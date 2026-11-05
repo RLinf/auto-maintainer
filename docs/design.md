@@ -162,7 +162,7 @@ Every feature works on any repository; the profile decides its details. Each row
 | Talk to it | Per-maintainer chat threads backed by an agent session with the service's tools, and slash commands (`/am ...`) in PR comments. | proposals inline | M1 (read), M3 (act) |
 | Configurable behavior | A profile per repository, changed only by that repository's maintainers (2.3). Dashboard edits become memory PRs that the service merges after their approval. Operators manage only what the service runs on. | n/a | M1 |
 | Growing memory on GitHub | Learns from overrides, draft edits, rejected proposals, CI outcomes, and chat; writes per-repository and global knowledge to a private memory repo through tiered commits and PRs. | tiered | M3 |
-| Self-updating code | Drafts PRs against its own code repo; after a maintainer merges one, the supervisor tests, deploys, health-checks, and rolls back on failure. | PR, human merge | M4 |
+| Self-evolving code | Turns reviewers' requests in chat into PRs against its own code, with tests; a maintainer of its repository approves the merge and, separately, the deploy, which tests the new commit, switches, restarts, and rolls back if it fails to start (5.12). | maintainer approval | built |
 | Auto-merge | A maintainer arms a merge; the service waits for checks, reruns flaky jobs, updates the branch if needed, and merges when the profile's merge gate holds (5.5). | armed by a human | M2 |
 | Flaky CI rerun | Classifies failed jobs by signature or agent diagnosis, reruns only the failed jobs within a budget, and explains real failures to the author. | rerun: `auto` | M2 |
 
@@ -613,7 +613,7 @@ class Playbook(Protocol):
 | `issue_triage` | issue opened | Template labels, missing information, duplicates, doc links. | `issue.label`, `issue.comment` |
 | `digest` | daily and weekly tick | Builds the digest and metrics per maintainer. | `notify` |
 | `learn` | signal batch, weekly compaction | Turns signals into memory changes (5.11). | `memory.commit`, `memory.change` |
-| `self_improve` | chat request, learner finding, doctor failure | Agent edits the code repo in a worktree and runs tests and evals. | `code.pr` |
+| `self_improve` | `improve` request from chat | Agent edits a worktree of the code repo; the playbook runs the tests and Ruff. | `code.pr` |
 
 **Review headless.** Review skills are often written for an interactive session, and some ask the user before posting. The playbook prompt tells the agent that it runs headless, that the reproduction decision is already made, and that it returns the review result of 5.6 instead of asking and posting. The built-in `pr-review` skill, used when a repository has none, covers correctness, design and reuse, tests, docs, and PR metadata.
 
@@ -846,21 +846,36 @@ Each knowledge entry records `id`, text, source signals, `added_by`, `added_at`,
 
 Skills whose content depends on memory, such as the rubric section of `pr-priority`, are rendered per repository from memory at task time rather than edited in place.
 
-### 5.12 Self-update
+### 5.12 Self-evolution and self-update
 
-`am supervisor` watches the `main` branches of the code and memory repos.
+The service grows in two ways. Its memory grows from what reviewers teach it (5.11). Its code grows from what they ask for: a reviewer asks in chat for something the service cannot do yet, the service changes its own code, and its maintainers decide whether that code is merged and when the service runs it.
 
-- **Memory change**: validate every changed file against its schema, then hot-reload and invalidate affected profile caches. An invalid file keeps the previous version and opens an issue.
-- **Code change**:
-  1. Check out the new SHA into `releases/<sha>/`, run `uv sync --frozen`.
-  2. Run `pytest -m "not live"` and `am doctor --offline`, including `am profile doctor --offline` for every repository, since a pack change can break a profile.
-  3. Back up the SQLite database, run Alembic migrations against the backup copy to check them, then drain: stop taking jobs, let running agent tasks finish up to a timeout, checkpoint the rest.
-  4. Migrate, switch the `current` symlink, restart `am serve`.
-  5. Wait for `/healthz` and one successful poll cycle. On failure, switch back, restore the database backup, restart, and open an issue on the code repo with the logs.
+**From a conversation to a PR.** When a request needs code rather than a setting or a lesson, the chat agent proposes `improve` with the request spelled out (5.13), and the `self_improve` playbook starts:
 
-A release never changes a repository's configuration by itself: when new defaults or packs change a repository's merged profile, the repository keeps its current lock and its maintainers get a candidate to approve (5.2).
+1. It prepares a worktree of the service's repository (`code_repo` in `local.yaml`) at the tip of its default branch (`self_update.branch`, `main` by default).
+2. An agent on the `self_improve` route, in `workspace_write` mode and auto permissions, implements the request following that repository's `AGENTS.md`, adds tests, and updates the docs it changes. Whatever it would ask a person goes to the question desk like any other agent run (5.7), answered by maintainers of the code repository.
+3. The playbook collects the change as one patch (`Workspace.changes`) and runs the tests (`uv run --frozen pytest -q -x`) and Ruff itself in the sandbox, whatever the agent reported.
+4. It emits a `code.pr` action. The actuator applies the patch to a fresh worktree of the base commit, commits it as the service with a `Requested-by:` trailer, pushes the branch `am/self/<slug>-<id>`, and opens a PR on the default branch whose description holds the request, the agent's summary, both check results, and the agent's own test run. The chat thread gets a link.
 
-The `self_improve` playbook writes code on a branch `am/self/<slug>` in a worktree of the code repo, runs Ruff, the unit tests, and the replay evals for the playbooks and packs it touched, and opens a PR with the results. The service never merges its own code PRs.
+A request the agent declines, or one that ends with no change, opens no PR; the thread is told why.
+
+**Only maintainers merge and deploy.** Two separate approvals, each by a user whose live permission on the code repository is at least `self_update.approve_permission` (`maintain` by default), checked at the moment of the click:
+
+- **Merge.** The Service page lists open PRs on the code repository, marking self-improvement PRs; **Approve and merge** submits a `code.merge` action, which the actuator executes with a squash merge. Merging on GitHub itself works the same way, under that repository's own branch protection.
+- **Deploy.** The Service page shows the commit the service runs and the commits on the default branch it does not run yet. **Deploy** submits a `service.deploy` action for the tip of the branch. A merge never deploys by itself.
+
+Both actions carry the approver in `requested_by`, and their records and outcomes show on the Service page and in the audit log.
+
+**Deploying.** The `ServiceUpdater` (`selfupdate/updater.py`) runs the service from its own git checkout and only moves it to commits on the default branch. A deploy:
+
+1. refuses a checkout with local changes and a commit that is not on the default branch of the remote;
+2. checks the commit out in a staging worktree under the data directory, runs `uv sync --frozen` and the test command there (`self_update.test_command`, the unit tests by default), and stops on any failure, leaving the running code untouched;
+3. fast-forwards the checkout's branch to the commit (or checks it out detached), syncs the environment, and rebuilds the dashboard when Node is available (a failed dashboard build keeps the previous build);
+4. records the previous commit in `deploy.json` and asks the service to restart: `am serve` exits with code 75.
+
+`am supervise` runs `am serve` and starts it again after exit code 75. If the service dies before it confirms the deploy (it does after `confirm_deploy_after`, 60 seconds of running), the supervisor checks out the previous commit, syncs the environment, and starts the old code; the service then records the rollback in the audit log. Any other failure restarts with a growing delay; exit code 0 stops the supervisor. Under systemd, run `am supervise` as the unit's command.
+
+Database migrations run when the new code starts. A release never changes a repository's configuration by itself: when new defaults or packs change a repository's merged profile, the repository keeps its current lock and its maintainers get a candidate to approve (5.2).
 
 ### 5.13 Web dashboard and API
 
@@ -908,7 +923,7 @@ POST /webhooks/github                    (outside /api, HMAC-verified)
 - read tools: `list_repos`, `get_profile`, `search_prs`, `get_pr`, `get_evaluation`, `get_ci_status`, `list_proposals`, `read_memory`, `get_run_transcript`;
 - propose tools: `propose_action`, `propose_memory_change`, `propose_override`, `run_playbook`.
 
-Until the MCP server exists, the chat agent returns its proposals as structured output (`ChatAnswer.proposals`), which the service turns into the same proposals. Proposals created in a thread appear inline with approve and reject buttons, so the maintainer sees exactly what will be posted before it is. A configuration change proposed in chat applies only after a maintainer of that repository approves it, which the chatting maintainer can do if they qualify. A request the service cannot fulfill becomes a proposed issue on the code repo.
+Until the MCP server exists, the chat agent returns its proposals as structured output (`ChatAnswer.proposals`), which the service turns into the same proposals. Proposals created in a thread appear inline with approve and reject buttons, so the maintainer sees exactly what will be posted before it is. A configuration change proposed in chat applies only after a maintainer of that repository approves it, which the chatting maintainer can do if they qualify. A request the service cannot fulfill with a setting or a lesson becomes an `improve` request that changes its own code (5.12).
 
 ### 5.14 Notifications
 
@@ -977,7 +992,7 @@ The flows use `acme/widget` with the profile from 2.2.
 **Self-improvement.**
 
 1. A maintainer says in chat that hygiene should also check that new config files are documented.
-2. The learner classifies this as a new kind of check rather than a setting and starts `self_improve`, which adds a built-in check type, tests, and evals, and opens a code PR.
+2. The chat agent sees that this needs a new kind of check rather than a setting and proposes `improve`; `self_improve` adds a built-in check type with tests and opens a PR on the code repo.
 3. A maintainer reviews and merges it; the supervisor deploys the new SHA and confirms health; profiles can now enable the check.
 
 ## 7. Storage
@@ -1169,7 +1184,7 @@ self_improve: {primary: claude-code, fallback: [codex]}
 
 ## 11. Milestones
 
-**Status of the first implementation.** Built and tested on fakes: everything in M0 and M1 except the replay evals, plus from M2 `ci_doctor`, `merge`, `hygiene`, CI gate management, reviewer requests from CODEOWNERS, `stale` nudges, `profile_drift`, and budgets; from M3 memory tiers with the memory gate, memory PRs on a remote memory repo, slash commands, chat with proposals (structured output instead of MCP tools), and the T0 journal. Checked live and read-only: GitHub sign-in, snapshots of a real repository's open PRs, and the five installed agent CLIs. Not built yet: the MCP server, the ACP transport, the learner beyond the journal and chat lessons, compaction, cross-repository knowledge, digest, overlap detection, runner health, flaky test report, reproduction agent, cross-agent review, issue triage, release assistant, `am import rubric`, replay evals, `self_improve`, and the supervisor.
+**Status of the first implementation.** Built and tested on fakes: everything in M0 and M1 except the replay evals, plus from M2 `ci_doctor`, `merge`, `hygiene`, CI gate management, reviewer requests from CODEOWNERS, `stale` nudges, `profile_drift`, and budgets; from M3 memory tiers with the memory gate, memory PRs on a remote memory repo, slash commands, chat with proposals (structured output instead of MCP tools), and the T0 journal. Checked live and read-only: GitHub sign-in, snapshots of a real repository's open PRs, and the five installed agent CLIs. Not built yet: the MCP server, the ACP transport, the learner beyond the journal and chat lessons, compaction, cross-repository knowledge, digest, overlap detection, runner health, flaky test report, reproduction agent, cross-agent review, issue triage, release assistant, `am import rubric`, and replay evals. Built since: agents' questions on the dashboard over each CLI's own protocol (the ACP transport included), and self-evolution with the supervisor (5.12).
 
 | Milestone | Scope | Done when |
 |---|---|---|

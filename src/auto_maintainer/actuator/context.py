@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -24,12 +25,14 @@ from ..domain.clock import Clock
 from ..domain.codeowners import CODEOWNERS_LOCATIONS, owners_of_paths, parse_codeowners
 from ..domain.markers import build_marker
 from ..domain.ports import (
+    BranchPublisher,
     CiProvider,
     EventSink,
     ForgeReader,
     ForgeWriter,
     MemoryStore,
     Notifier,
+    ServiceUpdater,
     Store,
 )
 from ..domain.profile import RepoProfile
@@ -78,6 +81,13 @@ class ExecContext:
     labs: LabRunner | None = None
     code_repo: str | None = None
     channels: dict[str, str] | None = None
+    code_branch: str = "main"
+    publisher: BranchPublisher | None = None
+    """Pushes self-improvement branches to the code repo."""
+    updater: ServiceUpdater | None = None
+    """Moves the service's own checkout to a new commit."""
+    request_restart: Callable[[], None] | None = None
+    """Asks ``am serve`` to exit for its supervisor to start the new code."""
 
     async def public(
         self,

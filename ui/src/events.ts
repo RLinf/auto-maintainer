@@ -7,8 +7,8 @@ import { useQueryClient } from "@tanstack/react-query";
 const INVALIDATES: Record<string, string[][]> = {
   "proposal.created": [["proposals"], ["pr"], ["prs"], ["repos"]],
   "proposal.decided": [["proposals"], ["pr"], ["repos"]],
-  "action.executed": [["pr"], ["prs"], ["proposals"], ["audit"]],
-  "action.failed": [["pr"], ["proposals"], ["audit"]],
+  "action.executed": [["pr"], ["prs"], ["proposals"], ["audit"], ["service"]],
+  "action.failed": [["pr"], ["proposals"], ["audit"], ["service"]],
   "memory.changed": [["memory"], ["profile"], ["repos"]],
   "pr.opened": [["prs"], ["repos"]],
   "pr.synchronized": [["prs"], ["pr"]],

@@ -79,6 +79,17 @@ const zh: Record<string, string> = {
   "Expires": "过期时间",
   "Alert me in the browser": "在浏览器中提醒我",
   "No agent is waiting for an answer.": "当前没有智能体在等待答复。",
+  Service: "服务",
+  Running: "运行中",
+  "local changes": "有本地修改",
+  "Up to date with": "已与以下分支同步：",
+  "commits on": "个提交在",
+  "are not running yet": "上尚未运行",
+  Deploy: "部署",
+  "Self-improvement PRs": "自我改进 PR",
+  "No open self-improvement PRs.": "没有待处理的自我改进 PR。",
+  "Approve and merge": "批准并合并",
+  History: "历史",
 };
 
 const LangContext = createContext<{ lang: Lang; setLang: (l: Lang) => void }>({ lang: "en", setLang: () => {} });

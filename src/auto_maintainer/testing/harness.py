@@ -39,6 +39,8 @@ from ..store.sqlite import SqliteStore
 from .fakes import (
     FakeForge,
     FakeMemory,
+    FakePublisher,
+    FakeUpdater,
     FakeWorkspace,
     RecordingNotifier,
     ScriptedRunner,
@@ -117,6 +119,7 @@ class Harness:
         maintainer: str = "maria",
         approve: bool = True,
         dev_mode: bool = False,
+        code_repo: str | None = None,
     ) -> Harness:
         forge = FakeForge()
         forge.add_repo(
@@ -125,6 +128,9 @@ class Harness:
             )
         )
         forge.set_permission(repo, maintainer, Permission.MAINTAIN)
+        if code_repo:
+            forge.add_repo(RepoInfo(name=code_repo, default_branch_sha="e" * 40))
+            forge.set_permission(code_repo, maintainer, Permission.MAINTAIN)
         memory = FakeMemory()
         store = await SqliteStore.open(tmp / "am.db")
         runner = ScriptedRunner()
@@ -144,6 +150,8 @@ class Harness:
             sandbox=sandbox,
             notifier=notifier,
             clock=clock,
+            publisher=FakePublisher() if code_repo else None,
+            updater=FakeUpdater() if code_repo else None,
         )
         settings = ServiceSettings(
             login=forge.login,
@@ -155,6 +163,8 @@ class Harness:
             pack_dirs=[data_dir("packs")],
             schedules=schedules,
             dev_mode=dev_mode,
+            code_repo=code_repo,
+            confirm_deploy_after=0.0,
         )
         service = Service(adapters, settings, playbooks)
         h = cls(service, forge, memory, runner, clock, sandbox, notifier)

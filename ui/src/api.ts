@@ -72,6 +72,24 @@ export interface Me {
   pending_questions: number;
 }
 
+export interface ServiceView {
+  code_repo: string | null;
+  branch?: string;
+  approve_permission?: string;
+  can_approve?: boolean;
+  reason?: string;
+  status?: {
+    running_sha: string;
+    branch: string;
+    upstream_sha: string | null;
+    pending: { sha: string; author: string; subject: string }[];
+    dirty: boolean;
+    error: string | null;
+  } | null;
+  prs?: { number: number; title: string; author: string; branch: string; url: string; self_improvement: boolean }[];
+  history?: { kind: string; status: string; summary: string; error: string | null; at: string | null }[];
+}
+
 export interface QuestionOption {
   id: string;
   label: string;

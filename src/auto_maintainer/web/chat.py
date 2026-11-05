@@ -17,6 +17,11 @@
 Each thread belongs to one maintainer. The agent sees the maintainer's queue and
 the memory index and may propose actions; every proposed action becomes a
 proposal the maintainer approves in the thread, whatever the policy says.
+
+When the maintainer asks for something the service cannot do yet, the agent proposes
+``improve``: the ``self_improve`` playbook then changes the service's own code and
+opens a PR on its repository, which a maintainer of that repository approves before it
+is merged and deployed (design 5.12).
 """
 
 from __future__ import annotations
@@ -47,9 +52,16 @@ from .auth import User, current_user
 
 class ProposedAction(BaseModel):
     kind: Literal[
-        "label", "rerun", "request_reviewers", "comment", "nudge", "review", "lesson"
+        "label",
+        "rerun",
+        "request_reviewers",
+        "comment",
+        "nudge",
+        "review",
+        "lesson",
+        "improve",
     ]
-    repo: str
+    repo: str = Field(default="", description="The repository; empty for kind=improve.")
     number: int | None = None
     labels: list[str] = Field(default_factory=list)
     run_id: int | None = None
@@ -58,6 +70,13 @@ class ProposedAction(BaseModel):
     lesson: str = Field(
         default="",
         description="For kind=lesson: a review lesson to remember for this repository.",
+    )
+    request: str = Field(
+        default="",
+        description=(
+            "For kind=improve: the new behavior or fix the service's own code needs, "
+            "precise enough to implement and test."
+        ),
     )
 
 
@@ -135,7 +154,10 @@ def build_router() -> APIRouter:
             [
                 f"You are the maintainers' assistant for {', '.join(repos) or 'no repositories yet'}. You are talking to {user.login}. "
                 "Answer from the data below. You cannot act directly: put any change you suggest in `proposals`; "
-                "the maintainer approves each one before it runs. Internal priorities are private: never put them in public text.",
+                "the maintainer approves each one before it runs. Internal priorities are private: never put them in public text. "
+                "When the maintainer asks for something the service cannot do yet, or for a change in how it works that needs "
+                "code rather than a setting or a lesson, propose kind=improve with the request spelled out: the service then "
+                "changes its own code and opens a PR that a maintainer of its repository must approve before it is merged and deployed.",
                 f"Memory index:\n{memory_index or '(empty)'}",
                 "Review queue (internal):\n" + ("\n".join(queue) or "(empty)"),
                 untrusted(
@@ -167,6 +189,9 @@ def build_router() -> APIRouter:
         await service.store.save_thread(thread)
         created = []
         for p in answer.proposals:
+            if p.kind == "improve":
+                await _improve(service, user, p, thread_id, history)
+                continue
             if p.repo not in repos:
                 continue
             created += await _propose(service, user, p)
@@ -177,6 +202,38 @@ def build_router() -> APIRouter:
         return message.model_dump(mode="json")
 
     return r
+
+
+async def _improve(
+    service: Any, user: User, p: ProposedAction, thread_id: str, history: list[Any]
+) -> None:
+    """Start the ``self_improve`` playbook for a maintainer's request."""
+    if not p.request.strip():
+        return
+    if not service.settings.code_repo:
+        await service.store.add_message(
+            ChatMessage(
+                thread_id=thread_id,
+                role="assistant",
+                text="This service has no code repository configured, so it cannot change its own code.",
+            )
+        )
+        return
+    context = "\n".join(f"{m.role}: {m.text}" for m in history[-10:])
+    await service.bus.publish(
+        Event(
+            kind=EventKind.DASHBOARD_COMMAND,
+            payload={
+                "command": "improve",
+                "request": p.request.strip(),
+                "by": user.login,
+                "thread_id": thread_id,
+                "context": context[-8000:],
+                "request_id": f"{thread_id}:{service.clock.now().timestamp()}",
+            },
+            source="chat",
+        )
+    )
 
 
 async def _propose(service: Any, user: User, p: ProposedAction) -> list[str]:

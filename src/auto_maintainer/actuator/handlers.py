@@ -24,6 +24,7 @@ from ..domain.actions import (
     Action,
     ActionKind,
     ActionStatus,
+    CodeMergePayload,
     CodePrPayload,
     CommentUpsertPayload,
     IssueCommentPayload,
@@ -40,12 +41,13 @@ from ..domain.actions import (
     RerunPayload,
     ReviewPostPayload,
     ReviewUpdatePayload,
+    ServiceDeployPayload,
     ThreadReplyPayload,
 )
 from ..domain.markers import parse_markers
 from ..domain.ports import ReviewCommentSpec
 from ..domain.profile import RepoProfile
-from ..domain.records import ReviewRecord
+from ..domain.records import ChatMessage, ReviewRecord
 from ..domain.snapshot import PrSnapshot
 from .context import ExecContext
 from .memory_gate import try_merge_memory
@@ -476,13 +478,76 @@ async def _code_pr(
     pr: PrSnapshot | None,
     approver: str | None,
 ) -> dict[str, Any]:
+    """Open a PR on the service's own repository, pushing the patch first when one is given.
+
+    Opening the PR changes nothing the service runs; a maintainer of that repository
+    still has to approve the merge and the deploy.
+    """
     if not x.code_repo:
         raise RuntimeError("no code repo is configured")
     p = CodePrPayload.model_validate(action.payload)
+    commit = None
+    if p.patch:
+        if x.publisher is None:
+            raise RuntimeError("no branch publisher is configured")
+        trailers = f"\n\nRequested-by: {p.requested_by}" if p.requested_by else ""
+        commit = await x.publisher.publish(
+            x.code_repo, p.base_sha, p.patch, p.branch, f"{p.title}{trailers}\n"
+        )
     ref = await x.writer.create_service_pr(
-        x.code_repo, p.branch, "main", p.title, p.body
+        x.code_repo, p.branch, x.code_branch, p.title, p.body
     )
-    return {"pr": ref.id}
+    if p.thread_id:
+        await x.store.add_message(
+            ChatMessage(
+                thread_id=p.thread_id,
+                role="assistant",
+                text=(
+                    f"I opened {ref.url or f'{x.code_repo}#{ref.id}'} with the change. "
+                    f"A maintainer of {x.code_repo} has to approve it before it is merged, "
+                    "and again before the service runs it (Service page)."
+                ),
+            )
+        )
+    return {"pr": ref.id, "url": ref.url, "commit": commit}
+
+
+async def _code_merge(
+    x: ExecContext,
+    action: Action,
+    profile: RepoProfile | None,
+    pr: PrSnapshot | None,
+    approver: str | None,
+) -> dict[str, Any]:
+    if not x.code_repo:
+        raise RuntimeError("no code repo is configured")
+    p = CodeMergePayload.model_validate(action.payload)
+    sha = await x.writer.merge_service_pr(x.code_repo, p.number, p.method)
+    return {"sha": sha, "approved_by": p.approved_by}
+
+
+async def _service_deploy(
+    x: ExecContext,
+    action: Action,
+    profile: RepoProfile | None,
+    pr: PrSnapshot | None,
+    approver: str | None,
+) -> dict[str, Any]:
+    if x.updater is None:
+        raise RuntimeError(
+            "this service does not run from a git checkout it can update"
+        )
+    p = ServiceDeployPayload.model_validate(action.payload)
+    result = await x.updater.deploy(p.sha)
+    if not result.ok:
+        raise RuntimeError(f"deploying {p.sha[:12]} stopped: {result.log[-1500:]}")
+    if x.request_restart is not None:
+        x.request_restart()
+    return {
+        "sha": result.sha,
+        "previous_sha": result.previous_sha,
+        "approved_by": p.approved_by,
+    }
 
 
 async def _notify(
@@ -536,6 +601,8 @@ HANDLERS: dict[ActionKind, HandlerSpec] = {
     ActionKind.MEMORY_COMMIT: HandlerSpec(_memory_commit),
     ActionKind.MEMORY_CHANGE: HandlerSpec(_memory_change),
     ActionKind.CODE_PR: HandlerSpec(_code_pr),
+    ActionKind.CODE_MERGE: HandlerSpec(_code_merge),
+    ActionKind.SERVICE_DEPLOY: HandlerSpec(_service_deploy),
     ActionKind.NOTIFY: HandlerSpec(_notify),
 }
 

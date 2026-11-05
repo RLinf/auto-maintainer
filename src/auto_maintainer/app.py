@@ -36,6 +36,7 @@ from .labs.hosts import LocalLabHost, SshLabHost
 from .memory.git_store import GitMemoryStore
 from .notify.webhook import ChannelConfig, WebhookNotifier
 from .resources import data_dir, defaults_dir
+from .selfupdate import GitServiceUpdater
 from .service import Adapters, Service, ServiceSettings
 from .store.sqlite import SqliteStore
 from .workspace.git import GitWorkspace, LocalSandbox
@@ -143,6 +144,24 @@ async def build_service(cfg: HostConfig, dev: bool = False) -> Service:
     for pack in sorted((cfg.memory_path / "packs").glob("*/pack.yaml")):
         extra_packs[pack.parent.name] = pack.read_text(encoding="utf-8")
 
+    workspace = GitWorkspace(data, token=tokens.token, forge_url=cfg.github.web_url)
+    checkout = (
+        Path(cfg.self_update.checkout).expanduser()
+        if cfg.self_update.checkout
+        else Path(__file__).resolve().parents[2]
+    )
+    updater = (
+        GitServiceUpdater(
+            checkout,
+            data / "deploys",
+            branch=cfg.self_update.branch,
+            remote=cfg.self_update.remote,
+            test_command=cfg.self_update.test_command,
+        )
+        if cfg.code_repo and (checkout / ".git").exists()
+        else None
+    )
+
     adapters = Adapters(
         forge=reader,
         actuator_reader=fresh_reader,
@@ -151,12 +170,14 @@ async def build_service(cfg: HostConfig, dev: bool = False) -> Service:
         memory=memory,
         store=store,
         agents=router,
-        workspace=GitWorkspace(data, token=tokens.token, forge_url=cfg.github.web_url),
+        workspace=workspace,
         sandbox=LocalSandbox(),
         notifier=WebhookNotifier(channels),
         clock=clock,
         labs=labs,
         lab_runner=lab_runner,
+        publisher=workspace if cfg.code_repo else None,
+        updater=updater,
     )
     settings = ServiceSettings(
         login=login,
@@ -177,5 +198,7 @@ async def build_service(cfg: HostConfig, dev: bool = False) -> Service:
         operators=set(cfg.operators),
         base_url=cfg.base_url,
         sandbox_repo=cfg.sandbox_repo,
+        code_branch=cfg.self_update.branch,
+        code_approver=cfg.self_update.approve_permission,
     )
     return Service(adapters, settings)

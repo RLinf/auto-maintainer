@@ -326,6 +326,72 @@ class Workspace(Protocol):
 
     async def release(self, path: Any) -> None: ...
 
+    async def changes(self, path: Any) -> WorkChanges:
+        """Everything changed in the worktree since its checkout, as one patch."""
+        ...
+
+
+class WorkChanges(BaseModel):
+    base_sha: str
+    patch: str = ""
+    files: list[str] = Field(default_factory=list)
+
+
+@runtime_checkable
+class BranchPublisher(Protocol):
+    """Puts a patch on a new branch of the service's own repository (actuator only)."""
+
+    async def publish(
+        self, repo: str, base_sha: str, patch: str, branch: str, message: str
+    ) -> str:
+        """Apply ``patch`` on ``base_sha``, commit it, push ``branch``; return the commit."""
+        ...
+
+
+class CommitInfo(BaseModel):
+    sha: str
+    author: str = ""
+    subject: str = ""
+
+
+class UpdateStatus(BaseModel):
+    """Which code the service runs and what its repository's default branch has."""
+
+    running_sha: str
+    branch: str = ""
+    upstream_sha: str | None = None
+    pending: list[CommitInfo] = Field(default_factory=list)
+    """Commits on the default branch that the service does not run yet."""
+    dirty: bool = False
+    """The service's checkout has local changes, so it cannot be updated."""
+    error: str | None = None
+
+
+class DeployResult(BaseModel):
+    ok: bool
+    sha: str
+    previous_sha: str = ""
+    log: str = ""
+
+
+@runtime_checkable
+class ServiceUpdater(Protocol):
+    """Updates the code the service runs (design 5.12)."""
+
+    async def status(self) -> UpdateStatus: ...
+
+    async def confirm(self) -> dict[str, Any] | None:
+        """Mark the running deploy healthy so it is not rolled back; return its record
+        (``previous_sha``, ``sha``, ``rolled_back``) the first time, else ``None``."""
+        ...
+
+    async def deploy(self, sha: str) -> DeployResult:
+        """Test ``sha`` in a staging worktree, then switch the service's checkout to it.
+
+        The caller restarts the service after a successful deploy.
+        """
+        ...
+
 
 class CommandResult(BaseModel):
     exit_code: int

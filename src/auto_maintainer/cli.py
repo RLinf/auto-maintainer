@@ -184,12 +184,46 @@ def serve(
                 web, host=host or cfg.host, port=port or cfg.port, log_level="info"
             )
         )
+
+        async def restart_when_deployed() -> None:
+            await service.restart_requested.wait()
+            typer.echo("a maintainer deployed new code; restarting")
+            server.should_exit = True
+
+        watcher = asyncio.create_task(restart_when_deployed())
         try:
             await server.serve()
         finally:
+            watcher.cancel()
             await service.stop()
+        return service.restart_requested.is_set()
 
-    asyncio.run(main())
+    if asyncio.run(main()):
+        from .selfupdate import RESTART_EXIT_CODE
+
+        raise typer.Exit(RESTART_EXIT_CODE)
+
+
+@app.command(
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True}
+)
+def supervise(ctx: typer.Context) -> None:
+    """Run ``am serve`` and keep it running: restart it after a deploy, roll back a
+    deploy whose new code fails to start. Extra arguments go to ``am serve``."""
+    import sys
+
+    from .selfupdate.supervise import supervise as run_supervisor
+
+    cfg = _cfg()
+    checkout = (
+        Path(cfg.self_update.checkout).expanduser()
+        if cfg.self_update.checkout
+        else Path(__file__).resolve().parents[2]
+    )
+    command = [sys.executable, "-m", "auto_maintainer.cli", "serve", *ctx.args]
+    raise typer.Exit(
+        run_supervisor(command, checkout, cfg.data_path / "deploys" / "deploy.json")
+    )
 
 
 @app.command()

@@ -20,6 +20,7 @@ This module never imports an adapter. ``app.py`` builds real adapters and
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -33,6 +34,7 @@ from .domain.events import Event, EventKind
 from .domain.memory import MemoryChange, MemoryChangeState
 from .domain.ports import (
     AgentRunner,
+    BranchPublisher,
     CiProvider,
     ForgeReader,
     ForgeWriter,
@@ -40,6 +42,7 @@ from .domain.ports import (
     MemoryStore,
     Notifier,
     Sandbox,
+    ServiceUpdater,
     Store,
     Workspace,
 )
@@ -85,6 +88,10 @@ class Adapters:
     clock: Clock
     labs: dict[str, LabHost] = field(default_factory=dict)
     lab_runner: LabRunner | None = None
+    publisher: BranchPublisher | None = None
+    """Pushes self-improvement branches to the code repo (actuator only)."""
+    updater: ServiceUpdater | None = None
+    """Moves the service's own checkout to a new commit."""
 
 
 @dataclass
@@ -109,6 +116,11 @@ class ServiceSettings:
     operators: set[str] = field(default_factory=set)
     base_url: str | None = None
     """Where the dashboard is reached, for links in alerts."""
+    code_branch: str = "main"
+    code_approver: str = "maintain"
+    """Permission on ``code_repo`` needed to merge the service's own PRs and deploy them."""
+    confirm_deploy_after: float = 60.0
+    """Seconds of running before a fresh deploy counts as healthy (no rollback)."""
     sandbox_repo: str | None = None
     """In dev mode, the only repository the service serves and may act on."""
 
@@ -145,6 +157,9 @@ class Service:
             adapters.clock,
         )
         self.bus = EventBus()
+        self.restart_requested = asyncio.Event()
+        """Set after a deploy; ``am serve`` then exits for its supervisor to restart it."""
+        self._confirming: asyncio.Task[None] | None = None
         self.questions = QuestionDesk(
             adapters.store,
             self.bus,
@@ -168,6 +183,10 @@ class Service:
             service_login=settings.login,
             labs=adapters.lab_runner,
             code_repo=settings.code_repo,
+            code_branch=settings.code_branch,
+            publisher=adapters.publisher,
+            updater=adapters.updater,
+            request_restart=self.request_restart,
         )
         self.actuator = Actuator(self.exec)
         self.pipeline = ActionPipeline(
@@ -189,6 +208,8 @@ class Service:
             dev_mode=settings.dev_mode,
             pack_skill_dirs=[],
             scratch_dir=settings.scratch_dir,
+            code_repo=settings.code_repo,
+            code_branch=settings.code_branch,
         )
         self.engine = Engine(
             adapters.store,
@@ -269,14 +290,44 @@ class Service:
 
     # -- lifecycle -------------------------------------------------------------------
 
+    def request_restart(self) -> None:
+        self.restart_requested.set()
+
+    async def _confirm_deploy(self) -> None:
+        """After the service has run a while, mark a fresh deploy healthy and audit it."""
+        if self.a.updater is None:
+            return
+        await asyncio.sleep(self.settings.confirm_deploy_after)
+        record = await self.a.updater.confirm()
+        if not record:
+            return
+        rolled_back = bool(record.get("rolled_back"))
+        await self.store.add_audit(
+            AuditEntry(
+                kind="deploy",
+                repo=self.settings.code_repo,
+                summary=(
+                    f"rolled back from {str(record.get('sha'))[:12]} to {str(record.get('previous_sha'))[:12]}"
+                    if rolled_back
+                    else f"now running {str(record.get('sha'))[:12]} (was {str(record.get('previous_sha'))[:12]})"
+                ),
+                data=record,
+            )
+        )
+
     async def start(self) -> None:
         await self.actuator.reconcile_intents()
         await self.questions.cancel_orphans()
+        self._confirming = asyncio.create_task(
+            self._confirm_deploy(), name="confirm-deploy"
+        )
         self.bus.start()
         self.engine.start()
         self.scheduler.start()
 
     async def stop(self) -> None:
+        if self._confirming is not None:
+            self._confirming.cancel()
         await self.scheduler.stop()
         await self.engine.stop()
         await self.actuator.stop()

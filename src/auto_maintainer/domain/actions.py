@@ -52,6 +52,8 @@ class ActionKind(StrEnum):
     MEMORY_COMMIT = "memory.commit"
     MEMORY_CHANGE = "memory.change"
     CODE_PR = "code.pr"
+    CODE_MERGE = "code.merge"
+    SERVICE_DEPLOY = "service.deploy"
     NOTIFY = "notify"
 
     @property
@@ -68,6 +70,8 @@ _INTERNAL_KINDS = {
     ActionKind.MEMORY_COMMIT,
     ActionKind.MEMORY_CHANGE,
     ActionKind.CODE_PR,
+    ActionKind.CODE_MERGE,
+    ActionKind.SERVICE_DEPLOY,
     ActionKind.NOTIFY,
 }
 
@@ -312,9 +316,32 @@ class MemoryChangePayload(_Payload):
 
 
 class CodePrPayload(_Payload):
+    """A change to the service's own code: the patch goes on ``branch`` from ``base_sha``."""
+
     branch: str
     title: str
     body: str
+    patch: str = ""
+    """``git diff --binary`` of the change; empty when ``branch`` already exists."""
+    base_sha: str = ""
+    requested_by: str | None = None
+    thread_id: str | None = None
+    """The chat thread the request came from, told about the PR."""
+
+
+class CodeMergePayload(_Payload):
+    """Merge a PR on the service's own repository, approved by one of its maintainers."""
+
+    number: int
+    approved_by: str
+    method: str = "squash"
+
+
+class ServiceDeployPayload(_Payload):
+    """Run the service at ``sha`` of its repository's default branch."""
+
+    sha: str
+    approved_by: str
 
 
 class NotifyPayload(_Payload):
@@ -343,6 +370,8 @@ PAYLOADS: dict[ActionKind, type[BaseModel]] = {
     ActionKind.MEMORY_COMMIT: MemoryCommitPayload,
     ActionKind.MEMORY_CHANGE: MemoryChangePayload,
     ActionKind.CODE_PR: CodePrPayload,
+    ActionKind.CODE_MERGE: CodeMergePayload,
+    ActionKind.SERVICE_DEPLOY: ServiceDeployPayload,
     ActionKind.NOTIFY: NotifyPayload,
 }
 

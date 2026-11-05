@@ -26,7 +26,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
-from ..domain.ports import CommandResult
+from ..domain.ports import CommandResult, WorkChanges
 from ..subproc import run
 
 TokenFn = Callable[[str], Awaitable[str | None]]
@@ -61,14 +61,27 @@ def is_instruction_path(path: str) -> bool:
 
 
 class GitWorkspace:
-    """Implements ``Workspace``."""
+    """Implements ``Workspace``, and ``BranchPublisher`` for the actuator.
+
+    Args:
+        root: Data directory holding the mirrors and worktrees.
+        token: Returns a forge token for a repository; git reads it through a
+            credential helper from ``AM_GIT_TOKEN``, never from a remote URL.
+        forge_url: Base URL of the forge.
+        author: Name and email that commits made by the service carry.
+    """
 
     def __init__(
         self,
         root: Path,
         token: TokenFn | None = None,
         forge_url: str = "https://github.com",
+        author: tuple[str, str] = (
+            "auto-maintainer",
+            "auto-maintainer@users.noreply.github.com",
+        ),
     ) -> None:
+        self.author = author
         self.root = root
         self._token = token
         self._forge_url = forge_url.rstrip("/")
@@ -230,6 +243,84 @@ class GitWorkspace:
             await run(["git", "worktree", "remove", "--force", str(p)], cwd=mirror)
         shutil.rmtree(p, ignore_errors=True)
 
+    async def changes(self, path: Any) -> WorkChanges:
+        p = Path(path)
+        await run(["git", "add", "-A"], cwd=p, timeout=300, check=True)
+        base = (
+            await run(["git", "rev-parse", "HEAD"], cwd=p, check=True)
+        ).stdout.strip()
+        patch = (
+            await run(
+                ["git", "diff", "--cached", "--binary", "--no-color"],
+                cwd=p,
+                timeout=300,
+                check=True,
+            )
+        ).stdout
+        names = (
+            await run(["git", "diff", "--cached", "--name-only"], cwd=p, check=True)
+        ).stdout
+        return WorkChanges(base_sha=base, patch=patch, files=names.split())
+
+    async def publish(
+        self, repo: str, base_sha: str, patch: str, branch: str, message: str
+    ) -> str:
+        """Apply ``patch`` on ``base_sha`` in a fresh worktree, commit, and push ``branch``."""
+        lock = self._locks.setdefault(repo, asyncio.Lock())
+        async with lock:
+            mirror = await self._ensure_mirror(repo)
+            have = await run(
+                ["git", "cat-file", "-e", f"{base_sha}^{{commit}}"], cwd=mirror
+            )
+            if not have.ok:
+                await self._git(repo, "fetch", "-q", "origin", base_sha, cwd=mirror)
+            path = self.root / "worktrees" / f"publish-{uuid.uuid4().hex[:8]}"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            await self._git(
+                repo,
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                str(path),
+                base_sha,
+                cwd=mirror,
+            )
+        try:
+            await run(
+                ["git", "apply", "--index", "--binary", "--whitespace=nowarn", "-"],
+                cwd=path,
+                stdin=patch,
+                timeout=300,
+                check=True,
+            )
+            name, email = self.author
+            await run(
+                [
+                    "git",
+                    "-c",
+                    f"user.name={name}",
+                    "-c",
+                    f"user.email={email}",
+                    "commit",
+                    "-q",
+                    "-F",
+                    "-",
+                ],
+                cwd=path,
+                stdin=message,
+                check=True,
+            )
+            sha = (
+                await run(["git", "rev-parse", "HEAD"], cwd=path, check=True)
+            ).stdout.strip()
+            await self._git(
+                repo, "push", "-q", "origin", f"HEAD:refs/heads/{branch}", cwd=path
+            )
+            return sha
+        finally:
+            await self.release(path)
+
 
 class LocalSandbox:
     """Implements ``Sandbox``: a minimal environment, a private HOME, and a timeout.
@@ -252,6 +343,9 @@ class LocalSandbox:
                 "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
                 "HOME": home,
                 "LANG": "C.UTF-8",
+                "UV_CACHE_DIR": os.environ.get(
+                    "UV_CACHE_DIR", str(Path.home() / ".cache" / "uv")
+                ),
             }
             base.update(env or {})
             result = await run(argv, cwd=cwd, env=base, timeout=timeout)

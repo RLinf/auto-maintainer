@@ -28,6 +28,7 @@ from .merge import MergePlaybook
 from .onboard import Onboard, ProfileDrift
 from .review import ReviewPlaybook
 from .review_scan import ReviewScan
+from .self_improve import SelfImprove
 from .triage import Triage
 
 
@@ -48,6 +49,7 @@ def all_playbooks() -> list[Playbook]:
         Stale(),
         LabTest(),
         Journal(),
+        SelfImprove(),
     ]
 
 

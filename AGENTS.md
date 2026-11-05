@@ -23,6 +23,7 @@ uv run pytest -m live_agent               # adapter contract tests against insta
 uv run am init                            # write ~/.config/auto-maintainer/local.yaml and secrets.env
 uv run am doctor [--live]                 # probe forge auth, memory repo, agent CLIs, labs
 uv run am serve --demo                    # the whole service on fakes with sample data, on :7777
+uv run am supervise [serve options]       # production: restarts after a deploy, rolls back a failed one
 uv run am serve --dev                     # real forge: only sandbox_repo, or every repository at shadow
 uv run am repo add <owner>/<repo>         # start onboarding (needs your gh identity to pass the gate)
 uv run am profile show|doctor <owner>/<repo>
@@ -47,7 +48,7 @@ pre-commit run --all-files
 - `playbooks/` – one module per playbook, `base.py` (contract and context), `prompts.py` (`untrusted()` and prompt blocks).
 - `actuator/` – `pipeline.py` (policy, proposals, approvals), `executor.py` (per-repository queues, intents, staleness), `handlers.py` (one per action kind), `memory_gate.py`.
 - `engine/` – event bus, jobs and waits, poller, scheduler, the question desk (`questions.py`) where agents' questions wait for reviewers.
-- Adapters: `github/`, `agents/` (`exec.py` with two-way `Conversation`s, `acp.py`, `approver.py`, `adapters/`, `router.py`), `memory/`, `workspace/`, `labs/`, `store/`, `notify/`, plus `subproc.py`.
+- Adapters: `github/`, `agents/` (`exec.py` with two-way `Conversation`s, `acp.py`, `approver.py`, `adapters/`, `router.py`), `memory/`, `workspace/` (worktrees, and `publish` for the actuator), `labs/`, `store/`, `notify/`, `selfupdate/` (`updater.py` deploys the service's own checkout, `supervise.py`), plus `subproc.py`.
 - `web/` – FastAPI app, sign-in, the dashboard API, chat. `testing/` – fakes of every port, `Harness`, the demo data.
 - `packs/<name>/pack.yaml` – built-in packs. `skills/<name>/SKILL.md` – skills the service gives its runtime agents. `config/defaults/` – default profile (every repository action in `shadow`), routing, schedules.
 - `ui/` – React, TypeScript, Vite dashboard; `npm run build` writes into `src/auto_maintainer/web/static/`.
@@ -73,6 +74,12 @@ These hold everywhere. Reviewers reject changes that break them; `tests/test_lay
 - **Async all the way.** No blocking calls on the event loop; adapters run subprocesses through `subproc.run`. Times are UTC; business days go through `domain.calendar`.
 - **Labs follow their guard rules** (design 5.10): template commands only, one worktree per PR, lease only idle GPUs, never modify the base clone, cleanup in `finally`.
 - **Schemas are versioned.** A table change needs an Alembic migration in `store/migrations/versions/`; a profile or lock schema change needs a version bump and a loader for the previous version.
+
+## The service changing itself
+
+- A reviewer's `improve` request in chat starts `playbooks/self_improve.py`: an agent edits a worktree of `code_repo`, the playbook runs the tests and Ruff, and the actuator pushes `am/self/...` and opens a PR (design 5.12). Write that agent's instructions here, in this file: it reads `AGENTS.md` first.
+- Merging (`code.merge`) and deploying (`service.deploy`) need `self_update.approve_permission` (`maintain` by default) on `code_repo`, checked live in `web/api.py:code_maintainer`. Never add a path that merges or deploys without that check, for operators, for chat, or for the service itself.
+- A deploy only moves the service's checkout to a commit on the default branch, after that commit's tests pass in a staging worktree; `am supervise` rolls back a deploy whose code fails to start.
 
 ## Extending
 
@@ -104,7 +111,7 @@ These hold everywhere. Reviewers reject changes that break them; `tests/test_lay
 
 ## Commits and PRs
 
-- Commit subjects follow Conventional Commits (`<type>(<scope>): <description>`, imperative, about 72 characters). Every commit has a `Signed-off-by:` trailer from the human author (`git commit -s`), never an agent's identity.
+- Commit subjects follow Conventional Commits (`<type>(<scope>): <description>`, imperative, about 72 characters). Every commit a person makes has a `Signed-off-by:` trailer from that person (`git commit -s`), never an agent's identity. Commits the service makes on its own `am/self/*` branches carry `Requested-by:` instead and no sign-off; the maintainer who approves the merge answers for them, and the audit log records who that was (design 5.12).
 - PR titles use the same form; the description after `: ` is at most 50 characters, starts with a lowercase letter, has no trailing period, and is plain ASCII.
 - The PR description lists the commands you ran and their results.
 

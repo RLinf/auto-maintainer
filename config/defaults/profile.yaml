@@ -22,4 +22,6 @@ policy:
   memory.commit: {level: auto}
   memory.change: {level: auto}
   code.pr: {level: propose}
+  code.merge: {level: propose}
+  service.deploy: {level: propose}
   notify: {level: auto}

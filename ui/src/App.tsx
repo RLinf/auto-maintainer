@@ -16,6 +16,7 @@ import MemoryPage from "./pages/Memory";
 import PrPage from "./pages/Pr";
 import QuestionsPage from "./pages/Questions";
 import QueuePage from "./pages/Queue";
+import ServicePage from "./pages/Service";
 import { RepoDetailPage, ReposPage } from "./pages/Repos";
 import SignIn from "./pages/SignIn";
 
@@ -59,6 +60,7 @@ export default function App() {
     ["/repos", t("Repositories"), undefined],
     ["/ci", t("CI"), undefined],
     ["/agents", t("Agents"), undefined],
+    ["/service", t("Service"), undefined],
     ["/audit", t("Audit"), undefined],
     ["/chat", t("Chat"), undefined],
   ];
@@ -109,6 +111,7 @@ export default function App() {
             <Route path="/repos/:owner/:repo" element={<RepoDetailPage />} />
             <Route path="/ci" element={<CiPage me={user} />} />
             <Route path="/agents" element={<AgentsPage />} />
+            <Route path="/service" element={<ServicePage />} />
             <Route path="/audit" element={<AuditPage me={user} />} />
             <Route path="/chat" element={<ChatPage me={user} />} />
             <Route path="/chat/:threadId" element={<ChatPage me={user} />} />

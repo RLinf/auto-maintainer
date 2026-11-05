@@ -129,6 +129,9 @@ class ServiceInfo:
     dev_mode: bool = False
     pack_skill_dirs: list[Path] = field(default_factory=list)
     scratch_dir: Path = Path("/tmp/auto-maintainer-scratch")
+    code_repo: str | None = None
+    """The service's own repository, where self-improvements go."""
+    code_branch: str = "main"
 
 
 @dataclass

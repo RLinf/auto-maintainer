@@ -25,7 +25,16 @@ import yaml
 SRC = Path(__file__).resolve().parents[1] / "src" / "auto_maintainer"
 ROOT = SRC.parents[1]
 
-ADAPTERS = {"store", "github", "agents", "memory", "labs", "notify", "workspace"}
+ADAPTERS = {
+    "store",
+    "github",
+    "agents",
+    "memory",
+    "labs",
+    "notify",
+    "workspace",
+    "selfupdate",
+}
 ALLOWED: dict[str, set[str]] = {
     "domain": set(),
     **{a: {"domain", "subproc"} for a in ADAPTERS},

@@ -33,7 +33,14 @@ from ..domain.agents import AgentResult, AgentTask, RuntimeHealth
 from ..domain.clock import utc_now
 from ..domain.memory import MemoryChange
 from ..domain.permissions import Permission
-from ..domain.ports import CommandResult, GpuStatus, ReviewCommentSpec
+from ..domain.ports import (
+    CommandResult,
+    DeployResult,
+    GpuStatus,
+    ReviewCommentSpec,
+    UpdateStatus,
+    WorkChanges,
+)
 from ..domain.profile import Route
 from ..domain.snapshot import (
     CommentRef,
@@ -520,6 +527,71 @@ class FakeWorkspace:
 
     async def release(self, path: Any) -> None:
         self.released.append(Path(path))
+
+    async def changes(self, path: Any) -> WorkChanges:
+        """The files under ``path`` that a test wrote, as a pseudo-patch."""
+        p = Path(path)
+        files = sorted(
+            str(f.relative_to(p))
+            for f in p.rglob("*")
+            if f.is_file() and ".git" not in f.parts
+        )
+        patch = "".join(f"+++ {name}\n{(p / name).read_text()}" for name in files)
+        return WorkChanges(base_sha=self.base_sha, patch=patch, files=files)
+
+    base_sha: str = "b" * 40
+
+
+class FakePublisher:
+    """Implements ``BranchPublisher``; records what would have been pushed."""
+
+    def __init__(self) -> None:
+        self.published: list[dict[str, str]] = []
+
+    async def publish(
+        self, repo: str, base_sha: str, patch: str, branch: str, message: str
+    ) -> str:
+        self.published.append(
+            {
+                "repo": repo,
+                "base": base_sha,
+                "patch": patch,
+                "branch": branch,
+                "message": message,
+            }
+        )
+        return "c" * 40
+
+
+class FakeUpdater:
+    """Implements ``ServiceUpdater`` with a scripted status."""
+
+    def __init__(self, running: str = "a" * 40) -> None:
+        self.running = running
+        self.upstream: str | None = running
+        self.pending: list[Any] = []
+        self.deployed: list[str] = []
+        self.fail = False
+
+    async def status(self) -> UpdateStatus:
+        return UpdateStatus(
+            running_sha=self.running,
+            branch="main",
+            upstream_sha=self.upstream,
+            pending=self.pending,
+        )
+
+    async def confirm(self) -> dict[str, Any] | None:
+        return None
+
+    async def deploy(self, sha: str) -> DeployResult:
+        self.deployed.append(sha)
+        if self.fail:
+            return DeployResult(
+                ok=False, sha=sha, previous_sha=self.running, log="tests failed"
+            )
+        previous, self.running = self.running, sha
+        return DeployResult(ok=True, sha=sha, previous_sha=previous, log="ok")
 
 
 class FakeLabHost:

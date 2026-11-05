@@ -66,6 +66,20 @@ class LabHostConfig(_Cfg):
     gpu: GpuThresholdConfig = Field(default_factory=GpuThresholdConfig)
 
 
+class SelfUpdateConfig(_Cfg):
+    """How the service changes and updates its own code (design 5.12)."""
+
+    branch: str = "main"
+    """The default branch of ``code_repo``; deploys only go to commits on it."""
+    approve_permission: Literal["write", "maintain", "admin"] = "maintain"
+    """Permission on ``code_repo`` needed to merge the service's own PRs and deploy."""
+    checkout: str | None = None
+    """The git checkout the service runs from; defaults to the installed source tree."""
+    remote: str = "origin"
+    test_command: list[str] | None = None
+    """Run in a staging worktree before a deploy; defaults to the unit tests."""
+
+
 class HostConfig(_Cfg):
     host: str = "127.0.0.1"
     port: int = 7777
@@ -75,6 +89,8 @@ class HostConfig(_Cfg):
     github: GitHubConfig = Field(default_factory=GitHubConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     code_repo: str | None = None
+    """``owner/repo`` of the service's own code, where self-improvements go."""
+    self_update: SelfUpdateConfig = Field(default_factory=SelfUpdateConfig)
     labs: dict[str, LabHostConfig] = Field(default_factory=dict)
     host_overrides: dict[str, dict[str, Any]] = Field(default_factory=dict)
     """Per repository: host paths for its labs (design 2.2, layer 5)."""
@@ -134,6 +150,10 @@ github:
   oauth_client_id: Iv1.xxxxx
 memory:
   remote: your-org/auto-maintainer-memory
+code_repo: your-org/auto-maintainer     # the service's own code; reviewers' requests become PRs here
+self_update:
+  approve_permission: maintain          # needed on code_repo to merge those PRs and to deploy
+# sandbox_repo: your-org/sandbox        # am serve --dev then serves only this repository
 labs:
   gpu-host: {transport: ssh, host: gpu-host}
 host_overrides:

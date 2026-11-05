@@ -33,8 +33,10 @@ from pydantic import BaseModel, Field
 from ..domain.actions import (
     ActionKind,
     ActionStatus,
+    CodeMergePayload,
     MemoryChangePayload,
     ProposalState,
+    ServiceDeployPayload,
     make_action,
 )
 from ..domain.agents import AgentAnswer, AgentQuestion, QuestionState
@@ -53,6 +55,7 @@ from ..domain.profile import RepoProfile
 from ..domain.records import AuditEntry, JobStatus
 from ..domain.review import classify_review_state
 from ..domain.scoring import Evaluation, recompute
+from ..domain.snapshot import PrState
 from ..playbooks.evaluate import haystack, rubric_of
 from ..playbooks.hygiene import hygiene_key
 from ..profiles.layers import ProfileError, parse_yaml
@@ -159,6 +162,25 @@ async def may_answer(service: Service, user: User, question: AgentQuestion) -> b
     if question.repo is None:
         return user.login in service.settings.operators
     return (await permission(service, user, question.repo)).at_least(Permission.WRITE)
+
+
+class DeployBody(BaseModel):
+    sha: str = Field(min_length=7, max_length=40, pattern=r"^[0-9a-f]+$")
+
+
+async def code_maintainer(service: Service, user: User) -> tuple[bool, str]:
+    """Whether ``user`` may merge and deploy the service's own code, and why not."""
+    repo = service.settings.code_repo
+    if not repo:
+        return False, "no code repo is configured"
+    need = Permission(service.settings.code_approver)
+    have = await service.a.forge.get_permission(repo, user.login)
+    if have.at_least(need):
+        return True, ""
+    return (
+        False,
+        f"only users with {need.value} on {repo} can approve changes to the service",
+    )
 
 
 class PrTarget(BaseModel):
@@ -846,6 +868,116 @@ def build_router() -> APIRouter:
         except ValueError as e:
             raise HTTPException(409, str(e)) from e
         return proposal.model_dump(mode="json")
+
+    # -- the service's own code ---------------------------------------------------------
+
+    @r.get("/service")
+    async def service_status(
+        request: Request, user: User = Depends(current_user)
+    ) -> dict[str, Any]:
+        service = service_of(request)
+        repo = service.settings.code_repo
+        if repo is None:
+            return {"code_repo": None}
+        perm = await service.a.forge.get_permission(repo, user.login)
+        if not (
+            perm.at_least(Permission.READ) or user.login in service.settings.operators
+        ):
+            raise HTTPException(
+                403, f"you need access to {repo} to see the service's code"
+            )
+        allowed, reason = await code_maintainer(service, user)
+        status = await service.a.updater.status() if service.a.updater else None
+        prs = [
+            {
+                "number": pr.number,
+                "title": pr.title,
+                "author": pr.author,
+                "branch": pr.head_ref,
+                "url": pr.url,
+                "head_sha": pr.head_sha,
+                "self_improvement": pr.head_ref.startswith("am/self/"),
+            }
+            for pr in await service.a.forge.list_open_prs(repo)
+        ]
+        actions = await service.store.list_actions(
+            repo=repo,
+            kinds=[
+                ActionKind.CODE_PR,
+                ActionKind.CODE_MERGE,
+                ActionKind.SERVICE_DEPLOY,
+            ],
+        )
+        return {
+            "code_repo": repo,
+            "branch": service.settings.code_branch,
+            "approve_permission": service.settings.code_approver,
+            "can_approve": allowed,
+            "reason": reason,
+            "status": status.model_dump(mode="json") if status else None,
+            "prs": prs,
+            "history": [
+                {
+                    "kind": a.action.kind,
+                    "status": a.status,
+                    "summary": a.action.rationale,
+                    "result": a.external_ref,
+                    "error": a.error,
+                    "at": a.updated_at.isoformat(),
+                }
+                for a in actions[:20]
+            ],
+        }
+
+    @r.post("/service/prs/{number}/merge")
+    async def merge_service_pr(
+        request: Request, number: int, user: User = Depends(current_user)
+    ) -> dict[str, Any]:
+        service = service_of(request)
+        allowed, reason = await code_maintainer(service, user)
+        if not allowed:
+            raise HTTPException(403, reason)
+        repo = service.settings.code_repo
+        assert repo is not None
+        pr = await service.a.forge.get_pr(repo, number)
+        if pr is None or pr.state != PrState.OPEN:
+            raise HTTPException(404, f"{repo}#{number} is not an open PR")
+        action = make_action(
+            ActionKind.CODE_MERGE,
+            repo,
+            CodeMergePayload(number=number, approved_by=user.login),
+            number=number,
+            head_sha=pr.head_sha,
+        )
+        action.provenance.requested_by = user.login
+        action.rationale = f"{user.login} approved merging {repo}#{number}"
+        record = await service.pipeline.submit(action)
+        return record.model_dump(mode="json")
+
+    @r.post("/service/deploy")
+    async def deploy(
+        request: Request, body: DeployBody, user: User = Depends(current_user)
+    ) -> dict[str, Any]:
+        service = service_of(request)
+        allowed, reason = await code_maintainer(service, user)
+        if not allowed:
+            raise HTTPException(403, reason)
+        if service.a.updater is None:
+            raise HTTPException(
+                409, "this service does not run from a git checkout it can update"
+            )
+        repo = service.settings.code_repo
+        assert repo is not None
+        action = make_action(
+            ActionKind.SERVICE_DEPLOY,
+            repo,
+            ServiceDeployPayload(sha=body.sha, approved_by=user.login),
+            discriminator=f"{body.sha}:{service.clock.now().timestamp()}",
+        )
+        action.provenance.requested_by = user.login
+        action.rationale = f"{user.login} approved deploying {body.sha[:12]}"
+        record = await service.pipeline.submit(action)
+        return record.model_dump(mode="json")
 
     # -- agents' questions -------------------------------------------------------------
 
