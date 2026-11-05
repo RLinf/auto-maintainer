@@ -1,0 +1,575 @@
+# Copyright 2026 The RLinf Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""In-memory fakes of the ports, for unit tests, replay evals, and ``am serve --dev``.
+
+``FakeForge`` keeps PR snapshots and applies writes to them, so a poller sees the
+service's own labels and comments on its next read.
+"""
+
+from __future__ import annotations
+
+import itertools
+import json
+from collections.abc import Callable
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Literal
+
+from pydantic import BaseModel
+
+from ..domain.agents import AgentResult, AgentTask, RuntimeHealth
+from ..domain.clock import utc_now
+from ..domain.memory import MemoryChange
+from ..domain.permissions import Permission
+from ..domain.ports import CommandResult, GpuStatus, ReviewCommentSpec
+from ..domain.profile import Route
+from ..domain.snapshot import (
+    CommentRef,
+    IssueComment,
+    IssueSnapshot,
+    MergedPrSummary,
+    PrSnapshot,
+    PrState,
+    RepoInfo,
+    Review,
+    ReviewEventState,
+    ReviewThread,
+    RunnerInfo,
+    ThreadComment,
+)
+from ..domain.visibility import PublicText
+
+
+class FakeForge:
+    """Implements ``ForgeReader``, ``ForgeWriter``, and ``CiProvider`` in memory."""
+
+    def __init__(self, login: str = "auto-maintainer[bot]") -> None:
+        self.login = login
+        self.repos: dict[str, RepoInfo] = {}
+        self.prs: dict[tuple[str, int], PrSnapshot] = {}
+        self.issues: dict[tuple[str, int], IssueSnapshot] = {}
+        self.files: dict[tuple[str, str], str] = {}
+        self.permissions: dict[tuple[str, str], Permission] = {}
+        self.teams: dict[tuple[str, str], set[str]] = {}
+        self.path_changers: dict[tuple[str, str], str] = {}
+        self.job_logs: dict[int, str] = {}
+        self.merged: list[MergedPrSummary] = []
+        self.runners: list[RunnerInfo] = []
+        self.writes: list[tuple[str, dict[str, Any]]] = []
+        self._ids = itertools.count(1000)
+        self.fail_next: dict[str, Exception] = {}
+
+    # -- setup helpers ---------------------------------------------------------------
+
+    def add_repo(self, info: RepoInfo) -> None:
+        self.repos[info.name] = info
+
+    def put_pr(self, pr: PrSnapshot) -> None:
+        self.prs[(pr.repo, pr.number)] = pr
+
+    def set_permission(
+        self, repo: str, login: str, permission: Permission | str
+    ) -> None:
+        self.permissions[(repo, login.lower())] = Permission(permission)
+
+    def put_file(self, repo: str, path: str, text: str) -> None:
+        self.files[(repo, path)] = text
+
+    def _record(self, _op: str, /, **kwargs: Any) -> None:
+        if _op in self.fail_next:
+            raise self.fail_next.pop(_op)
+        self.writes.append((_op, kwargs))
+
+    def writes_of(self, method: str) -> list[dict[str, Any]]:
+        return [w for m, w in self.writes if m == method]
+
+    def _update_pr(self, repo: str, number: int, **changes: Any) -> None:
+        pr = self.prs.get((repo, number))
+        if pr is not None:
+            self.prs[(repo, number)] = pr.model_copy(
+                update={**changes, "updated_at": utc_now()}
+            )
+
+    # -- ForgeReader -------------------------------------------------------------------
+
+    async def service_login(self) -> str:
+        return self.login
+
+    async def get_repo(self, repo: str) -> RepoInfo:
+        return self.repos.get(repo) or RepoInfo(name=repo)
+
+    async def list_open_prs(self, repo: str) -> list[PrSnapshot]:
+        return [
+            p
+            for (r, _), p in sorted(self.prs.items())
+            if r == repo and p.state == PrState.OPEN
+        ]
+
+    async def get_pr(self, repo: str, number: int) -> PrSnapshot | None:
+        return self.prs.get((repo, number))
+
+    async def list_open_issues(self, repo: str) -> list[IssueSnapshot]:
+        return [i for (r, _), i in sorted(self.issues.items()) if r == repo]
+
+    async def list_merged_prs(
+        self, repo: str, limit: int = 50
+    ) -> list[MergedPrSummary]:
+        return self.merged[:limit]
+
+    async def get_file(
+        self, repo: str, path: str, ref: str | None = None
+    ) -> str | None:
+        return self.files.get((repo, path))
+
+    async def list_dir(self, repo: str, path: str, ref: str | None = None) -> list[str]:
+        prefix = path.rstrip("/") + "/"
+        names = {
+            p[len(prefix) :].split("/")[0]
+            for (r, p) in self.files
+            if r == repo and p.startswith(prefix)
+        }
+        return sorted(names)
+
+    async def get_permission(self, repo: str, login: str) -> Permission:
+        return self.permissions.get((repo, login.lower()), Permission.NONE)
+
+    async def is_team_member(self, org: str, team_slug: str, login: str) -> bool:
+        return login in self.teams.get((org, team_slug), set())
+
+    async def path_changed_by(
+        self, repo: str, path: str, ref: str | None = None
+    ) -> str | None:
+        return self.path_changers.get((repo, path))
+
+    async def default_branch_sha(self, repo: str) -> str:
+        return (
+            self.repos.get(repo) or RepoInfo(name=repo)
+        ).default_branch_sha or "0" * 40
+
+    # -- ForgeWriter ---------------------------------------------------------------------
+
+    @staticmethod
+    def _text(body: PublicText) -> str:
+        if not isinstance(body, PublicText):
+            raise TypeError(f"expected PublicText, got {type(body).__name__}")
+        return body.text
+
+    async def add_labels(self, repo: str, number: int, labels: list[str]) -> None:
+        self._record("add_labels", repo=repo, number=number, labels=labels)
+        pr = self.prs.get((repo, number))
+        if pr:
+            self._update_pr(repo, number, labels=sorted(set(pr.labels) | set(labels)))
+
+    async def remove_label(self, repo: str, number: int, label: str) -> None:
+        self._record("remove_label", repo=repo, number=number, label=label)
+        pr = self.prs.get((repo, number))
+        if pr:
+            self._update_pr(repo, number, labels=[x for x in pr.labels if x != label])
+
+    async def create_comment(
+        self, repo: str, number: int, body: PublicText
+    ) -> CommentRef:
+        text = self._text(body)
+        cid = next(self._ids)
+        self._record("create_comment", repo=repo, number=number, body=text, id=cid)
+        pr = self.prs.get((repo, number))
+        if pr:
+            comment = IssueComment(
+                id=cid,
+                author=self.login,
+                body=text,
+                created_at=utc_now(),
+                updated_at=utc_now(),
+            )
+            self._update_pr(repo, number, comments=[*pr.comments, comment])
+        return CommentRef(
+            id=cid, url=f"https://example.test/{repo}/pull/{number}#issuecomment-{cid}"
+        )
+
+    async def update_comment(
+        self, repo: str, comment_id: int, body: PublicText
+    ) -> None:
+        text = self._text(body)
+        self._record("update_comment", repo=repo, comment_id=comment_id, body=text)
+        for (r, n), pr in list(self.prs.items()):
+            if r != repo:
+                continue
+            comments = [
+                c.model_copy(update={"body": text, "updated_at": utc_now()})
+                if c.id == comment_id
+                else c
+                for c in pr.comments
+            ]
+            if comments != pr.comments:
+                self._update_pr(r, n, comments=comments)
+
+    async def delete_comment(self, repo: str, comment_id: int) -> None:
+        self._record("delete_comment", repo=repo, comment_id=comment_id)
+
+    async def create_review(
+        self,
+        repo: str,
+        number: int,
+        commit_sha: str,
+        body: PublicText,
+        event: Literal["COMMENT", "REQUEST_CHANGES"],
+        comments: list[ReviewCommentSpec],
+    ) -> CommentRef:
+        text = self._text(body)
+        rid = next(self._ids)
+        inline = [
+            {"path": c.path, "line": c.line, "body": self._text(c.body)}
+            for c in comments
+        ]
+        self._record(
+            "create_review",
+            repo=repo,
+            number=number,
+            commit_sha=commit_sha,
+            body=text,
+            event=event,
+            comments=inline,
+            id=rid,
+        )
+        pr = self.prs.get((repo, number))
+        if pr:
+            review = Review(
+                id=rid,
+                author=self.login,
+                state=ReviewEventState.COMMENTED
+                if event == "COMMENT"
+                else ReviewEventState.CHANGES_REQUESTED,
+                body=text,
+                submitted_at=utc_now(),
+                commit_sha=commit_sha,
+            )
+            threads = [
+                ReviewThread(
+                    id=f"T{rid}_{i}",
+                    path=c["path"],
+                    line=c["line"],
+                    comments=[
+                        ThreadComment(
+                            id=next(self._ids),
+                            author=self.login,
+                            body=c["body"],
+                            commit_sha=commit_sha,
+                        )
+                    ],
+                )
+                for i, c in enumerate(inline)
+            ]
+            self._update_pr(
+                repo,
+                number,
+                reviews=[*pr.reviews, review],
+                threads=[*pr.threads, *threads],
+            )
+        return CommentRef(
+            id=rid,
+            url=f"https://example.test/{repo}/pull/{number}#pullrequestreview-{rid}",
+        )
+
+    async def update_review(
+        self, repo: str, number: int, review_id: int, body: PublicText
+    ) -> None:
+        self._record(
+            "update_review",
+            repo=repo,
+            number=number,
+            review_id=review_id,
+            body=self._text(body),
+        )
+
+    async def reply_to_review_comment(
+        self, repo: str, number: int, comment_id: int, body: PublicText
+    ) -> CommentRef:
+        cid = next(self._ids)
+        self._record(
+            "reply_to_review_comment",
+            repo=repo,
+            number=number,
+            comment_id=comment_id,
+            body=self._text(body),
+            id=cid,
+        )
+        return CommentRef(id=cid)
+
+    async def request_reviewers(
+        self, repo: str, number: int, logins: list[str]
+    ) -> None:
+        self._record("request_reviewers", repo=repo, number=number, logins=logins)
+
+    async def update_branch(
+        self, repo: str, number: int, expected_head_sha: str
+    ) -> None:
+        self._record(
+            "update_branch",
+            repo=repo,
+            number=number,
+            expected_head_sha=expected_head_sha,
+        )
+
+    async def merge(
+        self,
+        repo: str,
+        number: int,
+        sha: str,
+        method: str,
+        subject: PublicText,
+        body: PublicText,
+    ) -> str:
+        self._record(
+            "merge",
+            repo=repo,
+            number=number,
+            sha=sha,
+            method=method,
+            subject=self._text(subject),
+            body=self._text(body),
+        )
+        self._update_pr(repo, number, state=PrState.MERGED)
+        return "m" * 40
+
+    async def convert_to_draft(self, repo: str, number: int) -> None:
+        self._record("convert_to_draft", repo=repo, number=number)
+        self._update_pr(repo, number, is_draft=True)
+
+    async def close(self, repo: str, number: int) -> None:
+        self._record("close", repo=repo, number=number)
+        self._update_pr(repo, number, state=PrState.CLOSED)
+
+    async def create_service_issue(
+        self, repo: str, title: str, body: str
+    ) -> CommentRef:
+        n = next(self._ids)
+        self._record(
+            "create_service_issue", repo=repo, title=title, body=body, number=n
+        )
+        return CommentRef(id=n)
+
+    async def create_service_pr(
+        self, repo: str, head: str, base: str, title: str, body: str
+    ) -> CommentRef:
+        n = next(self._ids)
+        self._record(
+            "create_service_pr",
+            repo=repo,
+            head=head,
+            base=base,
+            title=title,
+            body=body,
+            number=n,
+        )
+        return CommentRef(id=n)
+
+    async def merge_service_pr(
+        self, repo: str, number: int, method: str = "merge"
+    ) -> str:
+        self._record("merge_service_pr", repo=repo, number=number, method=method)
+        return "s" * 40
+
+    # -- CiProvider ---------------------------------------------------------------------
+
+    async def get_job_log(self, repo: str, job_id: int) -> str | None:
+        return self.job_logs.get(job_id)
+
+    async def rerun_failed_jobs(self, repo: str, run_id: int) -> None:
+        self._record("rerun_failed_jobs", repo=repo, run_id=run_id)
+
+    async def list_runners(self, repo: str) -> list[RunnerInfo]:
+        return self.runners
+
+
+class FakeMemory:
+    """Implements ``MemoryStore`` with a dict; branches are kept per change."""
+
+    def __init__(self, files: dict[str, str] | None = None) -> None:
+        self.files: dict[str, str] = dict(files or {})
+        self.branches: dict[str, dict[str, str | None]] = {}
+        self.commits: list[str] = []
+        self._n = itertools.count(1)
+        self._head = "mem0"
+
+    def _bump(self, message: str) -> str:
+        self._head = f"mem{next(self._n)}"
+        self.commits.append(message)
+        return self._head
+
+    async def read_text(self, path: str) -> str | None:
+        return self.files.get(path)
+
+    async def list_files(self, prefix: str) -> list[str]:
+        return sorted(p for p in self.files if p.startswith(prefix))
+
+    async def head(self) -> str:
+        return self._head
+
+    async def refresh(self) -> bool:
+        return False
+
+    async def commit_direct(
+        self, files: dict[str, str | None], message: str, author: str
+    ) -> str:
+        for path, text in files.items():
+            if text is None:
+                self.files.pop(path, None)
+            else:
+                self.files[path] = text
+        return self._bump(message)
+
+    async def stage_change(self, change: MemoryChange) -> str:
+        branch = f"am/mem/{change.id}"
+        self.branches[branch] = dict(change.files)
+        return branch
+
+    async def merge_change(self, change: MemoryChange) -> str:
+        files = self.branches.pop(change.branch or f"am/mem/{change.id}", change.files)
+        return await self.commit_direct(files, change.title, change.author)
+
+    async def drop_change(self, change: MemoryChange) -> None:
+        self.branches.pop(change.branch or "", None)
+
+    def remote_repo(self) -> str | None:
+        return None
+
+
+class ScriptedRunner:
+    """Implements ``AgentRunner``: answers each task kind from a queue or a function."""
+
+    def __init__(self) -> None:
+        self.answers: dict[str, list[Any]] = {}
+        self.handlers: dict[str, Callable[[AgentTask], Any]] = {}
+        self.tasks: list[AgentTask] = []
+
+    def queue(
+        self, kind: str, answer: dict[str, Any] | BaseModel | AgentResult
+    ) -> None:
+        self.answers.setdefault(kind, []).append(answer)
+
+    def on(self, kind: str, handler: Callable[[AgentTask], Any]) -> None:
+        self.handlers[kind] = handler
+
+    async def run(
+        self, task: AgentTask, route: Route, output_model: type[BaseModel] | None = None
+    ) -> AgentResult:
+        self.tasks.append(task)
+        kind = str(task.kind)
+        if kind in self.handlers:
+            answer = self.handlers[kind](task)
+        elif self.answers.get(kind):
+            answer = self.answers[kind].pop(0)
+        else:
+            return AgentResult(
+                runtime="scripted",
+                ok=False,
+                error=f"no scripted answer for {kind}",
+                error_kind="other",
+            )
+        if isinstance(answer, AgentResult):
+            return answer
+        data = (
+            answer.model_dump(mode="json") if isinstance(answer, BaseModel) else answer
+        )
+        if output_model is not None:
+            data = output_model.model_validate(data).model_dump(mode="json")
+        return AgentResult(
+            runtime="scripted", ok=True, text=json.dumps(data), structured=data
+        )
+
+    async def health(self) -> list[RuntimeHealth]:
+        return [RuntimeHealth(name="scripted", available=True)]
+
+    def bind_questions(self, questions: Any) -> None:
+        self.questions = questions
+
+
+class FakeWorkspace:
+    """Implements ``Workspace`` with temporary directories and a canned diff."""
+
+    def __init__(self, root: Path, diff_text: str = "") -> None:
+        self.root = root
+        self.diff_text = diff_text
+        self.prepared: list[tuple[str, int | None, str]] = []
+        self.released: list[Path] = []
+
+    async def prepare(
+        self, repo: str, number: int | None, sha: str, default_branch: str
+    ) -> Path:
+        path = self.root / f"{repo.replace('/', '__')}-{number}-{sha[:7]}"
+        path.mkdir(parents=True, exist_ok=True)
+        self.prepared.append((repo, number, sha))
+        return path
+
+    async def diff(
+        self, path: Any, base: str, head: str, max_bytes: int = 200_000
+    ) -> str:
+        return self.diff_text[:max_bytes]
+
+    async def release(self, path: Any) -> None:
+        self.released.append(Path(path))
+
+
+class FakeLabHost:
+    """Implements ``LabHost``; records commands and returns scripted results."""
+
+    def __init__(self, name: str = "lab", gpus: list[GpuStatus] | None = None) -> None:
+        self.name = name
+        self.gpus = gpus or []
+        self.commands: list[tuple[str, str | None, dict[str, str]]] = []
+        self.results: list[CommandResult] = []
+
+    async def run(
+        self,
+        command: str,
+        *,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        timeout: float = 600,
+    ) -> CommandResult:
+        self.commands.append((command, cwd, dict(env or {})))
+        return (
+            self.results.pop(0)
+            if self.results
+            else CommandResult(exit_code=0, stdout="ok")
+        )
+
+    async def gpu_status(self) -> list[GpuStatus]:
+        return self.gpus
+
+
+class RecordingNotifier:
+    def __init__(self) -> None:
+        self.sent: list[tuple[str, str, str]] = []
+
+    async def send(self, channel: str, text: str, event: str) -> None:
+        self.sent.append((channel, text, event))
+
+
+def make_pr(
+    repo: str = "acme/widget", number: int = 42, sha: str = "a" * 40, **kwargs: Any
+) -> PrSnapshot:
+    """A plausible open PR for tests."""
+    defaults: dict[str, Any] = {
+        "title": "fix(core): handle empty batches",
+        "body": "### Description\nFixes a crash.\n\n### Checklist\n- [x] tests",
+        "author": "alice",
+        "author_association": "CONTRIBUTOR",
+        "url": f"https://example.test/{repo}/pull/{number}",
+        "created_at": datetime(2026, 1, 5, 8, 0, tzinfo=utc_now().tzinfo),
+        "updated_at": datetime(2026, 1, 5, 8, 0, tzinfo=utc_now().tzinfo),
+    }
+    defaults.update(kwargs)
+    return PrSnapshot(repo=repo, number=number, head_sha=sha, **defaults)

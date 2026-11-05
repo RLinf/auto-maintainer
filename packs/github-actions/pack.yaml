@@ -1,0 +1,12 @@
+name: github-actions
+description: GitHub Actions as the CI provider, with signatures for common transient failures.
+profile:
+  ci:
+    provider: github-actions
+    flake_signatures:
+      - {id: gha-network-reset, category: flaky, pattern: '(ECONNRESET|Connection reset by peer|Connection timed out|Read timed out|TLS handshake timeout)'}
+      - {id: gha-dns, category: flaky, pattern: '(Could not resolve host|Temporary failure in name resolution|getaddrinfo ENOTFOUND)'}
+      - {id: gha-http-5xx, category: flaky, pattern: '(HTTP Error 50[234]|status code 50[234]|50[234] (Bad Gateway|Service Unavailable|Gateway Time-?out))'}
+      - {id: gha-rate-limited, category: flaky, pattern: '(429 Too Many Requests|API rate limit exceeded)'}
+      - {id: gha-runner-lost, category: infra, pattern: '(The runner has received a shutdown signal|lost communication with the server|The self-hosted runner: .* lost)'}
+      - {id: gha-disk-full, category: infra, pattern: 'No space left on device'}

@@ -1,0 +1,10 @@
+name: conventional-commits
+description: "Conventional Commit subjects and PR titles of the form type(scope): description."
+profile:
+  contribution:
+    commit_convention: conventional
+    title_rule:
+      pattern: '^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([\w./-]+\))?!?: \S.*$'
+  checks:
+    - {id: pr-title, type: builtin, name: title_rule}
+    - {id: commit-subjects, type: builtin, name: commit_convention}

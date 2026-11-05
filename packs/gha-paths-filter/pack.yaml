@@ -1,0 +1,5 @@
+name: gha-paths-filter
+description: Warns when a changed file matches no dorny/paths-filter filter in the named workflow.
+profile:
+  checks:
+    - {id: paths-filter-coverage, type: builtin, name: paths_filter_coverage, settings: {workflow: .github/workflows/ci.yml}}

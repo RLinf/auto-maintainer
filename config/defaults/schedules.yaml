@@ -1,0 +1,8 @@
+# Maintenance schedules (cron, UTC). Operators may override these in the memory repo.
+reconcile:  "*/30 * * * *"
+review_scan: "*/15 * * * *"   # each repository decides with review.scan.schedule
+stale:      "0 1 * * *"
+drift:      "15 * * * *"
+doctor:     "30 2 * * *"
+memory_sync: "*/5 * * * *"
+learn:      "0 3 * * *"

@@ -1,0 +1,14 @@
+name: gpu-lab
+description: Guard rules for shared GPU hosts, applied to every lab the profile uses.
+profile:
+  labs:
+    "*":
+      guard:
+        forbid:
+          - '\bray\s+stop\b'
+          - '\bnvidia-smi\b.*\s-r\b'
+          - '\bkill\s+-9\s+-1\b'
+          - '\bpkill\b'
+          - '\bkillall\b'
+          - '\breboot\b|\bshutdown\b'
+        ray_private_instance: true

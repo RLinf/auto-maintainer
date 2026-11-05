@@ -1,0 +1,56 @@
+{
+  "number": 42,
+  "title": "fix(scheduler): release ports on worker exit",
+  "body": "Fixes a leak.\n\n### Checklist\n- [x] tests",
+  "url": "https://github.com/acme/widget/pull/42",
+  "createdAt": "2026-10-01T08:00:00Z",
+  "updatedAt": "2026-10-02T09:30:00Z",
+  "isDraft": false,
+  "state": "OPEN",
+  "authorAssociation": "CONTRIBUTOR",
+  "author": {"login": "alice"},
+  "baseRefName": "main",
+  "headRefName": "fix-ports",
+  "headRefOid": "0ebdf9c3a1b2c3d4e5f60718293a4b5c6d7e8f90",
+  "headRepository": {"nameWithOwner": "alice/widget"},
+  "mergeable": "MERGEABLE",
+  "mergeStateStatus": "BEHIND",
+  "additions": 40,
+  "deletions": 7,
+  "labels": {"nodes": [{"name": "bug"}, {"name": "needs review"}]},
+  "files": {"nodes": [
+    {"path": "widget/scheduler/ports.py", "additions": 30, "deletions": 5, "changeType": "MODIFIED"},
+    {"path": "tests/test_ports.py", "additions": 10, "deletions": 2, "changeType": "ADDED"}
+  ]},
+  "commits": {"nodes": [
+    {"commit": {"oid": "aaaa1111bbbb2222cccc3333dddd4444eeee5555", "message": "fix(scheduler): release ports\n\nSigned-off-by: Alice <alice@example.com>", "author": {"email": "alice@example.com", "user": {"login": "alice"}}}},
+    {"commit": {"oid": "0ebdf9c3a1b2c3d4e5f60718293a4b5c6d7e8f90", "message": "test: cover exit path", "author": {"email": "bob@example.com", "user": null}}}
+  ]},
+  "reviews": {"nodes": [
+    {"databaseId": 9001, "author": {"login": "maint"}, "state": "CHANGES_REQUESTED", "body": "<!-- auto-maintainer: v=1 kind=review pr=42 sha=aaaa1111 -->\nSee inline.", "submittedAt": "2026-10-01T12:00:00Z", "commit": {"oid": "aaaa1111bbbb2222cccc3333dddd4444eeee5555"}},
+    {"databaseId": 9002, "author": null, "state": "COMMENTED", "body": "", "submittedAt": "2026-10-01T13:00:00Z", "commit": null}
+  ]},
+  "comments": {"nodes": [
+    {"databaseId": 7001, "author": {"login": "alice"}, "body": "/am review", "createdAt": "2026-10-02T09:00:00Z", "updatedAt": "2026-10-02T09:00:00Z"}
+  ]},
+  "reviewThreads": {"nodes": [
+    {"id": "PRRT_kwDO1", "isResolved": false, "isOutdated": true, "path": "widget/scheduler/ports.py", "line": 12,
+     "comments": {"nodes": [{"databaseId": 8001, "author": {"login": "maint"}, "body": "Close the socket here.", "createdAt": "2026-10-01T12:00:00Z", "commit": {"oid": "aaaa1111bbbb2222cccc3333dddd4444eeee5555"}}]}}
+  ]},
+  "reviewRequests": {"nodes": [
+    {"requestedReviewer": {"login": "carol"}},
+    {"requestedReviewer": {"slug": "core-team"}}
+  ]},
+  "headCommit": {"nodes": [{"commit": {"checkSuites": {"nodes": [
+    {"workflowRun": {"databaseId": 555, "runAttempt": 2, "workflow": {"name": "CI"}},
+     "checkRuns": {"nodes": [
+       {"databaseId": 1, "name": "unit", "status": "COMPLETED", "conclusion": "FAILURE", "detailsUrl": "https://github.com/acme/widget/actions/runs/555/job/1", "startedAt": "2026-10-02T09:01:00Z", "completedAt": "2026-10-02T09:10:00Z", "summary": null},
+       {"databaseId": 2, "name": "lint", "status": "COMPLETED", "conclusion": "SUCCESS", "detailsUrl": null, "startedAt": null, "completedAt": null, "summary": null},
+       {"databaseId": 3, "name": "e2e", "status": "IN_PROGRESS", "conclusion": null, "detailsUrl": null, "startedAt": null, "completedAt": null, "summary": null}
+     ]}},
+    {"workflowRun": null, "checkRuns": {"nodes": [
+       {"databaseId": 4, "name": "codecov/patch", "status": "WAITING", "conclusion": null, "detailsUrl": null, "startedAt": null, "completedAt": null, "summary": "pending"}
+    ]}},
+    {"workflowRun": {"databaseId": 556, "runAttempt": 1, "workflow": {"name": "Docs"}}, "checkRuns": {"nodes": []}}
+  ]}}}]}
+}

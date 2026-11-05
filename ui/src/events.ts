@@ -1,0 +1,61 @@
+// Live updates: the /api/events server-sent event stream invalidates cached queries,
+// so pages refresh when something changes instead of polling.
+
+import { useEffect } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+
+const INVALIDATES: Record<string, string[][]> = {
+  "proposal.created": [["proposals"], ["pr"], ["prs"], ["repos"]],
+  "proposal.decided": [["proposals"], ["pr"], ["repos"]],
+  "action.executed": [["pr"], ["prs"], ["proposals"], ["audit"]],
+  "action.failed": [["pr"], ["proposals"], ["audit"]],
+  "memory.changed": [["memory"], ["profile"], ["repos"]],
+  "pr.opened": [["prs"], ["repos"]],
+  "pr.synchronized": [["prs"], ["pr"]],
+  "pr.updated": [["prs"], ["pr"]],
+  "pr.labeled": [["prs"], ["pr"]],
+  "pr.closed": [["prs"], ["repos"]],
+  "pr.review_submitted": [["pr"]],
+  "checks.completed": [["pr"], ["ci"]],
+  "merge.armed": [["pr"]],
+  "merge.disarmed": [["pr"]],
+  "priority.overridden": [["prs"], ["pr"]],
+  "question.asked": [["questions"], ["me"]],
+  "question.answered": [["questions"], ["me"], ["audit"]],
+};
+
+/** Called for every ``question.asked`` event, to alert reviewers. */
+export const QUESTION_EVENT = "am-question";
+
+export function useLiveEvents(enabled: boolean) {
+  const client = useQueryClient();
+  useEffect(() => {
+    if (!enabled || typeof EventSource === "undefined") return;
+    const source = new EventSource("/api/events", { withCredentials: true });
+    const handler = (e: MessageEvent) => {
+      const keys = INVALIDATES[e.type];
+      if (keys) keys.forEach((queryKey) => client.invalidateQueries({ queryKey }));
+      if (e.type === "question.asked") alertReviewer(e.data);
+    };
+    Object.keys(INVALIDATES).forEach((kind) => source.addEventListener(kind, handler as EventListener));
+    return () => source.close();
+  }, [enabled, client]);
+}
+
+function alertReviewer(raw: string) {
+  let title = "An agent is waiting for an answer";
+  try {
+    const event = JSON.parse(raw) as { title?: string | null; repo?: string | null };
+    if (event.title) title = `${event.repo ?? "auto-maintainer"}: ${event.title}`;
+  } catch {
+    // keep the generic title
+  }
+  window.dispatchEvent(new CustomEvent(QUESTION_EVENT, { detail: title }));
+  try {
+    if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+      new Notification("auto-maintainer: agent question", { body: title });
+    }
+  } catch {
+    // browser notifications are optional
+  }
+}

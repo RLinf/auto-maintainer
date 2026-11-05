@@ -1,0 +1,5 @@
+name: docs-bilingual
+description: Two language versions of the docs change together.
+profile:
+  checks:
+    - {id: docs-parity, type: builtin, name: paired_paths, settings: {pairs: [[docs/en, docs/zh]]}}

@@ -1,0 +1,241 @@
+# Copyright 2026 The RLinf Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""The actuator (design 5.9): executes allowed actions exactly once, one queue per repository."""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import logging
+
+from ..domain.actions import ActionKind, ActionStatus, ProposalState
+from ..domain.events import Event, EventKind
+from ..domain.ids import same_commit
+from ..domain.markers import parse_markers
+from ..domain.memory import MemoryChangeState
+from ..domain.records import ActionRecord, AuditEntry
+from ..domain.snapshot import PrState
+from ..policy.leak_guard import LeakError
+from .context import ExecContext
+from .handlers import HANDLERS, Noop, Stale
+from .memory_gate import try_merge_memory
+
+log = logging.getLogger(__name__)
+
+_COMMENT_KINDS = {
+    ActionKind.REVIEW_POST,
+    ActionKind.COMMENT_UPSERT,
+    ActionKind.PR_NUDGE,
+    ActionKind.ISSUE_COMMENT,
+}
+
+
+class Actuator:
+    def __init__(self, x: ExecContext) -> None:
+        self.x = x
+        self._queues: dict[str, asyncio.Queue[tuple[str, str | None]]] = {}
+        self._workers: dict[str, asyncio.Task[None]] = {}
+        self._idle = asyncio.Event()
+        self._idle.set()
+        self._pending = 0
+
+    def enqueue(self, action_id: str, repo: str, approver: str | None = None) -> None:
+        queue = self._queues.get(repo)
+        if queue is None:
+            queue = self._queues[repo] = asyncio.Queue()
+            self._workers[repo] = asyncio.create_task(
+                self._worker(queue), name=f"actuator:{repo}"
+            )
+        self._pending += 1
+        self._idle.clear()
+        queue.put_nowait((action_id, approver))
+
+    async def _worker(self, queue: asyncio.Queue[tuple[str, str | None]]) -> None:
+        while True:
+            action_id, approver = await queue.get()
+            try:
+                await self.execute(action_id, approver)
+            except Exception:
+                log.exception("actuator crashed on %s", action_id)
+            finally:
+                self._pending -= 1
+                if self._pending == 0:
+                    self._idle.set()
+                queue.task_done()
+
+    async def drain(self) -> None:
+        """Wait until every queued action ran; for tests and shutdown."""
+        await self._idle.wait()
+
+    async def stop(self) -> None:
+        for task in self._workers.values():
+            task.cancel()
+        for task in self._workers.values():
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    async def execute(
+        self, action_id: str, approver: str | None = None
+    ) -> ActionRecord | None:
+        record = await self.x.store.get_action(action_id)
+        if record is None:
+            return None
+        if record.status in (
+            ActionStatus.EXECUTED,
+            ActionStatus.NOOP,
+            ActionStatus.SUPERSEDED,
+        ):
+            return record
+        action = record.action
+        spec = HANDLERS[action.kind]
+        profile = await self.x.profiles.active(action.repo)
+        if profile is None and action.kind.touches_repository:
+            return await self._finish(
+                record,
+                ActionStatus.FAILED,
+                error=f"{action.repo} has no approved profile",
+            )
+        pr = None
+        try:
+            if spec.needs_pr:
+                if action.number is None:
+                    raise RuntimeError(f"{action.kind} needs a PR number")
+                pr = await self.x.reader.get_pr(action.repo, action.number)
+                if pr is None or pr.state != PrState.OPEN:
+                    raise Stale(f"{action.repo}#{action.number} is no longer open")
+                if (
+                    spec.needs_current_head
+                    and action.head_sha
+                    and not same_commit(pr.head_sha, action.head_sha)
+                ):
+                    raise Stale(
+                        f"the head moved from {action.head_sha[:7]} to {pr.head_sha[:7]}"
+                    )
+            record.status = ActionStatus.INTENT
+            record.approver = approver or record.approver
+            await self.x.store.save_action(record)
+            ref = await spec.run(self.x, action, profile, pr, record.approver)
+        except Noop as e:
+            return await self._finish(record, ActionStatus.NOOP, error=str(e))
+        except Stale as e:
+            return await self._finish(record, ActionStatus.SUPERSEDED, error=str(e))
+        except LeakError as e:
+            return await self._finish(
+                record, ActionStatus.FAILED, error=f"leak guard: {e}"
+            )
+        except Exception as e:
+            log.exception("action %s failed", action.id)
+            return await self._finish(
+                record, ActionStatus.FAILED, error=f"{type(e).__name__}: {e}"
+            )
+        return await self._finish(record, ActionStatus.EXECUTED, ref=ref)
+
+    async def _finish(
+        self,
+        record: ActionRecord,
+        status: ActionStatus,
+        ref: dict | None = None,
+        error: str | None = None,
+    ) -> ActionRecord:
+        record.status = status
+        record.external_ref = ref or record.external_ref
+        record.error = error
+        record.updated_at = self.x.clock.now()
+        await self.x.store.save_action(record)
+        action = record.action
+        proposal = await self.x.store.proposal_for_action(action.id)
+        if proposal is not None and proposal.state in (
+            ProposalState.APPROVED,
+            ProposalState.PENDING,
+        ):
+            proposal.state = {
+                ActionStatus.EXECUTED: ProposalState.EXECUTED,
+                ActionStatus.NOOP: ProposalState.EXECUTED,
+                ActionStatus.SUPERSEDED: ProposalState.SUPERSEDED,
+            }.get(status, ProposalState.FAILED)
+            await self.x.store.save_proposal(proposal)
+        await self.x.store.add_audit(
+            AuditEntry(
+                kind="execution",
+                repo=action.repo,
+                number=action.number,
+                actor=record.approver or "service",
+                action_id=action.id,
+                summary=f"{action.kind} {status}" + (f": {error}" if error else ""),
+                data={"ref": record.external_ref},
+            )
+        )
+        kind = (
+            EventKind.ACTION_EXECUTED
+            if status in (ActionStatus.EXECUTED, ActionStatus.NOOP)
+            else EventKind.ACTION_FAILED
+        )
+        await self.x.bus.publish(
+            Event(
+                kind=kind,
+                repo=action.repo,
+                number=action.number,
+                sha=action.head_sha,
+                payload={
+                    "action_id": action.id,
+                    "kind": action.kind,
+                    "status": status,
+                    "ref": record.external_ref,
+                    "error": error,
+                },
+            )
+        )
+        return record
+
+    async def reconcile_intents(self) -> int:
+        """After a crash: settle actions left between intent and result (design 4.10)."""
+        records = await self.x.store.list_actions(statuses=[ActionStatus.INTENT])
+        settled = 0
+        for record in records:
+            action = record.action
+            done = False
+            if action.kind in _COMMENT_KINDS and action.number is not None:
+                pr = await self.x.reader.get_pr(action.repo, action.number)
+                bodies = [c.body for c in (pr.comments if pr else [])] + [
+                    r.body for r in (pr.reviews if pr else [])
+                ]
+                done = any(
+                    m.action == action.id for b in bodies for m in parse_markers(b)
+                )
+            if done:
+                await self._finish(
+                    record, ActionStatus.EXECUTED, ref={"reconciled": True}
+                )
+            else:
+                record.status = ActionStatus.QUEUED
+                await self.x.store.save_action(record)
+                self.enqueue(action.id, action.repo, record.approver)
+            settled += 1
+        return settled
+
+    async def sweep_memory(self) -> int:
+        """Merge open memory changes whose gate is now satisfied (notice windows, approvals)."""
+        merged = 0
+        for change in await self.x.store.list_memory_changes(MemoryChangeState.OPEN):
+            after = await try_merge_memory(self.x, change)
+            merged += after.state == MemoryChangeState.MERGED
+        return merged
+
+    async def merge_memory(self, change_id: str) -> str | None:
+        change = await self.x.store.get_memory_change(change_id)
+        if change is None:
+            return None
+        change = await try_merge_memory(self.x, change)
+        return change.state

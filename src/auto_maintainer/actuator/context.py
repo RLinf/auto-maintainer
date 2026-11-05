@@ -1,0 +1,127 @@
+# Copyright 2026 The RLinf Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""What actuator handlers run with, and how public text is assembled."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Protocol
+
+from ..domain.actions import Action, LabRunPayload
+from ..domain.clock import Clock
+from ..domain.codeowners import CODEOWNERS_LOCATIONS, owners_of_paths, parse_codeowners
+from ..domain.markers import build_marker
+from ..domain.ports import (
+    CiProvider,
+    EventSink,
+    ForgeReader,
+    ForgeWriter,
+    MemoryStore,
+    Notifier,
+    Store,
+)
+from ..domain.profile import RepoProfile
+from ..domain.snapshot import PrSnapshot
+from ..domain.visibility import PublicText
+from ..policy.leak_guard import make_public
+from ..profiles.knowledge import Knowledge
+from ..profiles.service import ProfileService
+
+RUNTIME_NAMES = {
+    "claude-code": "Claude Code",
+    "codex": "Codex",
+    "antigravity": "Antigravity",
+    "opencode": "OpenCode",
+    "gemini": "Gemini CLI",
+    "pi": "pi",
+    "dsh": "dsh",
+}
+
+
+class LabRunner(Protocol):
+    async def run(
+        self,
+        profile: RepoProfile,
+        payload: LabRunPayload,
+        repo: str,
+        number: int | None,
+        sha: str | None,
+        holder: str,
+    ) -> dict[str, Any]: ...
+
+
+@dataclass
+class ExecContext:
+    store: Store
+    reader: ForgeReader
+    writer: ForgeWriter
+    ci: CiProvider
+    memory: MemoryStore
+    notifier: Notifier
+    knowledge: Knowledge
+    profiles: ProfileService
+    bus: EventSink
+    clock: Clock
+    service_login: str
+    labs: LabRunner | None = None
+    code_repo: str | None = None
+    channels: dict[str, str] | None = None
+
+    async def public(
+        self,
+        action: Action,
+        profile: RepoProfile,
+        body: str,
+        *,
+        marker_kind: str,
+        pr: PrSnapshot | None,
+        runtime: str | None = None,
+        approver: str | None = None,
+        bare: bool = False,
+    ) -> PublicText:
+        """Wrap ``body`` with the marker and footer and pass it through the leak guard.
+
+        ``bare`` skips the marker and footer, for inline review comments and merge
+        messages.
+        """
+        if bare:
+            text = body.strip()
+        else:
+            marker = build_marker(
+                marker_kind, action.number, action.head_sha, action.id
+            )
+            name = RUNTIME_NAMES.get(runtime or "", runtime or "a coding agent")
+            approval = f", approved by {approver}" if approver else ""
+            footer = profile.comments.footer.format(runtime=name, approval=approval)
+            text = f"{marker}\n\n{body.strip()}\n\n<sub>{footer}</sub>"
+        allowed: set[str] = set()
+        if pr is not None:
+            allowed.add(pr.author)
+            allowed.update(await self.code_owners(profile, pr.paths))
+        entities = await self.knowledge.internal_entities(profile.repo, profile)
+        public, _warnings = make_public(text, profile, allowed, entities)
+        return public
+
+    async def code_owners(self, profile: RepoProfile, paths: list[str]) -> list[str]:
+        locations = (
+            [profile.people.codeowners]
+            if profile.people.codeowners
+            else list(CODEOWNERS_LOCATIONS)
+        )
+        for location in locations:
+            text = await self.reader.get_file(profile.repo, location)
+            if text:
+                return owners_of_paths(parse_codeowners(text), paths)
+        return []

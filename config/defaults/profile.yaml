@@ -1,0 +1,25 @@
+# Service defaults: the first layer of every repository profile (design 2.2).
+# Every action that touches a repository stays in shadow until the repository's
+# maintainers raise it. Only internal actions run by default.
+schema: 1
+policy:
+  label.apply: {level: shadow}
+  label.ci_gate: {level: shadow}
+  review.post: {level: shadow}
+  review.update: {level: shadow}
+  thread.reply: {level: shadow}
+  comment.upsert: {level: shadow}
+  ci.rerun_failed: {level: shadow}
+  pr.request_reviewers: {level: shadow}
+  pr.update_branch: {level: shadow}
+  pr.merge: {level: shadow}
+  pr.nudge: {level: shadow}
+  pr.convert_to_draft: {level: shadow}
+  pr.close: {level: shadow}
+  issue.label: {level: shadow}
+  issue.comment: {level: shadow}
+  lab.run: {level: shadow}
+  memory.commit: {level: auto}
+  memory.change: {level: auto}
+  code.pr: {level: propose}
+  notify: {level: auto}

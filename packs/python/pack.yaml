@@ -1,0 +1,5 @@
+name: python
+description: License header check for Python files, using contribution.license_header.
+profile:
+  checks:
+    - {id: license-header, type: builtin, name: license_header}

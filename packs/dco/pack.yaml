@@ -1,0 +1,10 @@
+name: dco
+description: Every commit carries Signed-off-by, and squash merges keep sign-off and co-author trailers.
+profile:
+  contribution:
+    signoff: true
+  checks:
+    - {id: signoff, type: builtin, name: signoff, blocking: true}
+  merge:
+    message:
+      preserve_trailers: [Signed-off-by, Co-authored-by]

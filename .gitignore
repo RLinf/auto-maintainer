@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+dist/
+build/
+*.egg-info/
+node_modules/
+ui/dist/
+src/auto_maintainer/web/static/
+.am-dev/
+*.db
+*.db-wal
+*.db-shm

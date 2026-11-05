@@ -1,0 +1,5 @@
+name: codeowners
+description: Reviewer suggestions and merge arming from CODEOWNERS; flags changed files without an owner.
+profile:
+  checks:
+    - {id: codeowners-coverage, type: builtin, name: codeowners_coverage}
