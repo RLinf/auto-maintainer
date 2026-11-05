@@ -24,13 +24,12 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from ..service import Service
 from . import api, auth, chat
-
-STATIC = Path(__file__).parent / "static"
+from .dashboard import STATIC, missing_page
 
 
 def create_app(
@@ -120,17 +119,18 @@ def create_app(
         events = await service.poller.poll_repo(repo)
         return {"events": len(events)}
 
-    if STATIC.is_dir():
-        if (STATIC / "assets").is_dir():
-            app.mount(
-                "/assets", StaticFiles(directory=STATIC / "assets"), name="assets"
-            )
+    if (STATIC / "assets").is_dir():
+        app.mount("/assets", StaticFiles(directory=STATIC / "assets"), name="assets")
 
-        @app.get("/{path:path}", include_in_schema=False)
-        async def spa(path: str) -> Response:
-            candidate = STATIC / path
-            if path and candidate.is_file() and STATIC in candidate.resolve().parents:
-                return FileResponse(candidate)
-            return FileResponse(STATIC / "index.html")
+    @app.get("/{path:path}", include_in_schema=False)
+    async def spa(path: str) -> Response:
+        if path.startswith(("api/", "auth/")):
+            raise HTTPException(404, "not found")
+        if not (STATIC / "index.html").is_file():
+            return HTMLResponse(missing_page(), status_code=503)
+        candidate = STATIC / path
+        if path and candidate.is_file() and STATIC in candidate.resolve().parents:
+            return FileResponse(candidate)
+        return FileResponse(STATIC / "index.html")
 
     return app

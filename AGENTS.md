@@ -51,7 +51,7 @@ pre-commit run --all-files
 - Adapters: `github/`, `agents/` (`exec.py` with two-way `Conversation`s, `acp.py`, `approver.py`, `adapters/`, `router.py`), `memory/`, `workspace/` (worktrees, and `publish` for the actuator), `labs/`, `store/`, `notify/`, `selfupdate/` (`updater.py` deploys the service's own checkout, `supervise.py`), plus `subproc.py`.
 - `web/` – FastAPI app, sign-in, the dashboard API, chat. `testing/` – fakes of every port, `Harness`, the demo data.
 - `packs/<name>/pack.yaml` – built-in packs. `skills/<name>/SKILL.md` – skills the service gives its runtime agents. `config/defaults/` – default profile (every repository action in `shadow`), routing, schedules.
-- `ui/` – React, TypeScript, Vite dashboard; `npm run build` writes into `src/auto_maintainer/web/static/`.
+- `ui/` – React, TypeScript, Vite dashboard; `npm run build` writes into `src/auto_maintainer/web/static/`, which is not in git. `am serve` runs that build at startup whenever it is missing or older than `ui/` (`web/dashboard.py`), so Node 20+ is needed wherever the service runs from a checkout.
 - `tests/` – flows, rules, adapters (`tests/github/`, `tests/agents/`), and `test_layers.py`.
 
 ## Architecture rules

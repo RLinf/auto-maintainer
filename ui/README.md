@@ -1,6 +1,6 @@
 # Dashboard
 
-The maintainer dashboard for auto-maintainer: React 18, TypeScript, Vite, and TanStack Query. It talks to the JSON API in `src/auto_maintainer/web/` and is served by `am serve` from `src/auto_maintainer/web/static/`, where `npm run build` writes it.
+The maintainer dashboard for auto-maintainer: React 18, TypeScript, Vite, and TanStack Query. It talks to the JSON API in `src/auto_maintainer/web/` and is served by `am serve` from `src/auto_maintainer/web/static/`, where `npm run build` writes it. That directory is not in git: `am serve` (and `--demo`) builds it at startup whenever it is missing or older than these sources, if `npm` is installed; without `npm`, every page says how to build it.
 
 ## Develop against the demo backend
 

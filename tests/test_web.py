@@ -145,3 +145,42 @@ async def test_override_requires_reason_and_starts_calibration(demo) -> None:
         await h.settle()
     threads = await h.store.list_threads("walt")
     assert threads and "Calibration" in threads[0].title
+
+
+async def test_an_unbuilt_dashboard_explains_itself(
+    demo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import auto_maintainer.web.app as web_app
+    from auto_maintainer.web.dashboard import ensure_built
+
+    h, _ = demo
+    monkeypatch.setattr(web_app, "STATIC", tmp_path / "no-static")
+    app = create_app(h.service, data_dir=tmp_path, allow_dev_login=True)
+    async with _client(app, None) as anon:
+        page = await anon.get("/")
+        assert page.status_code == 503 and "The dashboard is not built" in page.text
+        assert "npm ci" in page.text
+        assert (await anon.get("/queue/anything")).status_code == 503
+        assert (await anon.get("/api/no-such-endpoint")).status_code == 404
+        assert (await anon.get("/healthz")).status_code == 200
+    messages: list[str] = []
+    assert not ensure_built(tmp_path / "no-ui", tmp_path / "no-static", messages.append)
+    assert "no sources" in messages[0]
+
+
+def test_the_dashboard_rebuilds_when_its_sources_change(tmp_path: Path) -> None:
+    import os
+
+    from auto_maintainer.web.dashboard import needs_build
+
+    ui, static = tmp_path / "ui", tmp_path / "static"
+    (ui / "src").mkdir(parents=True)
+    (ui / "package.json").write_text("{}")
+    (ui / "src" / "App.tsx").write_text("old")
+    assert needs_build(ui, static)
+    static.mkdir()
+    (static / "index.html").write_text("<html>")
+    assert not needs_build(ui, static)
+    later = (static / "index.html").stat().st_mtime + 10
+    os.utime(ui / "src" / "App.tsx", (later, later))
+    assert needs_build(ui, static)

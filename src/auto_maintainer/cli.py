@@ -118,8 +118,10 @@ def serve(
     import uvicorn
 
     from .web.app import create_app
+    from .web.dashboard import ensure_built
 
     _setup_logging(verbose)
+    ensure_built(echo=typer.echo)
 
     if demo:
         from .testing.demo import DEMO_USER, build_demo
@@ -134,14 +136,13 @@ def serve(
             service.settings.operators.add(DEMO_USER)
             web = create_app(service, data_dir=root, allow_dev_login=True)
             await service.start()
-            url = f"http://{host or '127.0.0.1'}:{port or 7777}"
+            bind = host or "0.0.0.0"
+            url = f"http://{'127.0.0.1' if bind == '0.0.0.0' else bind}:{port or 7777}"
             typer.echo(
                 f"demo data in {root}; sign in at {url}/auth/dev?login={DEMO_USER}"
             )
             server = uvicorn.Server(
-                uvicorn.Config(
-                    web, host=host or "127.0.0.1", port=port or 7777, log_level="info"
-                )
+                uvicorn.Config(web, host=bind, port=port or 7777, log_level="info")
             )
             try:
                 await server.serve()

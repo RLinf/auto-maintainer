@@ -427,7 +427,7 @@ Files on the service host:
 └── runs/<run-id>/             prompt, transcript, structured output
 ```
 
-Agent worktrees come from mirrors the service owns, never from clones that people use. Lab worktrees follow each lab's own paths from its profile. The dashboard listens on localhost or the intranet only and is reached through the reverse proxy.
+Agent worktrees come from mirrors the service owns, never from clones that people use. Lab worktrees follow each lab's own paths from its profile. The dashboard listens on every interface by default (`host: 0.0.0.0`, port 7777) and serves plain HTTP. `base_url` is the address browsers use and builds the GitHub sign-in callback. Beyond a trusted network, put a TLS reverse proxy in front, set `base_url` to its HTTPS address and `cookie_secure: true`, or bind `host: 127.0.0.1` behind the proxy.
 
 ### 4.8 State and ownership
 

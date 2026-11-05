@@ -81,9 +81,13 @@ class SelfUpdateConfig(_Cfg):
 
 
 class HostConfig(_Cfg):
-    host: str = "127.0.0.1"
+    host: str = "0.0.0.0"
+    """Address the dashboard and API listen on; ``0.0.0.0`` is every interface."""
     port: int = 7777
     base_url: str = "http://127.0.0.1:7777"
+    """The URL browsers use to reach the dashboard. It builds the GitHub sign-in
+    callback (``<base_url>/auth/callback``) and the links in alerts, so set it to the
+    host's reachable name or address when people connect from other machines."""
     data_dir: str = str(Path.home() / ".local" / "share" / "auto-maintainer")
     operators: list[str] = Field(default_factory=list)
     github: GitHubConfig = Field(default_factory=GitHubConfig)
@@ -142,7 +146,8 @@ def load_host_config(config_dir: Path | None = None) -> HostConfig:
 
 EXAMPLE = """# ~/.config/auto-maintainer/local.yaml
 port: 7777
-base_url: http://127.0.0.1:7777
+host: 0.0.0.0                           # listen on every interface
+base_url: http://your-host:7777         # what browsers open; GitHub sign-in calls back here
 operators: [your-login]
 github:
   auth: token            # or app, with app_id and private_key_path
