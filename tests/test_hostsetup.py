@@ -510,3 +510,59 @@ async def test_signing_in_on_the_web_through_the_github_cli_keeps_nothing(
         assert await h.service.a.user_tokens.get("maria") is None
     assert not logins[0].config_dir.exists()
     await h.close()
+
+
+# -- a private memory repository not every credential can see ----------------------------
+
+APP_USER = "ghu_" + "a" * 36
+"""A GitHub App's sign-in token for maria: it sees only where that app is installed."""
+MEMORY = "RLinf/rlinf-am-mem"
+
+
+def _private_github(visible_to: set[str]) -> httpx.MockTransport:
+    """A fake GitHub whose memory repository only ``visible_to`` logins can see."""
+    users = {**USERS, APP_USER: "maria"}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        token = request.headers.get("authorization", "").removeprefix("Bearer ")
+        login = users.get(token)
+        if request.url.path == "/user":
+            if login is None:
+                return httpx.Response(401, json={"message": "Bad credentials"})
+            return httpx.Response(200, json={"login": login, "name": login.title()})
+        if request.url.path == f"/repos/{MEMORY}":
+            if login in visible_to and token != APP_USER:
+                return httpx.Response(200, json={"private": True})
+            return httpx.Response(404, json={"message": "Not Found"})
+        return httpx.Response(404)
+
+    return httpx.MockTransport(handle)
+
+
+async def test_a_memory_repo_a_sign_in_cannot_see_is_found_with_another_credential(
+    tmp_path: Path,
+) -> None:
+    s = _setup(tmp_path, transport=_private_github({"hao", "maria"}))
+    out = await s.memory(MEMORY, create=False, person_token=APP_USER)
+    assert out == {"repo": MEMORY, "created": False}
+    assert s.cfg.memory.remote == MEMORY
+
+
+async def test_a_memory_repo_nobody_can_see_names_the_accounts_tried(
+    tmp_path: Path,
+) -> None:
+    s = _setup(tmp_path, transport=_private_github(set()))
+    with pytest.raises(SetupError) as e:
+        await s.memory(MEMORY, create=False, person_token=APP_USER)
+    message = str(e.value)
+    assert "maria" in message and "hao" in message
+    assert "installed" in message and "fine-grained" in message
+
+
+async def test_the_services_own_account_must_see_the_memory_repo(
+    tmp_path: Path,
+) -> None:
+    s = _setup(tmp_path, transport=_private_github({"hao"}), run_gh=_gh_logged_out)
+    await s.use_token(STRANGER, claim=False)
+    with pytest.raises(SetupError, match="service's account eve cannot see it"):
+        await s.memory(MEMORY, create=False, person_token=TOKEN)

@@ -580,41 +580,73 @@ class HostSetup:
             )
         return t.json().get("token") if t.status_code == 201 else None
 
+    async def _service_token(self, repo: str) -> str | None:
+        """The credential the service itself will use for ``repo``: an installation
+        token of its GitHub App, its token, or its GitHub CLI login (the one made in the
+        browser, else the host's)."""
+        gh = self.cfg.github
+        if gh.auth == "app":
+            if self._pem is None and gh.private_key_path:
+                key = Path(gh.private_key_path).expanduser()
+                if key.is_file():
+                    self._pem = key.read_text(encoding="utf-8")
+            return await self._app_token(repo)
+        if self._token:
+            return self._token
+        if gh.auth == "token":
+            return os.environ.get(gh.token_env) or None
+        if gh.gh_config_dir or self.gh_login.state() != "none":
+            token = await self.gh_login.token()
+            if token:
+                return token
+        return await self.gh_token()
+
     async def memory(
         self, repo: str | None, create: bool, person_token: str | None = None
     ) -> dict[str, Any]:
         """Use ``repo`` as the memory repository, creating it private when asked;
         with ``repo`` empty, memory stays on this host.
 
-        The repository is checked, and created, with the signed-in maintainer's own
-        GitHub account (``person_token``, or the token they proved ownership with),
-        so it can live wherever they may create repositories. The service's account
-        must then reach it too: a GitHub App needs to be installed on it.
+        The repository is looked up with each credential at hand in turn (the
+        signed-in maintainer's, the service's own, the host's GitHub CLI), because a
+        private repository is invisible to a credential not given access to it: a
+        GitHub App's sign-in sees only repositories the app is installed on, and a
+        fine-grained token only those chosen for it. It is created with the
+        maintainer's account. The service's own account must then reach it, since it
+        keeps the memory there; that is checked last.
         """
         if not repo:
             self.cfg.memory.remote = None
             return {"repo": None}
         if not re.fullmatch(r"[\w.-]+/[\w.-]+", repo):
             raise SetupError("name the repository as owner/name")
-        token = (
-            person_token
-            or self._claimer_token
-            or (self._token if self.cfg.github.auth != "app" else None)
-            or await self.gh_token()
-        )
-        if token is None:
+        person = person_token or self._claimer_token
+        service = await self._service_token(repo)
+        host = await self.gh_token()
+        candidates = [t for t in dict.fromkeys([person, service, host]) if t]
+        if not candidates:
             raise SetupError("sign in with GitHub first")
         owner, name = repo.split("/", 1)
-        auth = {"Authorization": f"Bearer {token}"}
+        tried: list[str] = []
+        found: dict[str, Any] | None = None
         async with self._client() as client:
-            r = await client.get(f"/repos/{repo}", headers=auth)
-            if r.status_code == 200:
-                if not r.json().get("private"):
+            for token in candidates:
+                auth = {"Authorization": f"Bearer {token}"}
+                r = await client.get(f"/repos/{repo}", headers=auth)
+                if r.status_code == 200:
+                    found = r.json()
+                    break
+                if r.status_code not in (401, 403, 404):
+                    raise SetupError(f"GitHub answered {r.status_code} for {repo}")
+                tried.append(await self._login_of(client, auth))
+            if found is not None:
+                if not found.get("private"):
                     raise SetupError(
                         f"{repo} is public; the memory repository must be private"
                     )
                 created = False
-            elif r.status_code == 404 and create:
+            elif create:
+                auth = {"Authorization": f"Bearer {person or candidates[0]}"}
                 me = (await client.get("/user", headers=auth)).json().get("login")
                 path = "/user/repos" if owner == me else f"/orgs/{owner}/repos"
                 body = {
@@ -630,20 +662,61 @@ class HostSetup:
                         f"{c.json().get('message', '')}"
                     )
                 created = True
-            elif r.status_code == 404:
-                raise SetupError(f"{repo} does not exist or this account cannot see it")
             else:
-                raise SetupError(f"GitHub answered {r.status_code} for {repo}")
-        if self.cfg.github.auth == "app" and await self._app_token(repo) is None:
-            self.cfg.memory.remote = repo
-            return {
-                "repo": repo,
-                "created": created,
-                "install": f"{self.cfg.github.web_url}/apps/{self.cfg.github.app_slug}/installations/new",
-                "warning": f"install the app on {repo} so the service can write there",
-            }
+                accounts = ", ".join(dict.fromkeys(tried)) or "no account"
+                install = (
+                    f" Install the app on it: {self._install_url()}"
+                    if self.cfg.github.auth == "app"
+                    else ""
+                )
+                raise SetupError(
+                    f"{repo} does not exist, or none of these can see it: {accounts}. "
+                    "A private repository is visible only to accounts given access; "
+                    "a GitHub App's sign-in sees only repositories the app is installed "
+                    "on, and a fine-grained token only the repositories chosen for it."
+                    + install
+                )
+            if self.cfg.github.auth == "app":
+                if await self._app_token(repo) is None:
+                    self.cfg.memory.remote = repo
+                    return {
+                        "repo": repo,
+                        "created": created,
+                        "install": self._install_url(),
+                        "warning": f"install the app on {repo} so the service can write there",
+                    }
+            elif (
+                service is not None
+                and (
+                    await client.get(
+                        f"/repos/{repo}", headers={"Authorization": f"Bearer {service}"}
+                    )
+                ).status_code
+                != 200
+            ):
+                # Only a credential the service has, refused by GitHub, shows that the
+                # service cannot reach it; without one there is nothing to check.
+                who = (self.identity or {}).get("login") or await self._login_of(
+                    client, {"Authorization": f"Bearer {service}"}
+                )
+                raise SetupError(
+                    f"{repo} is there, but the service's account {who} cannot see it, "
+                    "and the service keeps its memory with that account. Give it write "
+                    "access to the repository, or use an account that has it."
+                )
         self.cfg.memory.remote = repo
         return {"repo": repo, "created": created}
+
+    async def _login_of(self, client: httpx.AsyncClient, auth: dict[str, str]) -> str:
+        """The account a credential belongs to, for messages; ``?`` when GitHub will
+        not say (an installation token has no user)."""
+        r = await client.get("/user", headers=auth)
+        if r.status_code == 200:
+            return str(r.json().get("login") or "?")
+        return "the service's GitHub App" if self.cfg.github.auth == "app" else "?"
+
+    def _install_url(self) -> str:
+        return f"{self.cfg.github.web_url}/apps/{self.cfg.github.app_slug}/installations/new"
 
     # -- finishing -----------------------------------------------------------------------
 
