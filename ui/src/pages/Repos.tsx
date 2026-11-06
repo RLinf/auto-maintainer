@@ -1,206 +1,414 @@
-// Repositories: onboarding, the approved profile, pending candidates, settings, and agreement scores.
+// Repositories: onboarding, the approved profile, pending candidates, the private
+// settings layer, and agreement between the service and maintainers. Changing a
+// repository's configuration needs its maintainers (the configuration gate).
 
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { api, type Agreement, type GateDecision, type MemoryChange, type ProfileResponse, type RepoRow } from "../api";
-import { Diff, Empty, ErrorBox, Loading, Section, Status, useAct, When } from "../components";
+import { useAgent } from "../agent";
+import { Diff, Empty, ErrorBox, PageHead, Section, Status, timeOf, useAct, When } from "../components";
+import { useRepos } from "../data";
 import { useT } from "../i18n";
+import { Icon } from "../icons";
+import { DataTable, ListToolbar, useList, type Column } from "../list";
+import { Skeleton, Tabs, useTab, useToast } from "../ui";
+
+function repoState(r: RepoRow): string {
+  if (r.paused) return "Paused";
+  if (r.active) return "Active";
+  return "Waiting for a profile";
+}
+
+function profileState(r: RepoRow): string {
+  if (r.candidate_error) return "Error";
+  if (r.candidate_pending) return "Change pending";
+  return "Up to date";
+}
 
 export function ReposPage() {
   const t = useT();
-  const repos = useQuery({ queryKey: ["repos"], queryFn: () => api.get<RepoRow[]>("/api/repos") });
-  const [name, setName] = useState("");
-  const add = useAct((repo: string) => api.post("/api/repos", { repo }), [["repos"]]);
+  const navigate = useNavigate();
+  const agent = useAgent();
+  const repos = useRepos();
+  const [adding, setAdding] = useState(false);
+  const list = useList<RepoRow>({
+    rows: repos.data ?? [],
+    key: (r) => r.repo,
+    search: (r) => `${r.repo} ${r.added_by}`,
+    facets: [
+      { id: "state", label: t("Status"), values: (r) => t(repoState(r)) },
+      { id: "profile", label: t("Profile"), values: (r) => t(profileState(r)) },
+      { id: "owner", label: t("Owner"), values: (r) => r.repo.split("/")[0] },
+    ],
+    sorts: [
+      { id: "repo", label: t("Name"), value: (r) => r.repo.toLowerCase() },
+      { id: "prs", label: t("Open PRs"), value: (r) => r.open_prs, descFirst: true },
+      { id: "proposals", label: t("Proposals"), value: (r) => r.pending_proposals, descFirst: true },
+      { id: "poll", label: t("Last poll"), value: (r) => timeOf(r.last_poll_at), descFirst: true },
+      { id: "added", label: t("Added"), value: (r) => timeOf(r.added_at), descFirst: true },
+    ],
+    defaultSort: "repo",
+  });
+  const columns: Column<RepoRow>[] = [
+    {
+      id: "repo",
+      header: t("Repository"),
+      sort: "repo",
+      cell: (r) => (
+        <span className="row" style={{ gap: 8, flexWrap: "nowrap" }}>
+          <Icon name="repo" />
+          <span>
+            <Link to={`/repos/${r.repo}`} style={{ color: "var(--text)", fontWeight: 550 }}>
+              {r.repo}
+            </Link>
+            <div className="small muted">
+              {t("added by")} {r.added_by} · <When at={r.added_at} />
+            </div>
+          </span>
+        </span>
+      ),
+    },
+    {
+      id: "state",
+      header: t("Status"),
+      cell: (r) => <Status value={r.paused ? "failed" : r.active ? "executed" : "pending"} label={t(repoState(r))} />,
+    },
+    {
+      id: "prs",
+      header: t("Open PRs"),
+      sort: "prs",
+      className: "num",
+      cell: (r) => <Link to={`/prs?f.repo=${encodeURIComponent(r.repo)}`}>{r.open_prs}</Link>,
+    },
+    { id: "proposals", header: t("Proposals"), sort: "proposals", className: "num", cell: (r) => r.pending_proposals || <span className="muted">0</span> },
+    {
+      id: "profile",
+      header: t("Profile"),
+      cell: (r) =>
+        r.candidate_error ? (
+          <span className="small" style={{ color: "var(--bad)" }} title={r.candidate_error}>
+            <Icon name="x" size={12} /> {t("error")}
+          </span>
+        ) : r.candidate_pending ? (
+          <Status value="pending" label={t("change to approve")} />
+        ) : (
+          <span className="small muted">{t("up to date")}</span>
+        ),
+    },
+    { id: "poll", header: t("Last poll"), sort: "poll", className: "hide-narrow small", cell: (r) => <When at={r.last_poll_at} /> },
+    {
+      id: "ask",
+      header: "",
+      width: 44,
+      cell: (r) => (
+        <button
+          className="ghost icon sm"
+          title={t("Ask agent")}
+          aria-label={t("Ask agent")}
+          onClick={() => agent.open({ context: { page: "repository", repo: r.repo, number: null, label: r.repo } })}
+        >
+          <Icon name="sparkles" size={14} />
+        </button>
+      ),
+    },
+  ];
   return (
     <>
-      <h1>{t("Repositories")}</h1>
-      <ErrorBox error={repos.error} />
-      {repos.isLoading ? <Loading /> : !repos.data?.length ? <Empty>No repositories you maintain are configured.</Empty> : (
-        <div className="card table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>{t("Repository")}</th>
-                <th>State</th>
-                <th className="num">Open PRs</th>
-                <th className="num">Proposals</th>
-                <th>Profile</th>
-                <th className="hide-narrow">Last poll</th>
-              </tr>
-            </thead>
-            <tbody>
-              {repos.data.map((r) => (
-                <tr key={r.repo}>
-                  <td>
-                    <Link to={`/repos/${r.repo}`}>{r.repo}</Link>
-                  </td>
-                  <td className="row">
-                    <Status value={r.active ? "executed" : "pending"} />
-                    <span className="small">{r.active ? "active" : "waiting for an approved profile"}</span>
-                    {r.paused && <span className="pill status-bad">paused</span>}
-                  </td>
-                  <td className="num">{r.open_prs}</td>
-                  <td className="num">{r.pending_proposals}</td>
-                  <td className="small">
-                    {r.candidate_error ? <span style={{ color: "var(--bad)" }}>{r.candidate_error}</span> : r.candidate_pending ? "candidate pending" : "up to date"}
-                  </td>
-                  <td className="small hide-narrow">
-                    <When at={r.last_poll_at} />
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-      <Section title={t("Add repository")}>
-        <form
-          className="row"
-          onSubmit={(e) => {
-            e.preventDefault();
-            add.mutate(name.trim());
-          }}
-        >
-          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="owner/repo" />
-          <button className="primary" disabled={!/^[\w.-]+\/[\w.-]+$/.test(name.trim()) || add.isPending}>
+      <PageHead
+        title={t("Repositories")}
+        sub={t("Each repository runs on a profile its maintainers approved. Until then the service only reads it.")}
+        actions={
+          <button className="primary" onClick={() => setAdding(true)}>
+            <Icon name="plus" />
             {t("Add repository")}
           </button>
-          {add.isSuccess && <span className="small muted">Onboarding started. Approve the drafted profile in Memory when it appears.</span>}
-        </form>
-        <ErrorBox error={add.error} />
-      </Section>
+        }
+      />
+      <ListToolbar list={list} placeholder={t("Search repositories")} />
+      <ErrorBox error={repos.error} />
+      {repos.isLoading ? (
+        <div className="card">
+          <Skeleton rows={4} />
+        </div>
+      ) : (
+        <DataTable
+          list={list}
+          columns={columns}
+          onOpen={(r) => navigate(`/repos/${r.repo}`)}
+          empty={
+            <>
+              {t("No repositories yet.")}{" "}
+              <button className="sm" onClick={() => setAdding(true)}>
+                {t("Add repository")}
+              </button>
+            </>
+          }
+        />
+      )}
+      {adding && <AddRepoDialog onClose={() => setAdding(false)} />}
     </>
+  );
+}
+
+function AddRepoDialog({ onClose }: { onClose: () => void }) {
+  const t = useT();
+  const toast = useToast();
+  const [name, setName] = useState("");
+  const add = useAct((repo: string) => api.post("/api/repos", { repo }), [["repos"]]);
+  const valid = /^[\w.-]+\/[\w.-]+$/.test(name.trim());
+  return (
+    <div className="overlay" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+      <div className="dialog" role="dialog" aria-modal="true" aria-label={t("Add repository")}>
+        <form
+          className="dialog-body"
+          onSubmit={(e) => {
+            e.preventDefault();
+            add.mutate(name.trim(), {
+              onSuccess: () => {
+                toast({ title: t("Onboarding started"), body: t("An agent drafts the profile. Approve it on the repository's page when it appears."), icon: "repo" });
+                onClose();
+              },
+            });
+          }}
+        >
+          <h2>{t("Add repository")}</h2>
+          <span className="small muted">
+            {t("You need maintainer access on GitHub. An agent reads the repository and drafts its profile; nothing is posted until a maintainer approves it.")}
+          </span>
+          <input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="owner/repo" onKeyDown={(e) => e.key === "Escape" && onClose()} />
+          <ErrorBox error={add.error} />
+          <div className="row" style={{ justifyContent: "flex-end" }}>
+            <button type="button" className="ghost" onClick={onClose}>
+              {t("Cancel")}
+            </button>
+            <button className="primary" disabled={!valid || add.isPending}>
+              {add.isPending ? t("Starting…") : t("Start onboarding")}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
   );
 }
 
 export function RepoDetailPage() {
   const t = useT();
+  const toast = useToast();
+  const agent = useAgent();
   const { owner, repo } = useParams();
   const full = `${owner}/${repo}`;
   const base = `/api/repos/${full}`;
   const profile = useQuery({ queryKey: ["profile", full], queryFn: () => api.get<ProfileResponse>(`${base}/profile`) });
   const agreement = useQuery({ queryKey: ["profile", full, "agreement"], queryFn: () => api.get<Agreement>(`${base}/agreement`) });
-  const repos = useQuery({ queryKey: ["repos"], queryFn: () => api.get<RepoRow[]>("/api/repos") });
+  const repos = useRepos();
   const row = repos.data?.find((r) => r.repo === full);
   const keys = [["profile"], ["repos"], ["memory"]];
   const approve = useAct((hash: string) => api.post<{ change: MemoryChange | null }>(`${base}/profile/approve`, { hash }), keys);
   const pause = useAct(() => api.post(`${base}/pause`, { reason: "paused from the dashboard" }), keys);
   const resume = useAct(() => api.post(`${base}/resume`), keys);
+  const p = profile.data;
+  const candidateHash = p?.candidate.candidate_hash ?? null;
+  const tabs = [
+    { id: "overview", label: t("Overview") },
+    { id: "candidate", label: t("Profile change"), count: candidateHash ? 1 : 0 },
+    { id: "settings", label: t("Settings") },
+  ];
+  const [tab, setTab] = useTab(tabs);
 
-  if (profile.isLoading) return <Loading />;
-  if (profile.error) return <ErrorBox error={profile.error} />;
-  const p = profile.data!;
-  const candidateHash = p.candidate.candidate_hash;
+  if (profile.isLoading) {
+    return (
+      <div className="card">
+        <Skeleton rows={6} />
+      </div>
+    );
+  }
+  if (profile.error || !p) return <ErrorBox error={profile.error} />;
 
   return (
     <>
-      <div className="row">
-        <h1 style={{ margin: 0 }}>{full}</h1>
-        {row?.paused ? (
-          <button onClick={() => resume.mutate(undefined)}>{t("Resume")}</button>
-        ) : (
-          <button className="danger" onClick={() => pause.mutate(undefined)}>
-            {t("Pause")}
-          </button>
-        )}
-        {!p.can_configure && <span className="small muted">{p.gate.reason}</span>}
-      </div>
-      <ErrorBox error={pause.error || resume.error} />
-
-      <div className="grid2">
-        <Section title={t("Approved profile")}>
-          {p.lock ? (
-            <div className="stack small">
-              <div>
-                Hash <span className="mono">{p.lock.hash}</span> · approved by {p.lock.approved_by.join(", ") || "—"} · <When at={p.lock.approved_at} /> · source {p.lock.source}
-              </div>
-              <table>
-                <thead>
-                  <tr>
-                    <th>Layer</th>
-                    <th>Approved hash</th>
-                    <th>Current hash</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {p.layers.map((l) => (
-                    <tr key={l.name}>
-                      <td>
-                        {l.name} <span className="muted">({l.source})</span>
-                      </td>
-                      <td className="mono">{p.lock?.layers[l.name] ?? "—"}</td>
-                      <td className="mono" style={{ color: p.lock?.layers[l.name] === l.hash ? undefined : "var(--warn)" }}>
-                        {l.hash}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          ) : (
-            <Empty>No approved profile yet. The service only reads this repository until a maintainer approves one.</Empty>
-          )}
-        </Section>
-        <Section title={t("Agreement")}>
-          {agreement.data && Object.keys(agreement.data.kinds).length ? (
-            <>
-            <p className="muted">{agreement.data.shadowed} shadow actions recorded.</p>
-            <table>
-              <thead>
-                <tr>
-                  <th>Action kind</th>
-                  <th className="num">Matched</th>
-                  <th className="num">Compared</th>
-                  <th className="num">Agreement</th>
-                </tr>
-              </thead>
-              <tbody>
-                {Object.entries(agreement.data.kinds).map(([kind, a]) => (
-                  <tr key={kind}>
-                    <td className="mono">{kind}</td>
-                    <td className="num">{a.matched}</td>
-                    <td className="num">{a.total}</td>
-                    <td className="num">{a.agreement === null ? "—" : `${Math.round(a.agreement * 100)}%`}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            </>
-          ) : (
-            <Empty>No shadow actions to compare yet.</Empty>
-          )}
-          <ErrorBox error={agreement.error} />
-        </Section>
-      </div>
-
-      <Section
-        title={t("Pending candidate")}
-        aside={
-          candidateHash ? (
-            <button className="primary" disabled={!p.can_configure || approve.isPending} title={p.can_configure ? "" : p.gate.reason} onClick={() => approve.mutate(candidateHash)}>
-              {t("Approve")} {candidateHash}
-            </button>
-          ) : null
+      <PageHead
+        crumbs={[{ to: "/repos", label: t("Repositories") }]}
+        title={full}
+        sub={
+          <span className="row" style={{ gap: 8 }}>
+            {row && <Status value={row.paused ? "failed" : row.active ? "executed" : "pending"} label={t(repoState(row))} />}
+            {p.can_configure ? (
+              <span className="row" style={{ gap: 4 }}>
+                <Icon name="shield" size={13} />
+                {t("You can change this repository's configuration")}
+              </span>
+            ) : (
+              <span className="row" style={{ gap: 4 }} title={p.gate.reason}>
+                <Icon name="eye" size={13} />
+                {t("View only: configuration needs")} {p.gate.required}
+              </span>
+            )}
+          </span>
         }
-      >
-        {p.candidate.candidate_error && <div className="error">{p.candidate.candidate_error}</div>}
-        {candidateHash ? <Diff text={p.candidate.candidate_diff} /> : <Empty>The approved profile matches every layer.</Empty>}
-        {approve.data?.change && (
-          <div className="notice small">
-            Memory change {approve.data.change.id} is {approve.data.change.state}.
-          </div>
-        )}
-        <ErrorBox error={approve.error} />
-      </Section>
+        actions={
+          <>
+            <button className="agent" onClick={() => agent.open()}>
+              <Icon name="sparkles" />
+              {t("Configure with the agent")}
+            </button>
+            <Link className="button" to={`/prs?f.repo=${encodeURIComponent(full)}`}>
+              <Icon name="pr" />
+              {row?.open_prs ?? ""} {t("PRs")}
+            </Link>
+            {row?.paused ? (
+              <button onClick={() => resume.mutate(undefined)}>
+                <Icon name="play" />
+                {t("Resume")}
+              </button>
+            ) : (
+              <button className="danger" onClick={() => pause.mutate(undefined, { onSuccess: () => toast({ title: `${full} ${t("is paused")}`, icon: "pause" }) })}>
+                <Icon name="pause" />
+                {t("Pause")}
+              </button>
+            )}
+          </>
+        }
+      />
+      <ErrorBox error={pause.error || resume.error} />
+      {candidateHash && tab !== "candidate" && (
+        <div className="strip question">
+          <Icon name="shield" />
+          <span>{t("A profile change waits for a maintainer's approval.")}</span>
+          <button className="sm right" onClick={() => setTab("candidate")}>
+            {t("Review it")}
+          </button>
+        </div>
+      )}
+      <Tabs tabs={tabs} active={tab} onChange={setTab} />
 
-      <SettingsEditor base={base} initial={p.memory_layer} canConfigure={p.can_configure} gateReason={p.gate.reason} />
+      {tab === "overview" && (
+        <div className="grid2">
+          <Section title={t("Approved profile")}>
+            {p.lock ? (
+              <div className="stack small">
+                <dl className="props">
+                  <dt>{t("Hash")}</dt>
+                  <dd>
+                    <code>{p.lock.hash}</code>
+                  </dd>
+                  <dt>{t("Approved by")}</dt>
+                  <dd>
+                    {p.lock.approved_by.join(", ") || "—"} · <When at={p.lock.approved_at} />
+                  </dd>
+                  <dt>{t("Source")}</dt>
+                  <dd>{p.lock.source}</dd>
+                </dl>
+                <div className="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>{t("Layer")}</th>
+                        <th>{t("Approved")}</th>
+                        <th>{t("Current")}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {p.layers.map((l) => {
+                        const same = p.lock?.layers[l.name] === l.hash;
+                        return (
+                          <tr key={l.name}>
+                            <td>
+                              {l.name} <span className="muted">({l.source})</span>
+                            </td>
+                            <td className="mono">{p.lock?.layers[l.name] ?? "—"}</td>
+                            <td className="mono" style={{ color: same ? undefined : "var(--warn)" }}>
+                              {l.hash} {!same && <Icon name="clock" size={12} />}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            ) : (
+              <Empty icon="shield">{t("No approved profile yet. The service only reads this repository until a maintainer approves one.")}</Empty>
+            )}
+          </Section>
+          <Section title={t("Agreement with maintainers")} hint={t("from shadow actions")}>
+            {agreement.data && Object.keys(agreement.data.kinds).length ? (
+              <div className="stack small">
+                <span className="muted">
+                  {agreement.data.shadowed} {t("shadow actions recorded. Raise an action to propose or auto when agreement is high.")}
+                </span>
+                {Object.entries(agreement.data.kinds).map(([kind, a]) => (
+                  <div key={kind} className="row" style={{ flexWrap: "nowrap" }} title={`${a.matched}/${a.total}`}>
+                    <span className="mono" style={{ width: 150, flexShrink: 0 }}>
+                      {kind}
+                    </span>
+                    <span style={{ flex: 1, height: 6, borderRadius: 3, background: "var(--surface-3)", overflow: "hidden" }}>
+                      <span style={{ display: "block", height: "100%", width: `${(a.agreement ?? 0) * 100}%`, background: "var(--accent)", borderRadius: 3 }} />
+                    </span>
+                    <span style={{ width: 70, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
+                      {a.agreement === null ? "—" : `${Math.round(a.agreement * 100)}%`} <span className="muted">({a.total})</span>
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <Empty icon="activity">{t("No shadow actions to compare yet.")}</Empty>
+            )}
+            <ErrorBox error={agreement.error} />
+          </Section>
+        </div>
+      )}
+
+      {tab === "candidate" && (
+        <Section
+          title={t("Profile change")}
+          aside={
+            candidateHash ? (
+              <button
+                className="primary"
+                disabled={!p.can_configure || approve.isPending}
+                title={p.can_configure ? "" : p.gate.reason}
+                onClick={() => approve.mutate(candidateHash, { onSuccess: () => toast({ title: t("Profile approved"), icon: "check" }) })}
+              >
+                <Icon name="check" size={14} />
+                {t("Approve")} <code style={{ background: "transparent", color: "inherit" }}>{candidateHash}</code>
+              </button>
+            ) : null
+          }
+        >
+          {p.candidate.candidate_error && <div className="error">{p.candidate.candidate_error}</div>}
+          {candidateHash ? <Diff text={p.candidate.candidate_diff} /> : <Empty icon="check">{t("The approved profile matches every layer.")}</Empty>}
+          {!p.can_configure && candidateHash && <div className="notice small" style={{ marginTop: 10 }}>{p.gate.reason}</div>}
+          {approve.data?.change && (
+            <div className="notice small" style={{ marginTop: 10 }}>
+              {t("Memory change")} {approve.data.change.id}: {approve.data.change.state}.
+            </div>
+          )}
+          <ErrorBox error={approve.error} />
+        </Section>
+      )}
+
+      {tab === "settings" && <SettingsEditor repo={full} base={base} initial={p.memory_layer} canConfigure={p.can_configure} gateReason={p.gate.reason} />}
     </>
   );
 }
 
-function SettingsEditor({ base, initial, canConfigure, gateReason }: { base: string; initial: string; canConfigure: boolean; gateReason: string }) {
+function SettingsEditor({
+  repo,
+  base,
+  initial,
+  canConfigure,
+  gateReason,
+}: {
+  repo: string;
+  base: string;
+  initial: string;
+  canConfigure: boolean;
+  gateReason: string;
+}) {
   const t = useT();
+  const agent = useAgent();
+  const [editing, setEditing] = useState(false);
   const [text, setText] = useState(initial);
   const [title, setTitle] = useState("profile: update settings");
   useEffect(() => setText(initial), [initial]);
@@ -209,24 +417,61 @@ function SettingsEditor({ base, initial, canConfigure, gateReason }: { base: str
     [["profile"], ["memory"], ["repos"]],
   );
   return (
-    <Section title={t("Memory layer")}>
-      <p className="small muted">
-        The private layer of this repository's profile. Saving opens a memory change; it applies only after a maintainer of this repository approves it.
-        {canConfigure ? " You qualify, so saving is your approval." : ` ${gateReason}`}
+    <Section
+      title={t("Repository settings")}
+      hint={t("the private layer of the profile")}
+      aside={
+        <span className="row">
+          <button
+            className="agent sm"
+            onClick={() =>
+              agent.open({ context: { page: "repository", repo, number: null, label: repo }, prompt: t("I want to change how the service works on this repository: ") })
+            }
+          >
+            <Icon name="sparkles" size={14} />
+            {t("Describe a change")}
+          </button>
+          {!editing && (
+            <button className="sm" onClick={() => setEditing(true)}>
+              {t("Edit YAML")}
+            </button>
+          )}
+        </span>
+      }
+    >
+      <p className="small muted" style={{ marginTop: 0 }}>
+        {t("Tell the agent what should change and it drafts the edit for you to approve, or edit the YAML yourself. Either way the change is a memory change that applies once a maintainer of this repository approves it.")}{" "}
+        {canConfigure ? t("You qualify, so saving is your approval.") : gateReason}
       </p>
-      <textarea value={text} onChange={(e) => setText(e.target.value)} rows={Math.min(30, Math.max(8, text.split("\n").length + 2))} spellCheck={false} />
-      <div className="row" style={{ marginTop: 8 }}>
-        <input value={title} onChange={(e) => setTitle(e.target.value)} style={{ flex: 1, minWidth: 200 }} />
-        <button className="primary" disabled={save.isPending || text === initial} onClick={() => save.mutate(undefined)}>
-          {t("Save")}
-        </button>
-      </div>
+      {editing ? (
+        <>
+          <textarea value={text} onChange={(e) => setText(e.target.value)} rows={Math.min(30, Math.max(8, text.split("\n").length + 2))} spellCheck={false} />
+          <div className="row" style={{ marginTop: 8 }}>
+            <input value={title} onChange={(e) => setTitle(e.target.value)} style={{ flex: 1, minWidth: 200 }} aria-label={t("Change title")} />
+            <button
+              type="button"
+              className="ghost"
+              onClick={() => {
+                setText(initial);
+                setEditing(false);
+              }}
+            >
+              {t("Cancel")}
+            </button>
+            <button className="primary" disabled={save.isPending || text === initial} onClick={() => save.mutate(undefined)}>
+              {canConfigure ? t("Save and apply") : t("Propose")}
+            </button>
+          </div>
+        </>
+      ) : (
+        <pre className="pre">{initial || "# " + t("empty")}</pre>
+      )}
       {save.data && (
         <div className="stack" style={{ marginTop: 8 }}>
           <div className="notice small">
             {save.data.approved
-              ? `Saved; memory change ${save.data.change?.id} is ${save.data.change?.state}.`
-              : `Saved as memory change ${save.data.change?.id}; it waits for a maintainer's approval (${save.data.gate.reason}).`}
+              ? `${t("Saved; memory change")} ${save.data.change?.id} ${t("is")} ${save.data.change?.state}.`
+              : `${t("Saved as memory change")} ${save.data.change?.id}; ${t("it waits for a maintainer's approval")} (${save.data.gate.reason}).`}
           </div>
           <Diff text={save.data.diff} />
         </div>

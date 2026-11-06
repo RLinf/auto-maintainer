@@ -170,6 +170,9 @@ class ChatMessage(BaseModel):
     """``user``, ``assistant``, or ``tool``."""
     text: str
     proposals: list[str] = Field(default_factory=list)
+    """Actions proposed in this message, by action id."""
+    changes: list[str] = Field(default_factory=list)
+    """Configuration changes drafted in this message, by memory change id."""
     id: str = Field(default_factory=lambda: new_id("msg"))
     created_at: datetime = Field(default_factory=utc_now)
 

@@ -25,10 +25,11 @@ import yaml
 
 from .agents.registry import budgets_of, build_runtimes, merge_configs
 from .agents.router import AgentRouter
-from .config import HostConfig
+from .config import CONFIG_DIR, HostConfig
 from .domain.clock import SystemClock
 from .domain.profile import Route
 from .domain.records import AgentRunRecord
+from .domain.settings import ProviderBinding, RuntimeConfig
 from .github import GitHubActionsCi, GitHubClient, GitHubReader, GitHubWriter
 from .github.auth import GitHubAppTokenProvider, StaticTokenProvider
 from .labs.executor import GpuThresholds, LabExecutor
@@ -38,6 +39,7 @@ from .notify.webhook import ChannelConfig, WebhookNotifier
 from .resources import data_dir, defaults_dir
 from .selfupdate import GitServiceUpdater
 from .service import Adapters, Service, ServiceSettings
+from .store.secrets import FileSecretStore
 from .store.sqlite import SqliteStore
 from .workspace.git import GitWorkspace, LocalSandbox
 
@@ -109,6 +111,15 @@ async def build_service(cfg: HostConfig, dev: bool = False) -> Service:
         record_run=record_run,
     )
 
+    async def reconfigure(
+        agents: dict[str, RuntimeConfig], providers: dict[str, ProviderBinding]
+    ) -> None:
+        """New service settings: rebuild the runtimes and hand them to the router."""
+        router.reconfigure(
+            build_runtimes(agents, runs_dir=data / "runs", providers=providers),
+            budgets_of(agents),
+        )
+
     labs: dict[str, Any] = {}
     for name, lab in cfg.labs.items():
         labs[name] = (
@@ -178,6 +189,8 @@ async def build_service(cfg: HostConfig, dev: bool = False) -> Service:
         lab_runner=lab_runner,
         publisher=workspace if cfg.code_repo else None,
         updater=updater,
+        secrets=FileSecretStore(CONFIG_DIR / "provider-keys.json"),
+        reconfigure=reconfigure,
     )
     settings = ServiceSettings(
         login=login,

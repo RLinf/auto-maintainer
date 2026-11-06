@@ -34,12 +34,15 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     }
   }
   if (!res.ok) {
+    const raw = data && typeof data === "object" && "detail" in data ? (data as { detail: unknown }).detail : data;
     const detail =
-      data && typeof data === "object" && "detail" in data
-        ? String((data as { detail: unknown }).detail)
-        : typeof data === "string"
-          ? data
-          : res.statusText;
+      raw && typeof raw === "object" && "message" in raw
+        ? [String((raw as { message: unknown }).message), ...(((raw as { problems?: string[] }).problems ?? []) as string[])].join(": ")
+        : typeof raw === "string"
+          ? raw
+          : raw
+            ? JSON.stringify(raw)
+            : res.statusText;
     throw new ApiError(res.status, detail);
   }
   return data as T;
@@ -342,6 +345,7 @@ export interface ProfileResponse {
 }
 
 export interface MemoryChange {
+  service?: boolean;
   id: string;
   tier: string;
   title: string;
@@ -410,6 +414,7 @@ export interface ChatMessage {
   role: string;
   text: string;
   proposals: string[];
+  changes?: string[];
   created_at: string;
 }
 
@@ -423,4 +428,81 @@ export interface AgreementRow {
 export interface Agreement {
   shadowed: number;
   kinds: Record<string, AgreementRow>;
+}
+
+export interface SecretInfo {
+  name: string;
+  configured: boolean;
+  source: "dashboard" | "host" | "missing";
+  updated_at: string | null;
+  updated_by: string | null;
+}
+
+export interface SettingsAgent {
+  name: string;
+  adapter: string;
+  enabled: boolean;
+  model: string | null;
+  provider: string | null;
+  budget: { daily_usd: number | null; daily_runs: number | null };
+  allow_bypass: boolean;
+  binary: string | null;
+  from_settings: boolean;
+  providers_supported: string[];
+}
+
+export interface SettingsProvider {
+  id: string;
+  name: string;
+  protocol: "anthropic" | "openai" | "openai-responses";
+  base_url: string;
+  api_key: string | null;
+  models: string[];
+  key: SecretInfo | null;
+  used_by: string[];
+}
+
+export interface SettingsRoute {
+  task: string;
+  primary: string;
+  fallback: string[];
+  verifier: string | null;
+  model: string | null;
+  effort: string | null;
+  timeout_seconds: number;
+  permissions: string;
+  from_settings: boolean;
+}
+
+export interface SettingsView {
+  access: GateDecision;
+  repo: string | null;
+  document: string;
+  status: { applied: boolean; problems: string[]; loaded_at: string | null };
+  agents: SettingsAgent[];
+  providers: SettingsProvider[];
+  routing: SettingsRoute[];
+  system: {
+    poll_seconds: number;
+    max_public_writes_per_hour: number;
+    max_repo_public_writes_per_hour: number;
+    from_settings: string[];
+  };
+  host: {
+    dev_mode: boolean;
+    paused: boolean;
+    code_repo: string | null;
+    memory_repo: string | null;
+    base_url: string | null;
+    sandbox_repo: string | null;
+    operators: string[];
+  };
+  secrets: SecretInfo[];
+  pending: MemoryChange[];
+}
+
+export interface SettingsCheck {
+  ok: boolean;
+  problems: string[];
+  diff: string;
 }

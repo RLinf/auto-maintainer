@@ -40,7 +40,7 @@ pre-commit run --all-files
 
 ## Repository map
 
-- `src/auto_maintainer/domain/` – types (`RepoProfile`, `Event`, `Action`, `Proposal`, `PrSnapshot`, `Visibility`, `Rubric`, `MemoryChange`), pure rules (review state, scoring, merge gate, markers, CODEOWNERS, calendar), and ports (`ForgeReader`, `ForgeWriter`, `CiProvider`, `AgentRuntime`, `AgentRunner`, `MemoryStore`, `Workspace`, `Sandbox`, `LabHost`, `Store`, `Notifier`, `EventSink`). No I/O.
+- `src/auto_maintainer/domain/` – types (`RepoProfile`, `Event`, `Action`, `Proposal`, `PrSnapshot`, `Visibility`, `Rubric`, `MemoryChange`, `ServiceConfig`), pure rules (review state, scoring, merge gate, markers, CODEOWNERS, calendar), and ports (`ForgeReader`, `ForgeWriter`, `CiProvider`, `AgentRuntime`, `AgentRunner`, `MemoryStore`, `Workspace`, `Sandbox`, `LabHost`, `Store`, `SecretStore`, `Notifier`, `EventSink`). No I/O.
 - `src/auto_maintainer/service.py` – application wiring over a set of adapters (`Adapters`, `ServiceSettings`, `Service`); imports no adapter.
 - `src/auto_maintainer/app.py` – composition root that builds the real adapters; with `cli.py`, the only code that imports adapters.
 - `profiles/` – layer merging, packs, locks, the configuration gate (`ConfigGate`), knowledge reads, hygiene checks, the profile doctor.
@@ -48,8 +48,8 @@ pre-commit run --all-files
 - `playbooks/` – one module per playbook, `base.py` (contract and context), `prompts.py` (`untrusted()` and prompt blocks).
 - `actuator/` – `pipeline.py` (policy, proposals, approvals), `executor.py` (per-repository queues, intents, staleness), `handlers.py` (one per action kind), `memory_gate.py`.
 - `engine/` – event bus, jobs and waits, poller, scheduler, the question desk (`questions.py`) where agents' questions wait for reviewers.
-- Adapters: `github/`, `agents/` (`exec.py` with two-way `Conversation`s, `acp.py`, `approver.py`, `adapters/`, `router.py`), `memory/`, `workspace/` (worktrees, and `publish` for the actuator), `labs/`, `store/`, `notify/`, `selfupdate/` (`updater.py` deploys the service's own checkout, `supervise.py`), plus `subproc.py`.
-- `web/` – FastAPI app, sign-in, the dashboard API, chat. `testing/` – fakes of every port, `Harness`, the demo data.
+- Adapters: `github/`, `agents/` (`exec.py` with two-way `Conversation`s, `acp.py`, `approver.py`, `adapters/`, `router.py`), `memory/`, `workspace/` (worktrees, and `publish` for the actuator), `labs/`, `store/` (SQLite, and `secrets.py` for API keys), `notify/`, `selfupdate/` (`updater.py` deploys the service's own checkout, `supervise.py`), plus `subproc.py`.
+- `web/` – FastAPI app, sign-in, the dashboard API, chat, `settings.py` (the service settings). `testing/` – fakes of every port, `Harness`, the demo data.
 - `packs/<name>/pack.yaml` – built-in packs. `skills/<name>/SKILL.md` – skills the service gives its runtime agents. `config/defaults/` – default profile (every repository action in `shadow`), routing, schedules.
 - `ui/` – React, TypeScript, Vite dashboard; `npm run build` writes into `src/auto_maintainer/web/static/`, which is not in git. `am serve` runs that build at startup whenever it is missing or older than `ui/` (`web/dashboard.py`), so Node 20+ is needed wherever the service runs from a checkout.
 - `tests/` – flows, rules, adapters (`tests/github/`, `tests/agents/`), and `test_layers.py`.
@@ -63,6 +63,7 @@ These hold everywhere. Reviewers reject changes that break them; `tests/test_lay
 - **Visibility is typed.** Public text is `PublicText`, built only by `policy.leak_guard`, the only module besides `domain/visibility.py` that touches `GUARD_KEY`. Scores, tiers, rubric content, internal entities, and anything matching `domain/secrets.py` never reach a public action.
 - **Defaults keep repository actions in shadow.** `config/defaults/profile.yaml` sets every action that touches a repository to `shadow`; only maintainers raise it.
 - **Configuration belongs to the repository's maintainers.** Every change to a profile layer or lock goes through `ConfigGate.check`, which reads the user's live permission against `access.configure` (`maintain` by default). The service acts only on approved locks and cannot approve its own changes. Never add a way around the gate, for operators or for the service itself (design 2.3).
+- **The service settings belong to the maintainers of the service's repository.** Agents, model providers, default routes, and system values live in `config/service.yaml` (`domain/settings.py`); every change goes through `ConfigGate.check_service`, live against `code_repo`. API keys go only into the `SecretStore` and the agent's environment: never into the memory repo, a command line, a prompt, a transcript, or an API response.
 - **Agents propose, the core acts.** Only `actuator/` writes to the forge, runs lab commands, or pushes to the memory and code repos. Playbooks return `Action`s and never receive a `ForgeWriter`. Agents never get write credentials; their environment hides the host's `gh` and git credentials (`agents/exec.py:isolation_env`).
 - **Agents run in auto mode; reviewers answer what they ask** (design 5.7). Every route defaults to `permissions: auto`: the CLI's own auto mode (or `agents/approver.py` for ACP CLIs), with what it would ask a person sent through `ExecRuntime.resolve` to the question desk. A new adapter for a CLI that can ask implements `conversation()`; one that cannot is one-shot and never stalls on a prompt. Bypass applies only when the route asks for it, the operator sets `allow_bypass: true`, and the input is trusted or the route sets `bypass_untrusted: true` (`effective_permissions`). Playbooks set `ctx.trusted_input` once they know the author.
 - **Playbooks never block on the outside world.** A playbook that needs CI, a rerun, or an approval first returns `Wait(...)` or `retry_after`, and every run starts from fresh reads (design 4.3).
@@ -85,12 +86,13 @@ These hold everywhere. Reviewers reject changes that break them; `tests/test_lay
 
 | Add | Where | Also |
 |---|---|---|
-| Agent runtime | `agents/adapters/<name>.py` subclassing `ExecRuntime`, registered in `agents/registry.py` | Truthful `Capabilities`; a `Conversation` when the CLI can ask, tested with the `talking_cli` fixture; argv tests per permission mode, a `-m live_agent` test, the adapter table in design 5.7. Verify every flag against `--help` of the installed version. |
+| Agent runtime | `agents/adapters/<name>.py` subclassing `ExecRuntime`, registered in `agents/registry.py` | Truthful `Capabilities`; a `Conversation` when the CLI can ask, tested with the `talking_cli` fixture; argv tests per permission mode, a `-m live_agent` test, the adapter table in design 5.7. If the CLI can use a custom endpoint, `provider_env` (and argv) plus its protocols in `PROVIDER_PROTOCOLS`. Verify every flag against `--help` of the installed version. |
 | Playbook | `playbooks/<name>.py`, listed in `playbooks/__init__.py` | Triggers, `key()`, output models, the actions it emits, a flow test in `tests/test_flows.py` or a focused test. |
 | Action kind | `ActionKind` and a payload model in `domain/actions.py`, a handler in `actuator/handlers.py` | `shadow` in `config/defaults/profile.yaml`, a recommended level in design 8.3, hard limits, public text fields in `PUBLIC_TEXT_FIELDS`, idempotency and staleness tests. |
 | Pack | `packs/<name>/pack.yaml` | Only keys a pack may set (`profiles/layers.py`); a test in `tests/test_profiles.py`. |
 | Built-in check | a function in `profiles/checks.py`, listed in `BUILTIN` | Passing and failing cases in `tests/test_runtime.py`. |
 | Profile field | `domain/profile.py` | Default, merge rule (additive or not), doctor check, design 8.2. |
+| Service setting | a field in `ServiceConfig` (`domain/settings.py`), applied in `Service._apply_settings` | A check in `check_settings`, its row on the Settings page, the agent's outline in `web/chat.py:_settings_block`, design 8.1. |
 | Dashboard page | `ui/src/pages/` and `web/api.py` | The permission it requires (view needs write; configuration needs the gate) and whether it shows internal data. |
 | Notification channel | `notify/` | Config in the memory repo's `config/channels.yaml`. |
 

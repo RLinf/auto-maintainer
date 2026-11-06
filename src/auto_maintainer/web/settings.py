@@ -1,0 +1,321 @@
+# Copyright 2026 The RLinf Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""The service's settings on the dashboard (design 8.1 and 5.13).
+
+Everyone signed in can read them. Changing them, setting an API key, or testing a
+provider needs the service gate: a live check of the user's permission on the
+service's repository (``ConfigGate.check_service``). A change from anyone else waits
+as a proposal for a maintainer. API key values only ever travel inward: no response
+carries one.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+import httpx
+from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel, Field
+
+from ..domain.memory import MemoryChangeState
+from ..domain.records import AuditEntry
+from ..domain.settings import (
+    PROVIDER_PROTOCOLS,
+    SECRET_NAME,
+    Provider,
+    SettingsError,
+    effective_agents,
+    effective_routing,
+    secret_names,
+    settings_diff,
+)
+from ..service import Service
+from .api import service_of
+from .auth import User, current_user
+
+
+class DocumentBody(BaseModel):
+    yaml: str
+    title: str = Field(default="settings: update", max_length=120)
+
+
+class SecretBody(BaseModel):
+    value: str = Field(min_length=1, max_length=4096)
+
+
+async def _require_maintainer(service: Service, user: User) -> None:
+    decision = await service.service_gate(user.login)
+    if not decision.allowed:
+        raise HTTPException(403, decision.reason)
+
+
+async def settings_view(service: Service, user: User) -> dict[str, Any]:
+    """Everything the Settings page shows, with each value's source."""
+    text, legacy = await service.settings_text()
+    config = service.service_config
+    agents = effective_agents(config, legacy)
+    routes = effective_routing(service.default_routing, config)
+    names = secret_names(config)
+    secrets = (
+        {s.name: s for s in await service.a.secrets.describe(names)}
+        if service.a.secrets is not None
+        else {}
+    )
+    system = config.system
+    gate = await service.service_gate(user.login)
+    pending = [
+        c
+        for c in await service.store.list_memory_changes(MemoryChangeState.OPEN)
+        if c.service
+    ]
+    return {
+        "access": gate.model_dump(mode="json"),
+        "repo": service.settings_repo(),
+        "document": text,
+        "status": service.settings_status.model_dump(mode="json"),
+        "agents": [
+            {
+                "name": name,
+                **cfg.model_dump(
+                    mode="json",
+                    include={
+                        "adapter",
+                        "enabled",
+                        "model",
+                        "provider",
+                        "budget",
+                        "allow_bypass",
+                        "binary",
+                    },
+                ),
+                "from_settings": name in config.agents or name in legacy,
+                "providers_supported": sorted(PROVIDER_PROTOCOLS.get(cfg.adapter, ())),
+            }
+            for name, cfg in agents.items()
+        ],
+        "providers": [
+            {
+                "id": pid,
+                **p.model_dump(mode="json"),
+                "key": secrets[p.api_key].model_dump(mode="json")
+                if p.api_key in secrets
+                else None,
+                "used_by": sorted(n for n, a in agents.items() if a.provider == pid),
+            }
+            for pid, p in config.providers.items()
+        ],
+        "routing": [
+            {
+                "task": task,
+                **route.model_dump(
+                    mode="json",
+                    include={
+                        "primary",
+                        "fallback",
+                        "verifier",
+                        "model",
+                        "effort",
+                        "timeout_seconds",
+                        "permissions",
+                    },
+                ),
+                "from_settings": task in config.routing,
+            }
+            for task, route in routes.items()
+        ],
+        "system": {
+            "poll_seconds": service.settings.poll_seconds,
+            "max_public_writes_per_hour": service.settings.write_caps[0],
+            "max_repo_public_writes_per_hour": service.settings.write_caps[1],
+            "from_settings": sorted(system.model_dump(exclude_none=True)),
+        },
+        "host": {
+            "dev_mode": service.settings.dev_mode,
+            "paused": await service.pipeline.paused(None),
+            "code_repo": service.settings.code_repo,
+            "memory_repo": service.a.memory.remote_repo(),
+            "base_url": service.settings.base_url,
+            "sandbox_repo": service.settings.sandbox_repo,
+            "operators": sorted(service.settings.operators),
+        },
+        "secrets": [s.model_dump(mode="json") for s in secrets.values()],
+        "pending": [c.model_dump(mode="json") for c in pending],
+    }
+
+
+def _describe_probe_error(status: int | None, error: Exception | None) -> str:
+    if error is not None:
+        return "could not reach the endpoint; check the base URL and the host's network"
+    if status in (401, 403):
+        return "the endpoint rejected the key"
+    if status == 404:
+        return (
+            "there is no model list at this URL; check the base URL (many end in /v1)"
+        )
+    if status == 429:
+        return "the endpoint is rate limiting this key"
+    if status is not None and status >= 500:
+        return f"the endpoint failed ({status})"
+    return f"unexpected answer ({status})"
+
+
+async def probe_models(provider: Provider, key: str | None) -> dict[str, Any]:
+    """List the provider's models with its key; spends no tokens. Returns model ids only."""
+    base = provider.base_url
+    headers = {"Accept": "application/json"}
+    if provider.protocol == "anthropic":
+        url = f"{base}/models" if base.endswith("/v1") else f"{base}/v1/models"
+        headers["anthropic-version"] = "2023-06-01"
+        if key:
+            headers["x-api-key"] = key
+            headers["Authorization"] = f"Bearer {key}"
+    else:
+        url = f"{base}/models"
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
+    try:
+        async with httpx.AsyncClient(timeout=12, follow_redirects=False) as client:
+            res = await client.get(url, headers=headers)
+    except httpx.HTTPError as e:
+        return {"ok": False, "error": _describe_probe_error(None, e), "models": []}
+    if res.status_code != 200:
+        return {
+            "ok": False,
+            "error": _describe_probe_error(res.status_code, None),
+            "status": res.status_code,
+            "models": [],
+        }
+    try:
+        data = res.json().get("data", [])
+        models = sorted(
+            {str(m["id"]) for m in data if isinstance(m, dict) and "id" in m}
+        )[:200]
+    except (ValueError, AttributeError):
+        return {"ok": False, "error": "the answer was not a model list", "models": []}
+    return {"ok": True, "models": models, "status": 200}
+
+
+def build_router() -> APIRouter:
+    r = APIRouter(prefix="/api/settings")
+
+    @r.get("")
+    async def get_settings(
+        request: Request, user: User = Depends(current_user)
+    ) -> dict[str, Any]:
+        return await settings_view(service_of(request), user)
+
+    @r.post("/check")
+    async def check(
+        request: Request, body: DocumentBody, user: User = Depends(current_user)
+    ) -> dict[str, Any]:
+        """Check a draft without saving it: problems, and the diff against what runs."""
+        service = service_of(request)
+        current, _ = await service.settings_text()
+        try:
+            await service.check_settings_text(body.yaml)
+        except SettingsError as e:
+            return {
+                "ok": False,
+                "problems": e.problems,
+                "diff": settings_diff(current, body.yaml),
+            }
+        return {"ok": True, "problems": [], "diff": settings_diff(current, body.yaml)}
+
+    @r.put("")
+    async def save(
+        request: Request, body: DocumentBody, user: User = Depends(current_user)
+    ) -> dict[str, Any]:
+        service = service_of(request)
+        current, _ = await service.settings_text()
+        try:
+            change, decision = await service.propose_settings(
+                body.yaml, user.login, body.title
+            )
+        except SettingsError as e:
+            raise HTTPException(
+                422, {"message": "the settings do not check", "problems": e.problems}
+            ) from e
+        stored = await service.store.get_memory_change(change.id)
+        return {
+            "change": stored.model_dump(mode="json") if stored else None,
+            "approved": decision.allowed,
+            "gate": decision.model_dump(mode="json"),
+            "diff": settings_diff(current, body.yaml),
+            "status": service.settings_status.model_dump(mode="json"),
+        }
+
+    @r.put("/secrets/{name}")
+    async def set_secret(
+        request: Request,
+        name: str,
+        body: SecretBody,
+        user: User = Depends(current_user),
+    ) -> dict[str, Any]:
+        service = service_of(request)
+        await _require_maintainer(service, user)
+        if service.a.secrets is None:
+            raise HTTPException(409, "this service has no secret store")
+        if not SECRET_NAME.match(name):
+            raise HTTPException(
+                422, "secret names are capitals, such as DEEPSEEK_API_KEY"
+            )
+        await service.a.secrets.set(name, body.value, user.login)
+        await service.store.add_audit(
+            AuditEntry(kind="config", actor=user.login, summary=f"set secret {name}")
+        )
+        await service.reload_settings()
+        [info] = await service.a.secrets.describe([name])
+        return info.model_dump(mode="json")
+
+    @r.delete("/secrets/{name}")
+    async def delete_secret(
+        request: Request, name: str, user: User = Depends(current_user)
+    ) -> dict[str, Any]:
+        service = service_of(request)
+        await _require_maintainer(service, user)
+        if service.a.secrets is None:
+            raise HTTPException(409, "this service has no secret store")
+        await service.a.secrets.delete(name)
+        await service.store.add_audit(
+            AuditEntry(
+                kind="config", actor=user.login, summary=f"removed secret {name}"
+            )
+        )
+        await service.reload_settings()
+        return {"name": name, "deleted": True}
+
+    @r.post("/providers/{provider_id}/test")
+    async def test_provider(
+        request: Request, provider_id: str, user: User = Depends(current_user)
+    ) -> dict[str, Any]:
+        service = service_of(request)
+        await _require_maintainer(service, user)
+        provider = service.service_config.providers.get(provider_id)
+        if provider is None:
+            raise HTTPException(404, f"no provider named {provider_id!r} is in force")
+        key = (
+            await service.a.secrets.get(provider.api_key)
+            if provider.api_key and service.a.secrets is not None
+            else None
+        )
+        if provider.api_key and not key:
+            return {
+                "ok": False,
+                "error": f"the key {provider.api_key} is not set yet",
+                "models": [],
+            }
+        return await probe_models(provider, key)
+
+    return r

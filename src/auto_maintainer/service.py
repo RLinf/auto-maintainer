@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -29,9 +30,11 @@ from typing import Any
 from .actuator.context import ExecContext, LabRunner
 from .actuator.executor import Actuator
 from .actuator.pipeline import ActionPipeline
+from .domain.actions import ActionKind, MemoryChangePayload, make_action
 from .domain.clock import Clock
 from .domain.events import Event, EventKind
-from .domain.memory import MemoryChange, MemoryChangeState
+from .domain.memory import MemoryChange, MemoryChangeState, Tier
+from .domain.permissions import Permission
 from .domain.ports import (
     AgentRunner,
     BranchPublisher,
@@ -42,12 +45,28 @@ from .domain.ports import (
     MemoryStore,
     Notifier,
     Sandbox,
+    SecretStore,
     ServiceUpdater,
     Store,
     Workspace,
 )
 from .domain.profile import Route
 from .domain.records import AuditEntry, Job, RepoRecord
+from .domain.secrets import find_secrets
+from .domain.settings import (
+    LEGACY_RUNTIMES_PATH,
+    SETTINGS_PATH,
+    ProviderBinding,
+    RuntimeConfig,
+    ServiceConfig,
+    SettingsError,
+    SettingsStatus,
+    check_settings,
+    effective_agents,
+    effective_routing,
+    parse_legacy_runtimes,
+    parse_settings,
+)
 from .engine.bus import EventBus
 from .engine.engine import Engine
 from .engine.poller import Poller
@@ -92,6 +111,15 @@ class Adapters:
     """Pushes self-improvement branches to the code repo (actuator only)."""
     updater: ServiceUpdater | None = None
     """Moves the service's own checkout to a new commit."""
+    secrets: SecretStore | None = None
+    """Values of the secrets the service settings name (providers' API keys)."""
+    reconfigure: (
+        Callable[
+            [dict[str, RuntimeConfig], dict[str, ProviderBinding]], Awaitable[None]
+        ]
+        | None
+    ) = None
+    """Rebuilds the agent runtimes for new settings; supplied by the composition root."""
 
 
 @dataclass
@@ -157,6 +185,17 @@ class Service:
             adapters.clock,
         )
         self.bus = EventBus()
+        self.default_routing = {
+            k: v.model_copy(deep=True) for k, v in settings.routing.items()
+        }
+        """The code's default routes (``config/defaults/routing.yaml``), before settings."""
+        self.host_values = {
+            "poll_seconds": settings.poll_seconds,
+            "write_caps": settings.write_caps,
+        }
+        self.service_config = ServiceConfig()
+        """The settings in force, from ``config/service.yaml``."""
+        self.settings_status = SettingsStatus(applied=True)
         self.restart_requested = asyncio.Event()
         """Set after a deploy; ``am serve`` then exits for its supervisor to restart it."""
         self._confirming: asyncio.Task[None] | None = None
@@ -223,6 +262,7 @@ class Service:
             serves=self.serves,
         )
         self.bus.subscribe(self.engine.handle_event)
+        self.bus.subscribe(self._settings_event)
         self.poller = Poller(
             adapters.forge,
             adapters.store,
@@ -316,6 +356,7 @@ class Service:
         )
 
     async def start(self) -> None:
+        await self.reload_settings()
         await self.actuator.reconcile_intents()
         await self.questions.cancel_orphans()
         self._confirming = asyncio.create_task(
@@ -354,6 +395,179 @@ class Service:
                     )
                 )
         await self.actuator.sweep_memory()
+
+    # -- service settings (design 8.1) ------------------------------------------------
+
+    def settings_repo(self) -> str | None:
+        """The repository whose maintainers own the service's settings: the service's
+        code repository, or else its memory repository."""
+        return self.settings.code_repo or self.a.memory.remote_repo()
+
+    async def service_gate(self, login: str) -> GateDecision:
+        """Whether ``login`` may change the service's settings (live, on the forge)."""
+        return await self.gate.check_service(
+            self.settings_repo(), login, Permission(self.settings.code_approver)
+        )
+
+    async def settings_text(self) -> tuple[str, dict[str, Any]]:
+        """The settings document as stored, and the older ``runtimes.yaml`` agents."""
+        text = await self.a.memory.read_text(SETTINGS_PATH) or ""
+        legacy = parse_legacy_runtimes(
+            await self.a.memory.read_text(LEGACY_RUNTIMES_PATH)
+        )
+        return text, legacy
+
+    async def check_settings_text(self, text: str) -> ServiceConfig:
+        """Parse and check a settings document without applying it.
+
+        Raises:
+            SettingsError: It does not parse, or its pieces do not fit together.
+        """
+        if found := find_secrets(text):
+            raise SettingsError(
+                [
+                    f"the document contains what looks like a credential ({', '.join(found)}); "
+                    "name a secret instead and set its value in the key field"
+                ]
+            )
+        config = parse_settings(text)
+        _, legacy = await self.settings_text()
+        problems = check_settings(config, self.default_routing, legacy)
+        if problems:
+            raise SettingsError(problems)
+        return config
+
+    async def reload_settings(self) -> SettingsStatus:
+        """Apply ``config/service.yaml`` from the memory repo. A document that does not
+        check keeps the previous settings in force and says why in ``settings_status``."""
+        text, legacy = await self.settings_text()
+        try:
+            config = parse_settings(text)
+            problems = check_settings(config, self.default_routing, legacy)
+            if problems:
+                raise SettingsError(problems)
+            await self._apply_settings(config, legacy)
+        except SettingsError as e:
+            log.warning("service settings not applied: %s", e)
+            self.settings_status = SettingsStatus(
+                applied=False, problems=e.problems, loaded_at=self.clock.now()
+            )
+            return self.settings_status
+        self.service_config = config
+        self.settings_status = SettingsStatus(applied=True, loaded_at=self.clock.now())
+        return self.settings_status
+
+    async def _apply_settings(
+        self, config: ServiceConfig, legacy: dict[str, Any]
+    ) -> None:
+        routes = effective_routing(self.default_routing, config)
+        self.settings.routing.clear()
+        self.settings.routing.update(routes)
+        system = config.system
+        poll = system.poll_seconds or self.host_values["poll_seconds"]
+        caps = self.host_values["write_caps"]
+        caps = (
+            system.max_public_writes_per_hour
+            if system.max_public_writes_per_hour is not None
+            else caps[0],
+            system.max_repo_public_writes_per_hour
+            if system.max_repo_public_writes_per_hour is not None
+            else caps[1],
+        )
+        self.settings.poll_seconds = poll
+        self.scheduler.poll_seconds = poll
+        self.settings.write_caps = caps
+        self.pipeline.write_caps = caps
+        if self.a.reconfigure is not None:
+            await self.a.reconfigure(
+                effective_agents(config, legacy), await self.provider_bindings(config)
+            )
+
+    async def provider_bindings(
+        self, config: ServiceConfig
+    ) -> dict[str, ProviderBinding]:
+        """Each provider with its key from the secret store, for building runtimes."""
+        out = {}
+        for pid, p in config.providers.items():
+            key = (
+                await self.a.secrets.get(p.api_key)
+                if p.api_key and self.a.secrets is not None
+                else None
+            )
+            out[pid] = ProviderBinding(
+                id=pid,
+                name=p.name or pid,
+                protocol=p.protocol,
+                base_url=p.base_url,
+                models=tuple(p.models),
+                api_key=key,
+            )
+        return out
+
+    async def propose_settings(
+        self, text: str, login: str, title: str, *, approve: bool = True
+    ) -> tuple[MemoryChange, GateDecision]:
+        """Open a change to ``config/service.yaml``. With ``approve`` and a ``login`` who
+        passes the service gate, making the change approves it and it applies at once;
+        otherwise it waits on the Settings page for a maintainer of the service's
+        repository.
+
+        Raises:
+            SettingsError: The document does not check.
+        """
+        await self.check_settings_text(text)
+        current, _ = await self.settings_text()
+        if current.strip() == text.strip():
+            raise SettingsError(
+                ["the settings already say this; there is nothing to change"]
+            )
+        decision = await self.service_gate(login)
+        change = MemoryChange(
+            tier=Tier.T2,
+            title=title or "settings: update",
+            description=f"Service settings change by {login}.",
+            files={SETTINGS_PATH: text if text.endswith("\n") else text + "\n"},
+            service=True,
+            author=login,
+            requested_by=login,
+            from_own_signals=False,
+            created_at=self.clock.now(),
+        )
+        if approve and decision.allowed:
+            change.approvals = {decision.repo: [login]}
+        await self.store.save_memory_change(change)
+        await self.store.add_audit(
+            AuditEntry(
+                kind="config",
+                actor=login,
+                summary=f"service settings change: {change.title}",
+                data={"change": change.id, "approved": bool(change.approvals)},
+            )
+        )
+        await self.submit_memory_change(change)
+        stored = await self.store.get_memory_change(change.id)
+        if stored is not None and stored.state == MemoryChangeState.MERGED:
+            await self.reload_settings()
+        return stored or change, decision
+
+    async def submit_memory_change(self, change: MemoryChange) -> None:
+        """Hand a memory change to the memory gate through the actuator."""
+        await self.pipeline.submit(
+            make_action(
+                ActionKind.MEMORY_CHANGE,
+                self.settings_repo() or "service",
+                MemoryChangePayload(change_id=change.id),
+                discriminator=change.id,
+            )
+        )
+        await self.actuator.drain()
+
+    async def _settings_event(self, event: Event) -> None:
+        if event.kind != EventKind.MEMORY_CHANGED:
+            return
+        paths = set(event.payload.get("paths") or [])
+        if paths & {SETTINGS_PATH, LEGACY_RUNTIMES_PATH, "remote"}:
+            await self.reload_settings()
 
     # -- operations used by the dashboard and the CLI ----------------------------------
 
@@ -395,6 +609,13 @@ class Service:
         if change is None or change.state != MemoryChangeState.OPEN:
             raise ValueError(f"memory change {change_id} is not open")
         decisions = []
+        if change.service:
+            decision = await self.service_gate(login)
+            decisions.append(decision)
+            if decision.allowed and login not in change.approvals.get(
+                decision.repo, []
+            ):
+                change.approvals.setdefault(decision.repo, []).append(login)
         for repo in change.repos:
             current = await self.profiles.active(repo)
             decision = await self.gate.check(repo, login, current)
@@ -414,6 +635,8 @@ class Service:
             )
         )
         state = await self.actuator.merge_memory(change_id)
+        if change.service and state == MemoryChangeState.MERGED:
+            await self.reload_settings()
         return decisions, state
 
     async def reject_memory_change(
@@ -422,6 +645,10 @@ class Service:
         change = await self.store.get_memory_change(change_id)
         if change is None or change.state != MemoryChangeState.OPEN:
             raise ValueError(f"memory change {change_id} is not open")
+        if change.service and login != change.requested_by:
+            decision = await self.service_gate(login)
+            if not decision.allowed:
+                raise PermissionError(decision.reason)
         for repo in change.repos:
             decision = await self.gate.check(
                 repo, login, await self.profiles.active(repo)

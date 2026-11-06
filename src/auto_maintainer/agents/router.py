@@ -38,7 +38,7 @@ from ..domain.ids import new_id
 from ..domain.ports import AgentQuestions, AgentRuntime
 from ..domain.profile import Route
 from ..domain.records import AgentRunRecord
-from .registry import Budget
+from ..domain.settings import Budget
 from .structured import extract_json, repair_prompt, schema_instructions, validate
 
 UsageToday = Callable[[str], Awaitable[tuple[int, float]]]
@@ -108,6 +108,21 @@ class AgentRouter:
         for runtime in self.runtimes.values():
             if hasattr(runtime, "questions"):
                 runtime.questions = questions  # type: ignore[attr-defined]
+
+    def reconfigure(
+        self,
+        runtimes: Mapping[str, AgentRuntime],
+        budgets: Mapping[str, Budget] | None = None,
+    ) -> None:
+        """Run on these runtimes from now on (new settings). Runs in progress finish on
+        the runtime they started with; breakers of runtimes that changed are reset."""
+        changed = {n for n in runtimes if self.runtimes.get(n) is not runtimes[n]}
+        self.runtimes = dict(runtimes)
+        self.budgets = dict(budgets or {})
+        for name in changed | (set(self.breakers) - set(runtimes)):
+            self.breakers.pop(name, None)
+        if self.questions is not None:
+            self.bind_questions(self.questions)
 
     # -- AgentRunner -----------------------------------------------------------------
 

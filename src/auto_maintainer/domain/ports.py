@@ -58,6 +58,7 @@ from .records import (
     ReviewRecord,
 )
 from .scoring import Evaluation
+from .settings import SecretInfo
 from .snapshot import (
     CommentRef,
     IssueSnapshot,
@@ -460,6 +461,20 @@ class UserRecord(BaseModel):
     avatar_url: str = ""
     permissions: dict[str, str] = Field(default_factory=dict)
     permissions_checked_at: datetime | None = None
+
+
+class SecretStore(Protocol):
+    """Values of the secrets service settings name, such as providers' API keys.
+
+    They stay on the service host. A value set from the dashboard wins over one in the
+    host environment (``secrets.env``). Nothing outside the agents' environment ever
+    receives a value: the dashboard sees only ``SecretInfo``.
+    """
+
+    async def get(self, name: str) -> str | None: ...
+    async def describe(self, names: list[str]) -> list[SecretInfo]: ...
+    async def set(self, name: str, value: str, by: str) -> None: ...
+    async def delete(self, name: str) -> None: ...
 
 
 class Store(Protocol):

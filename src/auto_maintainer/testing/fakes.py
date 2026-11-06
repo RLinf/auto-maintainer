@@ -42,6 +42,7 @@ from ..domain.ports import (
     WorkChanges,
 )
 from ..domain.profile import Route
+from ..domain.settings import SECRET_NAME, ProviderBinding, RuntimeConfig, SecretInfo
 from ..domain.snapshot import (
     CommentRef,
     IssueComment,
@@ -592,6 +593,48 @@ class FakeUpdater:
             )
         previous, self.running = self.running, sha
         return DeployResult(ok=True, sha=sha, previous_sha=previous, log="ok")
+
+
+class FakeSecrets:
+    """Implements ``SecretStore`` in memory."""
+
+    def __init__(self, values: dict[str, str] | None = None) -> None:
+        self.values = dict(values or {})
+
+    async def get(self, name: str) -> str | None:
+        return self.values.get(name)
+
+    async def describe(self, names: list[str]) -> list[SecretInfo]:
+        return [
+            SecretInfo(
+                name=n,
+                configured=n in self.values,
+                source="dashboard" if n in self.values else "missing",
+            )
+            for n in sorted(set(names) | set(self.values))
+        ]
+
+    async def set(self, name: str, value: str, by: str) -> None:
+        if not SECRET_NAME.match(name):
+            raise ValueError(f"{name!r} is not a secret name")
+        self.values[name] = value
+
+    async def delete(self, name: str) -> None:
+        self.values.pop(name, None)
+
+
+class Reconfigured:
+    """Records what the service asked to run on after each settings change."""
+
+    def __init__(self) -> None:
+        self.calls: list[
+            tuple[dict[str, RuntimeConfig], dict[str, ProviderBinding]]
+        ] = []
+
+    async def __call__(
+        self, agents: dict[str, RuntimeConfig], providers: dict[str, ProviderBinding]
+    ) -> None:
+        self.calls.append((agents, providers))
 
 
 class FakeLabHost:

@@ -184,3 +184,33 @@ def test_the_dashboard_rebuilds_when_its_sources_change(tmp_path: Path) -> None:
     later = (static / "index.html").stat().st_mtime + 10
     os.utime(ui / "src" / "App.tsx", (later, later))
     assert needs_build(ui, static)
+
+
+async def test_the_agent_knows_the_page_it_is_asked_from(demo) -> None:
+    h, app = demo
+    seen: list[str] = []
+
+    def answer(task):
+        seen.append(task.prompt)
+        return {"reply": "It needs one more approval.", "proposals": []}
+
+    h.runner.on("chat", answer)
+    context = {"page": "pr", "repo": "acme/widget", "number": 42}
+    async with _client(app, "walt") as walt:
+        thread = (
+            await walt.post(
+                "/api/chat/threads", json={"text": "status?", "context": context}
+            )
+        ).json()
+        assert thread["repo"] == "acme/widget"
+        reply = await walt.post(
+            f"/api/chat/threads/{thread['id']}/messages",
+            json={"text": "What blocks this PR?", "context": context},
+        )
+        assert reply.status_code == 200, reply.text
+        hidden = await walt.post(
+            "/api/chat/threads",
+            json={"text": "x", "context": {"page": "repo", "repo": "other/secret"}},
+        )
+        assert hidden.status_code == 403
+    assert "looking at acme/widget#42" in seen[0] and "'this PR'" in seen[0]

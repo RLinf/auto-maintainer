@@ -37,3 +37,13 @@ SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 def find_secrets(text: str) -> list[str]:
     """Names of the credential kinds found in ``text``."""
     return [name for name, pattern in SECRET_PATTERNS if pattern.search(text or "")]
+
+
+def redact_secrets(text: str) -> tuple[str, list[str]]:
+    """``text`` with every credential replaced by a note, and the kinds found."""
+    found = []
+    for name, pattern in SECRET_PATTERNS:
+        if pattern.search(text or ""):
+            found.append(name)
+            text = pattern.sub(f"[removed {name}]", text)
+    return text, found

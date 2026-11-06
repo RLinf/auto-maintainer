@@ -108,11 +108,13 @@ A repository's configuration is everything that decides how the service behaves 
 | Memory repo PR | Only the service can push to the memory repo's default branch. The memory gate merges a PR only after a maintainer of each repository whose directory it touches has approved it, as a PR review or on the dashboard. Proposals from the learner, onboarding, and drift detection take the same path. |
 | New release of the service | Changed defaults or packs that alter a repository's merged profile become a candidate for that repository, which keeps running on its current lock until its maintainers approve. Defaults never set an action that touches a repository above `shadow`. |
 | Host overrides | Limited by schema to host paths; any other key is rejected. |
+| Service settings (8.1) | The same gate, applied to the service's own repository (`code_repo`, else the memory repository): a live check that the user has `self_update.approve_permission` there (`maintain` by default). A change arrives from the Settings page, from a conversation in which the agent drafts it, or as a memory PR; it applies when such a maintainer makes or approves it. Operators of the host have no say here unless they are also such maintainers. |
 
 - **Maintainers** of a repository are the users whose permission on it is at least `access.configure`: `maintain` by default. A profile can raise the bar to `admin`, or lower it to `write` for a team that treats everyone who can push as a maintainer; it can never go below `write`. Changing the bar is itself a configuration change, so only the current maintainers can make it.
 - **Collaborators with write access** below the bar can use the dashboard for that repository, approve proposals, and arm merges where `merge.arming` allows it, but they cannot change its configuration.
 - **Learned knowledge** (T1, 5.11) is not configuration. It never edits a profile layer, the rubric's dimensions and weights, or the policy, and it merges without a review only when the repository's configuration allows it and the change comes from that repository's own signals.
-- **Operators**, the people who run the service's host, manage what the service runs on: installed runtimes and their budgets, credentials, lab hosts, host paths, and maintenance schedules (8.1). They cannot change any repository's configuration. They can disable a runtime, which sends its tasks to the next runtime in each repository's route, and they can pause the service; stopping never needs a repository's approval.
+- **Maintainers of the service's repository** own the service settings (8.1): which agents run and on which model providers, their budgets, the default route per task, and system values such as the polling interval and the public write caps. They set API keys, which stay on the host.
+- **Operators**, the people who run the service's host, manage the host itself: `local.yaml`, credentials files, lab hosts, host paths, and maintenance schedules (8.1). They cannot change any repository's configuration or the service settings unless they are also maintainers of the repository concerned. They can pause the service; stopping never needs a repository's approval.
 - **Everyone else**, including maintainers of other repositories in the same deployment, contributors, and the service itself, can propose a change but never apply it.
 
 ### 2.4 Extension points
@@ -160,7 +162,7 @@ Every feature works on any repository; the profile decides its details. Each row
 | Agent drivers | Runs Claude Code, Codex, Antigravity, OpenCode, pi, dsh, and Gemini CLI through one runtime interface with routing, fallback, budgets, and health probes. | n/a | M0 to M4 |
 | Dashboard | Web UI for the review queue, PR detail, proposal inbox, CI health, memory, agents, settings, profiles, and the audit log, across all repositories the signed-in user maintains. | n/a | M0, M1 |
 | Talk to it | Per-maintainer chat threads backed by an agent session with the service's tools, and slash commands (`/am ...`) in PR comments. | proposals inline | M1 (read), M3 (act) |
-| Configurable behavior | A profile per repository, changed only by that repository's maintainers (2.3). Dashboard edits become memory PRs that the service merges after their approval. Operators manage only what the service runs on. | n/a | M1 |
+| Configurable behavior | A profile per repository, changed only by that repository's maintainers (2.3). Dashboard edits become memory PRs that the service merges after their approval. The service's own settings belong to the maintainers of its repository. | n/a | M1 |
 | Growing memory on GitHub | Learns from overrides, draft edits, rejected proposals, CI outcomes, and chat; writes per-repository and global knowledge to a private memory repo through tiered commits and PRs. | tiered | M3 |
 | Self-evolving code | Turns reviewers' requests in chat into PRs against its own code, with tests; a maintainer of its repository approves the merge and, separately, the deploy, which tests the new commit, switches, restarts, and rolls back if it fails to start (5.12). | maintainer approval | built |
 | Auto-merge | A maintainer arms a merge; the service waits for checks, reruns flaky jobs, updates the branch if needed, and merges when the profile's merge gate holds (5.5). | armed by a human | M2 |
@@ -434,7 +436,7 @@ Agent worktrees come from mirrors the service owns, never from clones that peopl
 | Home | Holds | Written by | If the service host is lost |
 |---|---|---|---|
 | Target repositories (forge) | PR and issue state; the service's comments with their markers; optional in-repo profile files | everyone; the actuator for the service | nothing lost; review state is rebuilt from the markers |
-| Memory repo | operator settings, repository profiles and locks, rubrics, knowledge, journals (including every override) | only the service pushes; every other change arrives as a PR and passes the memory gate (2.3) | nothing lost |
+| Memory repo | service settings, repository profiles and locks, rubrics, knowledge, journals (including every override) | only the service pushes; every other change arrives as a PR and passes the memory gate (2.3) | nothing lost |
 | Code repo | code, built-in packs, runtime skills, default config | maintainers; `self_improve` PRs | nothing lost |
 | SQLite | jobs, runs, snapshots, evaluations, proposals, chat, audit, profile cache | engine, actuator, web, profiles | restored from the nightly backup; snapshots are polled again |
 | Host config | secrets, paths, port | the admin | provisioned again by hand |
@@ -739,7 +741,9 @@ The **generic adapter** covers any CLI from config alone: a command template wit
 
 **Structured output** is tried in this order: the runtime's schema flag; JSON extracted from the final message with one repair turn (the router adds the schema to the prompt for runtimes without a flag). Pydantic validates the result in every case; a second invalid result fails the run and triggers fallback.
 
-**Router.** The route for each task kind (primary runtime, fallbacks, optional verifier, model and effort, permission mode, question timeout) comes from the repository's profile, falling back to `config/defaults/routing.yaml`. Operators declare which runtimes exist and their budgets in `runtimes.yaml`; disabling a runtime moves its tasks to the next runtime in each route. A runtime that fails with auth expiry, quota exhaustion, a crash, a timeout, or invalid output twice is skipped for a cool-down period (circuit breaker). Budgets are tracked per runtime per day from reported usage, with optional limits per repository.
+**Router.** The route for each task kind (primary runtime, fallbacks, optional verifier, model and effort, permission mode, question timeout) comes from the repository's profile, falling back to the service settings and then to `config/defaults/routing.yaml`. The service settings (8.1) declare which runtimes exist, their models, model providers, and budgets; disabling a runtime moves its tasks to the next runtime in each route. A change to the settings rebuilds the runtimes without a restart; runs in progress finish on the runtime they started with. A runtime that fails with auth expiry, quota exhaustion, a crash, a timeout, or invalid output twice is skipped for a cool-down period (circuit breaker). Budgets are tracked per runtime per day from reported usage, with optional limits per repository.
+
+**Model providers.** A runtime can use a model endpoint instead of its CLI's own sign-in. A provider has a protocol (`anthropic` for Anthropic Messages, `openai` for Chat Completions, `openai-responses`), a base URL, its models, and the name of the secret that holds its key. The adapter points the CLI at it: Claude Code through `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN` (Anthropic protocol only, with an inherited `ANTHROPIC_API_KEY` removed); Codex through `-c model_provider=...` and a `model_providers.<id>` entry whose `env_key` is `AM_PROVIDER_API_KEY`; OpenCode through an inline provider in `OPENCODE_CONFIG_CONTENT` whose key is an `{env:AM_PROVIDER_API_KEY}` reference; the generic adapter through `AM_PROVIDER_*` and the protocol's usual variables. Gemini CLI and Antigravity talk only to their own services, so the settings refuse a provider for them. The key travels only in the agent's environment, never on a command line or in a file, and the exact value is scrubbed from transcripts and errors. A runtime with a provider and no model of its own uses the provider's first model.
 
 **Sandbox.** Every run gets its own worktree from the service's mirror. The environment is built from an allowlist (`PATH`, `HOME`, locale, proxy variables) plus a down-scoped, read-only token for the forge CLI; it never carries `GITHUB_TOKEN`, `GH_TOKEN`, or the SSH agent socket. Each run also gets an empty `GH_CONFIG_DIR` and its own `GIT_CONFIG_GLOBAL` with system config off, so `gh` and `git` cannot pick up the host's stored credentials. `workspace_write` tasks (`self_improve`, lab script generation) write only inside their worktree.
 
@@ -749,7 +753,7 @@ These measures keep an agent from acting through credentials by accident; they d
 
 - `auto` (the default): each CLI's own auto mode, with what it would ask a person sent to a reviewer. For the ACP runtimes, which have no auto mode of their own, the service's automatic rules (`agents/approver.py`) stand in: they approve reading and searching inside the run's directories (symlinks resolved, so a link a PR commits cannot point out of the worktree), read-only shell commands there (no redirects, substitutions, or command separators), and, for writing tasks, edits inside the worktree and running tests or linters; they refuse edits in read-only tasks; everything else goes to a reviewer. Claude Code's classifier is more permissive than these rules: in a live run it let a read-only task write a file outside the worktree without asking. Repositories that want the narrower behavior for reviews use `restricted` on those routes.
 - `restricted`: the CLI's narrow mode, and any request that would need a person is denied without asking.
-- `bypass`: every permission check and CLI sandbox is skipped. It applies only when all three agree: the route asks for it, the operator set `allow_bypass: true` on the runtime in `runtimes.yaml` (off by default), and the input is trusted or the route sets `bypass_untrusted: true`. Input counts as trusted when the PR author is on the team or the task carries no contributor text, as for calibration. Otherwise the attempt runs in `auto`.
+- `bypass`: every permission check and CLI sandbox is skipped. It applies only when all three agree: the route asks for it, the service settings set `allow_bypass: true` on the runtime (off by default), and the input is trusted or the route sets `bypass_untrusted: true`. Input counts as trusted when the PR author is on the team or the task carries no contributor text, as for calibration. Otherwise the attempt runs in `auto`.
 
 The router decides per attempt, and every agent run records the mode it actually ran with; the dashboard marks bypass runs. Bypass changes nothing about what the service posts, but it does change what a prompt-injected agent can do on the host: text in an outside contributor's PR can steer an agent that can run commands, read files the host user can read, and reach the network. That is why it is opt-in on three sides.
 
@@ -879,23 +883,23 @@ Database migrations run when the new code starts. A release never changes a repo
 
 ### 5.13 Web dashboard and API
 
-Authentication uses GitHub OAuth (web flow, with the device flow as a fallback). Sessions are HMAC-signed cookies. The user's permission on each configured repository is cached for 10 minutes. A user sees only the repositories where they have write access or higher. On those, they can view everything, approve proposals, override priority, arm merges, and chat. Changing anything in a repository's configuration (profile, autonomy, rubric, routing, labs, notification routes) goes through the configuration gate (2.3), which requires `access.configure` on that repository at the moment of the change. Operators, listed in `local.yaml`, see the Agents page and the host's health, can disable a runtime, and can pause the service; they see a repository's data only if they also maintain it.
+Authentication uses GitHub OAuth (web flow, with the device flow as a fallback). Sessions are HMAC-signed cookies. The user's permission on each configured repository is cached for 10 minutes. A user sees only the repositories where they have write access or higher. On those, they can view everything, approve proposals, override priority, arm merges, and chat. Changing anything in a repository's configuration (profile, autonomy, rubric, routing, labs, notification routes) goes through the configuration gate (2.3), which requires `access.configure` on that repository at the moment of the change. Changing the service settings goes through the same gate against the service's own repository. Operators, listed in `local.yaml`, can pause the service and see the host's health; they see a repository's data only if they also maintain it.
 
 The passwordless sign-in `/auth/dev` exists only in `am serve --demo`, which runs on fakes. An instance that talks to a real forge never offers it, in dev mode included, because anyone who reached it could sign in as a maintainer and pass the configuration gate.
 
+**Layout.** A top bar holds the three places maintainers use daily (Home, Pull requests, Repositories) and a menu with the rest; a search and command palette (Ctrl or Cmd+K) that reaches every page, repository, PR, and command, and hands anything else to the agent; a bell with what waits on the user; and the account menu (settings, theme, language, keyboard shortcuts, pause). Every list (PRs, proposals, questions, memory changes, CI failures, runs, the audit log) has the same controls: search, filters by facet, sorting by any column, grouping, paging, selection with bulk actions, and keyboard navigation (`j`, `k`, Enter, `x`, `/`). The view lives in the URL, so it can be shared and survives the back button. The agent is on every page (Ctrl or Cmd+J, or Ask agent): it opens beside the page and knows what the page shows (see Chat below).
+
 Pages:
 
-- **Queue**: the ranked review queue across the user's repositories, with filters for repository, "mine" (CODEOWNERS and claims), review state, tier, label, and age; claim and unclaim.
-- **PR**: snapshot, review state, timeline of the service's actions, current draft (editable, approve or reject), evaluation with override and reason, CI status with diagnoses, merge gate checklist, lab runs.
-- **Inbox**: all pending proposals, grouped and bulk-approvable, each showing exactly what will be posted.
-- **Questions**: what agents are waiting on (5.7), with what each wants, the PR it works on, and when the question expires; answer with allow, deny and a message, or answers to each question. A banner and an optional browser notification announce new questions, and the navigation shows how many wait.
-- **CI**: flake rates, reruns, runner health, signatures with confirm and reject.
-- **Chat**: threads with inline proposals.
-- **Memory**: browse files, pending memory PRs, journals, calibration threads.
-- **Repositories**: onboarding, the approved profile with the layer each value came from, pending candidates with their differences, doctor results, drift proposals, per-repository pause.
-- **Agents**: runtime health, versions, budgets and usage, run transcripts.
-- **Settings**: per repository, autonomy per action kind with agreement scores, routing, labs, and notification routes. Saving opens a memory PR that the gate merges once a maintainer of that repository approves it; when the editor qualifies, saving is that approval.
-- **Audit**: every action with its decision, approver, external reference, and undo.
+- **Home**: the control center. Tiles for what waits on the user, PRs that need review, top-priority PRs, repositories, and the service; one feed of every decision (agents' questions first, then proposals, memory changes, and service updates), each answerable in place; and the PRs to review next.
+- **Pull requests**: the ranked review queue across the user's repositories, with saved views (all, needs review, mine, not evaluated, reviewed), filters for repository, tier, review state, author, label, and claim, and review in bulk.
+- **PR**: the description, checks, files, timeline of the service's actions, reviews, and CI diagnoses, beside the internal priority (with an override and reason), the merge checklist, and hygiene results; claim, review, arm a merge.
+- **Repositories**: onboarding; per repository, the approved profile with the hash of each layer, agreement scores from shadow actions, the pending candidate with its differences, per-repository pause, and the repository's settings layer, changed by asking the agent or by editing it. Saving opens a memory change that applies once a maintainer of that repository approves it; when the editor qualifies, saving is that approval.
+- **Proposals**: every pending proposal, showing exactly what will be posted, editable before approval, approvable in bulk.
+- **Agent questions**: what agents are waiting on (5.7), with what each wants, the PR it works on, and when the question expires; answer with allow, deny and a message, or answers to each question. A strip and a toast announce new questions, with an optional browser notification, and the bell counts them.
+- **Memory**: memory changes waiting for approval, and a browser over the memory repository.
+- **Settings**: the service settings (8.1) in one place: agents with their status, model, provider, and budget; model providers with their keys' status and a connection test that lists the endpoint's models without spending tokens; the default route per task; system values; and the settings file itself. Each row shows its current value and whether it differs from the default. The intended way to change them is to tell the agent what should change: it drafts the edit, the page shows the diff, and a maintainer of the service's repository applies it. API keys go only into their key fields; they are never shown again.
+- **CI health**, **Agents** (runs, outcomes, duration, cost), **Conversations** (every thread with the agent), **Service** (5.12), and the **Audit log**.
 
 The UI uses each repository's internal language (default `en`), with a per-user toggle; public text on the forge always uses the repository's public language.
 
@@ -911,7 +915,8 @@ GET  /proposals?state=pending&repo=      POST /proposals/{id}/approve   (optiona
 POST /proposals/{id}/reject              (reason required)
 GET  /ci/flakes?repo=  GET /ci/runners   POST /playbooks/{name}/run
 GET  /chat/threads  POST /chat/threads   POST /chat/threads/{id}/messages   (SSE reply)
-GET  /memory/tree  GET /memory/file      GET  /config   PUT /config/{section}
+GET  /memory/tree  GET /memory/file      GET  /settings  PUT /settings  POST /settings/check
+PUT  /settings/secrets/{name}            POST /settings/providers/{id}/test
 GET  /agents  GET /runs/{id}             GET  /audit    GET /events (SSE)
 POST /pause  POST /resume                (optional ?repo=)
 GET  /healthz
@@ -924,6 +929,8 @@ POST /webhooks/github                    (outside /api, HMAC-verified)
 - propose tools: `propose_action`, `propose_memory_change`, `propose_override`, `run_playbook`.
 
 Until the MCP server exists, the chat agent returns its proposals as structured output (`ChatAnswer.proposals`), which the service turns into the same proposals. Proposals created in a thread appear inline with approve and reject buttons, so the maintainer sees exactly what will be posted before it is. A configuration change proposed in chat applies only after a maintainer of that repository approves it, which the chatting maintainer can do if they qualify. A request the service cannot fulfill with a setting or a lesson becomes an `improve` request that changes its own code (5.12).
+
+**The agent on every page.** The panel sends only the page's identifiers (the page, a repository, a PR number); the service reads that page's data itself, so the agent sees what the maintainer may see and nothing the browser could invent. Each page keeps its own conversation for the browser session, and every conversation is also on the Conversations page. The agent receives the service settings, their defaults, and which secrets are set (never their values). It drafts configuration as a `configure` proposal holding the complete new document, either the service settings or a repository's settings layer; the service checks it and shows it in the thread with its diff and an Apply button that goes through the gate. Text that looks like a credential is removed from a message before it is stored or sent to the agent, and a drafted document that contains one is refused.
 
 ### 5.14 Notifications
 
@@ -1023,8 +1030,9 @@ Every table that refers to a PR, job, or action carries a `repo` column.
 ```
 auto-maintainer-memory/                private
 ├── MEMORY.md                          global index, at most 200 lines
-├── config/                            operator settings: what the service runs on
-│   ├── runtimes.yaml                  installed runtimes, models, budgets
+├── config/                            service settings (8.1)
+│   ├── service.yaml                   agents, model providers, default routes, system values
+│   ├── runtimes.yaml                  older agent declarations; service.yaml overrides them
 │   ├── schedules.yaml                 maintenance jobs
 │   └── channels.yaml                  notification channels; credentials stay on the host
 ├── packs/<name>/                      deployment-specific packs
@@ -1049,7 +1057,7 @@ auto-maintainer-memory/                private
 
 ### 7.3 Host-local files
 
-`~/.config/auto-maintainer/local.yaml` (port, data directory, proxy, operators, lab hosts, host paths) and `secrets.env` (mode 0600: GitHub App ID and key path, OAuth client secret, webhook secret, IM tokens). The data directory holds the SQLite database, run transcripts, mirrors, worktrees, and release checkouts.
+`~/.config/auto-maintainer/local.yaml` (port, data directory, proxy, operators, lab hosts, host paths), `secrets.env` (mode 0600: GitHub App ID and key path, OAuth client secret, webhook secret, IM tokens), and `provider-keys.json` (mode 0600, written atomically: the API keys maintainers set on the Settings page; a key of the same name in `secrets.env` is used when the file has none). The data directory holds the SQLite database, run transcripts, mirrors, worktrees, and release checkouts.
 
 ### 7.4 Importing prior state
 
@@ -1061,12 +1069,13 @@ A repository that already tracked priorities in another tool can bring them alon
 
 ## 8. Configuration
 
-### 8.1 Operator settings and repository profiles
+### 8.1 Service settings, host settings, and repository profiles
 
-Two kinds of configuration, owned by different people:
+Three kinds of configuration, owned by different people:
 
-- **Operator settings** describe what the service runs on: installed runtimes, models, and budgets (`runtimes.yaml`), maintenance schedules, notification channels, lab hosts, host paths, and the operator list. They live in `config/` in the memory repo and in `local.yaml`, and they never decide how the service behaves on a repository.
-- **Repository profiles** decide everything else, per repository: the layers of 2.2, merged over `config/defaults/` from the code repo and changed only through the configuration gate (2.3).
+- **Service settings** decide how the service runs everywhere: which agent CLIs it runs and with which models, model providers and the names of their keys, budgets, the default route per task, and system values (`poll_seconds`, `max_public_writes_per_hour`, `max_repo_public_writes_per_hour`). They live in one document, `config/service.yaml` in the memory repo, which lists only what differs from the defaults. Maintainers of the service's repository change them (2.3), on the Settings page or by asking the agent. A document that does not parse, names an agent or provider that does not exist, gives a provider to a CLI that cannot use it, or contains a credential is refused; one that reaches the memory repo some other way and does not check leaves the previous settings in force, and the Settings page says why. Keys are secrets named by the providers; their values stay on the host (7.3).
+- **Host settings** describe the machine: `local.yaml` (port, data directory, operators, lab hosts, host paths, `code_repo`), `secrets.env`, maintenance schedules, and notification channels. Operators manage them.
+- **Repository profiles** decide everything else, per repository: the layers of 2.2, merged over `config/defaults/` from the code repo and changed only through the configuration gate (2.3). A repository's routing overrides the service's default routes for that repository.
 
 Every file has a schema version; the service refuses to load an unknown major version and keeps the previous valid one (4.10).
 
@@ -1128,22 +1137,36 @@ Service defaults set every action kind that touches a repository to `shadow`. Th
 ### 8.4 Example runtimes and routing
 
 ```yaml
-# memory repo: config/runtimes.yaml (operators)
-runtimes:
+# memory repo: config/service.yaml (maintainers of the service's repository)
+schema: 1
+providers:
+  deepseek:
+    name: DeepSeek
+    protocol: anthropic                    # anthropic | openai | openai-responses
+    base_url: https://api.deepseek.com/anthropic
+    api_key: DEEPSEEK_API_KEY              # a secret's name; its value is set on the Settings page
+    models: [deepseek-chat]
+agents:
   claude-code:
+    provider: deepseek                     # uses the provider's first model unless model is set
     budget: {daily_usd: 80}
     command_prefix: [sudo, -u, am-agent, --preserve-env=PATH, --]   # confine agents to an unprivileged user
   codex:       {budget: {daily_runs: 200}, options: {approvals_reviewer: auto_review}}  # or user: every escalation to a reviewer
   antigravity: {options: {sandbox: false}}                          # agy's sandbox server cannot start on this host
-  # allow_bypass: true on a runtime lets routes that ask for bypass mode use it
+  # allow_bypass: true on an agent lets routes that ask for bypass mode use it
   dsh:
     adapter: generic
+    enabled: true
     command: ["dsh", "run", "--cwd", "{workdir}", "--prompt-file", "{prompt_file}"]  # placeholder until the dsh CLI is confirmed
     output: {format: text}
+routing:
+  evaluate: {primary: claude-code, fallback: [codex]}               # instead of the code's default
+system:
+  poll_seconds: 300
 ```
 
 ```yaml
-# code repo: config/defaults/routing.yaml; a profile's routing section overrides it
+# code repo: config/defaults/routing.yaml; the service settings' routing, then a profile's, override it
 review:       {primary: claude-code, fallback: [codex, antigravity], verifier: codex}
 # every route runs in auto mode unless it says otherwise; in a repository's profile:
 #   routing: {review: {primary: claude-code, permissions: restricted}}       # deny anything that would ask
@@ -1184,7 +1207,7 @@ self_improve: {primary: claude-code, fallback: [codex]}
 
 ## 11. Milestones
 
-**Status of the first implementation.** Built and tested on fakes: everything in M0 and M1 except the replay evals, plus from M2 `ci_doctor`, `merge`, `hygiene`, CI gate management, reviewer requests from CODEOWNERS, `stale` nudges, `profile_drift`, and budgets; from M3 memory tiers with the memory gate, memory PRs on a remote memory repo, slash commands, chat with proposals (structured output instead of MCP tools), and the T0 journal. Checked live and read-only: GitHub sign-in, snapshots of a real repository's open PRs, and the five installed agent CLIs. Not built yet: the MCP server, the ACP transport, the learner beyond the journal and chat lessons, compaction, cross-repository knowledge, digest, overlap detection, runner health, flaky test report, reproduction agent, cross-agent review, issue triage, release assistant, `am import rubric`, and replay evals. Built since: agents' questions on the dashboard over each CLI's own protocol (the ACP transport included), and self-evolution with the supervisor (5.12).
+**Status of the first implementation.** Built and tested on fakes: everything in M0 and M1 except the replay evals, plus from M2 `ci_doctor`, `merge`, `hygiene`, CI gate management, reviewer requests from CODEOWNERS, `stale` nudges, `profile_drift`, and budgets; from M3 memory tiers with the memory gate, memory PRs on a remote memory repo, slash commands, chat with proposals (structured output instead of MCP tools), and the T0 journal. Checked live and read-only: GitHub sign-in, snapshots of a real repository's open PRs, and the five installed agent CLIs. Not built yet: the MCP server, the ACP transport, the learner beyond the journal and chat lessons, compaction, cross-repository knowledge, digest, overlap detection, runner health, flaky test report, reproduction agent, cross-agent review, issue triage, release assistant, `am import rubric`, and replay evals. Built since: agents' questions on the dashboard over each CLI's own protocol (the ACP transport included), self-evolution with the supervisor (5.12), the dashboard layout of 5.13 with the agent on every page, and the service settings with model providers (8.1), changed through the agent and the gate. Providers are tested on fakes and by their command lines and environments; no CLI has yet run against a custom provider live.
 
 | Milestone | Scope | Done when |
 |---|---|---|

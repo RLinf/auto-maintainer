@@ -92,6 +92,53 @@ class ConfigGate:
             reason=reason,
         )
 
+    async def check_service(
+        self, repo: str | None, login: str, required: Permission
+    ) -> GateDecision:
+        """Whether ``login`` may change the service's own settings (agents, providers,
+        default routes, system values, secrets).
+
+        Those belong to the maintainers of the service's repository on the forge,
+        checked live, like a repository's configuration. Being an operator of the host
+        grants nothing here, and the service never approves its own changes.
+        """
+        if not repo:
+            return GateDecision(
+                allowed=False,
+                repo="",
+                login=login,
+                required=required,
+                actual=Permission.NONE,
+                reason=(
+                    "no repository owns this service's settings: set code_repo (or a "
+                    "memory remote) in local.yaml so its maintainers can change them"
+                ),
+            )
+        if login.lower() in self._service:
+            return GateDecision(
+                allowed=False,
+                repo=repo,
+                login=login,
+                required=required,
+                actual=Permission.NONE,
+                reason="the service cannot approve its own configuration changes",
+            )
+        actual = await self._forge.get_permission(repo, login)
+        allowed = actual.at_least(required)
+        reason = (
+            f"{login} has {actual} on {repo}"
+            if allowed
+            else f"{login} has {actual} on {repo}; changing the service's settings needs {required}"
+        )
+        return GateDecision(
+            allowed=allowed,
+            repo=repo,
+            login=login,
+            required=required,
+            actual=actual,
+            reason=reason,
+        )
+
 
 def memory_change_ready(
     change: MemoryChange,
@@ -106,6 +153,10 @@ def memory_change_ready(
     """
     if change.tier == Tier.T0:
         return True, "journal entries merge directly"
+    if change.service:
+        if any(change.approvals.values()):
+            return True, "approved by a maintainer of the service's repository"
+        return False, "waiting for a maintainer of the service's repository"
     unapproved = [r for r in change.repos if not change.approvals.get(r)]
     if change.tier == Tier.T2 or not change.repos:
         if not change.repos:

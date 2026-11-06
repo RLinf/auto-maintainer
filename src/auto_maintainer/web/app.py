@@ -28,7 +28,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from ..service import Service
-from . import api, auth, chat
+from . import api, auth, chat, settings
 from .dashboard import STATIC, missing_page
 
 
@@ -88,6 +88,7 @@ def create_app(
     )
     app.include_router(api.build_router())
     app.include_router(chat.build_router())
+    app.include_router(settings.build_router())
 
     @app.get("/healthz")
     async def healthz() -> dict[str, Any]:

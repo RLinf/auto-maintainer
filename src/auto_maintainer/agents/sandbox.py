@@ -113,8 +113,20 @@ _SCRUB_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
 )
 
 
+_KNOWN_SECRETS: set[str] = set()
+
+
+def register_secret(value: str) -> None:
+    """Scrub this exact value from now on, whatever it looks like (a provider's key)."""
+    if len(value) >= 8:
+        _KNOWN_SECRETS.add(value)
+
+
 def scrub(text: str) -> str:
     """Return ``text`` with tokens, API keys, and URL credentials replaced by ``[REDACTED]``."""
+    for value in _KNOWN_SECRETS:
+        if value in text:
+            text = text.replace(value, _REDACTED)
     for pattern, replacement in _SCRUB_PATTERNS:
         text = pattern.sub(replacement, text)
     return text

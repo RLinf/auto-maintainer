@@ -72,6 +72,23 @@ class GenericRuntime(ExecRuntime):
     def capabilities(self) -> Capabilities:
         return Capabilities(bypass=bool(self.bypass_args))
 
+    def provider_env(self) -> dict[str, str | None]:
+        """``AM_PROVIDER_*`` for any CLI, plus the usual names for its protocol."""
+        p = self.provider
+        if p is None:
+            return {}
+        env: dict[str, str | None] = {
+            "AM_PROVIDER_PROTOCOL": p.protocol,
+            "AM_PROVIDER_BASE_URL": p.base_url,
+            "AM_PROVIDER_MODEL": self.model,
+            "AM_PROVIDER_API_KEY": p.api_key,
+        }
+        if p.protocol == "anthropic":
+            env |= {"ANTHROPIC_BASE_URL": p.base_url, "ANTHROPIC_AUTH_TOKEN": p.api_key}
+        else:
+            env |= {"OPENAI_BASE_URL": p.base_url, "OPENAI_API_KEY": p.api_key}
+        return {k: v for k, v in env.items() if v is not None}
+
     def build_invocation(
         self, task: AgentTask, files: RunFiles, binary: str
     ) -> Invocation:

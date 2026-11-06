@@ -4,6 +4,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { ErrorBox } from "../components";
 import { useT } from "../i18n";
+import { Icon } from "../icons";
 
 interface DeviceStart {
   flow_id: string;
@@ -19,9 +20,12 @@ export default function SignIn() {
   const [error, setError] = useState<unknown>(null);
   const timer = useRef<number | null>(null);
 
-  useEffect(() => () => {
-    if (timer.current) window.clearTimeout(timer.current);
-  }, []);
+  useEffect(
+    () => () => {
+      if (timer.current) window.clearTimeout(timer.current);
+    },
+    [],
+  );
 
   const start = async () => {
     setError(null);
@@ -63,26 +67,35 @@ export default function SignIn() {
   };
 
   return (
-    <div className="signin card">
-      <h1>auto-maintainer</h1>
-      <p className="muted">Sign in with a GitHub account that has write access to a repository this service maintains.</p>
-      <a className="button primary" href="/auth/login" style={{ textAlign: "center" }}>
+    <div className="signin card" style={{ padding: 28 }}>
+      <div className="row" style={{ gap: 10 }}>
+        <span className="logo-mark" style={{ width: 34, height: 34, borderRadius: 10 }}>
+          <Icon name="merge" size={18} />
+        </span>
+        <h1>auto-maintainer</h1>
+      </div>
+      <p className="muted" style={{ margin: 0 }}>
+        {t("Sign in with a GitHub account that has write access to a repository this service maintains.")}
+      </p>
+      <a className="button primary" href="/auth/login" style={{ height: 40, textDecoration: "none" }}>
         {t("Sign in with GitHub")}
       </a>
       {device ? (
-        <div className="stack">
+        <div className="stack" style={{ alignItems: "center", textAlign: "center" }}>
           <span>
-            Open{" "}
+            {t("Open")}{" "}
             <a href={device.verification_uri} target="_blank" rel="noreferrer">
               {device.verification_uri}
             </a>{" "}
-            and enter:
+            {t("and enter")}:
           </span>
           <span className="code">{device.user_code}</span>
-          <span className="muted small">Waiting for GitHub…</span>
+          <span className="muted small">{t("Waiting for GitHub…")}</span>
         </div>
       ) : (
-        <button onClick={start}>{t("Sign in with a device code")}</button>
+        <button className="ghost" onClick={start}>
+          {t("Sign in with a device code")}
+        </button>
       )}
       <ErrorBox error={error} />
     </div>

@@ -139,6 +139,27 @@ class ClaudeCodeRuntime(ExecRuntime):
         runs in a sandbox; operators accept that by setting ``allow_bypass``."""
         return {"IS_SANDBOX": "1"} if os.geteuid() == 0 else {}
 
+    def provider_env(self) -> dict[str, str | None]:
+        """Point Claude Code at an Anthropic-compatible endpoint.
+
+        The key goes in ``ANTHROPIC_AUTH_TOKEN`` (sent as a bearer token); an inherited
+        ``ANTHROPIC_API_KEY`` would take precedence over it, so it is removed. The
+        background model is the same one, since the endpoint may not serve Claude's.
+        """
+        p = self.provider
+        if p is None:
+            return {}
+        env: dict[str, str | None] = {
+            "ANTHROPIC_BASE_URL": p.base_url,
+            "ANTHROPIC_AUTH_TOKEN": p.api_key or None,
+            "ANTHROPIC_API_KEY": None,
+        }
+        if self.model:
+            env["ANTHROPIC_MODEL"] = self.model
+            env["ANTHROPIC_SMALL_FAST_MODEL"] = self.model
+            env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = self.model
+        return env
+
     def build_invocation(
         self, task: AgentTask, files: RunFiles, binary: str
     ) -> Invocation:

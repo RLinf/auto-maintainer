@@ -1,195 +1,281 @@
-// The review queue: open PRs ranked by internal priority.
+// Pull requests: every open PR the user can see, ranked by internal priority, with saved
+// views, search, filters, sorting, grouping, and review in bulk. The view lives in the URL.
 
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
-import { Link } from "react-router-dom";
-import { api, qs, type Me, type PrRow, type ReviewActivity, type ReviewStart } from "../api";
-import { Empty, ErrorBox, Labels, Loading, prPath, Tier, When } from "../components";
+import { useQuery } from "@tanstack/react-query";
+import { Link, useNavigate } from "react-router-dom";
+import { api, type Me, type PrRow, type ReviewActivity, type ReviewStart } from "../api";
+import { useAgent } from "../agent";
+import { ErrorBox, Labels, PageHead, prPath, ReviewState, Tier, timeOf, useAct, When } from "../components";
+import { prKey, REVIEW_ORDER, REVIEW_STATES, TIER_ORDER, usePrs } from "../data";
 import { useT } from "../i18n";
+import { Icon } from "../icons";
+import { BulkBar, DataTable, ListToolbar, useList, type Column } from "../list";
+import { MenuItem, Popover, Skeleton, Tabs, useTab, useToast } from "../ui";
 
-const STATES = ["", "NEW_REVIEW", "FOLLOWUP_REVIEW", "APPROVED_NEW_COMMITS", "UP_TO_DATE", "SELF_PR", "DRAFT"];
-const TIERS = ["", "P0", "P1", "P2", "P3"];
+const NEEDS_REVIEW = new Set(["NEW_REVIEW", "FOLLOWUP_REVIEW", "APPROVED_NEW_COMMITS"]);
 
 export default function QueuePage({ me }: { me: Me }) {
   const t = useT();
-  const [repo, setRepo] = useState("");
-  const [tier, setTier] = useState("");
-  const [state, setState] = useState("");
-  const [mine, setMine] = useState(false);
-  const params = { repo, tier, state, mine };
-  const prs = useQuery({ queryKey: ["prs", params], queryFn: () => api.get<PrRow[]>(`/api/prs${qs(params)}`) });
-  const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [started, setStarted] = useState<ReviewStart[]>([]);
-  const client = useQueryClient();
-  const review = useMutation({
-    mutationFn: (rows: PrRow[]) =>
-      api.post<ReviewStart[]>("/api/reviews", { prs: rows.map((r) => ({ repo: r.repo, number: r.number })) }),
-    onSuccess: (out) => {
-      setStarted(out);
-      setSelected(new Set());
-      void client.invalidateQueries({ queryKey: ["prs"] });
-    },
-  });
-  const keyOf = (p: PrRow) => `${p.repo}#${p.number}`;
-  const toggle = (p: PrRow) =>
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(keyOf(p))) next.delete(keyOf(p));
-      else next.add(keyOf(p));
-      return next;
-    });
-  const chosen = (prs.data ?? []).filter((p) => selected.has(keyOf(p)));
-  const reviewable = (prs.data ?? []).filter((p) => p.review_state !== "UP_TO_DATE");
-  const allChosen = reviewable.length > 0 && reviewable.every((p) => selected.has(keyOf(p)));
+  const navigate = useNavigate();
+  const toast = useToast();
+  const agent = useAgent();
+  const all = usePrs();
+  const mine = useQuery({ queryKey: ["prs", "mine"], queryFn: () => api.get<PrRow[]>("/api/prs?mine=true") });
+  const rows = all.data ?? [];
+  const views = [
+    { id: "all", label: t("All open"), count: rows.length },
+    { id: "review", label: t("Needs review"), count: rows.filter((p) => NEEDS_REVIEW.has(p.review_state)).length },
+    { id: "mine", label: t("Mine"), count: mine.data?.length },
+    { id: "unrated", label: t("Not evaluated"), count: rows.filter((p) => !p.tier).length },
+    { id: "reviewed", label: t("Reviewed"), count: rows.filter((p) => p.review_state === "UP_TO_DATE").length },
+  ];
+  const [view, setView] = useTab(views);
+  const source =
+    view === "mine"
+      ? mine.data ?? []
+      : view === "review"
+        ? rows.filter((p) => NEEDS_REVIEW.has(p.review_state))
+        : view === "unrated"
+          ? rows.filter((p) => !p.tier)
+          : view === "reviewed"
+            ? rows.filter((p) => p.review_state === "UP_TO_DATE")
+            : rows;
 
+  const list = useList<PrRow>({
+    rows: source,
+    key: prKey,
+    search: (p) => `${p.title} ${p.repo}#${p.number} #${p.number} ${p.author} ${p.labels.join(" ")} ${p.summary} ${p.claimed_by ?? ""}`,
+    facets: [
+      { id: "repo", label: t("Repository"), values: (p) => p.repo },
+      { id: "tier", label: t("Tier"), values: (p) => p.tier ?? t("Not evaluated") },
+      { id: "state", label: t("Review state"), values: (p) => t(REVIEW_STATES[p.review_state] ?? p.review_state) },
+      { id: "author", label: t("Author"), values: (p) => p.author },
+      { id: "label", label: t("Label"), values: (p) => p.labels },
+      { id: "claimed", label: t("Claimed by"), values: (p) => p.claimed_by ?? t("Unclaimed") },
+    ],
+    sorts: [
+      { id: "priority", label: t("Priority"), value: (p) => p.total ?? -1, descFirst: true },
+      { id: "tier", label: t("Tier"), value: (p) => (p.tier ? TIER_ORDER.indexOf(p.tier) : 99) },
+      { id: "updated", label: t("Last updated"), value: (p) => timeOf(p.updated_at), descFirst: true },
+      { id: "number", label: t("Number"), value: (p) => p.number, descFirst: true },
+      { id: "title", label: t("Title"), value: (p) => p.title.toLowerCase() },
+      { id: "author", label: t("Author"), value: (p) => p.author.toLowerCase() },
+      { id: "state", label: t("Review state"), value: (p) => REVIEW_ORDER.indexOf(p.review_state) },
+    ],
+    defaultSort: "-priority",
+    groups: [
+      { id: "repo", label: t("Repository"), value: (p) => p.repo },
+      { id: "tier", label: t("Tier"), value: (p) => p.tier ?? t("Not evaluated"), order: [...TIER_ORDER, t("Not evaluated")] },
+      { id: "state", label: t("Review state"), value: (p) => t(REVIEW_STATES[p.review_state] ?? p.review_state), order: REVIEW_ORDER.map((s) => t(REVIEW_STATES[s])) },
+      { id: "author", label: t("Author"), value: (p) => p.author },
+      { id: "claimed", label: t("Claimed by"), value: (p) => p.claimed_by ?? t("Unclaimed") },
+    ],
+    pageSize: 50,
+  });
+
+  const review = useAct(
+    (prs: PrRow[]) => api.post<ReviewStart[]>("/api/reviews", { prs: prs.map((r) => ({ repo: r.repo, number: r.number })) }),
+    [["prs"]],
+  );
+  const startReview = (prs: PrRow[]) =>
+    review.mutate(prs, {
+      onSuccess: (out) => {
+        list.clearSelection();
+        const started = out.filter((s) => s.run !== "skip");
+        const skipped = out.filter((s) => s.run === "skip");
+        toast({
+          title: started.length
+            ? `${started.length} ${t(started.length === 1 ? "review started" : "reviews started")}`
+            : t("Nothing to review"),
+          body: [
+            started.length ? t("Drafts appear in your proposals to edit and post.") : "",
+            skipped.length ? `${t("Skipped")}: ${skipped.map((s) => `#${s.number} (${s.reason})`).join(", ")}` : "",
+          ]
+            .filter(Boolean)
+            .join(" "),
+          icon: "pr",
+          action: started.length ? { label: t("Proposals"), onClick: () => navigate("/inbox") } : undefined,
+        });
+      },
+    });
+
+  const askAbout = (p: PrRow) => agent.open({ context: { page: "pr", repo: p.repo, number: p.number, label: `${p.repo}#${p.number}` } });
+
+  const columns: Column<PrRow>[] = [
+    { id: "tier", header: t("Tier"), cell: (p) => <Tier tier={p.tier} />, sort: "tier", width: 64 },
+    {
+      id: "score",
+      header: t("Score"),
+      cell: (p) => (p.total == null ? <span className="muted">—</span> : p.total.toFixed(1)),
+      sort: "priority",
+      className: "num",
+      width: 72,
+    },
+    {
+      id: "title",
+      header: t("Pull request"),
+      sort: "title",
+      cell: (p) => (
+        <div style={{ minWidth: 260 }}>
+          <Link to={prPath(p.repo, p.number)} style={{ color: "var(--text)", fontWeight: 550 }}>
+            {p.title}
+          </Link>
+          <div className="small muted">
+            {p.repo}#{p.number} · {p.author} · <When at={p.updated_at} />
+            {p.draft ? ` · ${t("draft")}` : ""}
+          </div>
+          {p.summary && (
+            <div className="small muted truncate hide-narrow" style={{ maxWidth: 560 }} title={p.summary}>
+              {p.summary}
+            </div>
+          )}
+        </div>
+      ),
+    },
+    {
+      id: "state",
+      header: t("Review"),
+      sort: "state",
+      cell: (p) => (
+        <div className="stack" style={{ gap: 4, alignItems: "flex-start" }}>
+          <ReviewState state={p.review_state} />
+          <Activity a={p.review_activity} me={me.login} />
+        </div>
+      ),
+    },
+    { id: "labels", header: t("Labels"), cell: (p) => <Labels labels={p.labels} max={3} />, className: "hide-narrow" },
+    {
+      id: "claimed",
+      header: t("Claimed by"),
+      cell: (p) => (p.claimed_by ? (p.claimed_by === me.login ? <strong>{t("you")}</strong> : p.claimed_by) : <span className="muted">—</span>),
+      className: "hide-narrow",
+    },
+    {
+      id: "actions",
+      header: "",
+      width: 84,
+      cell: (p) => (
+        <span className="row" style={{ gap: 2, justifyContent: "flex-end", flexWrap: "nowrap" }}>
+          <button className="ghost icon sm" title={t("Ask agent")} aria-label={t("Ask agent")} onClick={() => askAbout(p)}>
+            <Icon name="sparkles" size={14} />
+          </button>
+          <Popover
+            align="right"
+            label={t("Actions")}
+            trigger={(_, toggle) => (
+              <button className="ghost icon sm" aria-label={t("More actions")} onClick={toggle}>
+                <Icon name="more" size={14} />
+              </button>
+            )}
+          >
+            {(close) => (
+              <>
+                <MenuItem icon="eye" onClick={() => (navigate(prPath(p.repo, p.number)), close())}>
+                  {t("Open")}
+                </MenuItem>
+                <MenuItem icon="pr" onClick={() => (startReview([p]), close())}>
+                  {p.reviewed_sha ? t("Follow up") : t("Review")}
+                </MenuItem>
+                <MenuItem icon="sparkles" onClick={() => (askAbout(p), close())}>
+                  {t("Ask agent")}
+                </MenuItem>
+                <MenuItem icon="external" href={p.url} onClick={close}>
+                  {t("Open on GitHub")}
+                </MenuItem>
+              </>
+            )}
+          </Popover>
+        </span>
+      ),
+    },
+  ];
+
+  const selected = list.selected;
   return (
     <>
-      <div className="row">
-        <h1>{t("Queue")}</h1>
-        <span className="pill status-warn">{t("Internal")}</span>
-        <span className="muted small">Tiers and scores are private to maintainers and never posted.</span>
-      </div>
-      <div className="filters">
-        <label className="field">
-          {t("Repository")}
-          <select value={repo} onChange={(e) => setRepo(e.target.value)}>
-            <option value="">{t("All")}</option>
-            {me.repos.map((r) => (
-              <option key={r}>{r}</option>
-            ))}
-          </select>
-        </label>
-        <label className="field">
-          {t("Tier")}
-          <select value={tier} onChange={(e) => setTier(e.target.value)}>
-            {TIERS.map((x) => (
-              <option key={x} value={x}>
-                {x || t("All")}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="field">
-          {t("Review state")}
-          <select value={state} onChange={(e) => setState(e.target.value)}>
-            {STATES.map((x) => (
-              <option key={x} value={x}>
-                {x || t("All")}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="row small">
-          <input type="checkbox" checked={mine} onChange={(e) => setMine(e.target.checked)} /> {t("Mine")}
-        </label>
-        <button
-          className="primary"
-          disabled={!chosen.length || review.isPending}
-          onClick={() => review.mutate(chosen)}
-          title="Run a review, or a follow-up for PRs reviewed before. Drafts go to your inbox to edit and post."
-        >
-          {review.isPending ? t("Starting…") : `${t("Review selected")} (${chosen.length})`}
-        </button>
-      </div>
-      <ErrorBox error={prs.error ?? review.error} />
-      {started.length ? (
-        <div className="card small">
-          {started.map((s) => (
-            <div key={`${s.repo}#${s.number}`}>
-              {s.repo}#{s.number}:{" "}
-              {s.run === "skip" ? <span className="muted">skipped ({s.reason})</span> : `${s.run} started; the draft will appear in your inbox`}
-            </div>
-          ))}
+      <PageHead
+        title={t("Pull requests")}
+        sub={
+          <span className="row" style={{ gap: 6 }}>
+            <Icon name="shield" size={14} />
+            {t("Tiers and scores are internal: they are never posted.")}
+          </span>
+        }
+        actions={
+          <button className="agent" onClick={() => agent.open()}>
+            <Icon name="sparkles" />
+            {t("Ask about the queue")}
+          </button>
+        }
+      />
+      <Tabs tabs={views} active={view} onChange={setView} />
+      <ListToolbar list={list} placeholder={t("Search by title, number, author, label…")} />
+      <ErrorBox error={all.error || review.error} />
+      {all.isLoading || (view === "mine" && mine.isLoading) ? (
+        <div className="card">
+          <Skeleton rows={8} />
         </div>
-      ) : null}
-      {prs.isLoading ? (
-        <Loading />
-      ) : !prs.data?.length ? (
-        <Empty>No open PRs match.</Empty>
       ) : (
-        <div className="card table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>
-                  <input
-                    type="checkbox"
-                    aria-label="Select all"
-                    checked={allChosen}
-                    onChange={() => setSelected(allChosen ? new Set() : new Set(reviewable.map(keyOf)))}
-                  />
-                </th>
-                <th>{t("Tier")}</th>
-                <th className="num">{t("Total")}</th>
-                <th>{t("Title")}</th>
-                <th>{t("Author")}</th>
-                <th>{t("Review state")}</th>
-                <th>{t("Review")}</th>
-                <th className="hide-narrow">{t("Labels")}</th>
-                <th className="hide-narrow">{t("Claimed by")}</th>
-                <th className="hide-narrow">{t("Summary")}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {prs.data.map((p) => (
-                <tr key={keyOf(p)}>
-                  <td>
-                    <input
-                      type="checkbox"
-                      aria-label={`Select ${keyOf(p)}`}
-                      checked={selected.has(keyOf(p))}
-                      disabled={p.review_state === "UP_TO_DATE"}
-                      onChange={() => toggle(p)}
-                    />
-                  </td>
-                  <td>
-                    <Tier tier={p.tier} />
-                  </td>
-                  <td className="num">{p.total?.toFixed(1) ?? "—"}</td>
-                  <td>
-                    <Link to={prPath(p.repo, p.number)}>{p.title}</Link>
-                    <div className="muted small">
-                      {p.repo}#{p.number} · {p.head}
-                      {p.draft ? " · draft" : ""} · <When at={p.updated_at} />
-                    </div>
-                  </td>
-                  <td>{p.author}</td>
-                  <td className="small">{p.review_state}</td>
-                  <td className="small">
-                    <Activity a={p.review_activity} me={me.login} />
-                  </td>
-                  <td className="hide-narrow">
-                    <Labels labels={p.labels} />
-                  </td>
-                  <td className="hide-narrow">{p.claimed_by ?? <span className="muted">—</span>}</td>
-                  <td className="hide-narrow small">{p.summary}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <DataTable
+          list={list}
+          columns={columns}
+          onOpen={(p) => navigate(prPath(p.repo, p.number))}
+          selectable={(p) => p.review_state !== "UP_TO_DATE"}
+          empty={view === "review" ? t("No PR needs a review.") : t("No open PRs.")}
+        />
       )}
+      <BulkBar count={selected.length} onClear={list.clearSelection}>
+        <button className="primary sm" disabled={review.isPending} onClick={() => startReview(selected)}>
+          {review.isPending ? t("Starting…") : `${t("Review")} ${selected.length}`}
+        </button>
+        <button
+          className="sm"
+          onClick={() =>
+            agent.open({
+              prompt: `${t("Compare these PRs and tell me which to review first")}: ${selected.map((p) => `${p.repo}#${p.number}`).join(", ")}`,
+              send: true,
+            })
+          }
+        >
+          <Icon name="sparkles" size={14} />
+          {t("Compare")}
+        </button>
+      </BulkBar>
     </>
   );
 }
 
 function Activity({ a, me }: { a: ReviewActivity; me: string }) {
+  const t = useT();
   const job = a.job;
   if (job && (job.status === "queued" || job.status === "running")) {
-    return <span className="pill status-info">{job.playbook === "followup" ? "following up…" : "reviewing…"}</span>;
+    return (
+      <span className="small" style={{ color: "var(--info)" }}>
+        <Icon name="clock" size={12} /> {job.playbook === "followup" ? t("following up…") : t("reviewing…")}
+      </span>
+    );
   }
   if (a.draft) {
     return (
-      <Link to="/inbox" className="pill status-warn">
-        draft{a.draft.for ? ` for ${a.draft.for === me ? "you" : a.draft.for}` : ""}
+      <Link to="/inbox" className="small">
+        {t("draft")}
+        {a.draft.for ? ` ${t("for")} ${a.draft.for === me ? t("you") : a.draft.for}` : ""} →
       </Link>
     );
   }
   if (job && job.status === "failed") {
-    return <span className="pill status-bad" title={job.error ?? ""}>failed</span>;
+    return (
+      <span className="small" style={{ color: "var(--bad)" }} title={job.error ?? ""}>
+        <Icon name="x" size={12} /> {t("review failed")}
+      </span>
+    );
   }
   if (a.posted) {
-    return <span className="pill status-ok">posted at {a.posted.sha}</span>;
+    return (
+      <span className="small muted">
+        {t("posted at")} <code>{a.posted.sha.slice(0, 7)}</code>
+      </span>
+    );
   }
-  return <span className="muted">—</span>;
+  return null;
 }

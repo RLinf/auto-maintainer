@@ -52,6 +52,10 @@ class MemoryChange(BaseModel):
     """Path to new content; ``None`` deletes the file."""
     repos: list[str] = Field(default_factory=list)
     """Target repositories whose directories or configuration the change affects."""
+    service: bool = False
+    """The change edits the service's own settings (``config/service.yaml``). It needs
+    the approval of a maintainer of the service's repository, recorded in
+    ``approvals`` under that repository, instead of one per target repository."""
     author: str = "service"
     requested_by: str | None = None
     """A maintainer who asked for the change, for example in chat."""

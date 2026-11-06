@@ -1,53 +1,168 @@
-// Small shared pieces: status pills, loading and error boxes, diffs, and mutation helpers.
+// Shared display pieces: page headers, cards, status pills (icon or dot plus text, never
+// color alone), times, diffs, empty and error states, and mutation helpers.
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
+import { Link } from "react-router-dom";
 import { ApiError } from "./api";
+import { REVIEW_STATES } from "./data";
+import { useT } from "./i18n";
+import { Icon, type IconName } from "./icons";
+import { Skeleton } from "./ui";
+
+export function PageHead({
+  title,
+  sub,
+  actions,
+  crumbs,
+}: {
+  title: ReactNode;
+  sub?: ReactNode;
+  actions?: ReactNode;
+  crumbs?: { to: string; label: string }[];
+}) {
+  return (
+    <div className="page-head">
+      <div className="titles">
+        {crumbs && (
+          <nav className="crumbs" aria-label="Breadcrumb">
+            {crumbs.map((c) => (
+              <span key={c.to} className="row" style={{ gap: 6 }}>
+                <Link to={c.to}>{c.label}</Link>
+                <Icon name="chevronRight" size={12} />
+              </span>
+            ))}
+          </nav>
+        )}
+        <h1>{title}</h1>
+        {sub && <div className="sub">{sub}</div>}
+      </div>
+      {actions && <div className="actions">{actions}</div>}
+    </div>
+  );
+}
+
+export function Section({
+  title,
+  children,
+  aside,
+  hint,
+  flush,
+}: {
+  title: ReactNode;
+  children: ReactNode;
+  aside?: ReactNode;
+  hint?: ReactNode;
+  flush?: boolean;
+}) {
+  return (
+    <section className={`card ${flush ? "flush" : ""}`}>
+      <header className="card-head" style={flush ? { padding: "14px 18px 0" } : undefined}>
+        <div className="row" style={{ gap: 8 }}>
+          <h2>{title}</h2>
+          {hint && <span className="hint">{hint}</span>}
+        </div>
+        {aside}
+      </header>
+      {children}
+    </section>
+  );
+}
 
 export function Tier({ tier }: { tier: string | null | undefined }) {
-  if (!tier) return <span className="muted">—</span>;
+  if (!tier) return <span className="muted" title="Not evaluated">—</span>;
   return <span className={`pill tier tier-${tier.toLowerCase()}`}>{tier}</span>;
 }
 
 const STATUS_CLASS: Record<string, string> = {
   executed: "ok",
   approved: "ok",
+  allowed: "ok",
   merged: "ok",
+  done: "ok",
+  passing: "ok",
+  success: "ok",
+  completed: "ok",
+  neutral: "muted",
+  skipped: "muted",
+  stale: "muted",
+  in_progress: "info",
+  failure: "bad",
+  timed_out: "bad",
+  action_required: "warn",
+  startup_failure: "bad",
   noop: "muted",
   shadowed: "muted",
   superseded: "muted",
   expired: "muted",
+  cancelled: "muted",
   proposed: "warn",
   pending: "warn",
+  waiting: "warn",
   queued: "info",
+  running: "info",
   intent: "info",
-  open: "warn",
+  open: "info",
   failed: "bad",
   denied: "bad",
   rejected: "bad",
   conflict: "bad",
+  flaky: "warn",
+  infra: "info",
+  pr_caused: "bad",
 };
 
-export function Status({ value }: { value: string | null | undefined }) {
+export function Status({ value, label }: { value: string | null | undefined; label?: string }) {
   if (!value) return null;
-  return <span className={`pill status-${STATUS_CLASS[value.toLowerCase()] ?? "info"}`}>{value}</span>;
-}
-
-export function Labels({ labels }: { labels: string[] }) {
-  if (!labels.length) return <span className="muted">—</span>;
+  const cls = STATUS_CLASS[value.toLowerCase()] ?? "info";
   return (
-    <span className="labels">
-      {labels.map((l) => (
-        <span key={l} className="label">
-          {l}
-        </span>
-      ))}
+    <span className={`pill status-${cls}`}>
+      <span className="dot" aria-hidden="true" />
+      {label ?? value.replace(/_/g, " ")}
     </span>
   );
 }
 
-export function Loading() {
-  return <div className="muted pad">Loading…</div>;
+export function ReviewState({ state }: { state: string }) {
+  const t = useT();
+  const cls: Record<string, string> = {
+    NEW_REVIEW: "warn",
+    FOLLOWUP_REVIEW: "warn",
+    APPROVED_NEW_COMMITS: "info",
+    UP_TO_DATE: "ok",
+    SELF_PR: "muted",
+    DRAFT: "muted",
+    CLOSED: "muted",
+  };
+  return (
+    <span className={`pill status-${cls[state] ?? "info"}`} title={state}>
+      <span className="dot" aria-hidden="true" />
+      {t(REVIEW_STATES[state] ?? state)}
+    </span>
+  );
+}
+
+export function Labels({ labels, max = 4 }: { labels: string[]; max?: number }) {
+  if (!labels.length) return <span className="muted">—</span>;
+  const shown = labels.slice(0, max);
+  return (
+    <span className="labels">
+      {shown.map((l) => (
+        <span key={l} className="label">
+          {l}
+        </span>
+      ))}
+      {labels.length > max && (
+        <span className="label" title={labels.slice(max).join(", ")}>
+          +{labels.length - max}
+        </span>
+      )}
+    </span>
+  );
+}
+
+export function Loading({ rows = 5 }: { rows?: number }) {
+  return <Skeleton rows={rows} />;
 }
 
 export function ErrorBox({ error }: { error: unknown }) {
@@ -62,36 +177,41 @@ export function ErrorBox({ error }: { error: unknown }) {
   );
 }
 
-export function Empty({ children }: { children?: ReactNode }) {
-  return <div className="muted pad">{children ?? "Nothing here."}</div>;
+export function Empty({ children, icon = "inbox" }: { children?: ReactNode; icon?: IconName }) {
+  return (
+    <div className="empty">
+      <Icon name={icon} size={22} />
+      <div>{children ?? "Nothing here."}</div>
+    </div>
+  );
 }
 
-export function Section({ title, children, aside }: { title: string; children: ReactNode; aside?: ReactNode }) {
+export function CaughtUp({ children }: { children: ReactNode }) {
   return (
-    <section className="card">
-      <header className="card-head">
-        <h2>{title}</h2>
-        {aside}
-      </header>
-      {children}
-    </section>
+    <div className="caught-up">
+      <span className="big">
+        <Icon name="check" size={22} />
+      </span>
+      <strong style={{ color: "var(--text)" }}>{children}</strong>
+    </div>
   );
 }
 
 export function Diff({ text }: { text: string | null | undefined }) {
-  if (!text) return <Empty>No differences.</Empty>;
+  if (!text) return <Empty icon="check">No differences.</Empty>;
   return (
     <pre className="diff">
       {text.split("\n").map((line, i) => {
-        const cls = line.startsWith("+++") || line.startsWith("---")
-          ? "diff-file"
-          : line.startsWith("@@")
-            ? "diff-hunk"
-            : line.startsWith("+")
-              ? "diff-add"
-              : line.startsWith("-")
-                ? "diff-del"
-                : "";
+        const cls =
+          line.startsWith("+++") || line.startsWith("---")
+            ? "diff-file"
+            : line.startsWith("@@")
+              ? "diff-hunk"
+              : line.startsWith("+")
+                ? "diff-add"
+                : line.startsWith("-")
+                  ? "diff-del"
+                  : "";
         return (
           <div key={i} className={cls}>
             {line || " "}
@@ -106,16 +226,50 @@ export function Pre({ text }: { text: string }) {
   return <pre className="pre">{text}</pre>;
 }
 
-export function When({ at }: { at: string | null | undefined }) {
+// ---- time ------------------------------------------------------------------------------
+
+/** Re-render once a minute so relative times stay current. */
+function useMinute() {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const id = window.setInterval(() => setTick((n) => n + 1), 60_000);
+    return () => window.clearInterval(id);
+  }, []);
+}
+
+export function relative(at: string | Date, now = Date.now()): string {
+  const d = typeof at === "string" ? new Date(at) : at;
+  const diff = (now - d.getTime()) / 1000;
+  const future = diff < 0;
+  const s = Math.abs(diff);
+  const fmt = (n: number, unit: string) => (future ? `in ${n}${unit}` : `${n}${unit} ago`);
+  if (s < 45) return future ? "in a moment" : "just now";
+  if (s < 3600) return fmt(Math.round(s / 60), "m");
+  if (s < 86400) return fmt(Math.round(s / 3600), "h");
+  if (s < 86400 * 30) return fmt(Math.round(s / 86400), "d");
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+}
+
+export function When({ at, absolute }: { at: string | null | undefined; absolute?: boolean }) {
+  useMinute();
   if (!at) return <span className="muted">—</span>;
   const d = new Date(at);
   if (Number.isNaN(d.getTime())) return <span>{at}</span>;
+  const full = d.toLocaleString(undefined, { year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
   return (
-    <time dateTime={at} title={d.toISOString()}>
-      {d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
+    <time dateTime={at} title={full}>
+      {absolute ? full : relative(d)}
     </time>
   );
 }
+
+export function timeOf(at: string | null | undefined): number | null {
+  if (!at) return null;
+  const n = new Date(at).getTime();
+  return Number.isNaN(n) ? null : n;
+}
+
+// ---- mutations -----------------------------------------------------------------------------
 
 /** A mutation that invalidates the given query key prefixes when it succeeds. */
 export function useAct<TArgs, TResult>(fn: (args: TArgs) => Promise<TResult>, invalidate: string[][]) {
@@ -128,4 +282,45 @@ export function useAct<TArgs, TResult>(fn: (args: TArgs) => Promise<TResult>, in
 
 export function prPath(repo: string, number: number | null | undefined): string {
   return `/pr/${repo}/${number ?? ""}`;
+}
+
+/** A reason prompt inline: the first click reveals the field, the second confirms. */
+export function RejectButton({
+  onReject,
+  busy,
+  label = "Reject",
+  size,
+}: {
+  onReject: (reason: string) => void;
+  busy?: boolean;
+  label?: string;
+  size?: "sm";
+}) {
+  const t = useT();
+  const [open, setOpen] = useState(false);
+  const [reason, setReason] = useState("");
+  if (!open) {
+    return (
+      <button className={`danger ${size ?? ""}`} onClick={() => setOpen(true)}>
+        {t(label)}
+      </button>
+    );
+  }
+  return (
+    <form
+      className="row"
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (reason.trim()) onReject(reason.trim());
+      }}
+    >
+      <input autoFocus value={reason} onChange={(e) => setReason(e.target.value)} placeholder={t("Reason (required)")} style={size ? { height: 28 } : undefined} />
+      <button className={`danger solid ${size ?? ""}`} disabled={!reason.trim() || busy}>
+        {t(label)}
+      </button>
+      <button type="button" className={`ghost ${size ?? ""}`} onClick={() => setOpen(false)}>
+        {t("Cancel")}
+      </button>
+    </form>
+  );
 }

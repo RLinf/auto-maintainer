@@ -61,6 +61,7 @@ from ..domain.agents import (
     denial,
 )
 from ..domain.ports import AgentQuestions
+from ..domain.settings import ProviderBinding
 from .sandbox import build_env, scrub
 from .structured import extract_json
 
@@ -304,12 +305,17 @@ class ExecRuntime:
         allow_bypass: bool = False,
         command_prefix: Iterable[str] = (),
         questions: AgentQuestions | None = None,
+        provider: ProviderBinding | None = None,
     ) -> None:
         self.name = name or self.default_name
         self.binary = binary or self.default_binary
         self.runs_dir = Path(runs_dir) if runs_dir else DEFAULT_RUNS_DIR
         self.env_allow = [*self.default_env_allow, *env_allow]
-        self.model = model
+        self.provider = provider
+        """The model endpoint the CLI uses instead of its own sign-in, if any."""
+        self.model = model or (
+            provider.models[0] if provider and provider.models else None
+        )
         self.extra_args = list(extra_args)
         self.search_dirs = tuple(search_dirs)
         self.kill_grace_seconds = kill_grace_seconds
@@ -330,6 +336,11 @@ class ExecRuntime:
 
     def task_env(self, task: AgentTask) -> dict[str, str]:
         """Environment for one task, such as inline CLI config; adapters override."""
+        return {}
+
+    def provider_env(self) -> dict[str, str | None]:
+        """Environment that points the CLI at ``self.provider``; ``None`` removes a name
+        the process would otherwise inherit. Adapters that support providers override."""
         return {}
 
     def build_invocation(
@@ -498,6 +509,11 @@ class ExecRuntime:
         env = build_env(task, self.env_allow)
         env.update(isolation_env(files.dir))
         env.update(self.task_env(task))
+        for name, value in self.provider_env().items():
+            if value is None:
+                env.pop(name, None)
+            else:
+                env[name] = value
         if task.permissions == "bypass":
             env.update(self.bypass_env())
         try:

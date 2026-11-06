@@ -65,7 +65,42 @@ class OpenCodeRuntime(AcpRuntime):
                 "webfetch": "ask",
                 "external_directory": "ask",
             }
-        return {"OPENCODE_CONFIG_CONTENT": json.dumps({"permission": permission})}
+        config: dict[str, Any] = {"permission": permission}
+        if self.provider is not None:
+            config["provider"] = {self._provider_id(): self._provider_config()}
+        return {"OPENCODE_CONFIG_CONTENT": json.dumps(config)}
+
+    def _provider_id(self) -> str:
+        assert self.provider is not None
+        return f"am-{self.provider.id}"
+
+    def _provider_config(self) -> dict[str, Any]:
+        """OpenCode's provider entry; the key is an ``{env:...}`` reference, not the value."""
+        p = self.provider
+        assert p is not None
+        npm = {
+            "anthropic": "@ai-sdk/anthropic",
+            "openai": "@ai-sdk/openai-compatible",
+            "openai-responses": "@ai-sdk/openai",
+        }[p.protocol]
+        options: dict[str, Any] = {"baseURL": p.base_url}
+        if p.api_key:
+            options["apiKey"] = "{env:AM_PROVIDER_API_KEY}"
+        models = [
+            *p.models,
+            *([self.model] if self.model and self.model not in p.models else []),
+        ]
+        return {
+            "npm": npm,
+            "name": p.name or p.id,
+            "options": options,
+            "models": {m: {"name": m} for m in models},
+        }
+
+    def provider_env(self) -> dict[str, str | None]:
+        if self.provider is None or not self.provider.api_key:
+            return {}
+        return {"AM_PROVIDER_API_KEY": self.provider.api_key}
 
     def prompt_text(self, task: AgentTask) -> str:
         dirs = [str(d) for d in [*task.skill_dirs, *task.extra_dirs]]
@@ -81,6 +116,8 @@ class OpenCodeRuntime(AcpRuntime):
         self, task: AgentTask, session: dict[str, Any]
     ) -> list[tuple[str, dict[str, Any]]]:
         model = task.model or self.model
+        if model and self.provider is not None and "/" not in model:
+            model = f"{self._provider_id()}/{model}"
         if model:
             return [
                 ("session/set_config_option", {"configId": "model", "value": model})

@@ -12,17 +12,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Runtime configuration (operators' ``runtimes.yaml``) and building runtimes from it."""
+"""Building runtimes from their settings (``domain.settings``)."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Literal
-
-from pydantic import BaseModel, ConfigDict, Field
+from typing import Any
 
 from ..domain.ports import AgentRuntime
+from ..domain.settings import (
+    DEFAULT_RUNTIMES,
+    AdapterName,
+    Budget,
+    GenericOutput,
+    ProviderBinding,
+    RuntimeConfig,
+    merge_configs,
+)
 from .adapters.antigravity import AntigravityRuntime
 from .adapters.claude_code import ClaudeCodeRuntime
 from .adapters.codex import CodexRuntime
@@ -30,9 +37,19 @@ from .adapters.gemini import GeminiRuntime
 from .adapters.generic import GenericRuntime
 from .adapters.opencode import OpenCodeRuntime
 from .exec import ExecRuntime
+from .sandbox import register_secret
 
-AdapterName = Literal[
-    "claude-code", "codex", "antigravity", "opencode", "gemini", "generic"
+__all__ = [
+    "ADAPTERS",
+    "DEFAULT_RUNTIMES",
+    "AdapterName",
+    "Budget",
+    "GenericOutput",
+    "RuntimeConfig",
+    "budgets_of",
+    "build_runtime",
+    "build_runtimes",
+    "merge_configs",
 ]
 
 ADAPTERS: dict[str, type[ExecRuntime]] = {
@@ -45,88 +62,23 @@ ADAPTERS: dict[str, type[ExecRuntime]] = {
 }
 
 
-class Budget(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    daily_usd: float | None = None
-    daily_runs: int | None = None
-
-
-class GenericOutput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    format: Literal["text", "json", "jsonl"] = "text"
-    final_path: str | None = None
-
-
-class RuntimeConfig(BaseModel):
-    """One runtime as operators declare it."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    enabled: bool = True
-    adapter: AdapterName
-    binary: str | None = None
-    model: str | None = None
-    env_allow: list[str] = Field(default_factory=list)
-    extra_args: list[str] = Field(default_factory=list)
-    budget: Budget = Field(default_factory=Budget)
-    options: dict[str, Any] = Field(default_factory=dict)
-    """Adapter-specific keyword arguments, such as ``setting_sources`` for Claude Code."""
-    allow_bypass: bool = False
-    """Whether routes that ask for bypass mode may run this CLI with every permission
-    check skipped. Off by default; without it such routes run in ``auto`` mode."""
-    command_prefix: list[str] = Field(default_factory=list)
-    """A wrapper put before the command, such as a sandbox (``bwrap ... --``) or a
-    switch to an unprivileged user. ``{workdir}`` and ``{run_dir}`` are filled in."""
-    bypass_args: list[str] = Field(default_factory=list)
-    """For the generic adapter: arguments that switch the CLI into its bypass mode."""
-    command: list[str] = Field(default_factory=list)
-    """For the generic adapter: the command template."""
-    output: GenericOutput = Field(default_factory=GenericOutput)
-
-
-DEFAULT_RUNTIMES: dict[str, RuntimeConfig] = {
-    "claude-code": RuntimeConfig(adapter="claude-code"),
-    "codex": RuntimeConfig(adapter="codex"),
-    "antigravity": RuntimeConfig(adapter="antigravity"),
-    "opencode": RuntimeConfig(adapter="opencode"),
-    "gemini": RuntimeConfig(adapter="gemini"),
-    "pi": RuntimeConfig(
-        adapter="generic",
-        enabled=False,
-        command=["pi", "-p", "{prompt}"],
-        output=GenericOutput(format="text"),
-    ),
-    "dsh": RuntimeConfig(
-        adapter="generic",
-        enabled=False,
-        command=["dsh", "run", "--cwd", "{workdir}", "--prompt-file", "{prompt_file}"],
-        output=GenericOutput(format="text"),
-    ),
-}
-"""Defaults for every known CLI. ``pi`` and ``dsh`` are placeholders: their command
-lines are unconfirmed, so they stay disabled until an operator sets them."""
-
-
-def merge_configs(
-    overrides: Mapping[str, Mapping[str, Any]] | None = None,
-) -> dict[str, RuntimeConfig]:
-    """Defaults overlaid with operator overrides, key by key for known runtimes."""
-    merged = {name: cfg.model_copy(deep=True) for name, cfg in DEFAULT_RUNTIMES.items()}
-    for name, data in (overrides or {}).items():
-        base = merged[name].model_dump() if name in merged else {}
-        merged[name] = RuntimeConfig.model_validate({**base, **dict(data)})
-    return merged
-
-
 def build_runtime(
-    name: str, config: RuntimeConfig, runs_dir: Path | str | None = None
+    name: str,
+    config: RuntimeConfig,
+    runs_dir: Path | str | None = None,
+    provider: ProviderBinding | None = None,
 ) -> AgentRuntime:
-    """Build one runtime from its configuration."""
+    """Build one runtime from its configuration.
+
+    ``provider`` points the CLI at a model endpoint instead of its own sign-in; its key
+    is registered for scrubbing, so transcripts and errors never carry it.
+    """
     cls = ADAPTERS[config.adapter]
+    if provider is not None and provider.api_key:
+        register_secret(provider.api_key)
     kwargs: dict[str, Any] = {
         "runs_dir": runs_dir,
+        "provider": provider,
         "env_allow": config.env_allow,
         "model": config.model,
         "extra_args": config.extra_args,
@@ -153,11 +105,18 @@ def build_runtime(
 
 
 def build_runtimes(
-    configs: Mapping[str, RuntimeConfig], runs_dir: Path | str | None = None
+    configs: Mapping[str, RuntimeConfig],
+    runs_dir: Path | str | None = None,
+    providers: Mapping[str, ProviderBinding] | None = None,
 ) -> dict[str, AgentRuntime]:
-    """Build every enabled runtime, keyed by name."""
+    """Build every enabled runtime, keyed by name, each with its provider if it names one."""
     return {
-        name: build_runtime(name, cfg, runs_dir)
+        name: build_runtime(
+            name,
+            cfg,
+            runs_dir,
+            (providers or {}).get(cfg.provider) if cfg.provider else None,
+        )
         for name, cfg in configs.items()
         if cfg.enabled
     }

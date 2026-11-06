@@ -1,66 +1,64 @@
-// The audit log: every decision, execution, approval, pause, and configuration change.
+// The audit log: every decision, execution, approval, pause, and configuration change,
+// searchable, filterable, sortable, and groupable.
 
 import { useQuery } from "@tanstack/react-query";
-import { useState } from "react";
 import { Link } from "react-router-dom";
-import { api, qs, type AuditEntry, type Me } from "../api";
-import { Empty, ErrorBox, Loading, prPath, When } from "../components";
+import { api, type AuditEntry } from "../api";
+import { ErrorBox, PageHead, prPath, timeOf, When } from "../components";
 import { useT } from "../i18n";
+import { DataTable, ListToolbar, useList, type Column } from "../list";
+import { Skeleton } from "../ui";
 
-export default function AuditPage({ me }: { me: Me }) {
+export default function AuditPage() {
   const t = useT();
-  const [repo, setRepo] = useState("");
-  const [kind, setKind] = useState("");
-  const audit = useQuery({ queryKey: ["audit", repo], queryFn: () => api.get<AuditEntry[]>(`/api/audit${qs({ repo })}`) });
-  const rows = (audit.data ?? []).filter((a) => !kind || a.kind === kind);
-  const kinds = [...new Set((audit.data ?? []).map((a) => a.kind))].sort();
+  const audit = useQuery({ queryKey: ["audit"], queryFn: () => api.get<AuditEntry[]>("/api/audit") });
+  const list = useList<AuditEntry>({
+    rows: audit.data ?? [],
+    key: (a) => a.id,
+    search: (a) => `${a.kind} ${a.actor} ${a.repo ?? ""}#${a.number ?? ""} ${a.summary}`,
+    facets: [
+      { id: "kind", label: t("Kind"), values: (a) => a.kind },
+      { id: "actor", label: t("Actor"), values: (a) => a.actor },
+      { id: "repo", label: t("Repository"), values: (a) => a.repo ?? t("service") },
+    ],
+    sorts: [
+      { id: "when", label: t("Time"), value: (a) => timeOf(a.created_at), descFirst: true },
+      { id: "kind", label: t("Kind"), value: (a) => a.kind },
+      { id: "actor", label: t("Actor"), value: (a) => a.actor },
+    ],
+    defaultSort: "-when",
+    groups: [
+      { id: "kind", label: t("Kind"), value: (a) => a.kind },
+      { id: "actor", label: t("Actor"), value: (a) => a.actor },
+      { id: "repo", label: t("Repository"), value: (a) => a.repo ?? t("service") },
+      { id: "day", label: t("Day"), value: (a) => a.created_at.slice(0, 10) },
+    ],
+    pageSize: 100,
+  });
+  const columns: Column<AuditEntry>[] = [
+    { id: "when", header: t("When"), sort: "when", cell: (a) => <When at={a.created_at} />, width: 100 },
+    { id: "kind", header: t("Kind"), sort: "kind", cell: (a) => <span className="mono">{a.kind}</span> },
+    { id: "actor", header: t("Actor"), sort: "actor", cell: (a) => a.actor },
+    {
+      id: "target",
+      header: t("Target"),
+      className: "small",
+      cell: (a) =>
+        a.repo && a.number != null ? <Link to={prPath(a.repo, a.number)}>{`${a.repo}#${a.number}`}</Link> : a.repo ? <Link to={`/repos/${a.repo}`}>{a.repo}</Link> : <span className="muted">{t("service")}</span>,
+    },
+    { id: "summary", header: t("Summary"), cell: (a) => <span className="small">{a.summary}</span> },
+  ];
   return (
     <>
-      <div className="row">
-        <h1 style={{ margin: 0 }}>{t("Audit")}</h1>
-        <select value={repo} onChange={(e) => setRepo(e.target.value)} aria-label={t("Repository")}>
-          <option value="">{t("All")}</option>
-          {me.repos.map((r) => (
-            <option key={r}>{r}</option>
-          ))}
-        </select>
-        <select value={kind} onChange={(e) => setKind(e.target.value)} aria-label="Kind">
-          <option value="">all kinds</option>
-          {kinds.map((k) => (
-            <option key={k}>{k}</option>
-          ))}
-        </select>
-      </div>
+      <PageHead title={t("Audit log")} sub={t("Everything the service and its users decided or changed.")} />
+      <ListToolbar list={list} placeholder={t("Search the audit log")} />
       <ErrorBox error={audit.error} />
-      {audit.isLoading ? <Loading /> : !rows.length ? <Empty /> : (
-        <div className="card table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>When</th>
-                <th>Kind</th>
-                <th>Actor</th>
-                <th>Target</th>
-                <th>Summary</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((a) => (
-                <tr key={a.id}>
-                  <td className="small">
-                    <When at={a.created_at} />
-                  </td>
-                  <td className="mono">{a.kind}</td>
-                  <td className="small">{a.actor}</td>
-                  <td className="small">
-                    {a.repo && a.number != null ? <Link to={prPath(a.repo, a.number)}>{a.repo}#{a.number}</Link> : a.repo ?? "service"}
-                  </td>
-                  <td className="small">{a.summary}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+      {audit.isLoading ? (
+        <div className="card">
+          <Skeleton rows={8} />
         </div>
+      ) : (
+        <DataTable list={list} columns={columns} empty={t("Nothing recorded yet.")} />
       )}
     </>
   );

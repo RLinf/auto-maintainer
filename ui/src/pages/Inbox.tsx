@@ -1,183 +1,138 @@
-// The proposal inbox: exactly what each proposal will post, with edit-before-approve.
+// Proposals: every action that waits for a maintainer, showing exactly what will be
+// posted, editable before approval, with filters, sorting, grouping, and bulk approval.
 
-import { useQuery } from "@tanstack/react-query";
-import { useState } from "react";
-import { Link } from "react-router-dom";
-import { api, type ProposalWithAction } from "../api";
-import { Empty, ErrorBox, Loading, Pre, Status, useAct, When, prPath } from "../components";
+import { Fragment } from "react";
+import { api, type Me, type ProposalWithAction } from "../api";
+import { useAgent } from "../agent";
+import { CaughtUp, ErrorBox, PageHead, timeOf, useAct } from "../components";
+import { useProposals } from "../data";
 import { useT } from "../i18n";
+import { Icon } from "../icons";
+import { BulkBar, ListToolbar, useList } from "../list";
+import { kindLabel, ProposalCard, PROPOSAL_KEYS } from "../proposal";
+import { Skeleton, Tabs, useTab, useToast } from "../ui";
 
-const LABEL_KINDS = new Set(["label.apply", "label.ci_gate", "issue.label"]);
-const KEYS = [["proposals"], ["pr"], ["prs"], ["repos"]];
+export { useProposals } from "../data";
 
-interface InlineComment {
-  path: string;
-  line: number;
-  start_line?: number | null;
-  side?: string;
-  body: string;
-}
-
-export function useProposals() {
-  return useQuery({ queryKey: ["proposals", "pending"], queryFn: () => api.get<ProposalWithAction[]>("/api/proposals") });
-}
-
-export default function InboxPage({ me }: { me?: string }) {
+export default function InboxPage({ me }: { me: Me }) {
   const t = useT();
+  const toast = useToast();
+  const agent = useAgent();
   const proposals = useProposals();
-  const bulk = useAct(
-    async (ids: string[]) => {
-      for (const id of ids) await api.post(`/api/proposals/${id}/approve`, {});
-    },
-    KEYS,
-  );
+  const rows = proposals.data ?? [];
+  const mine = rows.filter((p) => p.requested_by === me.login);
+  const tabs = [
+    { id: "all", label: t("All"), count: rows.length },
+    { id: "mine", label: t("Your review drafts"), count: mine.length },
+    { id: "service", label: t("From the service"), count: rows.length - mine.length },
+  ];
+  const [tab, setTab] = useTab(tabs);
+  const source = tab === "mine" ? mine : tab === "service" ? rows.filter((p) => p.requested_by !== me.login) : rows;
+  const list = useList<ProposalWithAction>({
+    rows: source,
+    key: (p) => p.id,
+    search: (p) =>
+      `${p.repo} ${p.action?.action.kind ?? ""} ${kindLabel(p.action?.action.kind ?? "")} ${p.action?.action.rationale ?? ""} #${p.action?.action.number ?? ""} ${String(p.action?.action.payload.body ?? "")}`,
+    facets: [
+      { id: "repo", label: t("Repository"), values: (p) => p.repo },
+      { id: "kind", label: t("Action"), values: (p) => t(kindLabel(p.action?.action.kind ?? "unknown")) },
+      { id: "warn", label: t("Warnings"), values: (p) => (p.warnings.length ? t("Has warnings") : t("No warnings")) },
+    ],
+    sorts: [
+      { id: "new", label: t("Created"), value: (p) => timeOf(p.created_at), descFirst: true },
+      { id: "repo", label: t("Repository"), value: (p) => p.repo },
+      { id: "kind", label: t("Action"), value: (p) => p.action?.action.kind ?? "" },
+    ],
+    defaultSort: "-new",
+    groups: [
+      { id: "repo", label: t("Repository"), value: (p) => p.repo },
+      { id: "kind", label: t("Action"), value: (p) => t(kindLabel(p.action?.action.kind ?? "unknown")) },
+      { id: "pr", label: t("Pull request"), value: (p) => (p.action?.action.number != null ? `${p.repo}#${p.action.action.number}` : p.repo) },
+    ],
+    pageSize: 25,
+  });
+  const bulk = useAct(async (ids: string[]) => {
+    for (const id of ids) await api.post(`/api/proposals/${id}/approve`, {});
+    return ids.length;
+  }, PROPOSAL_KEYS);
 
-  if (proposals.isLoading) return <Loading />;
-  const mine = (proposals.data ?? []).filter((p) => me && p.requested_by === me);
-  const groups = new Map<string, ProposalWithAction[]>();
-  for (const p of proposals.data ?? []) {
-    if (me && p.requested_by === me) continue;
-    groups.set(p.repo, [...(groups.get(p.repo) ?? []), p]);
-  }
-
+  const groups = list.grouped ?? [["", list.visible] as [string, ProposalWithAction[]]];
   return (
     <>
-      <h1>{t("Inbox")}</h1>
-      <ErrorBox error={proposals.error || bulk.error} />
-      {mine.length > 0 && (
-        <section className="card stack">
-          <header className="card-head">
-            <h2>
-              {t("Your review drafts")} <span className="muted small">{mine.length} to edit and post</span>
-            </h2>
-          </header>
-          {mine.map((p) => (
-            <ProposalCard key={p.id} proposal={p} />
-          ))}
-        </section>
-      )}
-      {groups.size === 0 && mine.length === 0 && <Empty>No proposals wait for you.</Empty>}
-      {[...groups.entries()].map(([repo, items]) => {
-        const labelIds = items.filter((p) => p.action && LABEL_KINDS.has(p.action.action.kind)).map((p) => p.id);
-        return (
-          <section key={repo} className="card stack">
-            <header className="card-head">
-              <h2>
-                {repo} <span className="muted small">{items.length} pending</span>
-              </h2>
-              {labelIds.length > 0 && (
-                <button disabled={bulk.isPending} onClick={() => bulk.mutate(labelIds)}>
-                  {t("Approve all labels")} ({labelIds.length})
-                </button>
-              )}
-            </header>
-            {items.map((p) => (
-              <ProposalCard key={p.id} proposal={p} />
-            ))}
-          </section>
-        );
-      })}
-    </>
-  );
-}
-
-export function ProposalCard({ proposal, compact = false }: { proposal: ProposalWithAction; compact?: boolean }) {
-  const t = useT();
-  const record = proposal.action;
-  const action = record?.action;
-  const payload = (action?.payload ?? {}) as Record<string, unknown>;
-  const [editing, setEditing] = useState(false);
-  const [body, setBody] = useState(typeof payload.body === "string" ? payload.body : "");
-  const [comments, setComments] = useState<InlineComment[]>(Array.isArray(payload.comments) ? (payload.comments as InlineComment[]) : []);
-  const [rejecting, setRejecting] = useState(false);
-  const [reason, setReason] = useState("");
-
-  const approve = useAct(() => {
-    const edited: Record<string, unknown> | undefined = editing ? { ...payload, body, ...(comments.length ? { comments } : {}) } : undefined;
-    return api.post(`/api/proposals/${proposal.id}/approve`, edited ? { payload: edited } : {});
-  }, KEYS);
-  const reject = useAct(() => api.post(`/api/proposals/${proposal.id}/reject`, { reason }), KEYS);
-
-  if (!action) return <div className="proposal muted">Action {proposal.action_id} is missing.</div>;
-  const hasBody = typeof payload.body === "string";
-  const done = proposal.state !== "pending" || approve.isSuccess || reject.isSuccess;
-
-  return (
-    <div className="proposal">
-      <div className="row">
-        <span className="mono">{action.kind}</span>
-        {action.number != null && (
-          <Link to={prPath(action.repo, action.number)}>
-            {action.repo}#{action.number}
-          </Link>
-        )}
-        {action.head_sha && <span className="mono muted small">at {action.head_sha.slice(0, 7)}</span>}
-        <Status value={approve.isSuccess ? "approved" : reject.isSuccess ? "rejected" : proposal.state} />
-        <span className="muted small right">
-          <When at={proposal.created_at} />
-        </span>
-      </div>
-      {action.rationale && <div className="small muted">{action.rationale}</div>}
-      {proposal.warnings.length > 0 && (
-        <ul className="small" style={{ margin: 0, color: "var(--warn)" }}>
-          {proposal.warnings.map((w) => (
-            <li key={w}>{w}</li>
-          ))}
-        </ul>
-      )}
-      {!compact && (
-        <>
-          {hasBody &&
-            (editing ? (
-              <textarea value={body} onChange={(e) => setBody(e.target.value)} rows={Math.min(24, body.split("\n").length + 2)} />
-            ) : (
-              <Pre text={String(payload.body)} />
-            ))}
-          {comments.length > 0 && (
-            <div className="stack">
-              <span className="small muted">{comments.length} inline comments</span>
-              {comments.map((c, i) => (
-                <div key={i} className="inline-comment stack">
-                  <span className="mono small">
-                    {c.path}:{c.start_line ? `${c.start_line}-` : ""}
-                    {c.line}
-                  </span>
-                  {editing ? (
-                    <textarea
-                      value={c.body}
-                      onChange={(e) => setComments(comments.map((x, j) => (j === i ? { ...x, body: e.target.value } : x)))}
-                    />
-                  ) : (
-                    <Pre text={c.body} />
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
-          {!hasBody && !comments.length && <Pre text={JSON.stringify(payload, null, 2)} />}
-        </>
-      )}
-      {!done && (
-        <div className="row">
-          <button className="primary" disabled={approve.isPending} onClick={() => approve.mutate(undefined)}>
-            {editing ? "Approve edited" : t("Approve")}
+      <PageHead
+        title={t("Proposals")}
+        sub={t("What the service wants to do and needs a person to approve. What you see is exactly what will be posted.")}
+        actions={
+          <button className="agent" onClick={() => agent.open()}>
+            <Icon name="sparkles" />
+            {t("Ask about these")}
           </button>
-          {!compact && hasBody && <button onClick={() => setEditing(!editing)}>{editing ? "Discard edits" : "Edit"}</button>}
-          {rejecting ? (
-            <>
-              <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Reason (required)" />
-              <button className="danger" disabled={!reason.trim() || reject.isPending} onClick={() => reject.mutate(undefined)}>
-                {t("Reject")}
+        }
+      />
+      <Tabs tabs={tabs} active={tab} onChange={setTab} />
+      <ListToolbar list={list} placeholder={t("Search proposals")} />
+      <ErrorBox error={proposals.error || bulk.error} />
+      {proposals.isLoading ? (
+        <div className="card">
+          <Skeleton rows={6} />
+        </div>
+      ) : !list.count ? (
+        <div className="card">
+          <CaughtUp>{list.filtering ? t("Nothing matches these filters.") : t("No proposals wait for you.")}</CaughtUp>
+        </div>
+      ) : (
+        <div className="stack">
+          {groups.map(([group, items]) => (
+            <Fragment key={group}>
+              {group && (
+                <div className="row" style={{ marginTop: 6 }}>
+                  <h2>{group}</h2>
+                  <span className="muted small">{items.length}</span>
+                  <button className="ghost sm right" onClick={() => list.selectAll(items)}>
+                    {t("Select all")}
+                  </button>
+                </div>
+              )}
+              {items.map((p) => (
+                <ProposalCard key={p.id} proposal={p} selected={list.isSelected(p)} onSelect={() => list.toggle(p)} />
+              ))}
+            </Fragment>
+          ))}
+          {!list.grouped && list.pages > 1 && (
+            <div className="row" style={{ justifyContent: "center" }}>
+              <button className="sm" disabled={list.page === 0} onClick={() => list.setPage(list.page - 1)}>
+                {t("Previous")}
               </button>
-            </>
-          ) : (
-            <button className="danger" onClick={() => setRejecting(true)}>
-              {t("Reject")}
-            </button>
+              <span className="small muted">
+                {list.page + 1} / {list.pages}
+              </span>
+              <button className="sm" disabled={list.page >= list.pages - 1} onClick={() => list.setPage(list.page + 1)}>
+                {t("Next")}
+              </button>
+            </div>
           )}
         </div>
       )}
-      <ErrorBox error={approve.error || reject.error} />
-    </div>
+      <BulkBar count={list.selected.length} onClear={list.clearSelection}>
+        <button
+          className="primary sm"
+          disabled={bulk.isPending}
+          onClick={() =>
+            bulk.mutate(
+              list.selected.map((p) => p.id),
+              {
+                onSuccess: (n) => {
+                  list.clearSelection();
+                  toast({ title: `${n} ${t("proposals approved")}`, icon: "check" });
+                },
+              },
+            )
+          }
+        >
+          <Icon name="check" size={14} />
+          {bulk.isPending ? t("Approving…") : `${t("Approve")} ${list.selected.length}`}
+        </button>
+      </BulkBar>
+    </>
   );
 }

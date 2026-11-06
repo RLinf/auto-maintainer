@@ -1,123 +1,448 @@
-// Layout, navigation, sign-in gate, and routes.
+// The shell: sign-in gate, a top bar with three primary destinations and everything else
+// one menu or one keystroke away (Cmd/Ctrl+K), the agent on every page (Cmd/Ctrl+J), and
+// the routes.
 
-import { useQuery } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
-import { Link, NavLink, Route, Routes } from "react-router-dom";
-import { api, ApiError, type Me, type ProposalWithAction } from "./api";
-import { ErrorBox, Loading } from "./components";
+import { useQueryClient } from "@tanstack/react-query";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Link, NavLink, Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import { api, ApiError, type Me } from "./api";
+import { AgentProvider, useAgent } from "./agent";
+import { Empty, ErrorBox } from "./components";
+import { useMe, useMemoryChanges, useProposals } from "./data";
 import { QUESTION_EVENT, useLiveEvents } from "./events";
 import { useLang, useT } from "./i18n";
+import { Icon } from "./icons";
+import { CommandPalette, NAV, type Command } from "./palette";
 import AgentsPage from "./pages/Agents";
 import AuditPage from "./pages/Audit";
 import ChatPage from "./pages/Chat";
 import CiPage from "./pages/Ci";
+import HomePage from "./pages/Home";
 import InboxPage from "./pages/Inbox";
 import MemoryPage from "./pages/Memory";
 import PrPage from "./pages/Pr";
 import QuestionsPage from "./pages/Questions";
 import QueuePage from "./pages/Queue";
-import ServicePage from "./pages/Service";
 import { RepoDetailPage, ReposPage } from "./pages/Repos";
+import ServicePage from "./pages/Service";
+import SettingsPage from "./pages/Settings";
 import SignIn from "./pages/SignIn";
+import { MenuItem, Popover, Skeleton, ToastProvider, useHotkey, useTheme, useToast } from "./ui";
 
-export function useMe() {
-  return useQuery({ queryKey: ["me"], queryFn: () => api.get<Me>("/api/me") });
-}
+export { useMe } from "./data";
 
 export default function App() {
   const me = useMe();
+  if (me.isLoading) {
+    return (
+      <div className="content" style={{ paddingTop: 80 }}>
+        <Skeleton rows={6} />
+      </div>
+    );
+  }
+  if (me.error instanceof ApiError && me.error.status === 401) return <SignIn />;
+  if (me.error) {
+    return (
+      <div className="content">
+        <ErrorBox error={me.error} />
+      </div>
+    );
+  }
+  return (
+    <ToastProvider>
+      <AgentProvider>
+        <Shell me={me.data!} />
+      </AgentProvider>
+    </ToastProvider>
+  );
+}
+
+const PRIMARY = NAV.slice(0, 3);
+const MORE = NAV.slice(3);
+
+function Shell({ me }: { me: Me }) {
   const t = useT();
   const { lang, setLang } = useLang();
-  const signedIn = me.isSuccess;
-  useLiveEvents(signedIn);
-  const proposals = useQuery({
-    queryKey: ["proposals", "pending"],
-    queryFn: () => api.get<ProposalWithAction[]>("/api/proposals"),
-    enabled: signedIn,
-  });
-  const [asked, setAsked] = useState<string | null>(null);
-  useEffect(() => {
-    const show = (e: Event) => setAsked((e as CustomEvent<string>).detail);
-    window.addEventListener(QUESTION_EVENT, show);
-    return () => window.removeEventListener(QUESTION_EVENT, show);
-  }, []);
+  const [theme, setTheme] = useTheme();
+  const navigate = useNavigate();
+  const location = useLocation();
+  const agent = useAgent();
+  const toast = useToast();
+  const client = useQueryClient();
+  useLiveEvents(true);
+  const proposals = useProposals();
+  const memory = useMemoryChanges();
+  const [palette, setPalette] = useState(false);
+  const [help, setHelp] = useState(false);
 
-  if (me.isLoading) return <Loading />;
-  if (me.error instanceof ApiError && me.error.status === 401) return <SignIn />;
-  if (me.error) return <div className="content"><ErrorBox error={me.error} /></div>;
-  const user = me.data!;
+  const counts = {
+    questions: me.pending_questions,
+    proposals: proposals.data?.length ?? 0,
+    memory: memory.data?.length ?? 0,
+  };
+  const waiting = counts.questions + counts.proposals + counts.memory;
+
+  useHotkey("mod+k", () => setPalette((o) => !o));
+  useHotkey("?", () => setHelp(true));
+  useGoKeys((to) => navigate(to));
+  useEffect(() => {
+    const onAsk = (e: Event) =>
+      toast({
+        title: t("An agent is waiting for an answer"),
+        body: (e as CustomEvent<string>).detail,
+        icon: "question",
+        action: { label: t("Answer"), onClick: () => navigate("/questions") },
+      });
+    window.addEventListener(QUESTION_EVENT, onAsk);
+    return () => window.removeEventListener(QUESTION_EVENT, onAsk);
+  }, [toast, navigate, t]);
 
   const signOut = async () => {
     await fetch("/auth/logout", { method: "POST", credentials: "same-origin" });
     window.location.href = "/";
   };
+  const setPaused = async (paused: boolean) => {
+    try {
+      await api.post(paused ? "/api/pause" : "/api/resume", paused ? { reason: "paused from the dashboard" } : {});
+      await client.invalidateQueries({ queryKey: ["me"] });
+      toast({ title: paused ? t("The service is paused") : t("The service resumed"), icon: paused ? "pause" : "play" });
+    } catch (e) {
+      toast({ title: t("Could not change the service state"), body: e instanceof Error ? e.message : String(e), icon: "x" });
+    }
+  };
+  const canNotify = typeof Notification !== "undefined" && Notification.permission === "default";
 
-  const nav: [string, string, number | undefined][] = [
-    ["/", t("Queue"), undefined],
-    ["/inbox", t("Inbox"), proposals.data?.length],
-    ["/questions", t("Questions"), user.pending_questions],
-    ["/memory", t("Memory"), undefined],
-    ["/repos", t("Repositories"), undefined],
-    ["/ci", t("CI"), undefined],
-    ["/agents", t("Agents"), undefined],
-    ["/service", t("Service"), undefined],
-    ["/audit", t("Audit"), undefined],
-    ["/chat", t("Chat"), undefined],
-  ];
+  const commands = useMemo<Command[]>(() => {
+    const list: Command[] = [
+      { id: "agent", group: "Commands", label: t("Ask the agent about this page"), sub: "⌘J", icon: "sparkles", run: () => agent.open() },
+      me.paused
+        ? { id: "resume", group: "Commands", label: t("Resume the service"), icon: "play", run: () => void setPaused(false) }
+        : { id: "pause", group: "Commands", label: t("Pause the service"), icon: "pause", keywords: "stop halt", run: () => void setPaused(true) },
+      { id: "theme-light", group: "Commands", label: t("Use the light theme"), icon: "sun", keywords: "appearance", run: () => setTheme("light") },
+      { id: "theme-dark", group: "Commands", label: t("Use the dark theme"), icon: "moon", keywords: "appearance", run: () => setTheme("dark") },
+      { id: "theme-system", group: "Commands", label: t("Use the system theme"), icon: "monitor", keywords: "appearance", run: () => setTheme("system") },
+      {
+        id: "lang",
+        group: "Commands",
+        label: lang === "zh" ? "Switch to English" : "切换到中文",
+        icon: "globe",
+        keywords: "language chinese english",
+        run: () => setLang(lang === "zh" ? "en" : "zh"),
+      },
+      { id: "keys", group: "Commands", label: t("Keyboard shortcuts"), sub: "?", icon: "keyboard", run: () => setHelp(true) },
+      { id: "signout", group: "Commands", label: t("Sign out"), icon: "logout", run: () => void signOut() },
+    ];
+    if (canNotify) {
+      list.push({ id: "notify", group: "Commands", label: t("Alert me in the browser"), icon: "bell", run: () => void Notification.requestPermission() });
+    }
+    return list;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [me.paused, lang, agent, t, canNotify]);
 
+  const moreActive = MORE.some((n) => location.pathname.startsWith(n.to));
   return (
-    <div className="layout">
-      <nav className="nav" aria-label="Main">
-        <div className="brand">auto-maintainer</div>
-        {nav.map(([to, label, count]) => (
-          <NavLink key={to} to={to} end={to === "/"}>
-            <span>{label}</span>
-            {count ? <span className="count">{count}</span> : null}
-          </NavLink>
-        ))}
-      </nav>
-      <div className="main">
-        {user.paused && <div className="banner paused">{t("The service is paused")}</div>}
-        {(asked || user.pending_questions > 0) && (
-          <div className="banner question" role="status">
-            {asked ?? t("An agent is waiting for an answer")}{" "}
-            <Link to="/questions" onClick={() => setAsked(null)}>
-              {t("Open questions")}
+    <>
+      <header className="header">
+        <div className="header-inner">
+          <Link to="/" className="logo" aria-label="auto-maintainer home">
+            <span className="logo-mark">
+              <Icon name="merge" size={15} />
+            </span>
+            <span className="name">auto-maintainer</span>
+          </Link>
+          <nav className="tabs-nav" aria-label={t("Main")}>
+            {PRIMARY.map((n) => (
+              <NavLink key={n.to} to={n.to} end={n.to === "/"} title={t(n.label)}>
+                <Icon name={n.icon} size={15} />
+                <span className="label-text">{t(n.label)}</span>
+                {n.to === "/" && waiting > 0 && <span className="count">{waiting}</span>}
+              </NavLink>
+            ))}
+            <Popover
+              label={t("More")}
+              trigger={(_, toggle) => (
+                <a
+                  href="#more"
+                  className={moreActive ? "active" : ""}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    toggle();
+                  }}
+                  aria-haspopup="menu"
+                >
+                  <span className="label-text">{moreActive ? t(MORE.find((n) => location.pathname.startsWith(n.to))!.label) : t("More")}</span>
+                  <Icon name="chevronDown" size={14} />
+                </a>
+              )}
+            >
+              {(close) => (
+                <div style={{ width: 300 }}>
+                  {MORE.map((n) => (
+                    <button
+                      key={n.to}
+                      className="menu-item"
+                      style={{ height: "auto", padding: "8px 10px", alignItems: "flex-start" }}
+                      onClick={() => {
+                        navigate(n.to);
+                        close();
+                      }}
+                    >
+                      <Icon name={n.icon} />
+                      <span className="stack" style={{ gap: 0 }}>
+                        <span style={{ fontWeight: 550 }}>
+                          {t(n.label)}
+                          {n.to === "/inbox" && counts.proposals > 0 && <span className="muted"> · {counts.proposals}</span>}
+                          {n.to === "/questions" && counts.questions > 0 && <span className="muted"> · {counts.questions}</span>}
+                          {n.to === "/memory" && counts.memory > 0 && <span className="muted"> · {counts.memory}</span>}
+                        </span>
+                        <span className="small muted">{t(n.hint)}</span>
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </Popover>
+          </nav>
+          <span className="spacer" />
+          <button className="search-trigger" onClick={() => setPalette(true)} aria-label={t("Search")}>
+            <Icon name="search" />
+            <span className="grow">{t("Search or run a command")}</span>
+            <span className="kbd">⌘K</span>
+          </button>
+          <button className="agent hide-narrow" onClick={() => agent.toggle()} title={`${t("Ask agent")} (⌘J)`}>
+            <Icon name="sparkles" />
+            {t("Ask agent")}
+          </button>
+          <Popover
+            align="right"
+            label={t("Waiting on you")}
+            trigger={(_, toggle) => (
+              <button className="ghost icon" onClick={toggle} aria-label={`${t("Waiting on you")}: ${waiting}`} style={{ position: "relative" }}>
+                <Icon name="bell" />
+                {waiting > 0 && (
+                  <span className="pill" style={{ position: "absolute", top: 1, right: -2, padding: "0 5px", lineHeight: "16px", fontSize: 10.5, background: "var(--bad)", color: "#fff" }}>
+                    {waiting}
+                  </span>
+                )}
+              </button>
+            )}
+          >
+            {(close) => {
+              const go = (to: string) => () => {
+                navigate(to);
+                close();
+              };
+              return (
+                <>
+                  <div className="menu-label">{t("Waiting on you")}</div>
+                  <MenuItem icon="question" hint={counts.questions || "—"} onClick={go("/questions")}>
+                    {t("Agent questions")}
+                  </MenuItem>
+                  <MenuItem icon="inbox" hint={counts.proposals || "—"} onClick={go("/inbox")}>
+                    {t("Proposals")}
+                  </MenuItem>
+                  <MenuItem icon="book" hint={counts.memory || "—"} onClick={go("/memory")}>
+                    {t("Memory changes")}
+                  </MenuItem>
+                  <div className="menu-sep" />
+                  <MenuItem icon="home" onClick={go("/")}>
+                    {t("See everything on Home")}
+                  </MenuItem>
+                  {canNotify && (
+                    <MenuItem icon="bell" onClick={() => void Notification.requestPermission()}>
+                      {t("Alert me in the browser")}
+                    </MenuItem>
+                  )}
+                </>
+              );
+            }}
+          </Popover>
+          <Popover
+            align="right"
+            label={t("Account")}
+            trigger={(_, toggle) => (
+              <button className="ghost icon" onClick={toggle} aria-label={t("Account")}>
+                {me.avatar_url ? <img className="avatar" src={me.avatar_url} alt="" /> : <Icon name="globe" />}
+              </button>
+            )}
+          >
+            {(close) => (
+              <>
+                <div style={{ padding: "8px 10px 6px" }}>
+                  <div style={{ fontWeight: 600 }}>{me.name || me.login}</div>
+                  <div className="small muted">
+                    @{me.login}
+                    {me.operator ? ` · ${t("operator")}` : ""}
+                  </div>
+                </div>
+                <div className="menu-sep" />
+                <div className="menu-label">{t("Theme")}</div>
+                <MenuItem icon="monitor" checked={theme === "system"} onClick={() => setTheme("system")}>
+                  {t("System")}
+                </MenuItem>
+                <MenuItem icon="sun" checked={theme === "light"} onClick={() => setTheme("light")}>
+                  {t("Light")}
+                </MenuItem>
+                <MenuItem icon="moon" checked={theme === "dark"} onClick={() => setTheme("dark")}>
+                  {t("Dark")}
+                </MenuItem>
+                <div className="menu-label">{t("Language")}</div>
+                <MenuItem checked={lang === "en"} onClick={() => setLang("en")}>
+                  English
+                </MenuItem>
+                <MenuItem checked={lang === "zh"} onClick={() => setLang("zh")}>
+                  中文
+                </MenuItem>
+                <div className="menu-sep" />
+                <MenuItem icon="settings" hint="g s" onClick={() => (navigate("/settings"), close())}>
+                  {t("Settings")}
+                </MenuItem>
+                <MenuItem icon="keyboard" hint="?" onClick={() => (setHelp(true), close())}>
+                  {t("Keyboard shortcuts")}
+                </MenuItem>
+                <MenuItem icon={me.paused ? "play" : "pause"} onClick={() => (void setPaused(!me.paused), close())}>
+                  {me.paused ? t("Resume the service") : t("Pause the service")}
+                </MenuItem>
+                <MenuItem icon="logout" onClick={() => void signOut()}>
+                  {t("Sign out")}
+                </MenuItem>
+              </>
+            )}
+          </Popover>
+        </div>
+      </header>
+
+      <main className="content">
+        {me.paused && (
+          <div className="strip paused" role="status">
+            <Icon name="pause" />
+            <span>{t("The service is paused. It posts and changes nothing until it resumes.")}</span>
+            {me.operator && (
+              <button className="sm right" onClick={() => void setPaused(false)}>
+                <Icon name="play" size={14} />
+                {t("Resume")}
+              </button>
+            )}
+          </div>
+        )}
+        {me.dev_mode && (
+          <div className="strip dev" role="status">
+            <Icon name="shield" />
+            <span>{t("Dev mode: repository actions stay in shadow, except on the sandbox repository.")}</span>
+          </div>
+        )}
+        {counts.questions > 0 && location.pathname !== "/questions" && (
+          <div className="strip question" role="status">
+            <Icon name="question" />
+            <span>
+              {counts.questions === 1
+                ? t("An agent is waiting for an answer")
+                : `${counts.questions} ${t("agents are waiting for an answer")}`}
+            </span>
+            <Link to="/questions" className="right">
+              {t("Answer now")}
             </Link>
           </div>
         )}
-        <header className="topbar">
-          {user.dev_mode && <span className="badge">{t("Dev mode")}</span>}
-          <span className="spacer" />
-          <select aria-label="Language" value={lang} onChange={(e) => setLang(e.target.value as "en" | "zh")}>
-            <option value="en">EN</option>
-            <option value="zh">中文</option>
-          </select>
-          <span className="row">
-            {user.avatar_url && <img className="avatar" src={user.avatar_url} alt="" />}
-            <strong>{user.login}</strong>
-            {user.operator && <span className="muted small">operator</span>}
-          </span>
-          <button onClick={signOut}>{t("Sign out")}</button>
-        </header>
-        <main className="content">
-          <Routes>
-            <Route path="/" element={<QueuePage me={user} />} />
-            <Route path="/pr/:owner/:repo/:number" element={<PrPage />} />
-            <Route path="/inbox" element={<InboxPage me={user.login} />} />
-            <Route path="/questions" element={<QuestionsPage />} />
-            <Route path="/memory" element={<MemoryPage />} />
-            <Route path="/repos" element={<ReposPage />} />
-            <Route path="/repos/:owner/:repo" element={<RepoDetailPage />} />
-            <Route path="/ci" element={<CiPage me={user} />} />
-            <Route path="/agents" element={<AgentsPage />} />
-            <Route path="/service" element={<ServicePage />} />
-            <Route path="/audit" element={<AuditPage me={user} />} />
-            <Route path="/chat" element={<ChatPage me={user} />} />
-            <Route path="/chat/:threadId" element={<ChatPage me={user} />} />
-            <Route path="*" element={<div className="muted">Page not found.</div>} />
-          </Routes>
-        </main>
+        <Routes>
+          <Route path="/" element={<HomePage me={me} />} />
+          <Route path="/prs" element={<QueuePage me={me} />} />
+          <Route path="/pr/:owner/:repo/:number" element={<PrPage me={me} />} />
+          <Route path="/inbox" element={<InboxPage me={me} />} />
+          <Route path="/questions" element={<QuestionsPage />} />
+          <Route path="/memory" element={<MemoryPage />} />
+          <Route path="/repos" element={<ReposPage />} />
+          <Route path="/repos/:owner/:repo" element={<RepoDetailPage />} />
+          <Route path="/ci" element={<CiPage />} />
+          <Route path="/agents" element={<AgentsPage />} />
+          <Route path="/settings" element={<SettingsPage />} />
+          <Route path="/service" element={<ServicePage />} />
+          <Route path="/audit" element={<AuditPage />} />
+          <Route path="/chat" element={<ChatPage />} />
+          <Route path="/chat/:threadId" element={<ChatPage />} />
+          <Route
+            path="*"
+            element={
+              <Empty icon="search">
+                {t("Page not found.")} <Link to="/">{t("Go home")}</Link>
+              </Empty>
+            }
+          />
+        </Routes>
+      </main>
+
+      {!agent.isOpen && (
+        <button className="agent fab" onClick={() => agent.open()} aria-label={t("Ask agent")}>
+          <Icon name="sparkles" size={18} />
+          {t("Ask agent")}
+        </button>
+      )}
+      <CommandPalette open={palette} onClose={() => setPalette(false)} commands={commands} me={me} />
+      {help && <ShortcutsDialog onClose={() => setHelp(false)} />}
+    </>
+  );
+}
+
+/** ``g`` then a letter goes to a page (``g h`` home, ``g p`` pull requests, …). */
+function useGoKeys(go: (to: string) => void) {
+  const armed = useRef(0);
+  useEffect(() => {
+    const targets = Object.fromEntries(NAV.filter((n) => n.keys).map((n) => [n.keys!.split(" ")[1], n.to]));
+    const onKey = (e: KeyboardEvent) => {
+      const el = e.target as HTMLElement;
+      if (["INPUT", "TEXTAREA", "SELECT"].includes(el.tagName) || el.isContentEditable || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (Date.now() - armed.current < 1200 && targets[e.key]) {
+        e.preventDefault();
+        armed.current = 0;
+        go(targets[e.key]);
+      } else if (e.key === "g") {
+        armed.current = Date.now();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [go]);
+}
+
+function ShortcutsDialog({ onClose }: { onClose: () => void }) {
+  const t = useT();
+  useHotkey("escape", onClose);
+  const rows: [string[], string][] = [
+    [["⌘", "K"], "Search, go anywhere, run a command"],
+    [["⌘", "J"], "Open or close the agent"],
+    [["/"], "Search the list on this page"],
+    [["j", "k"], "Move through a list"],
+    [["↵"], "Open the highlighted row"],
+    [["x"], "Select the highlighted row"],
+    ...NAV.filter((n) => n.keys).map((n) => [n.keys!.split(" "), `${t("Go to")} ${t(n.label)}`] as [string[], string]),
+    [["?"], "Show this list"],
+  ];
+  return (
+    <div className="overlay" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+      <div className="dialog" role="dialog" aria-modal="true" aria-label={t("Keyboard shortcuts")}>
+        <div className="dialog-body">
+          <div className="row">
+            <h2>{t("Keyboard shortcuts")}</h2>
+            <button className="ghost icon sm right" onClick={onClose} aria-label={t("Close")}>
+              <Icon name="x" size={14} />
+            </button>
+          </div>
+          <dl className="props">
+            {rows.map(([keys, label]) => (
+              <div key={label} style={{ display: "contents" }}>
+                <dt>
+                  {keys.map((k) => (
+                    <span key={k} className="kbd" style={{ marginRight: 4 }}>
+                      {k}
+                    </span>
+                  ))}
+                </dt>
+                <dd>{t(label)}</dd>
+              </div>
+            ))}
+          </dl>
+          <span className="small muted">{t("On Windows and Linux, use Ctrl for ⌘.")}</span>
+        </div>
       </div>
     </div>
   );

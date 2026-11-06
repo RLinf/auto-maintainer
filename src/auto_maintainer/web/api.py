@@ -174,8 +174,8 @@ async def code_maintainer(service: Service, user: User) -> tuple[bool, str]:
     if not repo:
         return False, "no code repo is configured"
     need = Permission(service.settings.code_approver)
-    have = await service.a.forge.get_permission(repo, user.login)
-    if have.at_least(need):
+    decision = await service.gate.check_service(repo, user.login, need)
+    if decision.allowed:
         return True, ""
     return (
         False,

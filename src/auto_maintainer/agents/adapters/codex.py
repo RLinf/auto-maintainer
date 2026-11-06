@@ -120,7 +120,35 @@ class CodexRuntime(ExecRuntime):
     def build_invocation(
         self, task: AgentTask, files: RunFiles, binary: str
     ) -> Invocation:
-        return Invocation(argv=[binary, "app-server", *self.extra_args])
+        return Invocation(
+            argv=[binary, "app-server", *self.provider_args(), *self.extra_args]
+        )
+
+    def provider_args(self) -> list[str]:
+        """``-c`` overrides that define and select ``self.provider``; the key itself is
+        read from ``AM_PROVIDER_API_KEY`` (``env_key``), never put on the command line."""
+        p = self.provider
+        if p is None:
+            return []
+        key = f"model_providers.am-{p.id}"
+        wire = "responses" if p.protocol == "openai-responses" else "chat"
+        pairs = [
+            ("model_provider", f"am-{p.id}"),
+            (f"{key}.name", p.name or p.id),
+            (f"{key}.base_url", p.base_url),
+            (f"{key}.wire_api", wire),
+        ]
+        if p.api_key:
+            pairs.append((f"{key}.env_key", "AM_PROVIDER_API_KEY"))
+        args: list[str] = []
+        for name, value in pairs:
+            args += ["-c", f"{name}={json.dumps(value)}"]
+        return args
+
+    def provider_env(self) -> dict[str, str | None]:
+        if self.provider is None or not self.provider.api_key:
+            return {}
+        return {"AM_PROVIDER_API_KEY": self.provider.api_key}
 
     def conversation(self, task: AgentTask, files: RunFiles) -> Conversation:
         return CodexConversation(self, task)

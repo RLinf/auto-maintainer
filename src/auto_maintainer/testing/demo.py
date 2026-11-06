@@ -35,6 +35,40 @@ from .harness import Harness
 
 DEMO_REPO = "acme/widget"
 DEMO_USER = "maria"
+DEMO_SERVICE_REPO = "acme/auto-maintainer"
+
+DEMO_SETTINGS = """schema: 1
+routing:
+  evaluate: {primary: claude-code, fallback: [codex]}
+system:
+  poll_seconds: 300
+"""
+
+DEMO_SETTINGS_CHANGE = """schema: 1
+providers:
+  deepseek:
+    name: DeepSeek
+    protocol: anthropic
+    base_url: https://api.deepseek.com/anthropic
+    api_key: DEEPSEEK_API_KEY
+    models: [deepseek-chat]
+agents:
+  claude-code: {provider: deepseek}
+routing:
+  evaluate: {primary: claude-code, fallback: [codex]}
+system:
+  poll_seconds: 300
+"""
+
+_SETTINGS_WORDS = (
+    "provider",
+    "deepseek",
+    "model",
+    "agent",
+    "setting",
+    "configure",
+    "route",
+)
 
 LAYER: dict[str, Any] = {
     "extends": ["conventional-commits", "dco", "github-actions", "codeowners"],
@@ -114,6 +148,24 @@ def _answer(task: AgentTask) -> dict[str, Any]:
             "message": "Kept as a one-off override for this PR.",
         }
     if kind == "chat":
+        last = task.prompt.rsplit("user: ", 1)[-1].lower()
+        if any(word in last for word in _SETTINGS_WORDS):
+            return {
+                "reply": (
+                    "Here is a draft: Claude Code runs on DeepSeek through its "
+                    "Anthropic-compatible endpoint, and everything else stays as it is. "
+                    "Apply it below, then paste the key into DEEPSEEK_API_KEY on the "
+                    "Settings page."
+                ),
+                "proposals": [
+                    {
+                        "kind": "configure",
+                        "repo": "",
+                        "summary": "settings: run Claude Code on DeepSeek",
+                        "settings_yaml": DEMO_SETTINGS_CHANGE,
+                    }
+                ],
+            }
         return {
             "reply": "Two PRs wait for a first review; #42 is the top of your queue.",
             "proposals": [],
@@ -127,7 +179,14 @@ def _answer(task: AgentTask) -> dict[str, Any]:
 
 
 async def build_demo(root: Path) -> Harness:
-    h = await Harness.create(root, repo=DEMO_REPO, layer=LAYER, maintainer=DEMO_USER)
+    h = await Harness.create(
+        root,
+        repo=DEMO_REPO,
+        layer=LAYER,
+        maintainer=DEMO_USER,
+        code_repo=DEMO_SERVICE_REPO,
+    )
+    h.memory.files["config/service.yaml"] = DEMO_SETTINGS
     h.forge.set_permission(DEMO_REPO, "bob", Permission.WRITE)
     for kind in (
         "triage",

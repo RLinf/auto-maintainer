@@ -40,8 +40,10 @@ from .fakes import (
     FakeForge,
     FakeMemory,
     FakePublisher,
+    FakeSecrets,
     FakeUpdater,
     FakeWorkspace,
+    Reconfigured,
     RecordingNotifier,
     ScriptedRunner,
 )
@@ -152,6 +154,8 @@ class Harness:
             clock=clock,
             publisher=FakePublisher() if code_repo else None,
             updater=FakeUpdater() if code_repo else None,
+            secrets=FakeSecrets(),
+            reconfigure=Reconfigured(),
         )
         settings = ServiceSettings(
             login=forge.login,
