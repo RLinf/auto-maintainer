@@ -24,7 +24,7 @@ export const NAV: { to: string; label: string; icon: IconName; keys?: string; hi
   { to: "/", label: "Home", icon: "home", keys: "g h", hint: "Decisions waiting for you and the state of the service" },
   { to: "/prs", label: "Pull requests", icon: "pr", keys: "g p", hint: "The review queue, ranked by priority" },
   { to: "/repos", label: "Repositories", icon: "repo", keys: "g r", hint: "Profiles, settings, and onboarding" },
-  { to: "/inbox", label: "Proposals", icon: "inbox", keys: "g i", hint: "Actions waiting for approval" },
+  { to: "/inbox", label: "Approvals", icon: "inbox", keys: "g i", hint: "Actions waiting for approval" },
   { to: "/questions", label: "Agent questions", icon: "question", keys: "g q", hint: "What running agents are asking" },
   { to: "/memory", label: "Memory", icon: "book", keys: "g m", hint: "Memory changes and the memory repository" },
   { to: "/ci", label: "CI health", icon: "activity", hint: "Diagnosed failures, flaky jobs, reruns" },

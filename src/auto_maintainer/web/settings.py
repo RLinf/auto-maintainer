@@ -26,6 +26,7 @@ from __future__ import annotations
 from typing import Any
 
 import httpx
+import yaml
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
@@ -34,10 +35,12 @@ from ..domain.records import AuditEntry
 from ..domain.settings import (
     PROVIDER_PROTOCOLS,
     SECRET_NAME,
+    LabMachine,
     Provider,
     SettingsError,
     effective_agents,
     effective_routing,
+    machine_problems,
     secret_names,
     settings_diff,
 )
@@ -152,7 +155,34 @@ async def settings_view(service: Service, user: User) -> dict[str, Any]:
         },
         "secrets": [s.model_dump(mode="json") for s in secrets.values()],
         "pending": [c.model_dump(mode="json") for c in pending],
+        "labs": [
+            {"name": name, **machine.model_dump(mode="json")}
+            for name, machine in config.labs.items()
+        ],
     }
+
+
+class MachineBody(BaseModel):
+    machine: LabMachine
+    title: str = ""
+
+
+def _with_machine(text: str, name: str, machine: LabMachine | None) -> str:
+    """The settings document with machine ``name`` set (or removed when ``None``)."""
+    data = yaml.safe_load(text or "") or {}
+    if not isinstance(data, dict):
+        raise SettingsError(["the settings file is not a mapping"])
+    data.setdefault("schema", 1)
+    labs = dict(data.get("labs") or {})
+    if machine is None:
+        labs.pop(name, None)
+    else:
+        labs[name] = machine.model_dump(mode="json", exclude_defaults=True)
+    if labs:
+        data["labs"] = labs
+    else:
+        data.pop("labs", None)
+    return yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
 
 
 def _describe_probe_error(status: int | None, error: Exception | None) -> str:
@@ -295,6 +325,61 @@ def build_router() -> APIRouter:
         )
         await service.reload_settings()
         return {"name": name, "deleted": True}
+
+    @r.put("/labs/{name}")
+    async def set_machine(
+        request: Request,
+        name: str,
+        body: MachineBody,
+        user: User = Depends(current_user),
+    ) -> dict[str, Any]:
+        """Add or change a test machine: a settings change like any other, applied at
+        once for a maintainer of the service's repository, a proposal otherwise."""
+        service = service_of(request)
+        problems = machine_problems(name, body.machine)
+        if problems:
+            raise HTTPException(
+                422, {"message": "the machine does not check", "problems": problems}
+            )
+        current, _ = await service.settings_text()
+        return await save(
+            request,
+            DocumentBody(
+                yaml=_with_machine(current, name, body.machine),
+                title=body.title or f"settings: test machine {name}",
+            ),
+            user,
+        )
+
+    @r.delete("/labs/{name}")
+    async def remove_machine(
+        request: Request, name: str, user: User = Depends(current_user)
+    ) -> dict[str, Any]:
+        service = service_of(request)
+        current, _ = await service.settings_text()
+        return await save(
+            request,
+            DocumentBody(
+                yaml=_with_machine(current, name, None),
+                title=f"settings: remove test machine {name}",
+            ),
+            user,
+        )
+
+    @r.post("/labs/{name}/check")
+    async def check_machine(
+        request: Request, name: str, user: User = Depends(current_user)
+    ) -> dict[str, Any]:
+        """Connect to the machine and report what it is and its GPUs."""
+        service = service_of(request)
+        await _require_maintainer(service, user)
+        runner = service.a.lab_runner
+        if runner is None or name not in service.machines:
+            raise HTTPException(404, f"no test machine named {name!r} is in force")
+        try:
+            return await runner.check(name)
+        except Exception as e:  # report the failure to the page, not as a 500
+            return {"ok": False, "error": str(e)[-500:]}
 
     @r.post("/providers/{provider_id}/test")
     async def test_provider(

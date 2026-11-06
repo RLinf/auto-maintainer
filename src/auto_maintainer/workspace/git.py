@@ -18,6 +18,7 @@ sandbox for repository check scripts."""
 from __future__ import annotations
 
 import asyncio
+import base64
 import os
 import shutil
 import tempfile
@@ -263,6 +264,30 @@ class GitWorkspace:
             await run(["git", "diff", "--cached", "--name-only"], cwd=p, check=True)
         ).stdout
         return WorkChanges(base_sha=base, patch=patch, files=names.split())
+
+    async def merge_base(self, path: Any, a: str, b: str) -> str | None:
+        result = await run(["git", "merge-base", a, b], cwd=Path(path), timeout=120)
+        if not result.ok:
+            return None
+        return result.stdout.strip() or None
+
+    async def archive(self, path: Any, ref: str, max_bytes: int = 200_000_000) -> str:
+        with tempfile.TemporaryDirectory(prefix="am-archive-") as tmp:
+            out = Path(tmp) / "code.tar.gz"
+            await run(
+                ["git", "archive", "--format=tar.gz", "-o", str(out), ref],
+                cwd=Path(path),
+                timeout=600,
+                check=True,
+            )
+            size = out.stat().st_size
+            if size > max_bytes:
+                raise ValueError(
+                    f"the code at {ref[:12]} is {size // 1_000_000} MB packed; "
+                    f"the limit is {max_bytes // 1_000_000} MB"
+                )
+            data = await asyncio.to_thread(out.read_bytes)
+        return base64.b64encode(data).decode("ascii")
 
     async def publish(
         self,

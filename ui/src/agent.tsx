@@ -20,6 +20,7 @@ import { api, type ChatMessage, type ChatThread } from "./api";
 import { ErrorBox } from "./components";
 import { useProposals } from "./data";
 import { useT } from "./i18n";
+import { Markdown } from "./markdown";
 import { Icon, type IconName } from "./icons";
 import { ProposalCard } from "./proposal";
 import { ChangeById } from "./settingsChange";
@@ -36,7 +37,7 @@ const PAGES: { path: string; page: string; label: string; icon: IconName }[] = [
   { path: "/", page: "home", label: "Home", icon: "home" },
   { path: "/prs", page: "queue", label: "Pull requests", icon: "pr" },
   { path: "/repos", page: "repositories", label: "Repositories", icon: "repo" },
-  { path: "/inbox", page: "proposals", label: "Proposals", icon: "inbox" },
+  { path: "/inbox", page: "proposals", label: "Approvals", icon: "inbox" },
   { path: "/questions", page: "questions", label: "Agent questions", icon: "question" },
   { path: "/memory", page: "memory", label: "Memory", icon: "book" },
   { path: "/ci", page: "ci", label: "CI health", icon: "activity" },
@@ -379,7 +380,7 @@ export function Conversation({
                 <ProposalCard key={id} proposal={p} compact />
               ) : (
                 <span key={id} className="small muted">
-                  {t("A proposal from this answer is no longer pending.")} <Link to="/inbox">{t("Proposals")}</Link>
+                  {t("A proposal from this answer is no longer pending.")} <Link to="/inbox">{t("Approvals")}</Link>
                 </span>
               );
             })}
@@ -443,35 +444,7 @@ export function Conversation({
 
 /** Plain text with ``` fences, `code`, and **bold**; no HTML from the reply is rendered. */
 export function Rich({ text }: { text: string }) {
-  const parts = text.split(/```[\w-]*\n?/);
-  return (
-    <>
-      {parts.map((part, i) =>
-        i % 2 === 1 ? (
-          <pre key={i} className="pre" style={{ margin: "6px 0" }}>
-            {part.replace(/\n$/, "")}
-          </pre>
-        ) : (
-          <Fragment key={i}>{inline(part)}</Fragment>
-        ),
-      )}
-    </>
-  );
-}
-
-function inline(text: string): ReactNode[] {
-  const out: ReactNode[] = [];
-  const re = /(`[^`\n]+`|\*\*[^*\n]+\*\*)/g;
-  let last = 0;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(text))) {
-    if (m.index > last) out.push(text.slice(last, m.index));
-    const tok = m[0];
-    out.push(tok.startsWith("`") ? <code key={m.index}>{tok.slice(1, -1)}</code> : <strong key={m.index}>{tok.slice(2, -2)}</strong>);
-    last = m.index + tok.length;
-  }
-  if (last < text.length) out.push(text.slice(last));
-  return out;
+  return <Markdown text={text} className="chat-md" />;
 }
 
 /** A button that opens the agent, optionally about something other than the page. */

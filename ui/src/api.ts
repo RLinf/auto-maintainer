@@ -132,6 +132,7 @@ export interface AgentQuestion {
   repo: string | null;
   pr: number | null;
   asked_for?: string | null;
+  job_id?: string | null;
   state: "pending" | "answered" | "expired" | "cancelled";
   created_at: string | null;
   expires_at: string | null;
@@ -161,6 +162,7 @@ export interface PrRow {
 
 export interface ReviewActivity {
   job?: {
+    id: string;
     playbook: string;
     status: string;
     updated_at: string;
@@ -511,6 +513,63 @@ export interface SettingsView {
   };
   secrets: SecretInfo[];
   pending: MemoryChange[];
+  labs: LabMachine[];
+}
+
+export interface LabMachine {
+  name: string;
+  description: string;
+  transport: "ssh" | "local";
+  host: string | null;
+  workdir: string;
+  setup: string;
+  repos: string[];
+  forbid: string[];
+  timeout_seconds: number;
+  max_gpu_memory_mib: number;
+  max_gpu_util_pct: number;
+}
+
+export interface MachineCheck {
+  ok: boolean;
+  error?: string;
+  system?: string;
+  cpus?: string;
+  memory_gb?: string;
+  gpus?: { index: number; memory_used_mib: number; memory_total_mib: number; utilization_pct: number; processes: number; idle: boolean }[];
+}
+
+export interface JobStep {
+  kind: "start" | "message" | "tool" | "result" | "question" | "error" | "done";
+  text: string;
+  detail: string;
+  runtime: string;
+  task_kind: string;
+  ok: boolean | null;
+  at: string;
+}
+
+export interface AgentJob {
+  id: string;
+  playbook: string;
+  status: "queued" | "running" | "waiting" | "done" | "failed" | "cancelled";
+  repo: string | null;
+  number: number | null;
+  title: string | null;
+  by: string | null;
+  mine: boolean;
+  agent: string | null;
+  note: string | null;
+  created_at: string;
+  updated_at: string;
+  error: string | null;
+  result: Record<string, unknown> | null;
+  wait: string | null;
+  questions: string[];
+  questions_for_me: number;
+  produced: { id: string; kind: string; status: string; proposal: string | null; for: string | null }[];
+  last_step: JobStep | null;
+  steps?: JobStep[];
 }
 
 export interface SettingsCheck {

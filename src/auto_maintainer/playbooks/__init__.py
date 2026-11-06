@@ -27,6 +27,7 @@ from .housekeeping import Journal, LabTest, Stale
 from .hygiene import Hygiene
 from .merge import MergePlaybook
 from .onboard import Onboard, ProfileDrift
+from .reproduce import ReproducePlaybook
 from .review import ReviewPlaybook
 from .review_scan import ReviewScan
 from .self_improve import SelfImprove
@@ -52,6 +53,7 @@ def all_playbooks() -> list[Playbook]:
         Journal(),
         SelfImprove(),
         FixPlaybook(),
+        ReproducePlaybook(),
     ]
 
 

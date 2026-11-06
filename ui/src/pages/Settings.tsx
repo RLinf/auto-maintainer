@@ -6,7 +6,7 @@
 
 import { useEffect, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
-import { api, type SettingsAgent, type SettingsCheck, type SettingsProvider, type SettingsView } from "../api";
+import { api, type LabMachine, type MachineCheck, type SettingsAgent, type SettingsCheck, type SettingsProvider, type SettingsView } from "../api";
 import { useAgent, type AgentContext } from "../agent";
 import { Diff, Empty, ErrorBox, PageHead, Section, Status, useAct, When } from "../components";
 import { useSettings } from "../data";
@@ -56,6 +56,7 @@ export default function SettingsPage() {
     { id: "agents", label: t("Agents"), count: view.data?.agents.filter((a) => a.enabled).length },
     { id: "providers", label: t("Model providers"), count: view.data?.providers.length },
     { id: "routing", label: t("Task routing") },
+    { id: "labs", label: t("Test machines"), count: view.data?.labs.length },
     { id: "system", label: t("System") },
     { id: "file", label: t("Settings file") },
   ];
@@ -138,6 +139,7 @@ export default function SettingsPage() {
       {tab === "agents" && <AgentsTab v={v} ask={ask} />}
       {tab === "providers" && <ProvidersTab v={v} ask={ask} />}
       {tab === "routing" && <RoutingTab v={v} ask={ask} />}
+      {tab === "labs" && <LabsTab v={v} ask={ask} />}
       {tab === "system" && <SystemTab v={v} ask={ask} />}
       {tab === "file" && <FileTab v={v} />}
     </>
@@ -501,6 +503,190 @@ function RoutingTab({ v, ask }: { v: SettingsView; ask: (p: string, send?: boole
         </table>
       </div>
     </Section>
+  );
+}
+
+function LabsTab({ v, ask }: { v: SettingsView; ask: (p: string, send?: boolean) => void }) {
+  const t = useT();
+  const [adding, setAdding] = useState(false);
+  return (
+    <div className="stack" style={{ gap: 14 }}>
+      <Section
+        title={t("Test machines")}
+        hint={t("where a PR's code runs to reproduce what it claims")}
+        aside={
+          <div className="row" style={{ gap: 6 }}>
+            <ChangeButton onClick={() => ask(t("Add a test machine: "))} />
+            {v.access.allowed && (
+              <button className="sm" onClick={() => setAdding(!adding)}>
+                <Icon name="plus" size={13} />
+                {t("Add a machine")}
+              </button>
+            )}
+          </div>
+        }
+      >
+        <p className="small muted" style={{ marginTop: 0 }}>
+          {t("The service reaches a machine over SSH as its own user, with the key in that user's SSH config; nothing is installed there. Each reproduction copies the PR's code into a folder of its own and removes it afterwards. Scripts run only after the person who asked approves them.")}
+        </p>
+        {adding && <MachineForm onDone={() => setAdding(false)} />}
+        {!v.labs.length ? (
+          <Empty icon="server">{t("No test machines yet. Add one, or ask the agent to.")}</Empty>
+        ) : (
+          <div className="list">
+            {v.labs.map((m) => (
+              <MachineRow key={m.name} m={m} canChange={v.access.allowed} />
+            ))}
+          </div>
+        )}
+      </Section>
+    </div>
+  );
+}
+
+function MachineRow({ m, canChange }: { m: LabMachine; canChange: boolean }) {
+  const t = useT();
+  const toast = useToast();
+  const check = useAct(() => api.post<MachineCheck>(`/api/settings/labs/${m.name}/check`), []);
+  const remove = useAct(() => api.del<{ approved: boolean }>(`/api/settings/labs/${m.name}`), [["settings"], ["memory"]]);
+  const c = check.data;
+  return (
+    <div className="list-row" style={{ padding: "12px 4px", alignItems: "flex-start" }}>
+      <span style={{ paddingTop: 2 }}>
+        <Icon name="server" />
+      </span>
+      <span className="main">
+        <span className="t">
+          {m.name} <span className="muted small">{m.transport === "ssh" ? m.host || m.name : t("this host")}</span>
+        </span>
+        <span className="meta" style={{ whiteSpace: "normal" }}>
+          {m.description || t("No description")} · {m.repos.length ? `${t("only")} ${m.repos.join(", ")}` : t("every repository")} · {t("at most")}{" "}
+          {Math.round(m.timeout_seconds / 60)} {t("minutes")}
+          {m.setup ? (
+            <>
+              {" "}
+              · <code>{m.setup}</code>
+            </>
+          ) : null}
+        </span>
+        {c && (
+          <span className={`small ${c.ok ? "" : "danger-text"}`} style={{ marginTop: 4 }}>
+            {c.ok ? (
+              <>
+                <Icon name="check" size={12} /> {c.system} · {c.cpus} CPUs · {c.memory_gb} GB
+                {c.gpus?.length ? ` · ${c.gpus.filter((g) => g.idle).length}/${c.gpus.length} ${t("GPUs idle")}` : ` · ${t("no GPUs")}`}
+              </>
+            ) : (
+              <>
+                <Icon name="x" size={12} /> {c.error}
+              </>
+            )}
+          </span>
+        )}
+        <ErrorBox error={check.error || remove.error} />
+      </span>
+      {canChange && (
+        <span className="row" style={{ gap: 4 }}>
+          <button className="sm" disabled={check.isPending} onClick={() => check.mutate(undefined)}>
+            {check.isPending ? t("Checking…") : t("Check")}
+          </button>
+          <button
+            className="ghost sm danger-text"
+            disabled={remove.isPending}
+            onClick={() =>
+              remove.mutate(undefined, {
+                onSuccess: (r) => toast({ title: r.approved ? t("Removed") : t("Change proposed"), icon: "check" }),
+              })
+            }
+          >
+            {t("Remove")}
+          </button>
+        </span>
+      )}
+    </div>
+  );
+}
+
+function MachineForm({ onDone }: { onDone: () => void }) {
+  const t = useT();
+  const toast = useToast();
+  const [name, setName] = useState("");
+  const [transport, setTransport] = useState<"ssh" | "local">("ssh");
+  const [host, setHost] = useState("");
+  const [description, setDescription] = useState("");
+  const [setup, setSetup] = useState("");
+  const [repos, setRepos] = useState("");
+  const save = useAct(
+    () =>
+      api.put<{ approved: boolean }>(`/api/settings/labs/${name.trim()}`, {
+        machine: {
+          transport,
+          host: transport === "ssh" ? host.trim() || null : null,
+          description: description.trim(),
+          setup: setup.trim(),
+          repos: repos
+            .split(/[\s,]+/)
+            .map((r) => r.trim())
+            .filter(Boolean),
+        },
+      }),
+    [["settings"], ["memory"]],
+  );
+  return (
+    <form
+      className="card stack"
+      style={{ gap: 10, marginBottom: 12 }}
+      onSubmit={(e) => {
+        e.preventDefault();
+        save.mutate(undefined, {
+          onSuccess: (r) => {
+            toast({ title: r.approved ? t("Machine added") : t("Change proposed"), icon: "server" });
+            onDone();
+          },
+        });
+      }}
+    >
+      <div className="grid2" style={{ gap: 10 }}>
+        <label className="stack" style={{ gap: 4 }}>
+          <span className="small muted">{t("Name")}</span>
+          <input required value={name} onChange={(e) => setName(e.target.value)} placeholder="gpu-01" pattern="[a-z][a-z0-9]*(-[a-z0-9]+)*" />
+        </label>
+        <label className="stack" style={{ gap: 4 }}>
+          <span className="small muted">{t("Reached")}</span>
+          <select value={transport} onChange={(e) => setTransport(e.target.value as "ssh" | "local")}>
+            <option value="ssh">{t("over SSH")}</option>
+            <option value="local">{t("on this host")}</option>
+          </select>
+        </label>
+        {transport === "ssh" && (
+          <label className="stack" style={{ gap: 4 }}>
+            <span className="small muted">{t("SSH destination")}</span>
+            <input value={host} onChange={(e) => setHost(e.target.value)} placeholder="ci@gpu-01" />
+          </label>
+        )}
+        <label className="stack" style={{ gap: 4 }}>
+          <span className="small muted">{t("Description")}</span>
+          <input value={description} onChange={(e) => setDescription(e.target.value)} placeholder={t("8× A100 80GB, CUDA 12.4")} />
+        </label>
+        <label className="stack" style={{ gap: 4 }}>
+          <span className="small muted">{t("Run before each reproduction (optional)")}</span>
+          <input className="mono-input" value={setup} onChange={(e) => setSetup(e.target.value)} placeholder="source ~/envs/dev/bin/activate" />
+        </label>
+        <label className="stack" style={{ gap: 4 }}>
+          <span className="small muted">{t("Only for these repositories (optional)")}</span>
+          <input value={repos} onChange={(e) => setRepos(e.target.value)} placeholder="owner/name, …" />
+        </label>
+      </div>
+      <div className="row">
+        <button className="primary" disabled={!name.trim() || save.isPending}>
+          {t("Save")}
+        </button>
+        <button type="button" className="ghost" onClick={onDone}>
+          {t("Cancel")}
+        </button>
+      </div>
+      <ErrorBox error={save.error} />
+    </form>
   );
 }
 

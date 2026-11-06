@@ -53,6 +53,7 @@ from ..domain.ports import (
 from ..domain.profile import RepoProfile, Route
 from ..domain.records import Job
 from ..domain.review import ReviewClassification, classify_review_state
+from ..domain.settings import LabMachine
 from ..domain.snapshot import PrSnapshot, RunnerInfo
 from ..profiles.knowledge import Knowledge
 from ..profiles.service import ProfileService
@@ -132,6 +133,8 @@ class ServiceInfo:
     code_repo: str | None = None
     """The service's own repository, where self-improvements go."""
     code_branch: str = "main"
+    machines: dict[str, LabMachine] = field(default_factory=dict)
+    """Test machines from the service settings, by name; changed in place."""
 
 
 @dataclass
@@ -217,6 +220,7 @@ class PlaybookContext:
             TaskKind.REVIEW,
             TaskKind.FOLLOWUP,
             TaskKind.FIX,
+            TaskKind.REPRODUCE,
         ):
             # The requester chose the agent; verification keeps its own route.
             route = route.model_copy(update={"primary": self.agent, "fallback": []})

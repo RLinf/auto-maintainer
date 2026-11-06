@@ -295,18 +295,21 @@ export function RejectButton({
   busy,
   label = "Reject",
   size,
+  quiet,
 }: {
   onReject: (reason: string) => void;
   busy?: boolean;
   label?: string;
   size?: "sm";
+  /** A plain text button, for cards whose main action is something else. */
+  quiet?: boolean;
 }) {
   const t = useT();
   const [open, setOpen] = useState(false);
   const [reason, setReason] = useState("");
   if (!open) {
     return (
-      <button className={`danger ${size ?? ""}`} onClick={() => setOpen(true)}>
+      <button className={`${quiet ? "ghost danger-text" : "danger"} ${size ?? ""}`} onClick={() => setOpen(true)}>
         {t(label)}
       </button>
     );

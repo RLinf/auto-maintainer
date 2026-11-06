@@ -2,7 +2,6 @@
 // views, search, filters, sorting, grouping, and review in bulk. The view lives in the URL.
 
 import { useQuery } from "@tanstack/react-query";
-import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api, type Me, type PrRow, type ReviewActivity, type ReviewStart } from "../api";
 import { useAgent } from "../agent";
@@ -10,7 +9,8 @@ import { ErrorBox, Labels, PageHead, prPath, ReviewState, Tier, timeOf, useAct, 
 import { prKey, REVIEW_ORDER, REVIEW_STATES, TIER_ORDER, usePrs } from "../data";
 import { useT } from "../i18n";
 import { Icon } from "../icons";
-import { agentName, AgentPicker, reviewToast } from "../agentPicker";
+import { agentName, AgentPicker, reviewToast, useAgentChoice } from "../agentPicker";
+import { openJob } from "../openJob";
 import { BulkBar, DataTable, ListToolbar, useList, type Column } from "../list";
 import { MenuItem, Popover, Skeleton, Tabs, useTab, useToast } from "../ui";
 
@@ -49,7 +49,7 @@ export default function QueuePage({ me }: { me: Me }) {
     search: (p) => `${p.title} ${p.repo}#${p.number} #${p.number} ${p.author} ${p.labels.join(" ")} ${p.summary} ${p.claimed_by ?? ""}`,
     facets: [
       { id: "repo", label: t("Repository"), values: (p) => p.repo },
-      { id: "tier", label: t("Tier"), values: (p) => p.tier ?? t("Not evaluated") },
+      { id: "tier", label: t("Priority"), values: (p) => p.tier ?? t("Not evaluated") },
       { id: "state", label: t("Review state"), values: (p) => t(REVIEW_STATES[p.review_state] ?? p.review_state) },
       { id: "author", label: t("Author"), values: (p) => p.author },
       { id: "label", label: t("Label"), values: (p) => p.labels },
@@ -57,7 +57,7 @@ export default function QueuePage({ me }: { me: Me }) {
     ],
     sorts: [
       { id: "priority", label: t("Priority"), value: (p) => p.total ?? -1, descFirst: true },
-      { id: "tier", label: t("Tier"), value: (p) => (p.tier ? TIER_ORDER.indexOf(p.tier) : 99) },
+      { id: "tier", label: t("Priority"), value: (p) => (p.tier ? TIER_ORDER.indexOf(p.tier) : 99) },
       { id: "updated", label: t("Last updated"), value: (p) => timeOf(p.updated_at), descFirst: true },
       { id: "number", label: t("Number"), value: (p) => p.number, descFirst: true },
       { id: "title", label: t("Title"), value: (p) => p.title.toLowerCase() },
@@ -67,7 +67,7 @@ export default function QueuePage({ me }: { me: Me }) {
     defaultSort: "-priority",
     groups: [
       { id: "repo", label: t("Repository"), value: (p) => p.repo },
-      { id: "tier", label: t("Tier"), value: (p) => p.tier ?? t("Not evaluated"), order: [...TIER_ORDER, t("Not evaluated")] },
+      { id: "tier", label: t("Priority"), value: (p) => p.tier ?? t("Not evaluated"), order: [...TIER_ORDER, t("Not evaluated")] },
       { id: "state", label: t("Review state"), value: (p) => t(REVIEW_STATES[p.review_state] ?? p.review_state), order: REVIEW_ORDER.map((s) => t(REVIEW_STATES[s])) },
       { id: "author", label: t("Author"), value: (p) => p.author },
       { id: "claimed", label: t("Claimed by"), value: (p) => p.claimed_by ?? t("Unclaimed") },
@@ -75,7 +75,7 @@ export default function QueuePage({ me }: { me: Me }) {
     pageSize: 50,
   });
 
-  const [reviewer, setReviewer] = useState("");
+  const [reviewer, setReviewer] = useAgentChoice("review");
   const review = useAct(
     (prs: PrRow[]) => api.post<ReviewStart[]>("/api/reviews", { prs: prs.map((r) => ({ repo: r.repo, number: r.number })), agent: reviewer || null }),
     [["prs"], ["proposals"]],
@@ -91,7 +91,7 @@ export default function QueuePage({ me }: { me: Me }) {
   const askAbout = (p: PrRow) => agent.open({ context: { page: "pr", repo: p.repo, number: p.number, label: `${p.repo}#${p.number}` } });
 
   const columns: Column<PrRow>[] = [
-    { id: "tier", header: t("Tier"), cell: (p) => <Tier tier={p.tier} />, sort: "tier", width: 64 },
+    { id: "tier", header: t("Priority"), cell: (p) => <Tier tier={p.tier} />, sort: "tier", width: 64 },
     {
       id: "score",
       header: t("Score"),
@@ -240,11 +240,19 @@ function Activity({ a, me }: { a: ReviewActivity; me: string }) {
   const job = a.job;
   if (job && (job.status === "queued" || job.status === "running" || job.status === "waiting")) {
     return (
-      <span className="small" style={{ color: "var(--info)" }} title={job.by ? `${t("asked by")} ${job.by}` : undefined}>
-        <Icon name="clock" size={12} /> {job.playbook === "followup" ? t("following up…") : t("reviewing…")}
+      <button
+        className="link-button small"
+        style={{ color: "var(--info)" }}
+        title={t("Watch the agent work")}
+        onClick={(e) => {
+          e.stopPropagation();
+          openJob(job.id);
+        }}
+      >
+        <span className="pulse" /> {job.playbook === "followup" ? t("following up…") : t("reviewing…")}
         {job.agent ? ` ${agentName(job.agent)}` : ""}
         {job.by ? ` · ${job.by === me ? t("you") : job.by}` : ""}
-      </span>
+      </button>
     );
   }
   if (a.draft) {

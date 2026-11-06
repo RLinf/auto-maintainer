@@ -171,15 +171,11 @@ async def build_service(cfg: HostConfig, dev: bool = False) -> Service:
             if lab.transport == "ssh"
             else LocalLabHost(name)
         )
-    lab_runner = (
-        LabExecutor(
-            labs,
-            {n: GpuThresholds(**lab.gpu.model_dump()) for n, lab in cfg.labs.items()},
-            store,
-            clock,
-        )
-        if labs
-        else None
+    lab_runner = LabExecutor(
+        labs,
+        {n: GpuThresholds(**lab.gpu.model_dump()) for n, lab in cfg.labs.items()},
+        store,
+        clock,
     )
 
     channels = {

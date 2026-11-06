@@ -39,6 +39,7 @@ from ..store.sqlite import SqliteStore
 from .fakes import (
     ActingAs,
     FakeForge,
+    FakeLabRunner,
     FakeMemory,
     FakePublisher,
     FakeSecrets,
@@ -177,6 +178,7 @@ class Harness:
             user_tokens=FakeUserTokens(),
             writer_for_user=_acting_as(forge),
             publisher_for_user=_pushing_as(publisher),
+            lab_runner=FakeLabRunner(),
         )
         settings = ServiceSettings(
             login=forge.login,

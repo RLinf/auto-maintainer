@@ -20,6 +20,8 @@ service's own labels and comments on its next read.
 
 from __future__ import annotations
 
+import asyncio
+import base64
 import itertools
 import json
 from collections.abc import Callable
@@ -29,7 +31,13 @@ from typing import Any, Literal
 
 from pydantic import BaseModel
 
-from ..domain.agents import AgentResult, AgentTask, RuntimeHealth
+from ..domain.agents import (
+    AgentEvent,
+    AgentEventType,
+    AgentResult,
+    AgentTask,
+    RuntimeHealth,
+)
 from ..domain.clock import utc_now
 from ..domain.memory import MemoryChange
 from ..domain.permissions import Permission
@@ -75,6 +83,8 @@ class FakeForge:
         self.prs: dict[tuple[str, int], PrSnapshot] = {}
         self.issues: dict[tuple[str, int], IssueSnapshot] = {}
         self.files: dict[tuple[str, str], str] = {}
+        self.diffs: dict[tuple[str, int], str] = {}
+        """PR diffs by (repo, number); without one, a diff is made from the files."""
         self.permissions: dict[tuple[str, str], Permission] = {}
         self.teams: dict[tuple[str, str], set[str]] = {}
         self.path_changers: dict[tuple[str, str], str] = {}
@@ -146,6 +156,19 @@ class FakeForge:
         self, repo: str, path: str, ref: str | None = None
     ) -> str | None:
         return self.files.get((repo, path))
+
+    async def get_pr_diff(self, repo: str, number: int) -> str | None:
+        if (repo, number) in self.diffs:
+            return self.diffs[(repo, number)]
+        pr = self.prs.get((repo, number))
+        if pr is None:
+            return None
+        return "".join(
+            f"diff --git a/{f.path} b/{f.path}\n--- a/{f.path}\n+++ b/{f.path}\n"
+            f"@@ -1,{f.deletions} +1,{f.additions} @@\n"
+            + "".join(f"+line {i + 1}\n" for i in range(f.additions))
+            for f in pr.files
+        )
 
     async def list_dir(self, repo: str, path: str, ref: str | None = None) -> list[str]:
         prefix = path.rstrip("/") + "/"
@@ -485,6 +508,12 @@ class ScriptedRunner:
         self.tasks: list[AgentTask] = []
         self.routes: list[Route] = []
         """The route each task ran on, in order."""
+        self.steps: dict[str, Any] = {}
+        """Events each task kind reports while it "works", for the live view: a list,
+        or a function of the task that returns one."""
+        self.step_delay = 0.0
+        """Seconds between those events; the demo sets it so the view moves."""
+        self.progress: Any = None
 
     def queue(
         self, kind: str, answer: dict[str, Any] | BaseModel | AgentResult
@@ -494,12 +523,36 @@ class ScriptedRunner:
     def on(self, kind: str, handler: Callable[[AgentTask], Any]) -> None:
         self.handlers[kind] = handler
 
+    def bind_progress(self, observer: Any) -> None:
+        self.progress = observer
+
     async def run(
         self, task: AgentTask, route: Route, output_model: type[BaseModel] | None = None
+    ) -> AgentResult:
+        result = await self._answer(task, route, output_model)
+        if self.progress is not None:
+            await self.progress(
+                task,
+                result.runtime,
+                AgentEvent(type=AgentEventType.FINAL, result=result),
+            )
+        return result
+
+    async def _answer(
+        self, task: AgentTask, route: Route, output_model: type[BaseModel] | None
     ) -> AgentResult:
         self.tasks.append(task)
         self.routes.append(route)
         kind = str(task.kind)
+        if self.progress is not None:
+            await self.progress(
+                task, route.primary, AgentEvent(type=AgentEventType.STARTED)
+            )
+            steps = self.steps.get(kind, [])
+            for event in steps(task) if callable(steps) else steps:
+                if self.step_delay:
+                    await asyncio.sleep(self.step_delay)
+                await self.progress(task, route.primary, event)
         if kind in self.handlers:
             answer = self.handlers[kind](task)
         elif self.answers.get(kind):
@@ -553,6 +606,12 @@ class FakeWorkspace:
 
     async def release(self, path: Any) -> None:
         self.released.append(Path(path))
+
+    async def merge_base(self, path: Any, a: str, b: str) -> str | None:
+        return "b" * 40
+
+    async def archive(self, path: Any, ref: str, max_bytes: int = 200_000_000) -> str:
+        return base64.b64encode(f"code at {ref}".encode()).decode("ascii")
 
     async def changes(self, path: Any) -> WorkChanges:
         """The files under ``path`` that a test wrote, as a pseudo-patch."""
@@ -715,6 +774,7 @@ class FakeLabHost:
         self.gpus = gpus or []
         self.commands: list[tuple[str, str | None, dict[str, str]]] = []
         self.results: list[CommandResult] = []
+        self.stdin: list[str] = []
 
     async def run(
         self,
@@ -723,8 +783,11 @@ class FakeLabHost:
         cwd: str | None = None,
         env: dict[str, str] | None = None,
         timeout: float = 600,
+        stdin: str | None = None,
     ) -> CommandResult:
         self.commands.append((command, cwd, dict(env or {})))
+        if stdin is not None:
+            self.stdin.append(stdin)
         return (
             self.results.pop(0)
             if self.results
@@ -733,6 +796,65 @@ class FakeLabHost:
 
     async def gpu_status(self) -> list[GpuStatus]:
         return self.gpus
+
+
+class FakeLabRunner:
+    """Implements the actuator's ``LabRunner``: records reproductions and answers
+    them with ``outcome``; ``configure`` keeps the machines it is given."""
+
+    def __init__(self) -> None:
+        self.machines: dict[str, Any] = {}
+        self.reproduced: list[dict[str, Any]] = []
+        self.outcome: dict[str, Any] = {
+            "runs": {
+                "base": {
+                    "exit_code": 1,
+                    "timed_out": False,
+                    "duration_seconds": 4.2,
+                    "tail": ["AssertionError: expected 1 item, got 0"],
+                },
+                "head": {
+                    "exit_code": 0,
+                    "timed_out": False,
+                    "duration_seconds": 4.0,
+                    "tail": ["1 passed"],
+                },
+            }
+        }
+
+    def configure(self, machines: dict[str, Any]) -> None:
+        self.machines = dict(machines)
+
+    async def run(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise RuntimeError("template lab runs are not faked")
+
+    async def reproduce(
+        self, payload: Any, repo: str, number: int, code: dict[str, str], holder: str
+    ) -> dict[str, Any]:
+        self.reproduced.append(
+            {"payload": payload, "repo": repo, "number": number, "code": code}
+        )
+        return {"lab": payload.lab, "gpu": None, **self.outcome}
+
+    async def check(self, lab: str) -> dict[str, Any]:
+        if lab not in self.machines:
+            raise RuntimeError(f"there is no test machine named {lab!r}")
+        return {
+            "ok": True,
+            "system": "Linux 5.15 x86_64",
+            "cpus": "32",
+            "memory_gb": "251",
+            "gpus": [
+                {
+                    "index": 0,
+                    "memory_used_mib": 3,
+                    "memory_total_mib": 81920,
+                    "utilization_pct": 0,
+                    "processes": 0,
+                    "idle": True,
+                }
+            ],
+        }
 
 
 class RecordingNotifier:

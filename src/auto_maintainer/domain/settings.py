@@ -45,6 +45,10 @@ SETTINGS_SCHEMA = 1
 
 SECRET_NAME = re.compile(r"^[A-Z][A-Z0-9_]{1,63}$")
 PROVIDER_ID = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
+MACHINE_NAME = PROVIDER_ID
+SSH_DESTINATION = re.compile(r"^(?:[A-Za-z0-9._-]+@)?[A-Za-z0-9][A-Za-z0-9._-]*$")
+"""``user@host`` or a ``Host`` alias from the service user's SSH config. Never an
+option: a destination that starts with ``-`` would be read by ssh as one."""
 
 AdapterName = Literal[
     "claude-code", "codex", "antigravity", "opencode", "gemini", "generic"
@@ -204,6 +208,36 @@ class ProviderBinding:
 # -- system ------------------------------------------------------------------------
 
 
+class LabMachine(BaseModel):
+    """A machine where the service runs a PR's code to reproduce what it claims
+    (design 5.10). Shared by every repository unless ``repos`` names some."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    description: str = ""
+    """What people should know when they pick it, such as its GPUs."""
+    transport: Literal["ssh", "local"] = "ssh"
+    host: str | None = None
+    """The SSH destination (``user@host`` or an alias from the service user's SSH
+    config, which holds its key); defaults to the machine's name."""
+    workdir: str = "am-labs"
+    """Where runs go on the machine, relative to the login's home unless absolute.
+    Each run gets its own folder there, removed afterwards."""
+    setup: str = ""
+    """Shell run before every reproduction, such as activating an environment."""
+    repos: list[str] = Field(default_factory=list)
+    """Repositories that may use the machine; empty means all."""
+    forbid: list[str] = Field(default_factory=list)
+    """Regular expressions a script must not match, besides the built-in ones."""
+    timeout_seconds: int = Field(default=1800, ge=60, le=6 * 3600)
+    max_gpu_memory_mib: int = 500
+    """A GPU with less memory in use counts as idle (and none of its processes)."""
+    max_gpu_util_pct: int = 0
+
+    def serves(self, repo: str) -> bool:
+        return not self.repos or repo in self.repos
+
+
 class SystemSettings(BaseModel):
     """Service-wide values; each unset one keeps the host's value."""
 
@@ -234,6 +268,8 @@ class ServiceConfig(BaseModel):
     """Per task kind, the route fields that differ from the code's defaults. A
     repository's own profile can still override them for that repository."""
     system: SystemSettings = Field(default_factory=SystemSettings)
+    labs: dict[str, LabMachine] = Field(default_factory=dict)
+    """Test machines by name (design 5.10)."""
 
 
 class SettingsStatus(BaseModel):
@@ -358,6 +394,8 @@ def check_settings(
             problems.append(
                 f"agents.{name}: name a model, or list models on provider {agent.provider!r}"
             )
+    for name, machine in config.labs.items():
+        problems += [f"labs.{name}: {p}" for p in machine_problems(name, machine)]
     known_tasks = {str(k) for k in TaskKind}
     for task in config.routing:
         if task not in known_tasks:
@@ -383,6 +421,32 @@ def check_settings(
             elif role == "primary" and not agents[name].enabled:
                 problems.append(f"routing.{task}.primary: agent {name!r} is disabled")
     return problems
+
+
+def machine_problems(name: str, machine: LabMachine) -> list[str]:
+    """Why ``machine`` cannot be used as configured."""
+    out = []
+    if not MACHINE_NAME.match(name):
+        out.append("names are lowercase words joined by hyphens, such as gpu-01")
+    if machine.transport == "ssh" and not SSH_DESTINATION.match(machine.host or name):
+        out.append(
+            "host must be an SSH destination such as user@gpu-01 or an alias, "
+            "without spaces or a leading '-'"
+        )
+    workdir = machine.workdir.strip()
+    if not workdir or ".." in workdir.split("/") or "\n" in workdir:
+        out.append("workdir must be a plain path without '..'")
+    elif workdir.rstrip("/") in ("", "~", "/", "/tmp", "/home", "/root"):
+        out.append("workdir must be a folder of its own, not / or a home or /tmp")
+    for pattern in machine.forbid:
+        try:
+            re.compile(pattern)
+        except re.error as e:
+            out.append(f"forbid pattern {pattern!r} is not a regular expression ({e})")
+    for repo in machine.repos:
+        if not re.match(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", repo):
+            out.append(f"repos: {repo!r} is not owner/name")
+    return out
 
 
 def secret_names(config: ServiceConfig) -> list[str]:

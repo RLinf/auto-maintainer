@@ -331,6 +331,8 @@ def serve(
             # The demo's forge is a fake, so its maintainer can post and open fix
             # PRs "as themselves" without a GitHub token.
             await service.a.user_tokens.set(DEMO_USER, UserToken(token="demo"))
+            # Agents take their steps slowly enough to watch them in the live view.
+            harness.runner.step_delay = 0.7
             web = create_app(service, data_dir=root, allow_dev_login=True)
             await service.start()
             bind = host or "0.0.0.0"

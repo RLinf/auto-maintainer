@@ -60,7 +60,7 @@ export default function InboxPage({ me }: { me: Me }) {
   return (
     <>
       <PageHead
-        title={t("Proposals")}
+        title={t("Approvals")}
         sub={t("What the service wants to do and needs a person to approve. What you see is exactly what will be posted.")}
         actions={
           <button className="agent" onClick={() => agent.open()}>

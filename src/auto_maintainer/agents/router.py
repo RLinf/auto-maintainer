@@ -26,24 +26,47 @@ apply to every attempt.
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import Any
 
 from pydantic import BaseModel
 
-from ..domain.agents import AgentEventType, AgentResult, AgentTask, RuntimeHealth
+from ..domain.agents import (
+    AgentEvent,
+    AgentEventType,
+    AgentResult,
+    AgentTask,
+    RuntimeHealth,
+)
 from ..domain.clock import Clock, SystemClock
 from ..domain.ids import new_id
-from ..domain.ports import AgentQuestions, AgentRuntime
+from ..domain.ports import AgentQuestions, AgentRuntime, ProgressObserver
 from ..domain.profile import Route
 from ..domain.records import AgentRunRecord
 from ..domain.settings import Budget
+from .sandbox import scrub
 from .structured import extract_json, repair_prompt, schema_instructions, validate
 
 UsageToday = Callable[[str], Awaitable[tuple[int, float]]]
 """Runs and US dollars a runtime has used today."""
 RecordRun = Callable[[AgentRunRecord], Awaitable[None]]
+
+log = logging.getLogger(__name__)
+
+
+def _scrubbed(value: Any) -> Any:
+    """``value`` with every string in it scrubbed of credentials."""
+    if isinstance(value, str):
+        return scrub(value)
+    if isinstance(value, dict):
+        return {k: _scrubbed(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_scrubbed(v) for v in value]
+    return value
+
 
 _BREAKING_KINDS = frozenset({"auth", "quota", "crash", "timeout"})
 
@@ -101,6 +124,25 @@ class AgentRouter:
         self.disabled = set(disabled)
         self.breakers: dict[str, BreakerState] = {}
         self.questions: AgentQuestions | None = None
+        self.progress: ProgressObserver | None = None
+
+    def bind_progress(self, observer: ProgressObserver) -> None:
+        """Report every attempt's events to ``observer`` (``AgentRunner``)."""
+        self.progress = observer
+
+    async def _report(self, task: AgentTask, runtime: str, event: AgentEvent) -> None:
+        if self.progress is None:
+            return
+        cleaned = event.model_copy(
+            update={
+                "text": scrub(event.text),
+                "data": _scrubbed(event.data),
+            }
+        )
+        try:
+            await self.progress(task, runtime, cleaned)
+        except Exception:  # progress is for people watching; it never stops a run
+            log.exception("progress observer failed")
 
     def bind_questions(self, questions: AgentQuestions) -> None:
         """Send every runtime's permission prompts and questions to ``questions``."""
@@ -306,10 +348,13 @@ class AgentRouter:
 
     async def _attempt(self, runtime: AgentRuntime, task: AgentTask) -> AgentResult:
         result: AgentResult | None = None
+        await self._report(task, runtime.name, AgentEvent(type=AgentEventType.STARTED))
         try:
             async for event in runtime.run(task):
                 if event.type == AgentEventType.FINAL and event.result is not None:
                     result = event.result
+                else:
+                    await self._report(task, runtime.name, event)
         except Exception as exc:  # an adapter bug must not take the playbook down
             result = AgentResult(
                 runtime=runtime.name,
@@ -324,6 +369,14 @@ class AgentRouter:
                 error="runtime ended without a result",
                 error_kind="crash",
             )
+        await self._report(
+            task,
+            runtime.name,
+            AgentEvent(
+                type=AgentEventType.FINAL,
+                result=result.model_copy(update={"error": scrub(result.error or "")}),
+            ),
+        )
         if self.record_run is not None:
             await self.record_run(
                 AgentRunRecord(

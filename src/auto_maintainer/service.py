@@ -57,6 +57,7 @@ from .domain.secrets import find_secrets
 from .domain.settings import (
     LEGACY_RUNTIMES_PATH,
     SETTINGS_PATH,
+    LabMachine,
     ProviderBinding,
     RuntimeConfig,
     ServiceConfig,
@@ -72,6 +73,7 @@ from .domain.settings import (
 from .engine.bus import EventBus
 from .engine.engine import Engine
 from .engine.poller import Poller
+from .engine.progress import JobProgress
 from .engine.questions import QuestionDesk
 from .engine.scheduler import Scheduler
 from .playbooks import all_playbooks
@@ -223,6 +225,11 @@ class Service:
             dashboard_url=settings.base_url,
         )
         adapters.agents.bind_questions(self.questions)
+        self.machines: dict[str, LabMachine] = {}
+        """Test machines from the service settings; playbooks read this same dict."""
+        self.progress = JobProgress(adapters.store, self.bus, adapters.clock)
+        """What agents do in each job, for the dashboard's live view."""
+        adapters.agents.bind_progress(self.progress.observe)
         self.exec = ExecContext(
             store=adapters.store,
             reader=adapters.actuator_reader,
@@ -239,6 +246,7 @@ class Service:
             code_repo=settings.code_repo,
             code_branch=settings.code_branch,
             publisher=adapters.publisher,
+            workspace=adapters.workspace,
             updater=adapters.updater,
             request_restart=self.request_restart,
             writer_as=self.user_writer,
@@ -266,6 +274,7 @@ class Service:
             scratch_dir=settings.scratch_dir,
             code_repo=settings.code_repo,
             code_branch=settings.code_branch,
+            machines=self.machines,
         )
         self.engine = Engine(
             adapters.store,
@@ -277,6 +286,9 @@ class Service:
             adapters.clock,
             settings.pools,
             serves=self.serves,
+        )
+        self.engine.on_change = lambda job: self.progress.changed(
+            job.id, job.repo, job.number
         )
         self.bus.subscribe(self.engine.handle_event)
         self.bus.subscribe(self._settings_event)
@@ -543,6 +555,11 @@ class Service:
         self.scheduler.poll_seconds = poll
         self.settings.write_caps = caps
         self.pipeline.write_caps = caps
+        self.machines.clear()
+        self.machines.update(config.labs)
+        configure = getattr(self.a.lab_runner, "configure", None)
+        if configure is not None:
+            configure(dict(config.labs))
         if self.a.reconfigure is not None:
             await self.a.reconfigure(
                 effective_agents(config, legacy), await self.provider_bindings(config)

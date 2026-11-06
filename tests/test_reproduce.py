@@ -1,0 +1,277 @@
+# Copyright 2026 The RLinf Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Reproducing a PR on a test machine: machines in the settings, the agent's script
+waiting for the requester's approval, both sides run on the machine, and a report
+drafted for the requester."""
+
+from __future__ import annotations
+
+import contextlib
+from collections.abc import AsyncIterator
+from pathlib import Path
+from typing import Any
+
+import httpx
+import pytest
+
+from auto_maintainer.domain.actions import LabReproducePayload
+from auto_maintainer.domain.clock import FixedClock
+from auto_maintainer.domain.permissions import Permission
+from auto_maintainer.domain.ports import CommandResult, GpuStatus
+from auto_maintainer.domain.records import JobStatus
+from auto_maintainer.domain.settings import LabMachine, machine_problems
+from auto_maintainer.labs.executor import LabExecutor
+from auto_maintainer.testing.demo import build_demo
+from auto_maintainer.testing.fakes import FakeLabHost
+from auto_maintainer.web.app import create_app
+
+REPO = "acme/widget"
+
+
+# -- the machine -----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("machine", "problem"),
+    [
+        (LabMachine(host="-oProxyCommand=touch /tmp/x"), "SSH destination"),
+        (LabMachine(host="gpu 01"), "SSH destination"),
+        (LabMachine(workdir="../elsewhere"), "without '..'"),
+        (LabMachine(workdir="/"), "folder of its own"),
+        (LabMachine(forbid=["("]), "not a regular expression"),
+        (LabMachine(repos=["widget"]), "is not owner"),
+    ],
+)
+def test_a_machine_that_cannot_be_used_safely_is_refused(
+    machine: LabMachine, problem: str
+) -> None:
+    assert any(problem in p for p in machine_problems("gpu-01", machine))
+
+
+def test_a_plain_machine_checks() -> None:
+    assert machine_problems("gpu-01", LabMachine(host="ci@gpu-01.lab")) == []
+
+
+async def _executor(
+    tmp_path: Path, machine: LabMachine, host: FakeLabHost
+) -> LabExecutor:
+    from auto_maintainer.store.sqlite import SqliteStore
+
+    store = await SqliteStore.open(tmp_path / "am.db")
+    executor = LabExecutor({}, {}, store, FixedClock())
+    executor.configure({"gpu-01": machine})
+    executor.hosts["gpu-01"] = host
+    return executor
+
+
+def _payload(**kw: Any) -> LabReproducePayload:
+    data: dict[str, Any] = {
+        "lab": "gpu-01",
+        "summary": "a batch of one item",
+        "setup": "pip install -e .",
+        "script": "python -m pytest -q tests/test_loader.py -k one",
+        "expect": "base fails, head passes",
+    }
+    data.update(kw)
+    return LabReproducePayload.model_validate(data)
+
+
+async def test_both_sides_run_in_a_folder_of_their_own_that_is_removed(
+    tmp_path: Path,
+) -> None:
+    host = FakeLabHost("gpu-01")
+    secret = "ghp_" + "c" * 36
+    host.results = [
+        CommandResult(exit_code=0, stdout="/home/ci"),
+        CommandResult(exit_code=0),
+        CommandResult(exit_code=1, stdout=f"FAILED test_one\ntoken {secret}"),
+        CommandResult(exit_code=0),
+        CommandResult(exit_code=0, stdout="1 passed"),
+    ]
+    machine = LabMachine(setup="source ~/venv/bin/activate")
+    executor = await _executor(tmp_path, machine, host)
+    out = await executor.reproduce(
+        _payload(), REPO, 42, {"base": "QkFTRQ==", "head": "SEVBRA=="}, "act_12345678"
+    )
+    run_dir = "/home/ci/am-labs/acme__widget-42-12345678"
+    commands = [c for c, _, _ in host.commands]
+    assert host.stdin == ["QkFTRQ==", "SEVBRA=="]
+    assert f"mkdir -p {run_dir}/base" in commands[1]
+    assert commands[2].startswith("source ~/venv/bin/activate\npip install -e .\n")
+    assert host.commands[2][1] == f"{run_dir}/base"
+    assert commands[-1] == f"rm -rf {run_dir}"
+    assert out["runs"]["base"]["exit_code"] == 1
+    assert out["runs"]["head"]["tail"] == ["1 passed"]
+    assert secret not in "\n".join(out["runs"]["base"]["tail"])
+
+
+async def test_a_script_the_guard_refuses_never_reaches_the_machine(
+    tmp_path: Path,
+) -> None:
+    host = FakeLabHost("gpu-01")
+    executor = await _executor(tmp_path, LabMachine(forbid=[r"\bdocker\b"]), host)
+    for script in ("sudo rm -rf build", "ray stop --force", "docker run x"):
+        out = await executor.reproduce(
+            _payload(script=script), REPO, 42, {"base": "", "head": ""}, "act_1"
+        )
+        assert out["refused"]
+    assert host.commands == []
+
+
+async def test_a_machine_for_other_repositories_or_without_a_free_gpu_runs_nothing(
+    tmp_path: Path,
+) -> None:
+    host = FakeLabHost(
+        "gpu-01", gpus=[GpuStatus(index=0, memory_used_mib=40000, processes=1)]
+    )
+    executor = await _executor(tmp_path, LabMachine(repos=["acme/other"]), host)
+    with pytest.raises(RuntimeError, match="not for acme/widget"):
+        await executor.reproduce(_payload(), REPO, 42, {}, "act_1")
+    executor = await _executor(tmp_path / "2", LabMachine(), host)
+    host.results = [CommandResult(exit_code=0, stdout="/home/ci")]
+    out = await executor.reproduce(
+        _payload(needs_gpu=True), REPO, 42, {"base": "", "head": ""}, "act_1"
+    )
+    assert out["deferred"] and not host.stdin
+
+
+# -- the flow --------------------------------------------------------------------------
+
+
+@pytest.fixture
+async def demo(tmp_path: Path):
+    h = await build_demo(tmp_path)
+    h.forge.set_permission(REPO, "walt", Permission.WRITE)
+    app = create_app(h.service, data_dir=tmp_path, allow_dev_login=True)
+    yield h, app
+    await h.close()
+
+
+@contextlib.asynccontextmanager
+async def _as(app: Any, login: str) -> AsyncIterator[httpx.AsyncClient]:
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        await client.get(f"/auth/dev?login={login}")
+        client.headers["x-am-csrf"] = client.cookies.get("am_csrf") or ""
+        yield client
+
+
+async def test_only_service_maintainers_add_machines(demo) -> None:
+    h, app = demo
+    machine = {"host": "ci@a100-2", "description": "4× A100"}
+    async with _as(app, "walt") as walt:
+        proposed = await walt.put(
+            "/api/settings/labs/a100-2", json={"machine": machine}
+        )
+        assert proposed.status_code == 200 and proposed.json()["approved"] is False
+        assert "a100-2" not in h.service.machines
+        bad = await walt.put(
+            "/api/settings/labs/a100-2", json={"machine": {"host": "-oX=y"}}
+        )
+        assert bad.status_code == 422
+    async with _as(app, "maria") as maria:
+        applied = await maria.put(
+            "/api/settings/labs/a100-2", json={"machine": machine}
+        )
+        assert applied.json()["approved"] is True
+        assert h.service.machines["a100-2"].description == "4× A100"
+        names = [m["name"] for m in (await maria.get(f"/api/labs?repo={REPO}")).json()]
+        assert "a100-2" in names
+        checked = (await maria.post("/api/settings/labs/a100-2/check")).json()
+        assert checked["ok"] and checked["gpus"][0]["idle"]
+
+
+async def test_a_reproduction_runs_once_the_requester_approves_its_script(
+    demo,
+) -> None:
+    h, app = demo
+    runner = h.service.a.lab_runner
+    async with _as(app, "maria") as maria:
+        started = await maria.post(
+            f"/api/prs/{REPO}/42/reproduce",
+            json={"lab": "gpu-01", "note": "the batch of one", "agent": "codex"},
+        )
+        assert started.status_code == 200, started.text
+        await h.settle()
+        [plan_task] = [t for t in h.runner.tasks if t.kind == "reproduce"]
+        assert "the batch of one" in plan_task.prompt and plan_task.mode == "read_only"
+        [job] = [j for j in await h.store.list_jobs() if j.playbook == "reproduce"]
+        assert job.status == JobStatus.WAITING
+        [draft] = [
+            p
+            for p in (await maria.get("/api/proposals")).json()
+            if p["action"]["action"]["kind"] == "lab.reproduce"
+        ]
+        assert draft["requested_by"] == "maria"
+        assert "load([1])" in draft["action"]["action"]["payload"]["script"]
+        assert runner.reproduced == []
+        ok = await maria.post(f"/api/proposals/{draft['id']}/approve", json={})
+        assert ok.status_code == 200, ok.text
+        await h.settle()
+        [ran] = runner.reproduced
+        assert set(ran["code"]) == {"base", "head"}
+        job = await h.store.get_job(job.id)
+        assert job is not None and job.status == JobStatus.DONE
+        assert job.result and job.result["conclusion"] == "reproduced"
+        [report] = [
+            p
+            for p in (await maria.get("/api/proposals")).json()
+            if p["action"]["action"]["kind"] == "comment.upsert"
+            and p["requested_by"] == "maria"
+        ]
+        assert "batch of one" in report["action"]["action"]["payload"]["body"]
+
+
+async def test_a_rejected_script_ends_the_job_and_runs_nothing(demo) -> None:
+    h, app = demo
+    async with _as(app, "maria") as maria:
+        await maria.post(f"/api/prs/{REPO}/42/reproduce", json={"lab": "gpu-01"})
+        await h.settle()
+        [draft] = [
+            p
+            for p in (await maria.get("/api/proposals")).json()
+            if p["action"]["action"]["kind"] == "lab.reproduce"
+        ]
+        await maria.post(
+            f"/api/proposals/{draft['id']}/reject", json={"reason": "too slow"}
+        )
+        await h.settle()
+    [job] = [j for j in await h.store.list_jobs() if j.playbook == "reproduce"]
+    assert job.status == JobStatus.DONE and job.result
+    assert job.result["skipped"] == "the script was not approved"
+    assert h.service.a.lab_runner.reproduced == []
+
+
+async def test_a_script_the_machine_would_refuse_is_never_proposed(demo) -> None:
+    h, app = demo
+    h.runner.on(
+        "reproduce",
+        lambda task: {
+            "summary": "restart the cluster",
+            "script": "ray stop && python check.py",
+            "expect": "x",
+        },
+    )
+    async with _as(app, "maria") as maria:
+        await maria.post(f"/api/prs/{REPO}/42/reproduce", json={"lab": "gpu-01"})
+        await h.settle()
+        kinds = [
+            p["action"]["action"]["kind"]
+            for p in (await maria.get("/api/proposals")).json()
+        ]
+    assert "lab.reproduce" not in kinds
+    [job] = [j for j in await h.store.list_jobs() if j.playbook == "reproduce"]
+    assert job.result and job.result["refused"]

@@ -10,6 +10,7 @@ import { AgentProvider, useAgent } from "./agent";
 import { Empty, ErrorBox } from "./components";
 import { useMe, useMemoryChanges, useProposals } from "./data";
 import { QUESTION_EVENT, useLiveEvents } from "./events";
+import { JobDrawer } from "./jobs";
 import { useLang, useT } from "./i18n";
 import { Icon } from "./icons";
 import { Logo } from "./logo";
@@ -240,7 +241,7 @@ function Shell({ me }: { me: Me }) {
                     {t("Agent questions")}
                   </MenuItem>
                   <MenuItem icon="inbox" hint={counts.proposals || "—"} onClick={go("/inbox")}>
-                    {t("Proposals")}
+                    {t("Approvals")}
                   </MenuItem>
                   <MenuItem icon="book" hint={counts.memory || "—"} onClick={go("/memory")}>
                     {t("Memory changes")}
@@ -372,6 +373,7 @@ function Shell({ me }: { me: Me }) {
           />
         </Routes>
       </main>
+      <JobDrawer />
 
       {!agent.isOpen && (
         <button className="agent fab" onClick={() => agent.open()} aria-label={t("Ask agent")}>

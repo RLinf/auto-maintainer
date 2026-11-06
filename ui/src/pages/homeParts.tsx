@@ -6,48 +6,14 @@ import { useEffect, useState, type ReactNode } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api, type Automation, type ChatThread, type Me, type PrRow, type RepoRow, type ReviewStart } from "../api";
 import { useAgent } from "../agent";
-import { agentName, AgentPicker, reviewToast } from "../agentPicker";
-import { ErrorBox, prPath, Section, Tier, useAct, When } from "../components";
+import { agentName, AgentPicker, reviewToast, useAgentChoice } from "../agentPicker";
+import { ErrorBox, prPath, Tier, useAct, When } from "../components";
 import { prKey, useSettings } from "../data";
 import { useT } from "../i18n";
-import { Icon, type IconName } from "../icons";
-import { Skeleton, useToast } from "../ui";
-
-// ---- quick actions ----------------------------------------------------------------------------
-
-export function QuickActions() {
-  const t = useT();
-  const agent = useAgent();
-  const navigate = useNavigate();
-  const actions: { icon: IconName; title: string; body: string; run: () => void; accent?: boolean }[] = [
-    {
-      icon: "pr",
-      title: t("Review pull requests"),
-      body: t("Pick PRs and an agent; drafts come back for you to edit and post."),
-      run: () => document.getElementById("review")?.scrollIntoView({ behavior: "smooth" }),
-    },
-    { icon: "sparkles", title: t("Ask the agent"), body: t("About anything on any page; it sees what you see."), run: () => agent.open(), accent: true },
-    { icon: "repo", title: t("Add a repository"), body: t("The agent reads it and drafts how to maintain it."), run: () => navigate("/repos?add=1") },
-    { icon: "settings", title: t("Agents and models"), body: t("Choose which agents run and on which models."), run: () => navigate("/settings") },
-  ];
-  return (
-    <div className="quick">
-      {actions.map((a) => (
-        <button key={a.title} className={`quick-action ${a.accent ? "accent" : ""}`} onClick={a.run}>
-          <span className="quick-icon">
-            <Icon name={a.icon} size={18} />
-          </span>
-          <span className="stack" style={{ gap: 2, alignItems: "flex-start", textAlign: "left" }}>
-            <strong>{a.title}</strong>
-            <span className="small muted" style={{ whiteSpace: "normal" }}>
-              {a.body}
-            </span>
-          </span>
-        </button>
-      ))}
-    </div>
-  );
-}
+import { Icon } from "../icons";
+import { ACTIVE, needsMe, useWork, WorkRow } from "../jobs";
+import { openJob } from "../openJob";
+import { Popover, Skeleton, useToast } from "../ui";
 
 // ---- getting started ---------------------------------------------------------------------------
 
@@ -164,11 +130,19 @@ function activity(p: PrRow, me: Me, t: (s: string) => string): ReactNode {
   if (job && ["queued", "running", "waiting"].includes(job.status)) {
     const who = job.by ? (job.by === me.login ? t("you") : job.by) : null;
     return (
-      <span style={{ color: "var(--info)" }}>
-        <Icon name="clock" size={12} /> {job.playbook === "followup" ? t("following up…") : t("reviewing…")}
+      <button
+        className="link-button"
+        style={{ color: "var(--info)" }}
+        title={t("Watch the agent work")}
+        onClick={(e) => {
+          e.preventDefault();
+          openJob(job.id);
+        }}
+      >
+        <span className="pulse" /> {job.playbook === "followup" ? t("following up…") : t("reviewing…")}
         {job.agent ? ` ${agentName(job.agent)}` : ""}
         {who ? ` · ${who}` : ""}
-      </span>
+      </button>
     );
   }
   if (a.draft) {
@@ -182,13 +156,13 @@ function activity(p: PrRow, me: Me, t: (s: string) => string): ReactNode {
   return null;
 }
 
-export function ReviewCard({ rows, loading, me }: { rows: PrRow[]; loading: boolean; me: Me }) {
+export function ReviewCard({ rows, loading, me, automations }: { rows: PrRow[]; loading: boolean; me: Me; automations: Automation[] }) {
   const t = useT();
   const toast = useToast();
   const agent = useAgent();
   const navigate = useNavigate();
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [who, setWho] = useState("");
+  const [who, setWho] = useAgentChoice("review");
   const [showAll, setShowAll] = useState(false);
   const sorted = [...rows].sort((a, b) => (b.total ?? -1) - (a.total ?? -1));
   const shown = showAll ? sorted : sorted.slice(0, 8);
@@ -276,6 +250,7 @@ export function ReviewCard({ rows, loading, me }: { rows: PrRow[]; loading: bool
           {showAll ? t("Show fewer") : `${t("Show all")} (${rows.length})`}
         </button>
       )}
+      <ScheduleLine automations={automations} />
       <ErrorBox error={review.error} />
     </section>
   );
@@ -297,23 +272,106 @@ export function useAutomations(repos: RepoRow[]) {
   return results.map((q) => q.data).filter((a): a is Automation => !!a);
 }
 
-export function AutomationCard({ automations, loading }: { automations: Automation[]; loading: boolean }) {
+/** When reviews run in each repository, in one line, each changeable in place. */
+function ScheduleLine({ automations }: { automations: Automation[] }) {
   const t = useT();
+  const say = (a: Automation) =>
+    a.trigger === "scan"
+      ? `${t("every")} ${a.every_hours === 24 ? t("day") : a.every_hours === 168 ? t("week") : `${a.every_hours ?? 6} ${t("hours")}`}`
+      : a.trigger === "events"
+        ? t("on every update")
+        : t("only when asked");
   return (
-    <Section title={t("When reviews run")} hint={t("per repository")}>
-      <div id="automation" />
-      {loading ? (
-        <Skeleton rows={3} />
-      ) : !automations.length ? (
-        <span className="small muted">{t("Add a repository and approve its profile first.")}</span>
+    <div id="automation" className="schedule-line small">
+      <Icon name="clock" size={13} />
+      <span className="muted">{t("Reviews run")}:</span>
+      {automations.length === 0 && <span className="muted">{t("Add a repository and approve its profile first.")}</span>}
+      {automations.map((a) => (
+        <Popover
+          key={a.repo}
+          label={t("When reviews run")}
+          trigger={(open, toggle) => (
+            <button className={`chip-btn ${open ? "on" : ""}`} onClick={toggle} aria-expanded={open}>
+              {automations.length > 1 ? `${a.repo}: ` : ""}
+              {say(a)}
+              {a.trigger !== "manual" && a.followups ? ` · ${t("re-review on new commits")}` : ""}
+              <Icon name="chevronDown" size={12} />
+            </button>
+          )}
+        >
+          {() => (
+            <div style={{ padding: 8, width: 360, maxWidth: "calc(100vw - 48px)" }}>
+              <AutomationRow a={a} />
+            </div>
+          )}
+        </Popover>
+      ))}
+    </div>
+  );
+}
+
+// ---- what agents are doing ------------------------------------------------------------------
+
+export function AgentWork({ me }: { me: Me }) {
+  const t = useT();
+  const [everyone, setEveryone] = useState(false);
+  const work = useWork(everyone);
+  const jobs = work.data ?? [];
+  const groups = {
+    needs: jobs.filter((j) => needsMe(j, me.login)),
+    running: jobs.filter((j) => ACTIVE.has(j.status) && !needsMe(j, me.login)),
+    done: jobs.filter((j) => !ACTIVE.has(j.status) && !needsMe(j, me.login)),
+  };
+  const [tab, setTab] = useState<keyof typeof groups | null>(null);
+  const shown = tab ?? (groups.needs.length ? "needs" : groups.running.length || !groups.done.length ? "running" : "done");
+  const [all, setAll] = useState(false);
+  const rows = groups[shown];
+  const tabs: { id: keyof typeof groups; label: string }[] = [
+    { id: "needs", label: t("Needs you") },
+    { id: "running", label: t("Working") },
+    { id: "done", label: t("Finished") },
+  ];
+  return (
+    <section id="work" className="card">
+      <div className="row" style={{ marginBottom: 8, flexWrap: "wrap" }}>
+        <h2>{t("Agents' work")}</h2>
+        <div className="segmented" role="tablist">
+          {tabs.map((x) => (
+            <button key={x.id} role="tab" aria-selected={shown === x.id} className={shown === x.id ? "on" : ""} onClick={() => setTab(x.id)}>
+              {x.label}
+              {groups[x.id].length ? <span className="muted"> {groups[x.id].length}</span> : null}
+            </button>
+          ))}
+        </div>
+        <span className="spacer" />
+        <button className={`chip-btn ${everyone ? "on" : ""}`} style={{ borderStyle: "solid" }} onClick={() => setEveryone(!everyone)}>
+          {everyone ? t("Everyone's") : t("Mine")}
+        </button>
+      </div>
+      {work.isLoading ? (
+        <Skeleton rows={2} />
+      ) : !rows.length ? (
+        <span className="small muted">
+          {shown === "needs"
+            ? t("No agent is waiting for you.")
+            : shown === "running"
+              ? t("No agent is working for you right now. Start a review below.")
+              : t("Nothing finished in the last week.")}
+        </span>
       ) : (
-        <div className="stack" style={{ gap: 14 }}>
-          {automations.map((a) => (
-            <AutomationRow key={a.repo} a={a} />
+        <div className="list">
+          {(all ? rows : rows.slice(0, 6)).map((j) => (
+            <WorkRow key={j.id} job={j} me={me.login} />
           ))}
         </div>
       )}
-    </Section>
+      {rows.length > 6 && (
+        <button className="ghost sm" style={{ marginTop: 6 }} onClick={() => setAll(!all)}>
+          {all ? t("Show fewer") : `${t("Show all")} (${rows.length})`}
+        </button>
+      )}
+      <ErrorBox error={work.error} />
+    </section>
   );
 }
 

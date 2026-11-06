@@ -68,6 +68,11 @@ from .auth import User, current_user
 PERMISSION_TTL = timedelta(minutes=10)
 
 
+MAX_DIFF = 2_000_000
+_DIFFS: dict[tuple[str, int, str], str] = {}
+"""Recent PR diffs by (repo, number, head SHA); a head never changes its diff."""
+
+
 def service_of(request: Request) -> Service:
     return request.app.state.service
 
@@ -721,6 +726,31 @@ def build_router() -> APIRouter:
             "arm": arm.model_dump(mode="json") if arm else None,
             "gate": gate,
         }
+
+    @r.get("/prs/{owner}/{name}/{number}/diff")
+    async def pr_diff(
+        request: Request,
+        owner: str,
+        name: str,
+        number: int,
+        user: User = Depends(current_user),
+    ) -> dict[str, Any]:
+        """The PR's diff at its current head, so drafts can show comments in place."""
+        service = service_of(request)
+        repo = _repo(owner, name)
+        await require_view(service, user, repo)
+        pr = await service.store.get_snapshot(repo, number)
+        if pr is None:
+            raise HTTPException(404, f"{repo}#{number} is not known yet")
+        key = (repo, number, pr.head_sha)
+        text = _DIFFS.get(key)
+        if text is None:
+            text = (await service.a.forge.get_pr_diff(repo, number)) or ""
+            text = text[:MAX_DIFF]
+            _DIFFS[key] = text
+            while len(_DIFFS) > 64:
+                _DIFFS.pop(next(iter(_DIFFS)))
+        return {"sha": pr.head_sha, "diff": text, "truncated": len(text) >= MAX_DIFF}
 
     @r.post("/prs/{owner}/{name}/{number}/override")
     async def override(
@@ -1443,6 +1473,8 @@ def build_router() -> APIRouter:
                 ):
                     data["title"] = event.payload.get("title")
                     data["asked_for"] = event.payload.get("asked_for")
+                if event.kind == EventKind.JOB_PROGRESS:
+                    data["job"] = event.payload.get("job")
                 yield f"event: {event.kind}\ndata: {json.dumps(data)}\n\n"
 
         return StreamingResponse(stream(), media_type="text/event-stream")
@@ -1593,6 +1625,7 @@ async def review_activity(service: Service, repo: str) -> dict[int, dict[str, An
         if "job" not in row:
             payload = (job.events[-1].get("payload") if job.events else None) or {}
             row["job"] = {
+                "id": job.id,
                 "playbook": job.playbook,
                 "status": job.status,
                 "updated_at": job.updated_at.isoformat(),

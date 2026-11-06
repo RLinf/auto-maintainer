@@ -55,6 +55,9 @@ class EventKind(StrEnum):
     QUESTION_ASKED = "question.asked"
     QUESTION_ANSWERED = "question.answered"
     JOB_TIMEOUT = "job.timeout"
+    JOB_PROGRESS = "job.progress"
+    """A job's status or steps changed. Only the dashboard's event stream sees it
+    (``EventBus.notify``); no playbook runs on it."""
 
 
 class Event(BaseModel):

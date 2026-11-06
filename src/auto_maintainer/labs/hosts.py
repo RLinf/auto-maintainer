@@ -60,7 +60,9 @@ def _script(command: str, cwd: str | None, env: dict[str, str] | None) -> str:
 class _Host:
     name: str
 
-    async def _shell(self, script: str, timeout: float) -> CommandResult:
+    async def _shell(
+        self, script: str, timeout: float, stdin: str | None = None
+    ) -> CommandResult:
         raise NotImplementedError
 
     async def run(
@@ -70,8 +72,9 @@ class _Host:
         cwd: str | None = None,
         env: dict[str, str] | None = None,
         timeout: float = 600,
+        stdin: str | None = None,
     ) -> CommandResult:
-        return await self._shell(_script(command, cwd, env), timeout)
+        return await self._shell(_script(command, cwd, env), timeout, stdin)
 
     async def gpu_status(self) -> list[GpuStatus]:
         gpus = await self._shell(GPU_QUERY, 30)
@@ -85,8 +88,10 @@ class LocalLabHost(_Host):
     def __init__(self, name: str) -> None:
         self.name = name
 
-    async def _shell(self, script: str, timeout: float) -> CommandResult:
-        r = await run(["bash", "-c", script], timeout=timeout)
+    async def _shell(
+        self, script: str, timeout: float, stdin: str | None = None
+    ) -> CommandResult:
+        r = await run(["bash", "-c", script], timeout=timeout, stdin=stdin)
         return CommandResult(
             exit_code=r.exit_code,
             stdout=r.stdout,
@@ -104,7 +109,9 @@ class SshLabHost(_Host):
         self.host = host
         self._control = str((control_dir or Path.home() / ".ssh") / "am-%r@%h:%p")
 
-    async def _shell(self, script: str, timeout: float) -> CommandResult:
+    async def _shell(
+        self, script: str, timeout: float, stdin: str | None = None
+    ) -> CommandResult:
         argv = [
             "ssh",
             "-o",
@@ -117,10 +124,11 @@ class SshLabHost(_Host):
             "ControlPersist=10m",
             "-o",
             "ServerAliveInterval=30",
+            "--",
             self.host,
             script,
         ]
-        r = await run(argv, timeout=timeout)
+        r = await run(argv, timeout=timeout, stdin=stdin)
         return CommandResult(
             exit_code=r.exit_code,
             stdout=r.stdout,

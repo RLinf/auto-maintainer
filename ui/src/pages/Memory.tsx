@@ -100,7 +100,7 @@ export function ChangeCard({ change, compact = false }: { change: MemoryChange; 
             {t("Affects")} <strong>{change.repos.join(", ")}</strong> ·{" "}
           </>
         )}
-        {t("Approvals")}: {approvals.length ? approvals.map(([repo, logins]) => `${logins.join(", ")} (${repo})`).join("; ") : t("none yet")}
+        {t("Approved by")}: {approvals.length ? approvals.map(([repo, logins]) => `${logins.join(", ")} (${repo})`).join("; ") : t("none yet")}
       </div>
       <details>
         <summary className="small">

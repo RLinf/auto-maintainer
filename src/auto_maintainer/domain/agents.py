@@ -40,6 +40,7 @@ class TaskKind(StrEnum):
     LEARN = "learn"
     SELF_IMPROVE = "self_improve"
     FIX = "fix"
+    REPRODUCE = "reproduce"
     PROBE = "probe"
 
 
@@ -189,6 +190,8 @@ def denial(message: str, by: str = "service") -> AgentAnswer:
 
 
 class AgentEventType(StrEnum):
+    STARTED = "started"
+    """Reported by the router when an attempt begins; adapters never emit it."""
     MESSAGE = "message"
     TOOL_CALL = "tool_call"
     TOOL_RESULT = "tool_result"

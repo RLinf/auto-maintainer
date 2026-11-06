@@ -1,7 +1,9 @@
 // Which agent does a review: the route's default, or one the reviewer picks. Only
 // enabled agents are offered.
 
+import { useState } from "react";
 import type { ReviewStart } from "./api";
+import { openJob } from "./openJob";
 import { useSettings } from "./data";
 import { useT } from "./i18n";
 import { Icon } from "./icons";
@@ -18,20 +20,56 @@ export function agentName(name: string | null | undefined): string {
   return name ? NAMES[name] ?? name : "";
 }
 
-export function AgentPicker({ value, onChange, compact }: { value: string; onChange: (v: string) => void; compact?: boolean }) {
+/** The agent last picked for ``task``, remembered in this browser. */
+export function useAgentChoice(task: string): [string, (v: string) => void] {
+  const key = `am.agent.${task}`;
+  const [value, setValue] = useState(() => {
+    try {
+      return localStorage.getItem(key) ?? "";
+    } catch {
+      return "";
+    }
+  });
+  const set = (v: string) => {
+    setValue(v);
+    try {
+      localStorage.setItem(key, v);
+    } catch {
+      // the choice then lasts for this page only
+    }
+  };
+  return [value, set];
+}
+
+export function AgentPicker({
+  value,
+  onChange,
+  compact,
+  task = "review",
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  compact?: boolean;
+  task?: string;
+}) {
   const t = useT();
   const settings = useSettings();
   const agents = (settings.data?.agents ?? []).filter((a) => a.enabled);
+  const primary = settings.data?.routing.find((r) => r.task === task)?.primary;
+  // A remembered agent that was disabled since falls back to the default.
+  const current = value && !agents.some((a) => a.name === value) && settings.data ? "" : value;
   return (
-    <label className="row" style={{ gap: 6 }} title={t("Which agent reviews")}>
+    <label className="row" style={{ gap: 6 }} title={t("Which agent does it")}>
       {!compact && <Icon name="cpu" size={14} />}
-      <select value={value} onChange={(e) => onChange(e.target.value)} aria-label={t("Which agent reviews")} style={{ height: compact ? 28 : 34 }}>
-        <option value="">{t("Default agent")}</option>
-        {agents.map((a) => (
-          <option key={a.name} value={a.name}>
-            {agentName(a.name)}
-          </option>
-        ))}
+      <select value={current} onChange={(e) => onChange(e.target.value)} aria-label={t("Which agent does it")} style={{ height: compact ? 28 : 34 }}>
+        <option value="">{primary ? `${agentName(primary)} (${t("default")})` : t("Default agent")}</option>
+        {agents
+          .filter((a) => a.name !== primary)
+          .map((a) => (
+            <option key={a.name} value={a.name}>
+              {agentName(a.name)}
+            </option>
+          ))}
       </select>
     </label>
   );
@@ -42,6 +80,7 @@ export function reviewToast(out: ReviewStart[], t: (s: string) => string, openPr
   const started = out.filter((o) => o.run === "review" || o.run === "followup").length;
   const taken = out.filter((o) => o.run === "joined" || o.run === "drafted");
   const skipped = out.filter((o) => o.run === "skip");
+  const firstStarted = out.find((o) => (o.run === "review" || o.run === "followup") && o.event);
   return {
     title: started ? `${started} ${t(started === 1 ? "review started" : "reviews started")}` : t("Nothing new started"),
     body: [
@@ -55,6 +94,10 @@ export function reviewToast(out: ReviewStart[], t: (s: string) => string, openPr
       .filter(Boolean)
       .join(" · "),
     icon: "pr" as const,
-    action: started || taken.length ? { label: t("Proposals"), onClick: openProposals } : undefined,
+    action: firstStarted?.event
+      ? { label: t(started === 1 ? "Watch" : "Watch the first"), onClick: () => openJob(firstStarted.event as string) }
+      : taken.length
+        ? { label: t("Approvals"), onClick: openProposals }
+        : undefined,
   };
 }

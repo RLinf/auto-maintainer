@@ -31,6 +31,7 @@ from ..domain.actions import (
     IssueCommentPayload,
     IssueLabelPayload,
     LabelPayload,
+    LabReproducePayload,
     LabRunPayload,
     MemoryChangePayload,
     MemoryCommitPayload,
@@ -443,6 +444,41 @@ async def _lab_run(
     )
 
 
+async def _lab_reproduce(
+    x: ExecContext,
+    action: Action,
+    profile: RepoProfile | None,
+    pr: PrSnapshot | None,
+    approver: str | None,
+) -> dict[str, Any]:
+    """Copy the code before the PR and at its head to the test machine and run the
+    approved script on both. The machine never gets credentials: the service checks
+    the PR out and streams each side's files over."""
+    assert pr is not None
+    if x.labs is None or x.workspace is None:
+        raise RuntimeError("no test machines are configured")
+    p = LabReproducePayload.model_validate(action.payload)
+    info = await x.reader.get_repo(action.repo)
+    workdir = await x.workspace.prepare(
+        action.repo, pr.number, pr.head_sha, info.default_branch
+    )
+    try:
+        base = (
+            await x.workspace.merge_base(
+                workdir, f"origin/{info.default_branch}", pr.head_sha
+            )
+            or f"origin/{info.default_branch}"
+        )
+        refs = {"base": base, "head": pr.head_sha}
+        code = {
+            side: await x.workspace.archive(workdir, refs[side]) for side in p.sides
+        }
+    finally:
+        await x.workspace.release(workdir)
+    out = await x.labs.reproduce(p, action.repo, pr.number, code, holder=action.id)
+    return {**out, "base_sha": base, "head_sha": pr.head_sha}
+
+
 async def _memory_commit(
     x: ExecContext,
     action: Action,
@@ -641,6 +677,9 @@ HANDLERS: dict[ActionKind, HandlerSpec] = {
     ActionKind.ISSUE_LABEL: HandlerSpec(_issue_label),
     ActionKind.ISSUE_COMMENT: HandlerSpec(_issue_comment),
     ActionKind.LAB_RUN: HandlerSpec(_lab_run, needs_pr=True, needs_current_head=True),
+    ActionKind.LAB_REPRODUCE: HandlerSpec(
+        _lab_reproduce, needs_pr=True, needs_current_head=True
+    ),
     ActionKind.MEMORY_COMMIT: HandlerSpec(_memory_commit),
     ActionKind.MEMORY_CHANGE: HandlerSpec(_memory_change),
     ActionKind.PR_FIX: HandlerSpec(_pr_fix, needs_pr=True, needs_current_head=True),

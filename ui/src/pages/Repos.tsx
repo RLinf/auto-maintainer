@@ -52,7 +52,7 @@ export function ReposPage() {
     sorts: [
       { id: "repo", label: t("Name"), value: (r) => r.repo.toLowerCase() },
       { id: "prs", label: t("Open PRs"), value: (r) => r.open_prs, descFirst: true },
-      { id: "proposals", label: t("Proposals"), value: (r) => r.pending_proposals, descFirst: true },
+      { id: "proposals", label: t("Approvals"), value: (r) => r.pending_proposals, descFirst: true },
       { id: "poll", label: t("Last poll"), value: (r) => timeOf(r.last_poll_at), descFirst: true },
       { id: "added", label: t("Added"), value: (r) => timeOf(r.added_at), descFirst: true },
     ],
@@ -89,7 +89,7 @@ export function ReposPage() {
       className: "num",
       cell: (r) => <Link to={`/prs?f.repo=${encodeURIComponent(r.repo)}`}>{r.open_prs}</Link>,
     },
-    { id: "proposals", header: t("Proposals"), sort: "proposals", className: "num", cell: (r) => r.pending_proposals || <span className="muted">0</span> },
+    { id: "proposals", header: t("Approvals"), sort: "proposals", className: "num", cell: (r) => r.pending_proposals || <span className="muted">0</span> },
     {
       id: "profile",
       header: t("Profile"),

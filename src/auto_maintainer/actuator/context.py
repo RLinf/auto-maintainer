@@ -20,7 +20,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from ..domain.actions import Action, LabRunPayload
+from ..domain.actions import Action, LabReproducePayload, LabRunPayload
 from ..domain.clock import Clock
 from ..domain.codeowners import CODEOWNERS_LOCATIONS, owners_of_paths, parse_codeowners
 from ..domain.markers import build_marker
@@ -34,6 +34,7 @@ from ..domain.ports import (
     Notifier,
     ServiceUpdater,
     Store,
+    Workspace,
 )
 from ..domain.profile import RepoProfile
 from ..domain.snapshot import PrSnapshot
@@ -64,6 +65,17 @@ class LabRunner(Protocol):
         holder: str,
     ) -> dict[str, Any]: ...
 
+    async def reproduce(
+        self,
+        payload: LabReproducePayload,
+        repo: str,
+        number: int,
+        code: dict[str, str],
+        holder: str,
+    ) -> dict[str, Any]: ...
+
+    async def check(self, lab: str) -> dict[str, Any]: ...
+
 
 @dataclass
 class ExecContext:
@@ -87,12 +99,14 @@ class ExecContext:
     updater: ServiceUpdater | None = None
     """Moves the service's own checkout to a new commit."""
     request_restart: Callable[[], None] | None = None
+    """Asks ``am serve`` to exit for its supervisor to start the new code."""
+    workspace: Workspace | None = None
+    """Checks out a PR to copy its code to a test machine."""
     writer_as: Callable[[str], Awaitable[ForgeWriter | None]] | None = None
     """A forge writer acting as a signed-in maintainer, for review drafts they chose
     to post as themselves; ``None`` when their sign-in no longer works."""
     publisher_as: Callable[[str], Awaitable[BranchPublisher | None]] | None = None
     """A branch publisher pushing as a signed-in maintainer, for fix PRs."""
-    """Asks ``am serve`` to exit for its supervisor to start the new code."""
 
     async def public(
         self,

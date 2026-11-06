@@ -49,10 +49,10 @@ pre-commit run --all-files
 - `policy/` – `decide()` over `PolicyFacts`, hard limits, the leak guard.
 - `playbooks/` – one module per playbook, `base.py` (contract and context), `prompts.py` (`untrusted()` and prompt blocks).
 - `actuator/` – `pipeline.py` (policy, proposals, approvals), `executor.py` (per-repository queues, intents, staleness), `handlers.py` (one per action kind), `memory_gate.py`.
-- `engine/` – event bus, jobs and waits, poller, scheduler, the question desk (`questions.py`) where agents' questions wait for reviewers.
+- `engine/` – event bus, jobs and waits, poller, scheduler, the question desk (`questions.py`) where agents' questions wait for reviewers, and each job's live agent steps (`progress.py`).
 - Adapters: `github/`, `agents/` (`exec.py` with two-way `Conversation`s, `acp.py`, `approver.py`, `adapters/`, `router.py`), `memory/`, `workspace/` (worktrees, and `publish` for the actuator), `labs/`, `store/` (SQLite, and `secrets.py` for API keys), `notify/`, `selfupdate/` (`updater.py` deploys the service's own checkout, `supervise.py`), plus `subproc.py`.
 - `hostsetup.py` – the steps of the setup page (GitHub account, sign-in, memory repo), which write `local.yaml` and `secrets.env`; `config.py` reads and writes them.
-- `web/` – FastAPI app, sign-in (OAuth and one-time links), the dashboard API, chat, `settings.py` (the service settings), `setup.py` (the setup page). `testing/` – fakes of every port, `Harness`, the demo data.
+- `web/` – FastAPI app, sign-in (OAuth and one-time links), the dashboard API, chat, `jobs.py` (agents' work, live), `settings.py` (the service settings and test machines), `setup.py` (the setup page). `testing/` – fakes of every port, `Harness`, the demo data.
 - `packs/<name>/pack.yaml` – built-in packs. `skills/<name>/SKILL.md` – skills the service gives its runtime agents. `config/defaults/` – default profile (every repository action in `shadow`), routing, schedules.
 - `ui/` – React, TypeScript, Vite dashboard; `npm run build` writes into `src/auto_maintainer/web/static/`, which is not in git. `am serve` runs that build at startup whenever it is missing or older than `ui/` (`web/dashboard.py`), so Node 20+ is needed wherever the service runs from a checkout.
 - `tests/` – flows, rules, adapters (`tests/github/`, `tests/agents/`), and `test_layers.py`.
@@ -77,7 +77,7 @@ These hold everywhere. Reviewers reject changes that break them; `tests/test_lay
 - **Agent output is validated** against a Pydantic model defined next to the playbook that asks for it; the router uses the runtime's schema flag when it has one and one repair turn otherwise.
 - **Secrets never leave the host config.** No tokens in git remote URLs, command lines, prompts, logs, or transcripts; git reads them from `AM_GIT_TOKEN` through a credential helper. Agent environments come from the allowlist in `agents/sandbox.py`.
 - **Async all the way.** No blocking calls on the event loop; adapters run subprocesses through `subproc.run`. Times are UTC; business days go through `domain.calendar`.
-- **Labs follow their guard rules** (design 5.10): template commands only, one worktree per PR, lease only idle GPUs, never modify the base clone, cleanup in `finally`.
+- **Labs follow their guard rules** (design 5.10): template commands, or a reproduction script that its requester approved and that passes `domain/labs.py:script_refusals`; one worktree or run folder per run; lease only idle GPUs; never modify the base clone; no credentials on a machine (code goes over as archives); cleanup in `finally`.
 - **Schemas are versioned.** A table change needs an Alembic migration in `store/migrations/versions/`; a profile or lock schema change needs a version bump and a loader for the previous version.
 
 ## The service changing itself

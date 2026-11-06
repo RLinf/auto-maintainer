@@ -50,6 +50,13 @@ class EventBus:
         if self._task is None:
             self.start()
 
+    def notify(self, event: Event) -> None:
+        """Hand ``event`` to the dashboard's event streams only: no handler, no job,
+        and no store read. For frequent updates such as a job's progress."""
+        for listener in list(self._listeners):
+            if listener.qsize() < 1000:
+                listener.put_nowait(event)
+
     def start(self) -> None:
         if self._task is None or self._task.done():
             self._task = asyncio.create_task(self._run(), name="event-bus")
@@ -91,6 +98,8 @@ class EventBus:
         """
         queue: asyncio.Queue[Event] = asyncio.Queue()
         self._listeners.add(queue)
+        get: asyncio.Future[Event] | None = None
+        stop: asyncio.Future[bool] | None = None
         try:
             while closing is None or not closing.is_set():
                 get = asyncio.ensure_future(queue.get())
@@ -109,4 +118,9 @@ class EventBus:
                     return
                 yield None
         finally:
+            # A client that leaves closes this generator mid-wait; cancel what it was
+            # waiting on so no pending task is left behind.
+            for pending in (get, stop):
+                if pending is not None and not pending.done():
+                    pending.cancel()
             self._listeners.discard(queue)

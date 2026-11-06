@@ -6,13 +6,15 @@ import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api, type Evaluation, type Me, type PrDetail, type ReviewStart } from "../api";
 import { useAgent } from "../agent";
-import { agentName, AgentPicker } from "../agentPicker";
+import { agentName, AgentPicker, useAgentChoice } from "../agentPicker";
 import { Empty, ErrorBox, Labels, PageHead, Pre, Section, Status, Tier, timeOf, useAct, When } from "../components";
 import { REVIEW_STATES, usePrs } from "../data";
 import { useT } from "../i18n";
 import { Icon } from "../icons";
 import { DataTable, ListToolbar, useList, type Column } from "../list";
 import { FixButton } from "../proposal";
+import { ReproduceButton } from "../reproduce";
+import { openJob } from "../openJob";
 import { Skeleton, Tabs, useTab, useToast } from "../ui";
 
 const TIERS = ["P0", "P1", "P2", "P3"];
@@ -31,7 +33,7 @@ export default function PrPage({ me }: { me: Me }) {
   const keys = [["pr"], ["prs"]];
   const claim = useAct(() => api.post(`${base}/claim`), keys);
   const unclaim = useAct(() => api.del(`${base}/claim`), keys);
-  const [reviewer, setReviewer] = useState("");
+  const [reviewer, setReviewer] = useAgentChoice("review");
   const review = useAct(() => api.post<ReviewStart>(`${base}/review`, { agent: reviewer || null }), [...keys, ["proposals"]]);
   const arm = useAct(() => api.post(`${base}/merge`), keys);
   const disarm = useAct(() => api.del(`${base}/merge`), keys);
@@ -103,14 +105,21 @@ export default function PrPage({ me }: { me: Me }) {
             <AgentPicker value={reviewer} onChange={setReviewer} />
             <button
               className="primary"
-              disabled={review.isPending || reviewing}
+              disabled={review.isPending}
               title={reviewing ? reviewingText : undefined}
               onClick={() =>
-                review.mutate(undefined, {
+                reviewing && job?.id
+                  ? openJob(job.id)
+                  : review.mutate(undefined, {
                   onSuccess: (o) =>
                     toast(
                       o.run === "review" || o.run === "followup"
-                        ? { title: t("Review requested"), body: t("The draft will appear in your proposals."), icon: "pr" }
+                        ? {
+                            title: t("Review requested"),
+                            body: t("Watch the agent work; the draft comes back to you to edit and post."),
+                            icon: "pr",
+                            action: o.event ? { label: t("Watch"), onClick: () => openJob(o.event as string) } : undefined,
+                          }
                         : o.run === "skip"
                           ? { title: t("Nothing to review"), body: o.reason, icon: "check" }
                           : {
@@ -126,6 +135,7 @@ export default function PrPage({ me }: { me: Me }) {
               {reviewing ? t("Reviewing…") : d.review_state.reviewed_sha ? t("Follow up") : t("Review")}
             </button>
             {latestReview && <FixButton repo={full} number={pr.number} review={latestReview} align="right" />}
+            <ReproduceButton repo={full} number={pr.number} />
             {claimedBy === me.login ? (
               <button onClick={() => unclaim.mutate(undefined)}>{t("Unclaim")}</button>
             ) : (

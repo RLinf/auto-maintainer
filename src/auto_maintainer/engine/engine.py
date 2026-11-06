@@ -34,7 +34,12 @@ log = logging.getLogger(__name__)
 
 ContextFactory = Callable[[Job, Event], Awaitable[PlaybookContext]]
 
-_ACTION_EVENTS = {EventKind.ACTION_EXECUTED, EventKind.ACTION_FAILED}
+_ACTION_EVENTS = {
+    EventKind.ACTION_EXECUTED,
+    EventKind.ACTION_FAILED,
+    EventKind.PROPOSAL_DECIDED,
+}
+"""Events about one action: a job waiting on action ids wakes only for those."""
 
 
 class Engine:
@@ -64,6 +69,10 @@ class Engine:
         self._wake: dict[str, asyncio.Event] = {p: asyncio.Event() for p in self.pools}
         self._tasks: list[asyncio.Task[None]] = []
         self._running: set[asyncio.Task[None]] = set()
+        self._job_tasks: dict[str, asyncio.Task[object]] = {}
+        self._stopped: dict[str, str] = {}
+        self.on_change: Callable[[Job], None] | None = None
+        """Called whenever a job's status changes, for the dashboard."""
 
     # -- events → jobs ---------------------------------------------------------------
 
@@ -191,7 +200,63 @@ class Engine:
         finally:
             sem.release()
 
+    def _changed(self, job: Job) -> None:
+        if self.on_change is not None:
+            try:
+                self.on_change(job)
+            except Exception:
+                log.exception("job change listener failed")
+
+    async def stop_job(self, job_id: str, by: str) -> Job | None:
+        """Stop a job that has not finished: cancel it if it runs (its agent process
+        ends and its checkout is released), otherwise mark it cancelled. Returns the
+        job as it is afterwards, or ``None`` when there is no such job."""
+        job = await self.store.get_job(job_id)
+        if job is None or job.status in (
+            JobStatus.DONE,
+            JobStatus.FAILED,
+            JobStatus.CANCELLED,
+        ):
+            return job
+        task = self._job_tasks.get(job_id)
+        if task is not None and not task.done():
+            self._stopped[job_id] = by
+            task.cancel()
+            await asyncio.wait({task}, timeout=30)
+            return await self.store.get_job(job_id)
+        job.status = JobStatus.CANCELLED
+        job.error = f"stopped by {by}"
+        job.lease_until = None
+        job.wait = None
+        job.updated_at = self.clock.now()
+        await self.store.save_job(job)
+        self._changed(job)
+        return job
+
     async def run_job(self, job: Job) -> PlaybookResult | None:
+        current = asyncio.current_task()
+        if current is not None:
+            self._job_tasks[job.id] = current
+        try:
+            return await self._run_job(job)
+        except asyncio.CancelledError:
+            by = self._stopped.pop(job.id, None)
+            if by is None:
+                raise
+            if current is not None:
+                current.uncancel()
+            job.status = JobStatus.CANCELLED
+            job.error = f"stopped by {by}"
+            job.lease_until = None
+            job.updated_at = self.clock.now()
+            await self.store.save_job(job)
+            self._changed(job)
+            return None
+        finally:
+            self._job_tasks.pop(job.id, None)
+
+    async def _run_job(self, job: Job) -> PlaybookResult | None:
+        self._changed(job)
         playbook = self.playbooks.get(job.playbook)
         if playbook is None:
             job.status, job.error = JobStatus.FAILED, f"unknown playbook {job.playbook}"
@@ -218,6 +283,7 @@ class Engine:
             job.lease_until = None
             job.updated_at = self.clock.now()
             await self.store.save_job(job)
+            self._changed(job)
             return None
 
         for action in result.actions:
@@ -249,6 +315,7 @@ class Engine:
         else:
             job.status = JobStatus.DONE
         await self.store.save_job(job)
+        self._changed(job)
         for e in result.events:
             await self.bus.publish(e)
         return result

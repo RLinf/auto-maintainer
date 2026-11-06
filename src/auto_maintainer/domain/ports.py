@@ -21,7 +21,7 @@ and memory writes are handed to the actuator and nothing else.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal, Protocol, runtime_checkable
@@ -102,6 +102,10 @@ class ForgeReader(Protocol):
 
     async def list_dir(self, repo: str, path: str, ref: str | None = None) -> list[str]:
         """Entry names in a directory, or an empty list."""
+        ...
+
+    async def get_pr_diff(self, repo: str, number: int) -> str | None:
+        """The PR's unified diff against its base at its current head, or ``None``."""
         ...
 
     async def get_permission(self, repo: str, login: str) -> Permission: ...
@@ -255,6 +259,10 @@ class AgentQuestions(Protocol):
     ) -> AgentAnswer: ...
 
 
+ProgressObserver = Callable[[AgentTask, str, AgentEvent], Awaitable[None]]
+"""Called with the task, the runtime's name, and each event of every attempt."""
+
+
 class AgentRunner(Protocol):
     """Routes tasks to runtimes with fallback, and validates structured output."""
 
@@ -269,6 +277,11 @@ class AgentRunner(Protocol):
 
     def bind_questions(self, questions: AgentQuestions) -> None:
         """Send runtimes' permission prompts and questions to ``questions``."""
+        ...
+
+    def bind_progress(self, observer: ProgressObserver) -> None:
+        """Report every attempt's events to ``observer``, credentials scrubbed. An
+        observer that raises never stops the run."""
         ...
 
 
@@ -336,6 +349,19 @@ class Workspace(Protocol):
 
     async def changes(self, path: Any) -> WorkChanges:
         """Everything changed in the worktree since its checkout, as one patch."""
+        ...
+
+    async def merge_base(self, path: Any, a: str, b: str) -> str | None:
+        """The commit where ``b`` branched from ``a``, or ``None``."""
+        ...
+
+    async def archive(self, path: Any, ref: str, max_bytes: int = 200_000_000) -> str:
+        """The files of ``ref`` as a gzipped tar, base64-encoded, for copying the code
+        to a test machine without giving it any credentials.
+
+        Raises:
+            ValueError: The archive is larger than ``max_bytes``.
+        """
         ...
 
 
@@ -449,6 +475,7 @@ class LabHost(Protocol):
         cwd: str | None = None,
         env: dict[str, str] | None = None,
         timeout: float = 600,
+        stdin: str | None = None,
     ) -> CommandResult: ...
 
     async def gpu_status(self) -> list[GpuStatus]: ...

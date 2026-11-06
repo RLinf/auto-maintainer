@@ -434,7 +434,12 @@ async def _settings_block(service: Any, user: User) -> str:
             "base_url, api_key: <SECRET_NAME>, models: [...]}}\n"
             "routing: {<task>: {primary, fallback: [...], verifier, model, effort, "
             "timeout_seconds, permissions: auto | restricted}}\n"
-            "system: {poll_seconds, max_public_writes_per_hour, max_repo_public_writes_per_hour}",
+            "system: {poll_seconds, max_public_writes_per_hour, max_repo_public_writes_per_hour}\n"
+            "labs: {<name>: {description, transport: ssh | local, host: <user@host or an SSH "
+            "alias>, workdir, setup: <shell run before each reproduction>, repos: [owner/name, "
+            "...] (empty: every repository), forbid: [<regex>], timeout_seconds, "
+            "max_gpu_memory_mib, max_gpu_util_pct}} — test machines where a PR's code runs to "
+            "reproduce what it claims; the service user's SSH config must already reach the host",
             "To change settings, propose kind=configure with the complete new document in "
             "settings_yaml and a one-line summary; the maintainer sees the diff and applies "
             "it. A provider names its key by a secret name such as DEEPSEEK_API_KEY. Never "

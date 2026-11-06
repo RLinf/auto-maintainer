@@ -12,3 +12,4 @@ learn:        {primary: claude-code, fallback: [codex], timeout_seconds: 1200}
 chat:         {primary: claude-code, fallback: [codex], timeout_seconds: 900}
 self_improve: {primary: claude-code, fallback: [codex], timeout_seconds: 3600}
 fix:          {primary: claude-code, fallback: [codex], timeout_seconds: 2400}
+reproduce:    {primary: claude-code, fallback: [codex], timeout_seconds: 1800}

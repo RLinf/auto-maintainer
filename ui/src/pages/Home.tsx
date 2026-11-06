@@ -1,17 +1,19 @@
-// Home: the control center. What waits for the maintainer (agent questions, proposals,
-// memory changes, service updates) in one feed they can act on in place, the state of
-// the queue and the service at a glance, and the PRs worth reviewing next.
+// Home: the control center, in one column. A status line; for newcomers, the steps to
+// get going; what agents are doing for the user right now; the PRs to review with one
+// click (and when reviews run on their own); and every decision waiting on the user,
+// answerable in place.
 
 import { useMemo, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { api, type Me, type ServiceView } from "../api";
-import { CaughtUp, ErrorBox, Section, Tier, timeOf, useAct } from "../components";
+import { CaughtUp, ErrorBox, Tier, timeOf, useAct } from "../components";
 import { useMemoryChanges, useProposals, usePrs, useQuestions, useRepos, useService } from "../data";
 import { useT } from "../i18n";
-import { Icon, type IconName } from "../icons";
+import { Icon } from "../icons";
 import { ProposalCard } from "../proposal";
 import { Skeleton, useTab } from "../ui";
-import { AutomationCard, GettingStarted, QuickActions, ReviewCard, useAutomations } from "./homeParts";
+import { ACTIVE, useWork } from "../jobs";
+import { AgentWork, GettingStarted, ReviewCard, useAutomations } from "./homeParts";
 import { ChangeCard } from "./Memory";
 import { QuestionCard } from "./Questions";
 
@@ -29,7 +31,7 @@ interface FeedItem {
 
 const KIND_LABEL: Record<Kind, string> = {
   question: "Agent question",
-  proposal: "Proposal",
+  proposal: "Approval",
   memory: "Memory change",
   update: "Service update",
 };
@@ -55,6 +57,7 @@ export default function HomePage({ me }: { me: Me }) {
   const sv = service.data;
   const updates = serviceUpdates(sv);
   const automations = useAutomations(repoRows);
+  const work = useWork(false);
 
   const items = useMemo<FeedItem[]>(() => {
     const out: FeedItem[] = [];
@@ -70,7 +73,7 @@ export default function HomePage({ me }: { me: Me }) {
   const tabs = [
     { id: "all", label: t("All"), count: items.length },
     { id: "question", label: t("Questions"), count: counts.question },
-    { id: "proposal", label: t("Proposals"), count: counts.proposal },
+    { id: "proposal", label: t("Approvals"), count: counts.proposal },
     { id: "memory", label: t("Memory"), count: counts.memory },
     { id: "update", label: t("Updates"), count: counts.update },
   ];
@@ -94,210 +97,94 @@ export default function HomePage({ me }: { me: Me }) {
   const loadingFeed = questions.isLoading || proposals.isLoading || memory.isLoading;
   const first = (me.name || me.login).split(" ")[0];
 
+  const running = (work.data ?? []).filter((j) => ACTIVE.has(j.status)).length;
+  const top = byTier("P0") + byTier("P1");
   return (
-    <>
+    <div className="home">
       <div className="hero">
         <div className="titles">
           <h1>
             {t(greeting())}, {first}
           </h1>
-          <p>
-            {items.length
-              ? `${items.length} ${t(items.length === 1 ? "decision waits for you" : "decisions wait for you")} · ${needs.length} ${t("PRs need review")}`
-              : `${t("Nothing waits for your decision.")} ${needs.length} ${t("PRs need review")}`}
+          <p className="status-line">
+            <a href="#decisions">
+              <Icon name="inbox" size={14} />
+              {items.length ? `${items.length} ${t(items.length === 1 ? "decision waits for you" : "decisions wait for you")}` : t("Nothing waits for your decision.")}
+            </a>
+            <Link to="/prs?tab=review">
+              <Icon name="pr" size={14} />
+              {prs.isLoading ? "…" : needs.length} {t("PRs need review")}
+            </Link>
+            {top > 0 && (
+              <Link to="/prs?f.tier=P0,P1">
+                <Tier tier={byTier("P0") ? "P0" : "P1"} /> {top} {t("top priority")}
+              </Link>
+            )}
+            {running > 0 && (
+              <a href="#work">
+                <span className="pulse" /> {running} {t(running === 1 ? "agent working" : "agents working")}
+              </a>
+            )}
+            <Link to="/service">
+              <Icon name={me.paused ? "pause" : "server"} size={14} />
+              {me.paused ? t("Paused") : t("Running")}
+              {sv?.status?.pending.length ? ` · ${sv.status.pending.length} ${t("updates to deploy")}` : ""}
+            </Link>
           </p>
         </div>
       </div>
 
-      <QuickActions />
       <GettingStarted repos={repoRows} prs={rows} automations={automations} />
+      <AgentWork me={me} />
+      <ReviewCard rows={needs} loading={prs.isLoading} me={me} automations={automations} />
 
-      <div className="tiles">
-        <Tile
-          icon="inbox"
-          label={t("Waiting on you")}
-          value={items.length}
-          href="#decisions"
-          foot={
-            <>
-              {counts.question} {t("questions")} · {counts.proposal} {t("proposals")} · {counts.memory} {t("memory")}
-            </>
-          }
-        />
-        <Tile
-          icon="pr"
-          label={t("Need review")}
-          value={prs.isLoading ? "…" : needs.length}
-          to="/prs?tab=review"
-          foot={
-            <>
-              {needs.filter((p) => !p.claimed_by).length} {t("unclaimed")} · {rows.length} {t("open in total")}
-            </>
-          }
-        />
-        <Tile
-          icon="activity"
-          label={t("Top priority")}
-          value={prs.isLoading ? "…" : byTier("P0") + byTier("P1")}
-          to="/prs?f.tier=P0,P1"
-          foot={
-            <>
-              <Tier tier="P0" /> {byTier("P0")} <Tier tier="P1" /> {byTier("P1")}
-            </>
-          }
-        />
-        <Tile
-          icon="repo"
-          label={t("Repositories")}
-          value={repos.isLoading ? "…" : `${repoRows.filter((r) => r.active).length}/${repoRows.length}`}
-          to="/repos"
-          foot={
-            <>
-              {t("active")} · {repoRows.filter((r) => r.paused).length} {t("paused")} · {repoRows.filter((r) => r.candidate_pending).length} {t("profile changes")}
-            </>
-          }
-        />
-        <Tile
-          icon={me.paused ? "pause" : "server"}
-          label={t("Service")}
-          value={
-            <span className="row" style={{ fontSize: 20, gap: 8 }}>
-              <Icon name={me.paused ? "pause" : "check"} size={20} />
-              {me.paused ? t("Paused") : t("Running")}
-            </span>
-          }
-          to="/service"
-          foot={
-            sv?.status ? (
-              <>
-                <code>{sv.status.running_sha.slice(0, 8)}</code>
-                {sv.status.pending.length ? ` · ${sv.status.pending.length} ${t("updates to deploy")}` : ` · ${t("up to date")}`}
-              </>
-            ) : (
-              t(me.dev_mode ? "dev mode" : "no self-update configured")
-            )
-          }
-        />
-      </div>
-
-      <div className="split">
-        <div className="stack" style={{ gap: 18, minWidth: 0 }}>
-        <ReviewCard rows={needs} loading={prs.isLoading} me={me} />
-        <section id="decisions" className="stack" style={{ gap: 12, minWidth: 0 }}>
-          <div className="row">
-            <h2 style={{ fontSize: 17 }}>{t("Needs your decision")}</h2>
-            <span className="spacer" />
-            <div className="row" style={{ gap: 4 }}>
-              {tabs.map((tab) => (
-                <button key={tab.id} className={`chip-btn ${show === tab.id ? "on" : ""}`} style={{ borderStyle: "solid", height: 30 }} onClick={() => setShow(tab.id)}>
-                  {tab.label}
-                  {tab.count ? <span className="muted">{tab.count}</span> : null}
-                </button>
-              ))}
-            </div>
-            <button className="ghost sm" onClick={() => setOrder(order === "new" ? "old" : "new")} title={t("Sort")}>
-              <Icon name={order === "new" ? "sortDesc" : "sortAsc"} size={14} />
-              {order === "new" ? t("Newest first") : t("Oldest first")}
-            </button>
+      <section id="decisions" className="stack" style={{ gap: 12, minWidth: 0 }}>
+        <div className="row">
+          <h2 style={{ fontSize: 17 }}>{t("Needs your decision")}</h2>
+          <span className="spacer" />
+          <div className="row" style={{ gap: 4, flexWrap: "wrap" }}>
+            {tabs.map((tab) => (
+              <button key={tab.id} className={`chip-btn ${show === tab.id ? "on" : ""}`} style={{ borderStyle: "solid", height: 30 }} onClick={() => setShow(tab.id)}>
+                {tab.label}
+                {tab.count ? <span className="muted">{tab.count}</span> : null}
+              </button>
+            ))}
           </div>
-          <ErrorBox error={questions.error || proposals.error || memory.error} />
-          {loadingFeed ? (
-            <div className="card">
-              <Skeleton rows={6} />
-            </div>
-          ) : feed.length === 0 ? (
-            <div className="card">
-              <CaughtUp>{show === "all" ? t("You're all caught up.") : t("Nothing of this kind waits for you.")}</CaughtUp>
-            </div>
-          ) : (
-            <div className="feed">
-              {feed.slice(0, 30).map((i) => (
-                <div key={i.id} className={`feed-item kind-${i.kind}`}>
-                  <div className="head">
-                    <span className="kind-chip">{t(KIND_LABEL[i.kind])}</span>
-                    {i.mine && <span className="pill status-warn">{t("asks you")}</span>}
-                  </div>
-                  {i.node}
-                </div>
-              ))}
-              {feed.length > 30 && (
-                <span className="small muted">
-                  {feed.length - 30} {t("more")}: <Link to="/inbox">{t("Proposals")}</Link> · <Link to="/questions">{t("Questions")}</Link> ·{" "}
-                  <Link to="/memory">{t("Memory")}</Link>
-                </span>
-              )}
-            </div>
-          )}
-        </section>
+          <button className="ghost sm" onClick={() => setOrder(order === "new" ? "old" : "new")} title={t("Sort")}>
+            <Icon name={order === "new" ? "sortDesc" : "sortAsc"} size={14} />
+            {order === "new" ? t("Newest first") : t("Oldest first")}
+          </button>
         </div>
-
-        <aside className="side">
-          <AutomationCard automations={automations} loading={repos.isLoading} />
-          <Section title={t("Repositories")} aside={<Link to="/repos" className="small">{t("Manage")}</Link>}>
-            {repos.isLoading ? (
-              <Skeleton rows={3} />
-            ) : !repoRows.length ? (
-              <span className="muted small">{t("No repositories yet.")} <Link to="/repos">{t("Add one")}</Link></span>
-            ) : (
-              <div className="list">
-                {repoRows.map((r) => (
-                  <Link key={r.repo} to={`/repos/${r.repo}`} className="list-row" style={{ textDecoration: "none" }}>
-                    <Icon name="repo" />
-                    <span className="main">
-                      <span className="t">{r.repo}</span>
-                      <span className="meta">
-                        {r.paused ? t("paused") : r.active ? t("active") : t("waiting for an approved profile")} · {r.open_prs} {t("open PRs")}
-                        {r.pending_proposals ? ` · ${r.pending_proposals} ${t("proposals")}` : ""}
-                      </span>
-                    </span>
-                    {r.candidate_pending && <span className="pill status-warn">{t("profile change")}</span>}
-                  </Link>
-                ))}
+        <ErrorBox error={questions.error || proposals.error || memory.error} />
+        {loadingFeed ? (
+          <div className="card">
+            <Skeleton rows={6} />
+          </div>
+        ) : feed.length === 0 ? (
+          <div className="card">
+            <CaughtUp>{show === "all" ? t("You're all caught up.") : t("Nothing of this kind waits for you.")}</CaughtUp>
+          </div>
+        ) : (
+          <div className="feed">
+            {feed.slice(0, 30).map((i) => (
+              <div key={i.id} className={`feed-item kind-${i.kind}`}>
+                <div className="head">
+                  <span className="kind-chip">{t(KIND_LABEL[i.kind])}</span>
+                  {i.mine && <span className="pill status-warn">{t("asks you")}</span>}
+                </div>
+                {i.node}
               </div>
+            ))}
+            {feed.length > 30 && (
+              <span className="small muted">
+                {feed.length - 30} {t("more")}: <Link to="/inbox">{t("Approvals")}</Link> · <Link to="/questions">{t("Questions")}</Link> ·{" "}
+                <Link to="/memory">{t("Memory")}</Link>
+              </span>
             )}
-          </Section>
-        </aside>
-      </div>
-    </>
-  );
-}
-
-function Tile({
-  icon,
-  label,
-  value,
-  foot,
-  to,
-  href,
-}: {
-  icon: IconName;
-  label: string;
-  value: ReactNode;
-  foot?: ReactNode;
-  to?: string;
-  href?: string;
-}) {
-  const inner = (
-    <>
-      <span className="tile-label">
-        <Icon name={icon} size={15} />
-        {label}
-      </span>
-      <span className="tile-value">{value}</span>
-      {foot && <span className="tile-foot">{foot}</span>}
-    </>
-  );
-  if (to) {
-    return (
-      <Link to={to} className="tile">
-        {inner}
-      </Link>
-    );
-  }
-  return (
-    <a href={href} className="tile">
-      {inner}
-    </a>
+          </div>
+        )}
+      </section>
+    </div>
   );
 }
 

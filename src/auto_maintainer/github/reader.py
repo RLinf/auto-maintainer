@@ -598,6 +598,15 @@ class GitHubReader:
         )
         return raw.text if raw.status_code == 200 else None
 
+    async def get_pr_diff(self, repo: str, number: int) -> str | None:
+        raw = await self._client.request(
+            "GET",
+            f"/repos/{repo}/pulls/{number}",
+            repo=repo,
+            headers={"Accept": "application/vnd.github.diff"},
+        )
+        return raw.text if raw.status_code == 200 else None
+
     async def list_dir(self, repo: str, path: str, ref: str | None = None) -> list[str]:
         data = await self._client.get(
             f"/repos/{repo}/contents/{quote(path.strip('/'))}",

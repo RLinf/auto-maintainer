@@ -47,6 +47,7 @@ class ActionKind(StrEnum):
     PR_CONVERT_TO_DRAFT = "pr.convert_to_draft"
     PR_CLOSE = "pr.close"
     PR_FIX = "pr.fix"
+    LAB_REPRODUCE = "lab.reproduce"
     ISSUE_LABEL = "issue.label"
     ISSUE_COMMENT = "issue.comment"
     LAB_RUN = "lab.run"
@@ -332,6 +333,28 @@ class FixPrPayload(_Payload):
     requested_by: str | None = None
 
 
+class LabReproducePayload(_Payload):
+    """A reproduction an agent wrote for a PR: the script runs on a test machine in a
+    copy of the code before the PR (``base``) and at its head (``head``), once a
+    maintainer has read and approved it."""
+
+    lab: str
+    summary: str
+    """What the script checks, in plain words."""
+    setup: str = ""
+    """Commands that prepare the code, such as installing it; run before ``script``."""
+    script: str
+    expect: str = ""
+    """What result would confirm what the PR claims, on each side."""
+    needs_gpu: bool = False
+    timeout_seconds: int = 1800
+    sides: list[Literal["base", "head"]] = Field(
+        default_factory=lambda: ["base", "head"]
+    )
+    runtime: str | None = None
+    requested_by: str | None = None
+
+
 class CodePrPayload(_Payload):
     """A change to the service's own code: the patch goes on ``branch`` from ``base_sha``."""
 
@@ -388,6 +411,7 @@ PAYLOADS: dict[ActionKind, type[BaseModel]] = {
     ActionKind.MEMORY_CHANGE: MemoryChangePayload,
     ActionKind.CODE_PR: CodePrPayload,
     ActionKind.PR_FIX: FixPrPayload,
+    ActionKind.LAB_REPRODUCE: LabReproducePayload,
     ActionKind.CODE_MERGE: CodeMergePayload,
     ActionKind.SERVICE_DEPLOY: ServiceDeployPayload,
     ActionKind.NOTIFY: NotifyPayload,

@@ -19,7 +19,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from ..domain.agents import AgentTask
+from ..domain.agents import AgentEvent, AgentEventType, AgentTask
 from ..domain.permissions import Permission
 from ..domain.snapshot import (
     CheckConclusion,
@@ -37,14 +37,25 @@ DEMO_REPO = "acme/widget"
 DEMO_USER = "maria"
 DEMO_SERVICE_REPO = "acme/auto-maintainer"
 
-DEMO_SETTINGS = """schema: 1
+DEMO_LABS = """labs:
+  gpu-01:
+    description: 8× A100 80GB, CUDA 12.4
+    host: ci@gpu-01
+    setup: source ~/envs/widget/bin/activate
+"""
+
+DEMO_SETTINGS = (
+    """schema: 1
 routing:
   evaluate: {primary: claude-code, fallback: [codex]}
 system:
   poll_seconds: 300
 """
+    + DEMO_LABS
+)
 
-DEMO_SETTINGS_CHANGE = """schema: 1
+DEMO_SETTINGS_CHANGE = (
+    """schema: 1
 providers:
   deepseek:
     name: DeepSeek
@@ -59,6 +70,141 @@ routing:
 system:
   poll_seconds: 300
 """
+    + DEMO_LABS
+)
+
+DEMO_DIFF_42 = """diff --git a/src/loader.py b/src/loader.py
+--- a/src/loader.py
++++ b/src/loader.py
+@@ -8,9 +8,18 @@ from .batch import Batch
+
+ def load(items, size=32):
+-    batches = [items[i : i + size] for i in range(0, len(items), size)]
+-    return [Batch(b) for b in batches]
++    \"\"\"Split ``items`` into batches of at most ``size``; no batch for no items.\"\"\"
++    if not items:
++        return []
++    if size < 1:
++        raise ValueError("size must be at least 1")
++    batches = []
++    for start in range(0, len(items), size):
++        chunk = items[start : start + size]
++        batches.append(Batch(chunk))
++    return batches
+
+
+ def total(batches):
+diff --git a/tests/test_loader.py b/tests/test_loader.py
+--- a/tests/test_loader.py
++++ b/tests/test_loader.py
+@@ -0,0 +1,30 @@
++import pytest
++
++from loader import load, total
++
++
++def test_no_items_gives_no_batches():
++    assert load([]) == []
++
++
++def test_size_must_be_positive():
++    with pytest.raises(ValueError):
++        load([1], size=0)
++
++
++def test_full_batches():
++    batches = load(list(range(64)), size=32)
++    assert [len(b) for b in batches] == [32, 32]
++
++
++def test_empty_batch_is_skipped():
++    batches = load([], size=8)
++    assert total(batches) == 0
++
++
++def test_last_batch_is_partial():
++    batches = load(list(range(10)), size=4)
++    assert [len(b) for b in batches] == [4, 4, 2]
++
++
++def test_total_counts_items():
++    assert total(load(list(range(5)), size=2)) == 5
+"""
+
+
+def _demo_steps() -> dict[str, Any]:
+    """What the demo's agents appear to do, for the live view."""
+
+    def say(text: str) -> AgentEvent:
+        return AgentEvent(type=AgentEventType.MESSAGE, text=text)
+
+    def run(
+        name: str, ok: bool = True, out: str = "", **inputs: str
+    ) -> list[AgentEvent]:
+        return [
+            AgentEvent(
+                type=AgentEventType.TOOL_CALL,
+                text=name,
+                data={"name": name, "input": inputs},
+            ),
+            AgentEvent(
+                type=AgentEventType.TOOL_RESULT, text=out, data={"is_error": not ok}
+            ),
+        ]
+
+    return {
+        "review": [
+            say("I'll read the change and the repository's review skill first."),
+            *run(
+                "Read",
+                file_path=".agents/skills/code-review/SKILL.md",
+                out="---\nname: code-review",
+            ),
+            *run(
+                "Read", file_path="src/loader.py", out="def load(items, size=32): ..."
+            ),
+            *run(
+                "Grep", pattern="load\\(", out="tests/test_loader.py:7\nsrc/cli.py:41"
+            ),
+            say(
+                "The guard for empty input looks right. Checking whether the tests cover the boundary at one item."
+            ),
+            *run(
+                "Bash",
+                command="python -m pytest -q tests/test_loader.py",
+                out="......\n6 passed in 0.21s",
+            ),
+            say(
+                "All six tests pass, but none loads exactly one item, which is where the old slicing broke. One finding."
+            ),
+        ],
+        "fix": [
+            say("Adding the boundary test the review asked for."),
+            *run("Read", file_path="tests/test_loader.py"),
+            *run("Edit", file_path="tests/test_loader_one.py"),
+            *run(
+                "Bash",
+                command="python -m pytest -q tests/test_loader_one.py",
+                out="1 passed",
+            ),
+            say("The new test passes on this branch."),
+        ],
+        "reproduce": lambda task: (
+            [say("Both runs finished; reading their output.")]
+            if "You are reporting" in task.prompt
+            else [
+                say("The claim: loading a batch of one item used to return nothing."),
+                *run("Read", file_path="src/loader.py"),
+                *run(
+                    "Bash",
+                    command="git log -1 --format=%s",
+                    out="fix(loader): handle empty batches",
+                ),
+                say("A five-line script settles it: load([1]) and count the batches."),
+            ]
+        ),
+    }
+
 
 _SETTINGS_WORDS = (
     "provider",
@@ -192,6 +338,32 @@ def _answer(task: AgentTask) -> dict[str, Any]:
             "summary": "Adds the boundary test the review asked for.",
             "fixed": [{"id": "F1", "change": "added a test for a batch of one item"}],
         }
+    if kind == "reproduce" and "You are reporting" in task.prompt:
+        return {
+            "conclusion": "reproduced",
+            "comment": (
+                "Reproduced on a GPU test machine. Before this PR, loading a batch "
+                "of one item raised `AssertionError: expected 1 item, got 0`; at "
+                "this PR's head the same check passes (`1 passed`)."
+            ),
+            "notes": "",
+        }
+    if kind == "reproduce":
+        return {
+            "summary": "Load a batch of one item, which the review says is untested.",
+            "setup": "pip install -q -e .",
+            "script": (
+                "python - <<'PY'\n"
+                "from widget.loader import load\n"
+                "items = load([1])\n"
+                "assert len(items) == 1, f'expected 1 item, got {len(items)}'\n"
+                "print('1 passed')\n"
+                "PY"
+            ),
+            "expect": "base raises AssertionError; head prints 1 passed",
+            "needs_gpu": False,
+            "timeout_minutes": 10,
+        }
     if kind == "onboard":
         return {
             "profile": {"extends": ["conventional-commits"]},
@@ -222,6 +394,7 @@ async def build_demo(root: Path) -> Harness:
         "onboard",
         "hygiene",
         "fix",
+        "reproduce",
     ):
         h.runner.on(kind, _answer)
     h.forge.put_file(DEMO_REPO, ".github/CODEOWNERS", "* @maria\n/docs/ @bob\n")
@@ -293,5 +466,8 @@ async def build_demo(root: Path) -> Harness:
     h.forge.job_logs[2] = (
         "collecting...\nFAILED tests/test_ui.py::test_bar - AssertionError: expected 3 got 2\n"
     )
+    h.forge.diffs[(DEMO_REPO, 42)] = DEMO_DIFF_42
+    h.runner.steps.update(_demo_steps())
+    await h.service.reload_settings()
     await h.poll(DEMO_REPO)
     return h
