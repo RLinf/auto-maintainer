@@ -625,3 +625,4 @@ textarea.mono-input { width: 100%; }
 .machine-choice input { margin-top: 3px; }
 .machine-use { border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; background: var(--surface); }
 .machine-use.on { border-color: color-mix(in srgb, var(--ok) 40%, var(--border)); }
+.pr-work .list { margin: 0 -8px; }

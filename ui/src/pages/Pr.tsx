@@ -14,6 +14,7 @@ import { Icon } from "../icons";
 import { DataTable, ListToolbar, useList, type Column } from "../list";
 import { FixButton } from "../proposal";
 import { ReproduceButton } from "../reproduce";
+import { PrWork } from "../jobs";
 import { openJob } from "../openJob";
 import { Skeleton, Tabs, useTab, useToast } from "../ui";
 
@@ -153,6 +154,7 @@ export default function PrPage({ me }: { me: Me }) {
 
       <div className="split">
         <div className="stack" style={{ gap: 16, minWidth: 0 }}>
+          <PrWork repo={full} number={pr.number} me={me.login} />
           <Tabs tabs={tabs} active={tab} onChange={setTab} />
           {tab === "overview" && <Overview d={d} />}
           {tab === "files" && <Files d={d} />}

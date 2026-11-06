@@ -50,6 +50,15 @@ export function useWork(everyone: boolean) {
   });
 }
 
+/** Everyone's agent jobs on one PR: running ones first, then those of the last week. */
+export function usePrWork(repo: string, number: number) {
+  return useQuery({
+    queryKey: ["work", "pr", repo, number],
+    queryFn: () => api.get<AgentJob[]>(`/api/work?everyone=true&repo=${encodeURIComponent(repo)}&number=${number}`),
+    refetchInterval: (q) => ((q.state.data ?? []).some((j) => ACTIVE.has(j.status)) ? 15_000 : false),
+  });
+}
+
 /** Whether the job waits on the user: a question for them, or a draft for them. */
 export function needsMe(job: AgentJob, me: string): boolean {
   return job.questions_for_me > 0 || job.produced.some((p) => p.proposal && p.for === me);
@@ -448,3 +457,57 @@ const CONCLUSION: Record<string, string> = {
   inconclusive: "Inconclusive",
 };
 
+
+/** What agents do and have drafted on one PR, on that PR's page: every job on it
+ * (anyone's), each opening its live view, and every draft waiting for a decision,
+ * decidable in place. Nothing shows when there is nothing. */
+export function PrWork({ repo, number, me }: { repo: string; number: number; me: string }) {
+  const t = useT();
+  const work = usePrWork(repo, number);
+  const proposals = useProposals();
+  const [all, setAll] = useState(false);
+  const jobs = work.data ?? [];
+  const active = jobs.filter((j) => ACTIVE.has(j.status));
+  const ended = jobs.filter((j) => !ACTIVE.has(j.status));
+  const drafts = (proposals.data ?? []).filter((p) => p.action?.action.repo === repo && p.action?.action.number === number);
+  if (!jobs.length && !drafts.length) return null;
+  const shownEnded = all ? ended : ended.slice(0, 3);
+  return (
+    <section className="card pr-work">
+      <div className="row" style={{ marginBottom: 6 }}>
+        <h2>{t("On this PR")}</h2>
+        {active.length > 0 && (
+          <span className="small muted">
+            <span className="pulse" /> {active.length} {t(active.length === 1 ? "agent working" : "agents working")}
+          </span>
+        )}
+        {drafts.length > 0 && (
+          <span className="small muted">
+            · {drafts.length} {t(drafts.length === 1 ? "draft waits for a decision" : "drafts wait for a decision")}
+          </span>
+        )}
+      </div>
+      {jobs.length > 0 && (
+        <div className="list">
+          {[...active, ...shownEnded].map((j) => (
+            <WorkRow key={j.id} job={j} me={me} />
+          ))}
+        </div>
+      )}
+      {ended.length > 3 && (
+        <button className="ghost sm" onClick={() => setAll(!all)}>
+          {all ? t("Show fewer") : `${t("Show all")} (${jobs.length})`}
+        </button>
+      )}
+      {drafts.length > 0 && (
+        <div className="stack" style={{ gap: 10, marginTop: jobs.length ? 12 : 0 }}>
+          <span className="kind-chip">{t("Waiting for a decision")}</span>
+          {drafts.map((p) => (
+            <ProposalCard key={p.id} proposal={p} compact />
+          ))}
+        </div>
+      )}
+      <ErrorBox error={work.error} />
+    </section>
+  );
+}

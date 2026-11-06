@@ -365,23 +365,41 @@ def build_router() -> APIRouter:
         request: Request,
         everyone: bool = False,
         days: int = 7,
+        repo: str | None = None,
+        number: int | None = None,
         user: User = Depends(current_user),
     ) -> list[dict[str, Any]]:
-        """Agent jobs in the user's repositories: running ones, then those that ended
-        in the last ``days``, newest first; only the user's own unless ``everyone``."""
+        """Agent jobs in the user's repositories (or in ``repo``, on PR ``number``):
+        running ones, then those that ended in the last ``days``, newest first; only
+        the user's own unless ``everyone``."""
         service = service_of(request)
-        visible = set(await visible_repos(service, user))
+        if repo is not None:
+            await require_view(service, user, check_repo(repo))
+            visible = {repo}
+        else:
+            visible = set(await visible_repos(service, user))
         since = service.clock.now() - timedelta(days=max(1, min(days, 90)))
         out = []
-        for job in await service.store.list_jobs(limit=500):
+        for job in await service.store.list_jobs(repo=repo, limit=500):
             if job.playbook not in AGENT_PLAYBOOKS or job.repo not in visible:
+                continue
+            if number is not None and job.number != number:
                 continue
             if job.status not in ACTIVE and job.updated_at < since:
                 continue
             by = (_payload(job).get("by") or "").lower()
             if not everyone and by != user.login.lower():
                 continue
-            out.append(await job_view(service, job, me=user.login))
+            view = await job_view(service, job, me=user.login)
+            if (
+                job.status not in ACTIVE
+                and (job.result or {}).get("skipped")
+                and view["last_step"] is None
+            ):
+                # Nothing ran: another playbook took the same request (a follow-up
+                # for a PR that has no review yet), so there is no work to show.
+                continue
+            out.append(view)
         out.sort(key=lambda j: (j["status"] in ACTIVE, j["updated_at"]), reverse=True)
         return out[:100]
 

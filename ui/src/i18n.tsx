@@ -1017,6 +1017,10 @@ const zh: Record<string, string> = {
   "on PRs from the repository's team, instead of asking a reviewer. PRs from outside contributors keep the normal mode.": "运行仓库团队成员的 PR，而不是去问评审人。外部贡献者的 PR 仍使用正常模式。",
   "In this mode the agent can run any command as the service's user, which can read the service's files: the GitHub sign-ins it keeps and the SSH keys for test machines. Turn it on only for an agent you trust with that.": "这个模式下，智能体可以以服务的系统用户身份运行任何命令，而这个用户能读取服务的文件，包括它保存的 GitHub 登录凭据和测试机器的 SSH 密钥。只对你信得过的智能体打开。",
   "Turn on": "打开",
+  "On this PR": "这个 PR 上的工作",
+  "draft waits for a decision": "份草稿等待决定",
+  "drafts wait for a decision": "份草稿等待决定",
+  "Waiting for a decision": "等待决定",
 };
 
 const LangContext = createContext<{ lang: Lang; setLang: (l: Lang) => void }>({ lang: "zh", setLang: () => {} });

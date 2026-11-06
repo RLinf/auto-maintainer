@@ -208,3 +208,28 @@ async def walt_queue_and_maintainer_stops(h: Any, app: Any) -> None:
     async with _as(app, "maria") as maria:
         stopped = (await maria.post(f"/api/jobs/{queued.id}/stop")).json()
     assert stopped["status"] == "cancelled" and stopped["error"] == "stopped by maria"
+
+
+async def test_a_prs_page_lists_everyones_work_on_that_pr(demo) -> None:
+    h, app = demo
+    async with _as(app, "maria") as maria:
+        await maria.post(
+            "/api/reviews",
+            json={"prs": [{"repo": REPO, "number": 42}, {"repo": REPO, "number": 43}]},
+        )
+        await h.settle()
+    async with _as(app, "walt") as walt:
+        await walt.post(f"/api/prs/{REPO}/42/fix", json={})
+        await h.settle()
+        on_42 = (
+            await walt.get(f"/api/work?repo={REPO}&number=42&everyone=true")
+        ).json()
+        assert {("review", "maria"), ("fix", "walt")} <= {
+            (j["playbook"], j["by"]) for j in on_42
+        }
+        assert all(j["number"] == 42 for j in on_42)
+        # a playbook that took the same request and skipped without an agent is no work
+        assert not [j for j in on_42 if (j["result"] or {}).get("skipped")]
+    async with _as(app, "eve") as eve:
+        refused = await eve.get(f"/api/work?repo={REPO}&number=42&everyone=true")
+        assert refused.status_code == 403
