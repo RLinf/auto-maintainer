@@ -34,6 +34,7 @@ const TASKS: Record<string, string> = {
   evaluate: "Scores priority",
   calibrate: "Learns from priority overrides",
   ci_diagnose: "Explains failed CI jobs",
+  ci_root_cause: "Finds why real CI failures happen, in the code",
   hygiene: "Checks PR conventions",
   onboard: "Drafts a new repository's profile",
   learn: "Turns feedback into lessons",

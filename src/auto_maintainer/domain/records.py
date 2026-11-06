@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -140,6 +140,42 @@ class ReviewRecord(BaseModel):
     created_at: datetime = Field(default_factory=utc_now)
 
 
+class Culprit(BaseModel):
+    """A place in the code that causes a CI failure."""
+
+    path: str
+    line: int | None = None
+    why: str = ""
+
+
+class RootCause(BaseModel):
+    """Why CI failed, past the first classification: what fails, the mechanism, where
+    in the code, and the smallest fix (design 5.5). One cause may explain several jobs."""
+
+    jobs: list[str] = Field(
+        default_factory=list,
+        description="Names of the failed jobs this cause explains.",
+    )
+    failing: str = Field(description="The test, build step, or command that fails.")
+    origin: Literal["change", "base", "infra", "flaky", "unclear"] = Field(
+        description="change: this PR's change causes it. base: it fails without this "
+        "change too (the base branch is broken). infra: the runner or the CI service. "
+        "flaky: nondeterminism unrelated to the change. unclear: the evidence does not "
+        "settle it."
+    )
+    cause: str = Field(description="Why it fails: the mechanism, not the symptom.")
+    culprits: list[Culprit] = Field(
+        default_factory=list,
+        description="Where in the code, most relevant first: for origin change, the "
+        "changed files and lines.",
+    )
+    fix: str = Field(default="", description="The smallest change that makes it pass.")
+    evidence: list[str] = Field(
+        default_factory=list, description="Up to five log lines that show it."
+    )
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+
+
 class CiObservation(BaseModel):
     repo: str
     number: int | None = None
@@ -153,6 +189,8 @@ class CiObservation(BaseModel):
     confidence: float = 0.0
     explanation: str = ""
     rerun: bool = False
+    root_cause: RootCause | None = None
+    """For a failure that is not a flake: what a look at the code found."""
     id: str = Field(default_factory=lambda: new_id("ci"))
     created_at: datetime = Field(default_factory=utc_now)
 

@@ -12,11 +12,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""CI doctor (design 5.5): classify failed jobs, rerun flakes, explain real failures."""
+"""CI doctor (design 5.5): classify failed jobs, rerun flakes, and find the root cause
+of real failures.
+
+Each failed job gets a first look from its log (a flake signature, or a quick agent
+classification). Flakes are rerun within the profile's budget. The rest, and flakes
+that keep failing after their reruns, go together to a root-cause agent working in a
+read-only checkout of the PR head, which names what fails, the mechanism, where in
+the code, and the smallest fix. A cause in the change is explained to the PR author;
+one that is not (the base branch, the runner, unclear) goes to the maintainers.
+"""
 
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -35,7 +46,7 @@ from ..domain.events import Event, EventKind
 from ..domain.ids import same_commit, short_sha
 from ..domain.memory import Signal, SignalKind
 from ..domain.profile import FlakeSignature, RepoProfile
-from ..domain.records import CiObservation
+from ..domain.records import CiObservation, RootCause
 from ..domain.snapshot import CheckConclusion, CheckRun, PrSnapshot
 from .base import Playbook, PlaybookContext, PlaybookResult, in_scope
 from .prompts import pr_block, schema_hint, untrusted
@@ -97,6 +108,81 @@ def match_signature(
     return None
 
 
+class RootCauseReport(BaseModel):
+    """What the root-cause agent returns: one entry per distinct cause."""
+
+    causes: list[RootCause] = Field(default_factory=list)
+
+
+@dataclass
+class _Failure:
+    """A failed job of this run and what the first look at its log found."""
+
+    check: CheckRun
+    sig: FlakeSignature | None
+    diagnosis: Diagnosis
+    log: str
+    reruns: int = 0
+    """How many reruns it already failed after, when it was taken for a flake."""
+
+    @property
+    def real(self) -> bool:
+        """Not a flake, or a flake that kept failing: worth finding the cause of."""
+        return self.diagnosis.category != "flaky" or self.reruns > 0
+
+
+MAX_CULPRITS = 5
+
+
+def render_cause(cause: RootCause, base: str) -> str:
+    """A root cause as the PR author reads it in the CI comment."""
+    jobs = ", ".join(cause.jobs)
+    if cause.origin == "base":
+        lines = [
+            f"- **{cause.failing}** ({jobs}): fails on `{base}` too, so it does not "
+            f"come from this PR. {cause.cause}"
+        ]
+    else:
+        lines = [f"- **{cause.failing}** ({jobs}): {cause.cause}"]
+    for c in cause.culprits:
+        where = f"{c.path}:{c.line}" if c.line else c.path
+        lines.append(f"  - `{where}`" + (f": {c.why}" if c.why else ""))
+    if cause.fix and cause.origin == "change":
+        lines.append(f"  - Suggested fix: {cause.fix}")
+    return "\n".join(lines)
+
+
+def accepted_causes(
+    report: RootCauseReport, jobs: list[str], changed: list[str], workdir: Path
+) -> list[RootCause]:
+    """The agent's causes, checked: only jobs that failed here, and only culprit paths
+    that the PR changes or that exist in the checkout (never outside it)."""
+    root = workdir.resolve()
+    out: list[RootCause] = []
+    for cause in report.causes:
+        named = [j for j in cause.jobs if j in jobs]
+        if not named and len(jobs) == 1:
+            named = list(jobs)
+        if not named:
+            continue
+        culprits = []
+        for c in cause.culprits:
+            target = (root / c.path).resolve()
+            inside = target == root or root in target.parents
+            if c.path in changed or (inside and target.is_file()):
+                culprits.append(c)
+        out.append(
+            cause.model_copy(
+                update={
+                    "jobs": named,
+                    "culprits": culprits[:MAX_CULPRITS],
+                    "evidence": cause.evidence[:5],
+                }
+            )
+        )
+    return out
+
+
 def _rerun_requested(event: Event) -> bool:
     return event.kind == EventKind.PR_COMMENT and any(
         c.get("name") == "rerun" for c in event.payload.get("commands", [])
@@ -142,7 +228,7 @@ class CiDoctor(Playbook):
         actions, signals = [], []
         reruns: set[int] = set()
         deferred: set[int] = set()
-        explained: list[str] = []
+        failures: list[_Failure] = []
         for check in checks:
             log = await ctx.ci.get_job_log(pr.repo, check.id) or check.summary or ""
             sig = match_signature(log, check, signatures)
@@ -158,22 +244,8 @@ class CiDoctor(Playbook):
                 ) or Diagnosis(
                     category="unknown", confidence=0.0, explanation="no diagnosis"
                 )
-            await ctx.store.add_ci_observation(
-                CiObservation(
-                    repo=pr.repo,
-                    number=pr.number,
-                    sha=pr.head_sha,
-                    run_id=check.run_id,
-                    check_id=check.id,
-                    check_name=check.name,
-                    workflow=check.workflow,
-                    category=diagnosis.category,
-                    signature=sig.id if sig else None,
-                    confidence=diagnosis.confidence,
-                    explanation=diagnosis.explanation,
-                    rerun=diagnosis.category == "flaky",
-                )
-            )
+            failure = _Failure(check, sig, diagnosis, log)
+            failures.append(failure)
             if (
                 diagnosis.category == "flaky"
                 and check.run_id
@@ -181,9 +253,8 @@ class CiDoctor(Playbook):
             ):
                 done = await self._reruns(ctx, pr, check.run_id)
                 if done >= profile.ci.rerun.max_per_sha:
-                    explained.append(
-                        f"- **{check.name}** failed again after {done} reruns: {diagnosis.explanation}"
-                    )
+                    # Failing after every rerun: no longer treated as a flake.
+                    failure.reruns = done
                 elif await self._backoff_elapsed(
                     ctx, pr, check.run_id, done, profile.ci.rerun.backoff_seconds
                 ):
@@ -206,6 +277,74 @@ class CiDoctor(Playbook):
                     )
                 else:
                     deferred.add(check.run_id)
+            if diagnosis.signature and sig is None:
+                signals.append(
+                    Signal(
+                        kind=SignalKind.CI_OUTCOME,
+                        repo=pr.repo,
+                        number=pr.number,
+                        payload={
+                            "suggested_signature": diagnosis.signature.model_dump(),
+                            "check": check.name,
+                            "category": diagnosis.category,
+                        },
+                    )
+                )
+        real = [f for f in failures if f.real]
+        causes: list[RootCause] | None = None
+        base = "main"
+        if real and profile.ci.root_cause:
+            base = (await ctx.forge.get_repo(pr.repo)).default_branch
+            causes = await self._root_cause(ctx, pr, real, base)
+        by_job = {job: cause for cause in causes or [] for job in cause.jobs}
+        for f in failures:
+            await ctx.store.add_ci_observation(
+                CiObservation(
+                    repo=pr.repo,
+                    number=pr.number,
+                    sha=pr.head_sha,
+                    run_id=f.check.run_id,
+                    check_id=f.check.id,
+                    check_name=f.check.name,
+                    workflow=f.check.workflow,
+                    category=f.diagnosis.category,
+                    signature=f.sig.id if f.sig else None,
+                    confidence=f.diagnosis.confidence,
+                    explanation=f.diagnosis.explanation,
+                    rerun=f.diagnosis.category == "flaky" and not f.reruns,
+                    root_cause=by_job.get(f.check.name),
+                )
+            )
+        explained: list[str] = []
+        for cause in causes or []:
+            if cause.origin in ("change", "base"):
+                explained.append(render_cause(cause, base))
+            if cause.origin != "change":
+                event = cause.origin if cause.origin in ("infra", "base") else "unknown"
+                actions.append(
+                    make_action(
+                        ActionKind.NOTIFY,
+                        pr.repo,
+                        NotifyPayload(
+                            event=f"ci.{event}",
+                            text=f"{pr.repo}#{pr.number} {', '.join(cause.jobs)}: "
+                            f"{cause.failing}: {cause.cause}",
+                        ),
+                        number=pr.number,
+                        head_sha=pr.head_sha,
+                        discriminator=f"cause:{','.join(sorted(cause.jobs))}",
+                    )
+                )
+        for f in real:
+            if f.check.name in by_job:
+                continue
+            # No root cause for this job (turned off, or the agent found none):
+            # what the first look at the log said.
+            check, diagnosis = f.check, f.diagnosis
+            if f.reruns:
+                explained.append(
+                    f"- **{check.name}** failed again after {f.reruns} reruns: {diagnosis.explanation}"
+                )
             elif diagnosis.category == "pr_caused":
                 explained.append(f"- **{check.name}**: {diagnosis.explanation}")
             elif diagnosis.category in ("infra", "unknown"):
@@ -220,19 +359,6 @@ class CiDoctor(Playbook):
                         number=pr.number,
                         head_sha=pr.head_sha,
                         discriminator=str(check.id),
-                    )
-                )
-            if diagnosis.signature and sig is None:
-                signals.append(
-                    Signal(
-                        kind=SignalKind.CI_OUTCOME,
-                        repo=pr.repo,
-                        number=pr.number,
-                        payload={
-                            "suggested_signature": diagnosis.signature.model_dump(),
-                            "check": check.name,
-                            "category": diagnosis.category,
-                        },
                     )
                 )
         if explained:
@@ -254,6 +380,7 @@ class CiDoctor(Playbook):
             "reruns": sorted(reruns),
             "deferred": sorted(deferred),
             "explained": len(explained),
+            "root_causes": len(causes or []),
         }
         if deferred:
             return PlaybookResult(
@@ -326,6 +453,73 @@ class CiDoctor(Playbook):
             action.provenance.requested_by = author
             actions.append(action)
         return PlaybookResult(actions=actions, result={"runs": runs})
+
+    async def _root_cause(
+        self,
+        ctx: PlaybookContext,
+        pr: PrSnapshot,
+        failures: list[_Failure],
+        base: str,
+    ) -> list[RootCause] | None:
+        """Ask an agent, in a read-only checkout of the PR head, why these jobs fail;
+        ``None`` when it gives no usable answer (the first look then stands)."""
+        workdir = await ctx.workspace.prepare(pr.repo, pr.number, pr.head_sha, base)
+        try:
+            diff = await ctx.workspace.diff(workdir, f"origin/{base}", pr.head_sha)
+            logs = [
+                untrusted(
+                    f"ci.log {f.check.name}",
+                    f"Job: {f.check.name} (workflow {f.check.workflow}, run "
+                    f"{f.check.run_id})\nFirst look: {f.diagnosis.category}: "
+                    f"{f.diagnosis.explanation}"
+                    + (
+                        f"\nIt failed again after {f.reruns} reruns."
+                        if f.reruns
+                        else ""
+                    )
+                    + f"\n\n{excerpt(f.log)}",
+                    30_000,
+                )
+                for f in failures
+            ]
+            prompt = "\n\n".join(
+                [
+                    "Find the root cause of these CI failures. The working directory is "
+                    f"a checkout of the PR head {pr.head_sha}; compare against "
+                    f"origin/{base}. Read the failing tests and the code they exercise "
+                    "until you can name the mechanism, not only the symptom. Several jobs "
+                    "often fail for one reason: return one cause per distinct reason, "
+                    "listing the jobs it explains. For each, say what fails, why, where "
+                    "(files and lines; for a cause in this change, the changed lines), "
+                    "and the smallest fix. Origin `change` when this PR's change causes "
+                    "it; `base` when it does not depend on the change (the failing code "
+                    "and test are untouched by the diff, or the log shows the base "
+                    "branch fails the same way); `infra` for the runner or the CI "
+                    "service; `flaky` for nondeterminism; `unclear` when the evidence "
+                    "does not settle it. Do not guess: say `unclear` and what is missing.",
+                    *logs,
+                    pr_block(pr, diff),
+                    schema_hint(RootCauseReport.model_json_schema()),
+                ]
+            )
+            task = AgentTask(
+                kind=TaskKind.CI_ROOT_CAUSE,
+                prompt=prompt,
+                workdir=workdir,
+                output_schema=RootCauseReport.model_json_schema(),
+                skill_dirs=ctx.skill_dirs(),
+                repo=pr.repo,
+            )
+            answer = await ctx.ask(task, RootCauseReport)
+            if not answer.ok or answer.structured is None:
+                return None
+            report = RootCauseReport.model_validate(answer.structured)
+            causes = accepted_causes(
+                report, [f.check.name for f in failures], pr.paths, Path(workdir)
+            )
+            return causes or None
+        finally:
+            await ctx.workspace.release(workdir)
 
     async def _diagnose(
         self, ctx: PlaybookContext, pr: PrSnapshot, check: CheckRun, log: str

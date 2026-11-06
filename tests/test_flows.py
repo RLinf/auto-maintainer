@@ -255,6 +255,166 @@ async def test_flaky_ci_is_rerun_once_and_budget_holds(harness: Harness) -> None
     )
 
 
+async def _failing_ci(harness: Harness, log: str) -> None:
+    """Bring PR 42 through its first poll, then fail its ``unit`` job with ``log``."""
+    check = CheckRun(
+        id=8,
+        name="unit",
+        workflow="CI",
+        status=CheckStatus.COMPLETED,
+        conclusion=CheckConclusion.FAILURE,
+        run_id=100,
+        run_attempt=1,
+    )
+    harness.forge.put_pr(
+        _pr(
+            checks=[
+                check.model_copy(
+                    update={"status": CheckStatus.IN_PROGRESS, "conclusion": None}
+                )
+            ]
+        )
+    )
+    harness.runner.on("triage", lambda t: {"summary": "s", "labels": []})
+    harness.runner.on(
+        "evaluate",
+        lambda t: {
+            "scores": {"impact": 5, "urgency": 5, "strategic": 5, "readiness": 5},
+            "summary": "s",
+            "rationale": "r",
+        },
+    )
+    harness.runner.on("review", lambda t: REVIEW)
+    harness.runner.on("verify", lambda t: {"verdicts": []})
+    await harness.poll()
+    harness.forge.job_logs[8] = log
+    pr = await harness.forge.get_pr("acme/widget", 42)
+    harness.forge.put_pr(pr.model_copy(update={"checks": [check]}))
+    await harness.poll()
+
+
+async def test_a_real_ci_failure_gets_its_root_cause_from_the_code(
+    harness: Harness,
+) -> None:
+    await _auto(harness, comment_upsert="auto")
+    harness.runner.on(
+        "ci_diagnose",
+        lambda t: {
+            "category": "pr_caused",
+            "confidence": 0.6,
+            "explanation": "test_empty_batch fails",
+        },
+    )
+    asked: list[str] = []
+
+    def root_cause(task):
+        asked.append(task.prompt)
+        assert task.mode == "read_only"
+        return {
+            "causes": [
+                {
+                    "jobs": ["unit", "lint"],
+                    "failing": "tests/test_loader.py::test_empty_batch",
+                    "origin": "change",
+                    "cause": "The new guard returns None for an empty batch, and the "
+                    "caller iterates over the result.",
+                    "culprits": [
+                        {"path": "src/loader.py", "line": 12, "why": "returns None"},
+                        {"path": "../../etc/passwd", "line": 1, "why": "outside"},
+                    ],
+                    "fix": "Return an empty list instead of None.",
+                    "evidence": ["TypeError: 'NoneType' object is not iterable"],
+                    "confidence": 0.8,
+                }
+            ]
+        }
+
+    harness.runner.on("ci_root_cause", root_cause)
+    await _failing_ci(
+        harness,
+        "FAILED tests/test_loader.py::test_empty_batch\n"
+        "TypeError: 'NoneType' object is not iterable\n",
+    )
+    assert asked and "test_empty_batch" in asked[0]
+    [observation] = [
+        o
+        for o in await harness.store.list_ci_observations("acme/widget")
+        if o.check_id == 8
+    ]
+    cause = observation.root_cause
+    assert cause is not None and cause.jobs == ["unit"]  # lint did not fail here
+    assert [c.path for c in cause.culprits] == ["src/loader.py"]
+    [comment] = [
+        w
+        for w in harness.forge.writes_of("create_comment")
+        if "CI failures" in w["body"]
+    ]
+    body = comment["body"]
+    assert "tests/test_loader.py::test_empty_batch" in body
+    assert "`src/loader.py:12`: returns None" in body
+    assert "Suggested fix: Return an empty list instead of None." in body
+    assert "0.8" not in body and "passwd" not in body
+
+
+async def test_a_failure_the_change_did_not_cause_goes_to_the_maintainers(
+    harness: Harness,
+) -> None:
+    await _auto(harness, comment_upsert="auto", notify="auto")
+    harness.runner.on(
+        "ci_diagnose",
+        lambda t: {"category": "unknown", "confidence": 0.2, "explanation": "?"},
+    )
+    harness.runner.on(
+        "ci_root_cause",
+        lambda t: {
+            "causes": [
+                {
+                    "jobs": ["unit"],
+                    "failing": "tests/test_clock.py::test_tz",
+                    "origin": "base",
+                    "cause": "The test assumes the runner's time zone is UTC.",
+                    "confidence": 0.7,
+                }
+            ]
+        },
+    )
+    await _failing_ci(harness, "FAILED tests/test_clock.py::test_tz\n")
+    [comment] = [
+        w
+        for w in harness.forge.writes_of("create_comment")
+        if "CI failures" in w["body"]
+    ]
+    assert "does not come from this PR" in comment["body"]
+    notes = [
+        a
+        for a in await harness.store.list_actions(repo="acme/widget")
+        if a.action.kind == "notify"
+    ]
+    assert any(n.action.payload["event"] == "ci.base" for n in notes)
+
+
+async def test_without_a_root_cause_the_first_look_still_explains(
+    harness: Harness,
+) -> None:
+    await _auto(harness, comment_upsert="auto")
+    harness.runner.on(
+        "ci_diagnose",
+        lambda t: {
+            "category": "pr_caused",
+            "confidence": 0.6,
+            "explanation": "test_empty_batch fails on the new guard",
+        },
+    )
+    harness.runner.on("ci_root_cause", lambda t: {"causes": []})
+    await _failing_ci(harness, "FAILED tests/test_loader.py::test_empty_batch\n")
+    [comment] = [
+        w
+        for w in harness.forge.writes_of("create_comment")
+        if "CI failures" in w["body"]
+    ]
+    assert "**unit**: test_empty_batch fails on the new guard" in comment["body"]
+
+
 async def test_merge_waits_for_gate_then_merges_with_trailers(harness: Harness) -> None:
     from auto_maintainer.domain.memory import profile_path
     from auto_maintainer.profiles.layers import dump_yaml, parse_yaml

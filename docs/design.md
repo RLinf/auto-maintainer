@@ -647,9 +647,10 @@ The merge uses `merge.method`. For a squash, the subject comes from `merge.messa
 1. Skip runs for a SHA that is no longer the head, and cancelled runs unless `ci.cancelled_is_failure` is set (workflows with `cancel-in-progress` cancel superseded runs routinely).
 2. Fetch the job log through the `CiProvider` and cut it to the failing step plus a window around the first error. For providers without log access, use the check run's summary.
 3. Match the signature library: signatures from the profile's packs, global ones if the repository opted in, then the repository's own.
-4. Without a match, run the `ci_diagnose` task (read-only, worktree at the head SHA, log excerpt, PR diff). It returns `category` (`flaky`, `infra`, `pr_caused`, `unknown`), `confidence`, evidence lines, an explanation, and an optional new signature.
-5. `flaky` with budget left (`ci.rerun.max_per_sha`, default 2, with backoff): rerun failed jobs. `infra`: notify maintainers with the runner name; no comment to the author. `pr_caused`: draft a short comment for the author in the public language with the failing test and the likely cause. `unknown`: notify, no action.
-6. Record the observation in the repository's journal. A suggested signature that recurs three times, or that a maintainer confirms, becomes a T1 memory change; one that recurs in several repositories is proposed for global memory.
+4. Without a match, run the `ci_diagnose` task (log excerpt, PR description). It returns `category` (`flaky`, `infra`, `pr_caused`, `unknown`), `confidence`, evidence lines, an explanation, and an optional new signature. This is the first look, cheap and from the log alone.
+5. `flaky` with budget left (`ci.rerun.max_per_sha`, default 2, with backoff): rerun failed jobs. A flake that still fails after every rerun is no longer treated as one.
+6. **Root cause.** Every failure that is not a flake (and every flake that kept failing) goes, together with the others of the same head, to one `ci_root_cause` task (`ci.root_cause`, on by default): a read-only worktree at the head SHA, the PR diff against the base branch, each job's log excerpt and first look. Several jobs often fail for one reason, so the agent returns one cause per distinct reason (`domain/records.py:RootCause`): the jobs it explains, what fails (a test, a build step, a command), the mechanism, the culprit files and lines, the smallest fix, up to five log lines, a confidence, and its origin: `change` (this PR causes it), `base` (it fails without the change: the base branch is broken), `infra`, `flaky`, or `unclear` (the agent says so rather than guess). The playbook keeps only jobs that failed at this head, and only culprit paths that the PR changes or that exist in the checkout. A `change` cause becomes a comment for the author in the public language (what fails, why, where, the suggested fix; no confidence, no log lines); a `base` cause tells the author it is not theirs and notifies the maintainers (`ci.base`), as do `infra` (`ci.infra`) and `flaky` or `unclear` causes (`ci.unknown`). A job with no cause (the switch is off, or the agent gave no usable answer) keeps the first look: `pr_caused` explains it to the author in one line, `infra` and `unknown` notify.
+7. Record the observation, with its root cause, in the repository's journal; the PR page shows both. A suggested signature that recurs three times, or that a maintainer confirms, becomes a T1 memory change; one that recurs in several repositories is proposed for global memory.
 
 ### 5.6 Review and priority models
 
@@ -1124,7 +1125,7 @@ contribution: {commit_convention, title_rule, signoff, template_sections, licens
 checks:       [{id, type: builtin | command | agent, blocking, ...}]
 review:       {trigger: manual | scan | events, scan: {schedule, max_prs, followups}, skill, template, recommendations, verify, cross_agent, max_inline_comments, suggest_labels, max_suggested_labels}
 labels:       {roles: {<role>: <label>}, rules, never_remove_human_labels}
-ci:           {provider, required_workflows, cancelled_is_failure, rerun, runner_groups}
+ci:           {provider, required_workflows, cancelled_is_failure, rerun, runner_groups, root_cause}
 merge:        {enabled, method, arming, approvals, blocking_roles, message, update_branch, freezes}
 priority:     {rubric, stage_goals}                    # memory layer only
 timing:       {calendar, holidays, workdays, weekend, first_response_days, rereview_days, stale_days}  # dates are explicit; calendar is a label
@@ -1208,6 +1209,7 @@ followup:     {primary: claude-code, fallback: [codex]}
 evaluate:     {primary: antigravity, fallback: [claude-code], effort: low}
 calibrate:    {primary: antigravity, fallback: [claude-code]}
 ci_diagnose:  {primary: codex, fallback: [claude-code]}
+ci_root_cause: {primary: claude-code, fallback: [codex]}
 onboard:      {primary: claude-code, fallback: [codex]}
 chat:         {primary: claude-code, transport: acp}
 self_improve: {primary: claude-code, fallback: [codex]}

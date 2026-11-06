@@ -317,7 +317,20 @@ export interface CiObservation {
   confidence: number;
   explanation: string;
   rerun: boolean;
+  /** For a failure that is not a flake: what a look at the code found. */
+  root_cause: RootCause | null;
   created_at: string;
+}
+
+export interface RootCause {
+  jobs: string[];
+  failing: string;
+  origin: "change" | "base" | "infra" | "flaky" | "unclear";
+  cause: string;
+  culprits: { path: string; line: number | null; why: string }[];
+  fix: string;
+  evidence: string[];
+  confidence: number;
 }
 
 export interface RepoRow {

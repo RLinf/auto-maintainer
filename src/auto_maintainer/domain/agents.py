@@ -34,6 +34,7 @@ class TaskKind(StrEnum):
     EVALUATE = "evaluate"
     CALIBRATE = "calibrate"
     CI_DIAGNOSE = "ci_diagnose"
+    CI_ROOT_CAUSE = "ci_root_cause"
     HYGIENE = "hygiene"
     ONBOARD = "onboard"
     CHAT = "chat"

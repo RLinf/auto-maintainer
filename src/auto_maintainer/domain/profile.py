@@ -249,6 +249,9 @@ class Ci(_Section):
     runner_groups: dict[str, RunnerGroup] = Field(default_factory=dict)
     flake_signatures: list[FlakeSignature] = Field(default_factory=list)
     gate_daily_budget: int | None = None
+    root_cause: bool = True
+    """Look for the root cause of failures that are not flakes, in a checkout of the
+    PR head (design 5.5); ``false`` keeps the one-line explanation from the log."""
 
 
 class Arming(_Section):

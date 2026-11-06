@@ -300,8 +300,34 @@ def _answer(task: AgentTask) -> dict[str, Any]:
         return {
             "category": "pr_caused",
             "confidence": 0.7,
-            "explanation": "test_loader fails on the new guard.",
+            "explanation": "test_bar expects three steps and sees two.",
             "evidence": [],
+        }
+    if kind == "ci_root_cause":
+        return {
+            "causes": [
+                {
+                    "jobs": ["unit"],
+                    "failing": "tests/test_ui.py::test_bar",
+                    "origin": "change",
+                    "cause": "ProgressBar.step draws the bar before it counts the "
+                    "finished step, so after three steps it shows two.",
+                    "culprits": [
+                        {
+                            "path": "src/ui.py",
+                            "line": 41,
+                            "why": "self.done += 1 comes after self.draw()",
+                        }
+                    ],
+                    "fix": "Count the step before drawing: move self.done += 1 above "
+                    "self.draw().",
+                    "evidence": [
+                        "FAILED tests/test_ui.py::test_bar - AssertionError: "
+                        "expected 3 got 2"
+                    ],
+                    "confidence": 0.8,
+                }
+            ]
         }
     if kind == "calibrate":
         return {
@@ -405,6 +431,7 @@ async def build_demo(root: Path) -> Harness:
         "verify",
         "followup",
         "ci_diagnose",
+        "ci_root_cause",
         "calibrate",
         "chat",
         "onboard",
@@ -485,5 +512,24 @@ async def build_demo(root: Path) -> Harness:
     h.forge.diffs[(DEMO_REPO, 42)] = DEMO_DIFF_42
     h.runner.steps.update(_demo_steps())
     await h.service.reload_settings()
+    # PR 43's unit job finishes, and fails, after the first look at the repository,
+    # as it would on GitHub: that is what starts the CI doctor.
+    running = await h.forge.get_pr(DEMO_REPO, 43)
+    assert running is not None
+    failed = running.checks
+    h.forge.put_pr(
+        running.model_copy(
+            update={
+                "checks": [
+                    c.model_copy(
+                        update={"status": CheckStatus.IN_PROGRESS, "conclusion": None}
+                    )
+                    for c in failed
+                ]
+            }
+        )
+    )
+    await h.poll(DEMO_REPO)
+    h.forge.put_pr(running.model_copy(update={"checks": failed}))
     await h.poll(DEMO_REPO)
     return h

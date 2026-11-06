@@ -639,3 +639,6 @@ textarea.mono-input { width: 100%; }
 .level-rate { text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
 .level-row select { height: 30px; }
 .log-view { max-height: 460px; overflow: auto; margin: 0; padding: 10px 12px; font-family: var(--mono); font-size: 12px; line-height: 1.5; background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.root-cause { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; padding: 8px 10px; border-left: 3px solid var(--accent); background: var(--surface-2); border-radius: 0 6px 6px 0; }
+.root-cause ul { margin: 0; padding-left: 18px; }

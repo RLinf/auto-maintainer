@@ -4,7 +4,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { api, type Evaluation, type Me, type PrDetail, type ReviewStart, type RunCiPlan } from "../api";
+import { api, type Evaluation, type Me, type PrDetail, type ReviewStart, type RootCause, type RunCiPlan } from "../api";
 import { useAgent } from "../agent";
 import { agentName, AgentPicker, useAgentChoice } from "../agentPicker";
 import { Empty, ErrorBox, Labels, PageHead, Pre, prPath, Section, Status, Tier, timeOf, useAct, When } from "../components";
@@ -192,6 +192,7 @@ export default function PrPage({ me }: { me: Me }) {
                         <span className="small" style={{ whiteSpace: "normal", display: "block" }}>
                           {o.explanation}
                         </span>
+                        {o.root_cause && <RootCauseView cause={o.root_cause} prUrl={d.pr.url} sha={o.sha} />}
                         <span className="meta">
                           {o.signature && <code>{o.signature}</code>} {o.rerun ? `· ${t("rerun requested")}` : ""} · <When at={o.created_at} />
                         </span>
@@ -431,6 +432,61 @@ function Timeline({ d }: { d: PrDetail }) {
       <ListToolbar list={list} placeholder={t("Search the timeline")} />
       <DataTable list={list} columns={columns} empty={t("The service has not acted on this PR yet.")} />
     </>
+  );
+}
+
+const ORIGIN: Record<RootCause["origin"], { label: string; status: string }> = {
+  change: { label: "caused by this PR", status: "failed" },
+  base: { label: "fails without this PR too", status: "waiting" },
+  infra: { label: "CI infrastructure", status: "waiting" },
+  flaky: { label: "flaky", status: "cancelled" },
+  unclear: { label: "unclear", status: "cancelled" },
+};
+
+/** What the root-cause agent found for a failed job: what fails, why, where (linked to
+ * the file at that commit), the smallest fix, and the log lines that show it. */
+function RootCauseView({ cause, prUrl, sha }: { cause: RootCause; prUrl: string; sha: string }) {
+  const t = useT();
+  const [open, setOpen] = useState(false);
+  const base = prUrl.split("/pull/")[0];
+  const origin = ORIGIN[cause.origin];
+  return (
+    <div className="root-cause">
+      <div className="row" style={{ gap: 6 }}>
+        <strong className="small">{t("Root cause")}</strong>
+        <Status value={origin.status} label={t(origin.label)} />
+        <code className="small">{cause.failing}</code>
+      </div>
+      <span className="small" style={{ whiteSpace: "normal" }}>
+        {cause.cause}
+      </span>
+      {cause.culprits.length > 0 && (
+        <ul className="small">
+          {cause.culprits.map((c) => (
+            <li key={`${c.path}:${c.line}`}>
+              <a href={`${base}/blob/${sha}/${c.path}${c.line ? `#L${c.line}` : ""}`} target="_blank" rel="noreferrer">
+                <code>{c.line ? `${c.path}:${c.line}` : c.path}</code>
+              </a>
+              {c.why ? ` · ${c.why}` : ""}
+            </li>
+          ))}
+        </ul>
+      )}
+      {cause.fix && (
+        <span className="small" style={{ whiteSpace: "normal" }}>
+          <strong>{t("Suggested fix")}:</strong> {cause.fix}
+        </span>
+      )}
+      {cause.evidence.length > 0 && (
+        <>
+          <button className="ghost sm" style={{ alignSelf: "flex-start" }} onClick={() => setOpen(!open)}>
+            <Icon name={open ? "chevronDown" : "chevronRight"} size={12} />
+            {t("Log lines")}
+          </button>
+          {open && <Pre text={cause.evidence.join("\n")} />}
+        </>
+      )}
+    </div>
   );
 }
 
