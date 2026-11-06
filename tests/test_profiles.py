@@ -419,3 +419,61 @@ async def test_two_approvals_at_once_merge_a_change_once(tmp_path: Path) -> None
         assert stored is not None and stored.state == MemoryChangeState.MERGED
     finally:
         await h.close()
+
+
+async def test_a_repository_is_added_under_its_name_on_github(tmp_path: Path) -> None:
+    from auto_maintainer.domain.records import RepoRecord
+    from auto_maintainer.domain.snapshot import RepoInfo
+
+    h = await Harness.create(tmp_path, approve=False)
+    try:
+        h.forge.add_repo(RepoInfo(name="Acme/Gadget"))
+        record = await h.service.add_repo("acme/gadget", "maria")
+        assert record.repo == "Acme/Gadget"
+        await h.store.save_repo(RepoRecord(repo="acme/thing", added_by="maria"))
+        h.forge.add_repo(RepoInfo(name="Acme/Thing"))
+        with pytest.raises(ValueError, match="already added as acme/thing"):
+            await h.service.add_repo("Acme/Thing", "maria")
+    finally:
+        await h.close()
+
+
+async def test_renaming_a_repository_to_its_spelling_on_github(tmp_path: Path) -> None:
+    from auto_maintainer.domain.scoring import Evaluation
+    from auto_maintainer.profiles.layers import content_hash
+
+    h = await Harness.create(tmp_path, layer={"scope": {"min_pr": 3}})
+    try:
+        old, new = "acme/widget", "Acme/Widget"
+        h.forge.put_pr(make_pr(old, 42))
+        await h.poll(old)
+        await h.store.save_evaluation(Evaluation(repo=old, number=42, total=50.0))
+        h.forge.repos[new] = h.forge.repos.pop(old).model_copy(update={"name": new})
+        h.forge.set_permission(new, "maria", Permission.MAINTAIN)
+        with pytest.raises(ValueError, match="only the letter case"):
+            await h.service.rename_repo(old, "acme/other", "maria")
+        with pytest.raises(ValueError, match="GitHub spells it Acme/Widget"):
+            await h.service.rename_repo(old, "ACME/WIDGET", "maria")
+
+        changed = await h.service.rename_repo(old, new, "maria")
+
+        assert changed > 0
+        assert (
+            lock_path(old) not in h.memory.files
+            and profile_path(old) not in h.memory.files
+        )
+        assert h.memory.files[profile_path(new)].count("min_pr: 3") == 1
+        lock = parse_lock(h.memory.files[lock_path(new)], lock_path(new))
+        assert lock is not None and lock.repo == new and lock.profile["repo"] == new
+        assert lock.hash == content_hash(lock.profile)
+        assert await h.store.get_repo(old) is None
+        record = await h.store.get_repo(new)
+        assert record is not None and record.active
+        assert (await h.store.get_evaluation(new, 42)) is not None
+        assert (await h.store.get_snapshot(new, 42)) is not None
+        profile = await h.service.profiles.active(new)
+        assert profile is not None and profile.scope.min_pr == 3
+        state = await h.service.profiles.refresh(new)
+        assert state.candidate_hash is None, "the renamed lock still matches its layers"
+    finally:
+        await h.close()

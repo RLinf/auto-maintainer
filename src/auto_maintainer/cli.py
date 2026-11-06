@@ -643,6 +643,30 @@ def repo_add(repo: str) -> None:
     asyncio.run(main())
 
 
+@repo_app.command("rename")
+def repo_rename(old: str, new: str) -> None:
+    """Rename a repository to its spelling on GitHub when they differ only in letter
+    case: its memory folder and every record. Stop the service first (`am stop`).
+    Needs your GitHub identity (gh auth) to pass the configuration gate."""
+    from .background import running
+
+    if running(_cfg().data_path):
+        typer.echo("The service is running; stop it first with `am stop`.")
+        raise typer.Exit(1)
+
+    async def main() -> None:
+        login = await _whoami()
+        async with _service() as service:
+            try:
+                changed = await service.rename_repo(old, new, login)
+            except ValueError as e:
+                typer.echo(str(e))
+                raise typer.Exit(1) from e
+            typer.echo(f"renamed {old} to {new}: {changed} records")
+
+    asyncio.run(main())
+
+
 @repo_app.command("list")
 def repo_list() -> None:
     async def main() -> None:

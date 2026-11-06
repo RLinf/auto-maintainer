@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, TypeVar
@@ -829,6 +830,51 @@ class SqliteStore:
                 data=_dump(message),
             )
         )
+
+    async def rename_repo(self, old: str, new: str) -> int:
+        """Give every record of repository ``old`` the name ``new``: the repository
+        columns, and the name where it stands whole in stored data and keys (jobs'
+        keys, idempotency keys, memory paths). Returns the rows changed."""
+        pattern = re.compile(rf"(?<![A-Za-z0-9_.-]){re.escape(old)}(?![A-Za-z0-9_.-])")
+        changed = 0
+        async with self._write, self._engine.begin() as conn:
+            for table in m.metadata.sorted_tables:
+                cols = table.c
+                text_cols = [
+                    c for c in ("data", "key", "idem_key", "value") if c in cols
+                ]
+                if "repo" not in cols and not text_cols:
+                    continue
+                conditions = [func.instr(cols[c], old) > 0 for c in text_cols]
+                if "repo" in cols:
+                    conditions.append(cols["repo"] == old)
+                keys = list(table.primary_key.columns)
+                if not keys:  # a row could not be singled out to update
+                    continue
+                rows = (
+                    await conn.execute(
+                        select(
+                            *keys,
+                            *(cols[c] for c in text_cols),
+                            *([cols["repo"]] if "repo" in cols else []),
+                        ).where(or_(*conditions))
+                    )
+                ).all()
+                for row in rows:
+                    values: dict[str, Any] = {}
+                    for c in text_cols:
+                        text = row._mapping[cols[c]]
+                        if isinstance(text, str):
+                            renamed = pattern.sub(new, text)
+                            if renamed != text:
+                                values[c] = renamed
+                    if "repo" in cols and row._mapping[cols["repo"]] == old:
+                        values["repo"] = new
+                    if values:
+                        where = and_(*(k == row._mapping[k] for k in keys))
+                        await conn.execute(update(table).where(where).values(**values))
+                        changed += 1
+        return changed
 
     async def messages_with_pending_requests(self) -> list[ChatMessage]:
         """Messages in any conversation with a request card still waiting."""

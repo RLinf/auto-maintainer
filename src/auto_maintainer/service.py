@@ -39,6 +39,7 @@ from .domain.memory import (
     Tier,
     lock_path,
     profile_path,
+    repo_dir,
 )
 from .domain.permissions import Permission
 from .domain.ports import (
@@ -93,7 +94,7 @@ from .playbooks.base import (
 )
 from .profiles.gate import ConfigGate, GateDecision
 from .profiles.knowledge import Knowledge
-from .profiles.layers import ProfileError
+from .profiles.layers import ProfileError, content_hash
 from .profiles.loader import ProfileLoader
 from .profiles.lock import parse_lock
 from .profiles.packs import PackLibrary
@@ -737,6 +738,13 @@ class Service:
                 f"this development instance serves only its sandbox repository "
                 f"{self.settings.sandbox_repo}, not {repo}"
             )
+        repo = await self.canonical_repo(repo)
+        for known in await self.store.list_repos():
+            if known.repo != repo and known.repo.lower() == repo.lower():
+                raise ValueError(
+                    f"{repo} is already added as {known.repo}; rename it with "
+                    f"`am repo rename {known.repo} {repo}`"
+                )
         record = await self.store.get_repo(repo)
         if record is None:
             record = RepoRecord(
@@ -756,6 +764,78 @@ class Service:
                 Event(kind=EventKind.REPO_ADDED, repo=repo, payload={"by": added_by})
             )
         return record
+
+    async def rename_repo(self, old: str, new: str, login: str) -> int:
+        """Rename repository ``old`` to ``new``, its spelling on GitHub, when they
+        differ only in letter case: its memory folder (the approved lock is stamped
+        with the new name, nothing else in it changes), and every record in the store.
+        Only someone who may configure the repository may do it, as for any change to
+        its profile. Run it while the service is stopped. Returns the rows changed.
+
+        Raises:
+            ValueError: The names differ in more than case, ``new`` is not GitHub's
+                spelling, ``old`` is not a repository the service serves, or
+                ``login`` may not configure it.
+        """
+        if old == new or old.lower() != new.lower():
+            raise ValueError("a rename may change only the letter case of a name")
+        if await self.store.get_repo(old) is None:
+            raise ValueError(f"the service has no repository named {old}")
+        canonical = await self.canonical_repo(old)
+        if canonical != new:
+            raise ValueError(f"GitHub spells it {canonical}, not {new}")
+        decision = await self.gate.check(
+            new, login, await self.profiles.active(old), person=True
+        )
+        if not decision.allowed:
+            raise ValueError(decision.reason)
+        files: dict[str, str | None] = {}
+        moved: dict[str, str | None] = {}
+        for path in await self.a.memory.list_files(repo_dir(old)):
+            text = await self.a.memory.read_text(path)
+            files[path] = (
+                None  # deletions first: on a case-insensitive disk the paths collide
+            )
+            target = repo_dir(new) + path[len(repo_dir(old)) :]
+            if path == lock_path(old) and text:
+                lock = parse_lock(text, path)
+                if lock is not None:
+                    profile = {**lock.profile, "repo": new}
+                    text = lock.model_copy(
+                        update={
+                            "repo": new,
+                            "profile": profile,
+                            "hash": content_hash(profile),
+                        }
+                    ).to_yaml()
+            moved[target] = text
+        if files:
+            await self.a.memory.commit_direct(
+                {**files, **moved},
+                f"memory: rename {old} to {new}, its name on GitHub",
+                login,
+            )
+        changed = await self.store.rename_repo(old, new)
+        self.profiles.invalidate(old)
+        self.profiles.invalidate(new)
+        await self.store.add_audit(
+            AuditEntry(
+                kind="config",
+                repo=new,
+                actor=login,
+                summary=f"renamed {old} to {new} ({changed} records, {len(files)} memory files)",
+            )
+        )
+        return changed
+
+    async def canonical_repo(self, repo: str) -> str:
+        """GitHub's spelling of ``repo`` (names are not case-sensitive there), or
+        ``repo`` itself when GitHub cannot say."""
+        try:
+            return (await self.a.forge.get_repo(repo)).name or repo
+        except Exception as e:  # unreachable or unknown: keep what was given
+            log.warning("could not read %s's name from GitHub: %s", repo, e)
+            return repo
 
     async def open_lock_change(
         self, repo: str, profile_hash: str

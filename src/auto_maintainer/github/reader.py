@@ -424,7 +424,9 @@ class GitHubReader:
                 count = int(params.get("required_approving_review_count") or 0)
                 approvals = max(approvals or 0, count)
         return RepoInfo(
-            name=repo,
+            # GitHub's own spelling: names are not case-sensitive there, and the
+            # service keys a repository's records and memory folder by this one.
+            name=data.get("full_name") or repo,
             default_branch=branch,
             default_branch_sha=((branch_data.get("commit") or {}).get("sha")),
             private=bool(data.get("private")),

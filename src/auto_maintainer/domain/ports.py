@@ -668,6 +668,11 @@ class Store(Protocol):
         """Messages in any conversation with a request card still waiting."""
         ...
 
+    async def rename_repo(self, old: str, new: str) -> int:
+        """Give every record of repository ``old`` the name ``new``; returns the rows
+        changed."""
+        ...
+
     async def list_messages(self, thread_id: str) -> list[ChatMessage]: ...
 
     # users, audit, service state

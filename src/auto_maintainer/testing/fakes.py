@@ -132,7 +132,12 @@ class FakeForge:
         return self.login
 
     async def get_repo(self, repo: str) -> RepoInfo:
-        return self.repos.get(repo) or RepoInfo(name=repo)
+        # Like GitHub, names match whatever their letter case.
+        found = self.repos.get(repo) or next(
+            (info for name, info in self.repos.items() if name.lower() == repo.lower()),
+            None,
+        )
+        return found or RepoInfo(name=repo)
 
     async def list_open_prs(self, repo: str) -> list[PrSnapshot]:
         return [

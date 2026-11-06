@@ -30,6 +30,7 @@ uv run am logs -f | am status | am stop   # follow the log, check, stop the back
 uv run am supervise [serve options]       # the same in the foreground: restarts after a deploy, rolls back a failed one
 uv run am serve --dev                     # real forge: only sandbox_repo, or every repository at shadow
 uv run am repo add <owner>/<repo>         # start onboarding (needs your gh identity to pass the gate)
+uv run am repo rename <old> <new>         # fix a repository's letter case to GitHub's (stop the service first)
 uv run am profile show|doctor <owner>/<repo>
 uv run am import evaluations <file> --repo <owner>/<repo>
 cd ui && npm ci && npm run dev            # dashboard dev server against am serve --demo
