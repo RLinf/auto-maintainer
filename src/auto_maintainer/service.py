@@ -196,6 +196,8 @@ class Service:
         self.service_config = ServiceConfig()
         """The settings in force, from ``config/service.yaml``."""
         self.settings_status = SettingsStatus(applied=True)
+        self.closing = asyncio.Event()
+        """Set when shutdown begins; the dashboard's live streams end on it."""
         self.restart_requested = asyncio.Event()
         """Set after a deploy; ``am serve`` then exits for its supervisor to restart it."""
         self._confirming: asyncio.Task[None] | None = None
@@ -367,6 +369,7 @@ class Service:
         self.scheduler.start()
 
     async def stop(self) -> None:
+        self.closing.set()
         if self._confirming is not None:
             self._confirming.cancel()
         await self.scheduler.stop()

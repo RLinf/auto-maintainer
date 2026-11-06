@@ -65,38 +65,69 @@ def rollback(
     return ok
 
 
+class _Stop(Exception):
+    """Ctrl+C or SIGTERM reached the supervisor."""
+
+
 def supervise(
     command: list[str],
     checkout: Path,
     state_file: Path,
     *,
     max_backoff: float = 60.0,
+    stop_grace: float = 20.0,
     log: Callable[[str], None] = lambda m: print(
         f"[am supervise] {m}", file=sys.stderr
     ),
 ) -> int:
+    """Run ``command`` until it exits with 0 or the supervisor is told to stop.
+
+    On Ctrl+C or SIGTERM the service gets one SIGTERM and ``stop_grace`` seconds to
+    finish; a second Ctrl+C, or the grace running out, kills it. The supervisor never
+    exits while the service is still running.
+    """
     backoff = 1.0
     child: subprocess.Popen | None = None
 
-    def stop(signum: int, _frame: object) -> None:
-        if child is not None and child.poll() is None:
-            child.send_signal(signum)
-        raise SystemExit(0)
+    def stop(_signum: int, _frame: object) -> None:
+        raise _Stop
 
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
-    while True:
-        child = subprocess.Popen(command, cwd=checkout)
-        code = child.wait()
-        if code == 0:
+    try:
+        while True:
+            child = subprocess.Popen(command, cwd=checkout)
+            code = child.wait()
+            if code == 0:
+                return 0
+            if code == RESTART_EXIT_CODE:
+                log("restarting on the deployed code")
+                backoff = 1.0
+                continue
+            if rollback(checkout, state_file, log):
+                backoff = 1.0
+                continue
+            log(f"the service exited with {code}; restarting in {backoff:.0f} s")
+            time.sleep(backoff)
+            backoff = min(backoff * 2, max_backoff)
+    except _Stop:
+        if child is None or child.poll() is not None:
             return 0
-        if code == RESTART_EXIT_CODE:
-            log("restarting on the deployed code")
-            backoff = 1.0
-            continue
-        if rollback(checkout, state_file, log):
-            backoff = 1.0
-            continue
-        log(f"the service exited with {code}; restarting in {backoff:.0f} s")
-        time.sleep(backoff)
-        backoff = min(backoff * 2, max_backoff)
+        running = child
+
+        def kill_now(_signum: int, _frame: object) -> None:
+            running.kill()
+
+        signal.signal(signal.SIGINT, kill_now)
+        signal.signal(signal.SIGTERM, kill_now)
+        log("stopping the service (Ctrl+C again to kill it now)")
+        # A Ctrl+C in the terminal already reached the service too: one SIGTERM
+        # more lets it shut down gracefully, where a forwarded SIGINT would force it.
+        running.terminate()
+        try:
+            running.wait(timeout=stop_grace)
+        except subprocess.TimeoutExpired:
+            log(f"the service did not stop within {stop_grace:.0f} s; killing it")
+            running.kill()
+            running.wait()
+        return 0

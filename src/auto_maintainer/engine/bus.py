@@ -80,12 +80,33 @@ class EventBus:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._task
 
-    async def stream(self) -> AsyncIterator[Event]:
-        """Events published from now on, for a server-sent event stream."""
+    async def stream(
+        self, closing: asyncio.Event | None = None, heartbeat: float = 15.0
+    ) -> AsyncIterator[Event | None]:
+        """Events published from now on, for a server-sent event stream.
+
+        Yields ``None`` after ``heartbeat`` seconds without an event, so the caller
+        can check that its client is still there, and ends once ``closing`` is set,
+        so a server shutting down never waits on an idle dashboard.
+        """
         queue: asyncio.Queue[Event] = asyncio.Queue()
         self._listeners.add(queue)
         try:
-            while True:
-                yield await queue.get()
+            while closing is None or not closing.is_set():
+                get = asyncio.ensure_future(queue.get())
+                stop = asyncio.ensure_future(closing.wait()) if closing else None
+                waiting = {get} if stop is None else {get, stop}
+                done, _ = await asyncio.wait(
+                    waiting, timeout=heartbeat, return_when=asyncio.FIRST_COMPLETED
+                )
+                if stop is not None:
+                    stop.cancel()
+                if get in done:
+                    yield get.result()
+                    continue
+                get.cancel()
+                if closing is not None and closing.is_set():
+                    return
+                yield None
         finally:
             self._listeners.discard(queue)

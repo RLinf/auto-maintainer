@@ -1233,9 +1233,12 @@ def build_router() -> APIRouter:
 
         async def stream() -> Any:
             yield "retry: 5000\n\n"
-            async for event in service.bus.stream():
+            async for event in service.bus.stream(service.closing):
                 if await request.is_disconnected():
                     break
+                if event is None:
+                    yield ": ping\n\n"
+                    continue
                 if event.repo is not None and event.repo not in visible:
                     continue
                 data = {

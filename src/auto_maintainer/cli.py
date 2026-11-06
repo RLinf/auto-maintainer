@@ -102,6 +102,63 @@ def init() -> None:
     typer.echo(f"wrote {path} and {secrets}")
 
 
+STOP_SECONDS = 15.0
+"""How long the service may take to stop after the web server has."""
+
+
+async def _serve_until_stopped(service: Any, web: Any, host: str, port: int) -> None:
+    """Serve ``web`` until Ctrl+C, SIGTERM, or a deploy asks for a restart, then stop
+    the service and close its store.
+
+    Shutdown never waits on an idle browser: the dashboard's live streams end as soon
+    as it begins, other connections get five seconds, and the service gets
+    ``STOP_SECONDS``. A second Ctrl+C skips the wait for connections.
+    """
+    import uvicorn
+
+    loop = asyncio.get_running_loop()
+
+    def begin_closing() -> None:
+        loop.call_soon_threadsafe(service.closing.set)
+
+    class Server(uvicorn.Server):
+        def handle_exit(self, sig: int, frame: Any) -> None:
+            begin_closing()
+            super().handle_exit(sig, frame)
+            # uvicorn raises the captured signals again when serve() returns, which
+            # would cancel the service's shutdown below halfway; that shutdown is
+            # bounded instead.
+            self._captured_signals.clear()
+
+    server = Server(
+        uvicorn.Config(
+            web, host=host, port=port, log_level="info", timeout_graceful_shutdown=5
+        )
+    )
+
+    async def restart_when_deployed() -> None:
+        await service.restart_requested.wait()
+        typer.echo("a maintainer deployed new code; restarting")
+        begin_closing()
+        server.should_exit = True
+
+    watcher = asyncio.create_task(restart_when_deployed())
+    try:
+        await server.serve()
+    finally:
+        watcher.cancel()
+        try:
+            await asyncio.wait_for(service.stop(), STOP_SECONDS)
+        except TimeoutError:
+            typer.echo(
+                f"the service did not stop within {STOP_SECONDS:.0f} s; exiting anyway",
+                err=True,
+            )
+        close = getattr(service.store, "close", None)
+        if close is not None:
+            await close()
+
+
 @app.command()
 def serve(
     dev: bool = typer.Option(
@@ -115,8 +172,6 @@ def serve(
     verbose: bool = False,
 ) -> None:
     """Run the API, the workers, and the dashboard."""
-    import uvicorn
-
     from .web.app import create_app
     from .web.dashboard import ensure_built
 
@@ -141,13 +196,7 @@ def serve(
             typer.echo(
                 f"demo data in {root}; sign in at {url}/auth/dev?login={DEMO_USER}"
             )
-            server = uvicorn.Server(
-                uvicorn.Config(web, host=bind, port=port or 7777, log_level="info")
-            )
-            try:
-                await server.serve()
-            finally:
-                await service.stop()
+            await _serve_until_stopped(service, web, bind, port or 7777)
 
         asyncio.run(demo_main())
         return
@@ -180,23 +229,7 @@ def serve(
             webhook_target=hint,
         )
         await service.start()
-        server = uvicorn.Server(
-            uvicorn.Config(
-                web, host=host or cfg.host, port=port or cfg.port, log_level="info"
-            )
-        )
-
-        async def restart_when_deployed() -> None:
-            await service.restart_requested.wait()
-            typer.echo("a maintainer deployed new code; restarting")
-            server.should_exit = True
-
-        watcher = asyncio.create_task(restart_when_deployed())
-        try:
-            await server.serve()
-        finally:
-            watcher.cancel()
-            await service.stop()
+        await _serve_until_stopped(service, web, host or cfg.host, port or cfg.port)
         return service.restart_requested.is_set()
 
     if asyncio.run(main()):
