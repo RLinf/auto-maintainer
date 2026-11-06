@@ -16,12 +16,17 @@
 
 from __future__ import annotations
 
+import json
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 from ..domain.actions import (
     ActionHints,
     ActionKind,
+    ActionStatus,
     LabelPayload,
+    LabReproducePayload,
     RequestReviewersPayload,
     ReviewPostPayload,
     make_action,
@@ -30,6 +35,7 @@ from ..domain.agents import AgentTask, TaskKind
 from ..domain.events import Event, EventKind
 from ..domain.ids import short_sha
 from ..domain.profile import RepoProfile
+from ..domain.records import JobStatus
 from ..domain.review import (
     DismissedFinding,
     ReviewResult,
@@ -46,8 +52,11 @@ from .prompts import (
     label_block,
     label_choices,
     pr_block,
+    reproduction_block,
     review_skill_block,
     schema_hint,
+    skill_format_block,
+    skill_owns_format,
     template_block,
     untrusted,
 )
@@ -136,13 +145,17 @@ class ReviewPlaybook(Playbook):
                 workdir, f"origin/{info.default_branch}", pr.head_sha
             )
             lessons = await ctx.knowledge.review_lessons(pr.repo, profile)
+            own_format = skill_owns_format(profile, workdir)
             prompt = "\n\n".join(
                 [
                     interactive(profile, ctx.requested_by)
                     if ctx.requested_by
                     else headless(profile),
                     review_skill_block(profile, ctx.service.skills_dir, workdir),
-                    template_block(profile),
+                    skill_format_block(profile)
+                    if own_format
+                    else template_block(profile),
+                    reproduction_block(await _reproduction(ctx, pr.repo, pr.number)),
                     f"Review lessons from this repository's maintainers:\n{lessons}"
                     if lessons
                     else "",
@@ -180,7 +193,7 @@ class ReviewPlaybook(Playbook):
                 else "ready"
             )
             result.recommendation = profile.review.recommendations[meaning]
-        rendered = render_review(result, profile, set(pr.paths))
+        rendered = render_review(result, profile, set(pr.paths), own_format=own_format)
         team = ctx.trusted_input
         hints = ActionHints(
             author_is_team=team, recommendation=meaning, changed_paths=pr.paths
@@ -318,3 +331,48 @@ class ReviewPlaybook(Playbook):
                     )
                 )
         return result.model_copy(update={"findings": kept, "dismissed": dismissed})
+
+
+async def _reproduction(ctx: PlaybookContext, repo: str, number: int) -> str | None:
+    """The PR's latest reproduction on a test machine that ran: the approved plan,
+    where and at which commits it ran, and what the service concluded from the runs.
+    Run output comes from the PR's code, so it is marked untrusted."""
+    runs = [
+        r
+        for r in await ctx.store.list_actions(
+            repo=repo, number=number, kinds=[ActionKind.LAB_REPRODUCE], limit=50
+        )
+        if r.status == ActionStatus.EXECUTED and r.external_ref.get("runs")
+    ]
+    if not runs:
+        return None
+    record = max(runs, key=lambda r: r.updated_at)
+    plan = LabReproducePayload.model_validate(record.action.payload)
+    reports = [
+        job
+        for job in await ctx.store.list_jobs([JobStatus.DONE], repo=repo, limit=500)
+        if job.playbook == "reproduce"
+        and job.number == number
+        and (job.result or {}).get("conclusion")
+    ]
+    conclusion: dict[str, Any] = (
+        max(reports, key=lambda j: j.updated_at).result or {} if reports else {}
+    )
+    summary = {
+        "machine": plan.lab,
+        "approved_by": record.approver,
+        "head_sha": record.action.head_sha,
+        "plan": plan.summary,
+        "setup": plan.setup,
+        "script": plan.script,
+        "expect": plan.expect,
+        "runs": {
+            side: {k: v for k, v in run.items() if k != "tail"}
+            for side, run in (record.external_ref.get("runs") or {}).items()
+        },
+        "conclusion": conclusion.get("conclusion"),
+        "notes": conclusion.get("notes"),
+    }
+    return untrusted(
+        "reproduction", json.dumps(summary, ensure_ascii=False, indent=1), 20_000
+    )

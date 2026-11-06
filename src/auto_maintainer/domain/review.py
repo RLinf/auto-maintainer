@@ -206,22 +206,32 @@ def _finding_heading(f: Finding) -> str:
     return f"**{f.id} · {f.severity} · {f.category}: {f.title}**"
 
 
-def _inline_body(f: Finding) -> str:
-    parts = [_finding_heading(f), "", f.body.strip()]
+def _inline_body(f: Finding, own_format: bool = False) -> str:
+    """An inline comment: the finding's heading and body, or, when the repository's
+    skill sets the format, the body as the agent wrote it to that format."""
+    parts = (
+        [f.body.strip()] if own_format else [_finding_heading(f), "", f.body.strip()]
+    )
     if f.suggestion:
         parts += ["", "```suggestion", f.suggestion.rstrip("\n"), "```"]
     return "\n".join(parts)
 
 
 def render_review(
-    result: ReviewResult, profile: RepoProfile, diff_paths: set[str]
+    result: ReviewResult,
+    profile: RepoProfile,
+    diff_paths: set[str],
+    *,
+    own_format: bool = False,
 ) -> RenderedReview:
     """Render a review into a main comment and inline comments.
 
     A finding goes inline when it names a path in the diff and a line; the rest go
     in the main comment. Sections come from the profile's template: built-in
     section names are filled from the result's fields, and any other section from
-    ``result.sections``.
+    ``result.sections``. With ``own_format`` (the repository's review skill sets
+    the format) the main comment is ``result.sections`` as the agent returned them,
+    in its order, when it returned any.
     """
     inline_findings = [
         f for f in result.findings if f.path in diff_paths and f.line is not None
@@ -234,7 +244,7 @@ def render_review(
             start_line=f.start_line
             if f.start_line and f.start_line < (f.line or 0)
             else None,
-            body=_inline_body(f),
+            body=_inline_body(f, own_format),
         )
         for f in inline_findings
     ]
@@ -273,6 +283,13 @@ def render_review(
         "tests and docs": tests_text,
         "recommendation": recommendation_text,
     }
+    if own_format and any(text.strip() for text in result.sections.values()):
+        body = "\n\n".join(
+            f"### {heading.strip()}\n\n{text.strip()}"
+            for heading, text in result.sections.items()
+            if text.strip()
+        )
+        return RenderedReview(body=body, comments=comments)
     blocks = []
     for section in profile.review.template:
         if section in result.sections:

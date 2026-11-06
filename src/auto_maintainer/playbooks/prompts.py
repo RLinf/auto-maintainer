@@ -24,7 +24,7 @@ import json
 import re
 from pathlib import Path
 
-from ..domain.profile import RepoProfile
+from ..domain.profile import DEFAULT_SECTIONS, RepoProfile
 from ..domain.snapshot import PrSnapshot
 
 _FENCE = "=" * 12
@@ -79,7 +79,7 @@ def skill_instruction(profile: RepoProfile, skills_dir: Path) -> str:
 HEADLESS = """You are running headless inside an automated maintainer service.
 - Do not ask questions, do not post anything, do not push, and do not edit files.
 - Steps of the skill that ask the user or post to GitHub are replaced by returning the structured result.
-- Any reproduction decision is already made: do not reproduce the PR yourself.
+- Do not run the PR's workflow yourself to reproduce it: the reproduction is the record given below, or there is none.
 - Verify every finding against the code before reporting it; leave out anything you cannot confirm.
 - Public text you write is in {public_language}. Write plainly and specifically; name the code you mean."""
 
@@ -91,7 +91,7 @@ def headless(profile: RepoProfile) -> str:
 INTERACTIVE = """You are reviewing for {reviewer}, a maintainer, inside an automated maintainer service.
 - When something you cannot settle from the code, the PR, or the repository would change your review (the intent behind a change, an unwritten convention, which of two designs is wanted), ask {reviewer} with your tool for asking the user. Ask only what matters, a few questions at most, each answerable in a line.
 - Never ask whether to post, publish, or comment, and never post, push, or edit files. Return the review as the structured result: {reviewer} reads it, edits it, and decides what is posted.
-- Any reproduction decision is already made: do not reproduce the PR yourself.
+- Do not run the PR's workflow yourself to reproduce it, and do not ask how to: the reproduction is the record given below, or there is none.
 - Verify every finding against the code before reporting it; leave out anything you cannot confirm.
 - Public text you write is in {public_language}. Write plainly and specifically; name the code you mean."""
 
@@ -134,6 +134,68 @@ def repo_skills(workdir: Path) -> list[tuple[str, str, str]]:
                 )
             )
     return found
+
+
+def own_review_skill(profile: RepoProfile, workdir: Path) -> str | None:
+    """The path of the repository's own review skill when the review follows it: the
+    one the profile names (``repo:<path>``), or, while the profile keeps the built-in
+    default, the repository's skill whose name or folder says review."""
+    if profile.review.skill.startswith("repo:"):
+        return profile.review.skill.split(":", 1)[1].split("#", 1)[0]
+    if not profile.review.skill.startswith("builtin:"):
+        return None
+    own = [
+        s
+        for s in repo_skills(workdir)
+        if "review" in s[0].lower() or "review" in s[1].lower()
+    ]
+    return own[0][1] if own else None
+
+
+def skill_owns_format(profile: RepoProfile, workdir: Path) -> bool:
+    """Whether the repository's review skill sets the main comment's format: it is in
+    use and the maintainers did not set sections of their own in the profile."""
+    return (
+        own_review_skill(profile, workdir) is not None
+        and profile.review.template == DEFAULT_SECTIONS
+    )
+
+
+def skill_format_block(profile: RepoProfile) -> str:
+    """The output instructions when the repository's review skill fixes the format of
+    the main comment."""
+    recs = ", ".join(
+        f"{label!r} ({meaning})"
+        for meaning, label in profile.review.recommendations.items()
+    )
+    return (
+        "The repository's review skill fixes the main comment's format: follow it. Return "
+        "the main comment in `sections`: one entry per section of the skill's main comment, "
+        "keyed by its heading word for word (as the skill writes it), in the skill's order, "
+        "each holding the text to post under it, with the skill's own recommendation wording "
+        "in its section. Still list every confirmed or unresolved finding in `findings`: one "
+        "that names a line of the diff becomes an inline comment, so the sections point to it "
+        "by `path:line`. A finding's `body` is posted as that inline comment exactly as you "
+        "write it, so write it the way the skill says inline comments are written; put "
+        "replacement code for exactly the commented lines in `suggestion`. Fill `summary` with "
+        f"two or three sentences, and set `recommendation` to the closest of: {recs}."
+    )
+
+
+def reproduction_block(record: str | None) -> str:
+    """What the reviewer knows about running the PR: the service's latest reproduction
+    on a test machine, or that there is none."""
+    if record:
+        return (
+            "Reproduction on record, from the service's test machines (use it where the "
+            "skill asks how the PR was reproduced and what came out; say which commit it ran "
+            "and whether that is the head you review): " + record
+        )
+    return (
+        "No reproduction of this PR is on record. Where the skill asks how the PR was "
+        "reproduced, say that no run was made and what a run would need; a maintainer can "
+        "start one with Reproduce on the PR's page."
+    )
 
 
 def review_skill_block(profile: RepoProfile, skills_dir: Path, workdir: Path) -> str:

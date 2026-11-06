@@ -372,3 +372,122 @@ async def test_a_repository_can_turn_label_suggestions_off(demo) -> None:
             if p["action"]["action"]["kind"] == "label.apply"
             and p["action"]["action"]["payload"]["labels"]
         ]
+
+
+# -- the repository's own review format ----------------------------------------------
+
+
+QUESTIONS = [
+    "1. What settings did you use to reproduce this PR?",
+    "2. What were the reproduction results?",
+    "9. What is your recommendation?",
+]
+
+
+def _skill_review(task: Any) -> dict:
+    return {
+        "summary": "Guards against empty batches.",
+        "findings": [
+            {
+                "id": "F1",
+                "severity": "major",
+                "category": "correctness",
+                "title": "Off-by-one in the batch loop",
+                "body": "The loop skips the last batch.",
+                "path": "src/loader.py",
+                "line": 1,
+            }
+        ],
+        "sections": {
+            QUESTIONS[0]: "- No run was made; it needs one GPU.",
+            QUESTIONS[1]: "- Not reproduced.",
+            QUESTIONS[2]: "Changes requested\n- Fix F1 (`src/loader.py:1`).",
+        },
+        "recommendation": "Changes requested",
+    }
+
+
+async def test_a_review_posts_in_the_format_of_the_repositorys_skill(demo) -> None:
+    h, app = demo
+    pr = h.forge.prs[(REPO, 42)]
+    _skill(h, 42, pr.head_sha)
+    h.runner.on("review", _skill_review)
+    await _review(app, "maria", 42)
+    await h.settle()
+    [task] = [t for t in h.runner.tasks if t.kind == TaskKind.REVIEW]
+    assert "fixes the main comment's format" in task.prompt
+    assert "The main review comment has these sections" not in task.prompt
+    assert "No reproduction of this PR is on record" in task.prompt
+    async with _as(app, "maria") as maria:
+        [draft] = [
+            p
+            for p in (await maria.get("/api/proposals")).json()
+            if p["action"]["action"]["kind"] == "review.post"
+        ]
+    payload = draft["action"]["action"]["payload"]
+    headings = [
+        line[4:] for line in payload["body"].splitlines() if line.startswith("### ")
+    ]
+    assert headings == QUESTIONS, "the skill's sections, in its order, word for word"
+    assert "### Summary" not in payload["body"]
+    [comment] = payload["comments"]
+    assert comment["path"] == "src/loader.py"
+    assert comment["body"] == "The loop skips the last batch.", "posted as written"
+
+
+async def test_a_review_reports_the_reproduction_on_record(demo) -> None:
+    from auto_maintainer.domain.actions import (
+        ActionKind,
+        ActionStatus,
+        LabReproducePayload,
+        make_action,
+    )
+    from auto_maintainer.domain.records import ActionRecord
+
+    h, app = demo
+    pr = h.forge.prs[(REPO, 42)]
+    _skill(h, 42, pr.head_sha)
+    action = make_action(
+        ActionKind.LAB_REPRODUCE,
+        REPO,
+        LabReproducePayload(
+            lab="gpu-01",
+            summary="Run the loader on an empty batch.",
+            script="python -m loader --empty",
+            expect="head passes, base crashes",
+        ),
+        number=42,
+        head_sha=pr.head_sha,
+        discriminator="req:x",
+    )
+    await h.store.add_action(
+        ActionRecord(
+            action=action,
+            status=ActionStatus.EXECUTED,
+            approver="maria",
+            external_ref={
+                "runs": {
+                    "base": {"exit_code": 1, "tail": "Traceback"},
+                    "head": {"exit_code": 0, "tail": "ok"},
+                }
+            },
+        )
+    )
+    await h.store.upsert_job(
+        Job(
+            playbook="reproduce",
+            key="reproduce:acme/widget#42:req:x",
+            repo=REPO,
+            number=42,
+            pool="agent",
+            status=JobStatus.DONE,
+            result={"conclusion": "reproduced", "notes": "fails before, passes after"},
+        )
+    )
+    h.runner.on("review", _skill_review)
+    await _review(app, "maria", 42)
+    await h.settle()
+    [task] = [t for t in h.runner.tasks if t.kind == TaskKind.REVIEW]
+    record = task.prompt.split("Reproduction on record")[1]
+    assert "gpu-01" in record and '"conclusion": "reproduced"' in record
+    assert "Traceback" not in record, "run output stays with the job"
