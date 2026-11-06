@@ -5,6 +5,7 @@ import { useState } from "react";
 import { api, qs, type MemoryChange } from "../api";
 import { CaughtUp, Empty, ErrorBox, PageHead, Pre, RejectButton, Section, Status, timeOf, useAct, When } from "../components";
 import { useMemoryChanges } from "../data";
+import { ChangeProfiles } from "../profileView";
 import { useT } from "../i18n";
 import { Icon } from "../icons";
 import { ListToolbar, useList } from "../list";
@@ -102,6 +103,7 @@ export function ChangeCard({ change, compact = false }: { change: MemoryChange; 
         )}
         {t("Approved by")}: {approvals.length ? approvals.map(([repo, logins]) => `${logins.join(", ")} (${repo})`).join("; ") : t("none yet")}
       </div>
+      {!compact && <ChangeProfiles change={change} />}
       <details>
         <summary className="small">
           {Object.keys(change.files).length} {t("files")}

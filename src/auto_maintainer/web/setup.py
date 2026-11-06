@@ -53,6 +53,7 @@ class MemoryBody(BaseModel):
 class FinishBody(BaseModel):
     base_url: str
     code_repo: str | None = None
+    default_agent: str | None = None
 
 
 def _error(e: Exception) -> HTTPException:
@@ -161,7 +162,7 @@ def build_router(
         await owner(request)
         s = steps()
         try:
-            cfg = s.finish(body.base_url, body.code_repo or None)
+            cfg = s.finish(body.base_url, body.code_repo or None, body.default_agent)
             await on_finish(cfg)
         except errors as e:
             raise _error(e) from e

@@ -1,5 +1,5 @@
 // Host setup in the browser: the address, the GitHub CLI login the service acts as, the
-// memory repository, and the service's own repository. The service reaches GitHub only
+// memory repository, the service's own repository, and the agent that runs tasks first. The service reaches GitHub only
 // through the GitHub CLI; when the host has none, the page installs it. On a new host,
 // whoever proves through GitHub that they maintain the service's repository owns the
 // setup; later, maintainers reach this page from Settings.
@@ -36,6 +36,8 @@ interface SetupStatus {
   memory: string | null;
   code_repo: string | null;
   approve_permission: string;
+  /** The agent chosen at the last setup, if any. */
+  default_agent: string | null;
   detected: {
     gh: { installed: boolean; user?: Person; error?: string };
     agents: Record<string, boolean>;
@@ -52,6 +54,12 @@ const AGENT_NAMES: Record<string, string> = {
   gemini: "Gemini CLI",
 };
 
+/** The agent preselected on the page: the one chosen before, else the first installed. */
+function preferredAgent(s: SetupStatus): string | null {
+  if (s.default_agent) return s.default_agent;
+  return Object.keys(AGENT_NAMES).find((name) => s.detected.agents[name]) ?? null;
+}
+
 export default function SetupPage({ firstRun = false }: { firstRun?: boolean }) {
   const t = useT();
   const client = useQueryClient();
@@ -64,6 +72,7 @@ export default function SetupPage({ firstRun = false }: { firstRun?: boolean }) 
   const [memoryRepo, setMemoryRepo] = useState("");
   const [codeRepo, setCodeRepo] = useState("");
   const [showOther, setShowOther] = useState(false);
+  const [agent, setAgent] = useState<string | null | undefined>(undefined);
   const s = status.data;
   useEffect(() => {
     if (!s || s.busy) return;
@@ -71,11 +80,15 @@ export default function SetupPage({ firstRun = false }: { firstRun?: boolean }) 
     setCodeRepo((v) => v || s.code_repo || s.detected.checkout_repo || "");
     const login = s.claimer?.login ?? s.identity?.login;
     setMemoryRepo((v) => v || s.memory || (login ? `${login}/auto-maintainer-memory` : ""));
+    setAgent((v) => (v === undefined ? preferredAgent(s) : v));
   }, [s]);
   const refresh = () => client.invalidateQueries({ queryKey: ["setup"] });
   const hostLogin = useAct(() => api.post<Person>("/api/setup/github"), [["setup"]]);
   const memory = useAct((body: { repo: string | null; create: boolean }) => api.post<{ repo: string | null; created?: boolean }>("/api/setup/memory", body), [["setup"]]);
-  const finish = useAct(() => api.post<{ redirect: string }>("/api/setup/finish", { base_url: baseUrl, code_repo: codeRepo || null }), []);
+  const finish = useAct(
+    () => api.post<{ redirect: string }>("/api/setup/finish", { base_url: baseUrl, code_repo: codeRepo || null, default_agent: agent ?? null }),
+    [],
+  );
 
   const shell = (children: ReactNode) => (
     <div style={firstRun ? { minHeight: "100vh", display: "flex", justifyContent: "center", padding: "48px 16px 96px" } : { display: "flex", justifyContent: "center" }}>
@@ -223,17 +236,33 @@ export default function SetupPage({ firstRun = false }: { firstRun?: boolean }) 
         <input value={codeRepo} onChange={(e) => setCodeRepo(e.target.value)} placeholder="owner/auto-maintainer" style={{ width: "100%" }} />
       </Step>
 
-      <section className="card stack">
-        <div className="row">
-          <strong>{t("Agents found on this host")}</strong>
-          <span className="small muted">{t("Choose agents and model providers on the Settings page later.")}</span>
+      <Step
+        n={5}
+        title={t("The agent that does the work")}
+        done={!!agent}
+        hint={t("Every task runs on it first. When it cannot run, the other agents installed here take over. Model providers and per-task choices are on the Settings page.")}
+      >
+        <div className="agent-options" role="radiogroup" aria-label={t("Default agent")}>
+          {Object.entries(AGENT_NAMES).map(([name, label]) => {
+            const found = !!s.detected.agents[name];
+            return (
+              <label key={name} className={`agent-option ${agent === name ? "on" : ""} ${found ? "" : "missing"}`}>
+                <input type="radio" name="default-agent" checked={agent === name} disabled={!found && agent !== name} onChange={() => setAgent(name)} />
+                <strong>{label}</strong>
+                <span className="small muted right">{found ? t("installed") : t("not installed")}</span>
+              </label>
+            );
+          })}
         </div>
-        <div className="row">
-          {Object.entries(s.detected.agents).map(([name, found]) => (
-            <Status key={name} value={found ? "executed" : "cancelled"} label={`${AGENT_NAMES[name] ?? name}${found ? "" : ` · ${t("not found")}`}`} />
-          ))}
-        </div>
-      </section>
+        {!Object.values(s.detected.agents).some(Boolean) && (
+          <div className="notice small">
+            {t("No agent CLI is installed on this host. Install one, such as Claude Code, Codex, or Antigravity, and sign it in; the service uses it as soon as it is installed.")}
+          </div>
+        )}
+        {agent && !s.detected.agents[agent] && (
+          <div className="notice small">{t("This agent is not installed on this host any more; pick one that is.")}</div>
+        )}
+      </Step>
 
       <div className="row" style={{ justifyContent: "flex-end" }}>
         <ErrorBox error={finish.error} />

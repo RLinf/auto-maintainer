@@ -111,6 +111,9 @@ class HostConfig(_Cfg):
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     code_repo: str | None = None
     """``owner/repo`` of the service's own code, where self-improvements go."""
+    default_agent: str | None = None
+    """The agent chosen during setup to run every task first; the service settings'
+    ``default_agent`` overrides it."""
     self_update: SelfUpdateConfig = Field(default_factory=SelfUpdateConfig)
     labs: dict[str, LabHostConfig] = Field(default_factory=dict)
     host_overrides: dict[str, dict[str, Any]] = Field(default_factory=dict)

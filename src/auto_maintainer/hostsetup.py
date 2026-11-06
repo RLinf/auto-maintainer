@@ -567,9 +567,12 @@ class HostSetup:
             "memory": self.cfg.memory.remote,
             "code_repo": self.cfg.code_repo,
             "approve_permission": self.cfg.self_update.approve_permission,
+            "default_agent": self.cfg.default_agent,
         }
 
-    def finish(self, base_url: str, code_repo: str | None) -> HostConfig:
+    def finish(
+        self, base_url: str, code_repo: str | None, default_agent: str | None = None
+    ) -> HostConfig:
         """Write ``local.yaml``; the setup code expires. A host that must connect again
         loses what its GitHub App or token setup kept: their secrets and the app's key."""
         if self.identity is None and (
@@ -580,8 +583,11 @@ class HostSetup:
             raise SetupError("the address must look like http://host:7777")
         if code_repo and not re.fullmatch(r"[\w.-]+/[\w.-]+", code_repo):
             raise SetupError("name the service's repository as owner/name")
+        if default_agent and default_agent not in AGENT_BINARIES:
+            raise SetupError(f"there is no agent named {default_agent!r}")
         self.cfg.base_url = base_url.strip().rstrip("/")
         self.cfg.code_repo = code_repo or None
+        self.cfg.default_agent = default_agent or None
         for person in (self.claimer, self.identity):
             login = person["login"] if person else None
             if login and login not in self.cfg.operators:

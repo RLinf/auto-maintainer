@@ -23,11 +23,13 @@ are answered by its maintainers; questions outside any repository by operators.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from collections import deque
+from collections.abc import Awaitable
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, TypeVar
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
@@ -50,9 +52,11 @@ from ..domain.agents import AgentAnswer, AgentQuestion, QuestionState
 from ..domain.events import Event, EventKind
 from ..domain.ids import check_repo
 from ..domain.memory import (
+    MemoryChange,
     MemoryChangeState,
     Signal,
     SignalKind,
+    lock_path,
     profile_path,
     repo_dir,
     repos_of_path,
@@ -69,11 +73,57 @@ from ..domain.snapshot import PrState
 from ..playbooks.evaluate import haystack, rubric_of
 from ..playbooks.hygiene import hygiene_key
 from ..profiles.layers import ProfileError, parse_yaml
-from ..profiles.lock import profile_diff
+from ..profiles.lock import parse_lock, profile_diff
 from ..service import Service
 from .auth import User, current_user
 
 PERMISSION_TTL = timedelta(minutes=10)
+
+log = logging.getLogger(__name__)
+T = TypeVar("T")
+
+
+def _memory_write_failed(error: str) -> str:
+    return (
+        "The approval is recorded, but writing it to the memory repo failed: "
+        f"{redact_secrets(error)[0]}. Approve again to retry."
+    )
+
+
+async def _profile_changes(
+    service: Service, change: MemoryChange
+) -> list[dict[str, Any]]:
+    """For each repository whose lock ``change`` writes: the approved profile and the
+    one the change would lock, so the dashboard can show what changes in words."""
+    out = []
+    for repo in change.repos:
+        path = lock_path(repo)
+        try:
+            new = parse_lock(change.files.get(path), path)
+            old = await service.profiles.lock(repo)
+        except ProfileError:
+            continue
+        if new is not None:
+            out.append(
+                {
+                    "repo": repo,
+                    "before": old.profile if old else None,
+                    "after": new.profile,
+                }
+            )
+    return out
+
+
+async def _merge_memory(merge: Awaitable[T]) -> T:
+    """Await an approval that writes to the memory repo, turning a failed write into
+    a 502 that says so; ``ValueError`` (the change is not open) passes through."""
+    try:
+        return await merge
+    except (HTTPException, ValueError):
+        raise
+    except Exception as e:
+        log.exception("writing a memory change failed")
+        raise HTTPException(502, _memory_write_failed(str(e))) from e
 
 
 MAX_DIFF = 2_000_000
@@ -419,28 +469,48 @@ def build_router() -> APIRouter:
             raise HTTPException(409, str(e)) from e
         if change is None:
             raise HTTPException(403, decision.reason)
-        await service.store.save_memory_change(change)
-        record = await service.pipeline.submit(
-            make_action(
-                ActionKind.MEMORY_CHANGE,
-                repo,
-                MemoryChangePayload(change_id=change.id),
-                discriminator=change.id,
+        pending = await service.open_lock_change(repo, body.hash)
+        if pending is not None:
+            # A retry after a failed write: approve the change already staged.
+            change = pending
+            _, status = await _merge_memory(
+                service.approve_memory_change(change.id, user.login)
             )
-        )
-        await service.store.add_audit(
-            AuditEntry(
-                kind="config",
-                repo=repo,
-                actor=user.login,
-                summary=f"approved profile {body.hash}",
+        else:
+            await service.store.save_memory_change(change)
+            record = await service.pipeline.submit(
+                make_action(
+                    ActionKind.MEMORY_CHANGE,
+                    repo,
+                    MemoryChangePayload(change_id=change.id),
+                    discriminator=change.id,
+                )
             )
-        )
-        await service.actuator.drain()
+            await service.store.add_audit(
+                AuditEntry(
+                    kind="config",
+                    repo=repo,
+                    actor=user.login,
+                    summary=f"approved profile {body.hash}",
+                )
+            )
+            await service.actuator.drain()
+            done = await service.store.get_action(record.action.id) or record
+            if done.status == ActionStatus.FAILED:
+                raise HTTPException(
+                    502, _memory_write_failed(done.error or "unknown error")
+                )
+            status = str(done.status)
         stored = await service.store.get_memory_change(change.id)
+        if stored and stored.state == MemoryChangeState.CONFLICT:
+            raise HTTPException(
+                409,
+                "The approval is recorded, but the change conflicts with the memory "
+                f"repo: {redact_secrets(stored.rejected_reason or '')[0]}",
+            )
         return {
             "change": stored.model_dump(mode="json") if stored else None,
-            "action": record.status,
+            "action": status,
         }
 
     @r.put("/repos/{owner}/{name}/settings")
@@ -472,7 +542,7 @@ def build_router() -> APIRouter:
         if decision.allowed:
             change.approvals = {repo: [user.login]}
         await service.store.save_memory_change(change)
-        await service.pipeline.submit(
+        record = await service.pipeline.submit(
             make_action(
                 ActionKind.MEMORY_CHANGE,
                 repo,
@@ -481,12 +551,20 @@ def build_router() -> APIRouter:
             )
         )
         await service.actuator.drain()
+        done = await service.store.get_action(record.action.id) or record
+        if done.status == ActionStatus.FAILED:
+            raise HTTPException(
+                502, _memory_write_failed(done.error or "unknown error")
+            )
         stored = await service.store.get_memory_change(change.id)
+        before = current.dump() if current else None
         return {
             "change": stored.model_dump(mode="json") if stored else None,
             "approved": decision.allowed,
             "gate": decision.model_dump(mode="json"),
-            "diff": profile_diff(current.dump() if current else None, merged.data),
+            "diff": profile_diff(before, merged.data),
+            "before": before,
+            "after": merged.data,
         }
 
     @r.get("/repos/{owner}/{name}/rubric")
@@ -1498,7 +1576,10 @@ def build_router() -> APIRouter:
         service = service_of(request)
         visible = set(await visible_repos(service, user))
         return [
-            c.model_dump(mode="json")
+            {
+                **c.model_dump(mode="json"),
+                "profiles": await _profile_changes(service, c),
+            }
             for c in await service.store.list_memory_changes(state)
             if set(c.repos) <= visible and c.repos
         ]
@@ -1509,8 +1590,8 @@ def build_router() -> APIRouter:
     ) -> dict[str, Any]:
         service = service_of(request)
         try:
-            decisions, state = await service.approve_memory_change(
-                change_id, user.login
+            decisions, state = await _merge_memory(
+                service.approve_memory_change(change_id, user.login)
             )
         except ValueError as e:
             raise HTTPException(409, str(e)) from e

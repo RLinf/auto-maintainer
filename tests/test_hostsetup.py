@@ -243,8 +243,12 @@ async def test_a_maintainers_login_claims_the_setup_and_a_strangers_does_not(
     assert s.claimer is None
     assert (await s.claim(TOKEN))["login"] == "hao"
     await s.use_gh()
-    cfg = s.finish("http://box:7777/", SERVICE_REPO)
+    with pytest.raises(SetupError, match="no agent named 'devin'"):
+        s.finish("http://box:7777/", SERVICE_REPO, "devin")
+    cfg = s.finish("http://box:7777/", SERVICE_REPO, "antigravity")
     assert cfg.operators == ["hao"] and cfg.github.gh_config_dir is None
+    assert load_host_config(s.config_dir).default_agent == "antigravity"
+    assert s.summary()["default_agent"] == "antigravity"
 
 
 async def test_without_a_github_remote_only_the_code_proves_ownership(

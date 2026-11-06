@@ -15,10 +15,11 @@
 """The agent router: routes, fallback, circuit breakers, budgets, structured output.
 
 A route names a primary runtime and fallbacks. The router tries them in order and
-skips a runtime that is unknown, disabled, over its daily budget, or whose circuit
-breaker is open. A breaker opens after an ``auth``, ``quota``, ``crash``, or
-``timeout`` failure, or after two invalid structured answers in a row, and closes
-after the cool-down. ``route.model`` applies to the primary runtime only, since
+skips a runtime that is unknown, disabled, not installed (its ``installed()`` says
+so), over its daily budget, or whose circuit breaker is open. A missing CLI opens
+no breaker, so installing it makes it usable at once. A breaker opens after an
+``auth``, ``quota``, ``crash``, or ``timeout`` failure, or after two invalid
+structured answers in a row, and closes after the cool-down. ``route.model`` applies to the primary runtime only, since
 model names differ between CLIs; ``route.effort`` and ``route.timeout_seconds``
 apply to every attempt.
 """
@@ -252,6 +253,9 @@ class AgentRouter:
             return "not configured"
         if name in self.disabled:
             return "disabled"
+        installed = getattr(self.runtimes[name], "installed", None)
+        if callable(installed) and not installed():
+            return "not installed on this host"
         breaker = self.breakers.get(name)
         if breaker and breaker.open_until:
             if breaker.open_until > self.clock.now():

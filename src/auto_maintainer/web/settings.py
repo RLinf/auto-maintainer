@@ -70,7 +70,8 @@ async def settings_view(service: Service, user: User) -> dict[str, Any]:
     text, legacy = await service.settings_text()
     config = service.service_config
     agents = effective_agents(config, legacy)
-    routes = effective_routing(service.default_routing, config)
+    host_agent = service.host_values["default_agent"]
+    routes = effective_routing(service.default_routing, config, host_agent)
     names = secret_names(config)
     secrets = (
         {s.name: s for s in await service.a.secrets.describe(names)}
@@ -123,6 +124,14 @@ async def settings_view(service: Service, user: User) -> dict[str, Any]:
             }
             for pid, p in config.providers.items()
         ],
+        "default_agent": {
+            "name": config.default_agent or host_agent,
+            "source": "settings"
+            if config.default_agent
+            else "setup"
+            if host_agent
+            else None,
+        },
         "routing": [
             {
                 "task": task,

@@ -445,6 +445,11 @@ class ExecRuntime:
 
     # -- AgentRuntime ------------------------------------------------------------------
 
+    def installed(self) -> bool:
+        """Whether the CLI's binary is on this host; the router skips the runtime
+        when it is not."""
+        return resolve_binary(self.binary, self.search_dirs) is not None
+
     async def probe(self) -> RuntimeHealth:
         """Run ``<binary> --version``. Authentication is not checked."""
         binary = resolve_binary(self.binary, self.search_dirs)

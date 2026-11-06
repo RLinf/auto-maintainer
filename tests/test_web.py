@@ -23,7 +23,10 @@ from pathlib import Path
 import httpx
 import pytest
 
+from auto_maintainer.domain.memory import lock_path
 from auto_maintainer.domain.permissions import Permission
+from auto_maintainer.profiles.layers import dump_yaml
+from auto_maintainer.profiles.loader import IN_REPO_PATH
 from auto_maintainer.testing.demo import build_demo
 from auto_maintainer.web.app import create_app
 
@@ -85,6 +88,76 @@ async def test_settings_change_needs_a_maintainer(demo) -> None:
         out = (await maria.post(f"/api/memory/changes/{change_id}/approve")).json()
         assert out["state"] == "merged"
     assert (await h.service.profiles.active("acme/widget")).merge.enabled is False
+
+
+async def test_profile_approval_reports_a_failed_memory_write(demo) -> None:
+    h, app = demo
+    h.forge.put_file(
+        "acme/widget", IN_REPO_PATH, dump_yaml({"schema": 1, "scope": {"min_pr": 9}})
+    )
+    state = await h.service.profiles.refresh("acme/widget")
+    assert state.candidate_hash
+    stage = h.memory.stage_change
+    calls = 0
+
+    async def push_rejected_once(change):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("git exited with 1: failed to push some refs")
+        return await stage(change)
+
+    h.memory.stage_change = push_rejected_once
+    url = "/api/repos/acme/widget/profile/approve"
+    async with _client(app, "maria") as maria:
+        failed = await maria.post(url, json={"hash": state.candidate_hash})
+        assert failed.status_code == 502
+        assert "failed to push" in failed.json()["detail"]
+        assert (await h.service.profiles.active("acme/widget")).scope.min_pr != 9
+
+        retried = await maria.post(url, json={"hash": state.candidate_hash})
+        assert retried.status_code == 200, retried.text
+        assert retried.json()["change"]["state"] == "merged"
+    locks = [
+        c
+        for c in await h.store.list_memory_changes(None)
+        if c.repos == ["acme/widget"] and lock_path("acme/widget") in c.files
+    ]
+    assert len(locks) == 1, "the retry approves the change it already staged"
+    assert (await h.service.profiles.active("acme/widget")).scope.min_pr == 9
+
+
+async def test_a_settings_change_lists_its_profile_before_and_after(demo) -> None:
+    h, app = demo
+    yaml_text = "schema: 1\nextends: [dco]\nmerge: {enabled: false}\n"
+    async with _client(app, "walt") as walt:
+        out = (
+            await walt.put("/api/repos/acme/widget/settings", json={"yaml": yaml_text})
+        ).json()
+        assert out["before"]["merge"]["enabled"] is True
+        assert out["after"]["merge"]["enabled"] is False
+        listed = (await walt.get("/api/memory/changes")).json()
+    change = next(c for c in listed if c["id"] == out["change"]["id"])
+    [profile] = change["profiles"]
+    assert profile["repo"] == "acme/widget"
+    assert profile["before"]["merge"]["enabled"] is True
+    assert profile["after"]["merge"]["enabled"] is False
+
+
+async def test_saving_settings_reports_a_failed_memory_write(demo) -> None:
+    h, app = demo
+
+    async def push_rejected(change):
+        raise RuntimeError("git exited with 1: failed to push some refs")
+
+    h.memory.stage_change = push_rejected
+    async with _client(app, "maria") as maria:
+        out = await maria.put(
+            "/api/repos/acme/widget/settings",
+            json={"yaml": "schema: 1\nmerge: {enabled: false}\n"},
+        )
+    assert out.status_code == 502 and "failed to push" in out.json()["detail"]
+    assert (await h.service.profiles.active("acme/widget")).merge.enabled is True
 
 
 async def test_approve_and_edit_a_proposal(demo) -> None:

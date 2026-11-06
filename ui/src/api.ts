@@ -368,6 +368,8 @@ export interface ProfileResponse {
   candidate: {
     repo: string;
     lock_hash: string | null;
+    /** The profile that approving would lock, as plain data. */
+    candidate: Record<string, unknown> | null;
     candidate_hash: string | null;
     candidate_layers: Record<string, string>;
     candidate_error: string | null;
@@ -395,6 +397,8 @@ export interface MemoryChange {
   created_at: string;
   merged_at: string | null;
   rejected_reason: string | null;
+  /** For each repository whose profile the change locks: the approved profile and the new one. */
+  profiles?: { repo: string; before: Record<string, unknown> | null; after: Record<string, unknown> }[];
 }
 
 export interface AgentHealth {
@@ -522,6 +526,8 @@ export interface SettingsView {
   status: { applied: boolean; problems: string[]; loaded_at: string | null };
   agents: SettingsAgent[];
   providers: SettingsProvider[];
+  /** The agent every task tries first, and whether the settings or setup chose it. */
+  default_agent: { name: string | null; source: "settings" | "setup" | null };
   routing: SettingsRoute[];
   system: {
     poll_seconds: number;

@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 from pydantic import BaseModel
 
+from auto_maintainer.agents.adapters.generic import GenericRuntime
 from auto_maintainer.agents.registry import Budget
 from auto_maintainer.agents.router import AgentRouter
 from auto_maintainer.agents.scripted import ScriptedAgentRuntime
@@ -85,6 +86,29 @@ async def test_falls_back_and_records_every_attempt() -> None:
         True,
     ]
     assert records[0].repo == "o/r" and records[0].task_kind == "review"
+
+
+async def test_skips_a_cli_that_is_not_installed_without_opening_its_breaker(
+    tmp_path: Path,
+) -> None:
+    cli = tmp_path / "bin" / "agent-cli"
+    missing = GenericRuntime(
+        "missing", command=[str(cli), "{prompt}"], runs_dir=tmp_path / "runs"
+    )
+    b = ScriptedAgentRuntime("b", default={"ok": True})
+    router, records = _router(missing, b)  # type: ignore[arg-type]
+    route = Route(primary="missing", fallback=["b"])
+    assert (await router.run(_task(), route, Verdict)).runtime == "b"
+    assert [r.runtime for r in records] == ["b"], "no attempt on a missing CLI"
+    assert "missing" not in router.breakers
+
+    alone = await router.run(_task(), Route(primary="missing"), Verdict)
+    assert not alone.ok and "missing: not installed" in (alone.error or "")
+
+    cli.parent.mkdir()
+    cli.write_text("#!/bin/sh\necho '{\"ok\": true}'\n", encoding="utf-8")
+    cli.chmod(0o755)
+    assert (await router.run(_task(), route, Verdict)).runtime == "missing"
 
 
 async def test_model_applies_to_primary_only_effort_and_timeout_to_all() -> None:

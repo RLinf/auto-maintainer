@@ -8,8 +8,9 @@ import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom"
 import { api, type Agreement, type GateDecision, type MemoryChange, type ProfileResponse, type RepoRow } from "../api";
 import { useAgent } from "../agent";
 import { RepoMachinesSection } from "../machines";
+import { ProfileChanges, type Profile } from "../profileView";
 import { kindLabel } from "../proposal";
-import { Diff, Empty, ErrorBox, PageHead, Section, Status, timeOf, useAct, When } from "../components";
+import { Empty, ErrorBox, PageHead, Section, Status, timeOf, useAct, When } from "../components";
 import { useRepos } from "../data";
 import { useT } from "../i18n";
 import { Icon } from "../icons";
@@ -362,7 +363,11 @@ export function RepoDetailPage() {
           }
         >
           {p.candidate.candidate_error && <div className="error">{p.candidate.candidate_error}</div>}
-          {candidateHash ? <Diff text={p.candidate.candidate_diff} /> : <Empty icon="check">{t("The approved profile matches every layer.")}</Empty>}
+          {candidateHash && p.candidate.candidate ? (
+            <ProfileChanges before={p.lock?.profile ?? null} after={p.candidate.candidate} yaml={p.candidate.candidate_diff} />
+          ) : (
+            <Empty icon="check">{t("The approved profile matches every layer.")}</Empty>
+          )}
           {!p.can_configure && candidateHash && <div className="notice small" style={{ marginTop: 10 }}>{p.gate.reason}</div>}
           {approve.data?.change && (
             <div className="notice small" style={{ marginTop: 10 }}>
@@ -403,7 +408,11 @@ function SettingsEditor({
   const [title, setTitle] = useState("profile: update settings");
   useEffect(() => setText(initial), [initial]);
   const save = useAct(
-    () => api.put<{ change: MemoryChange | null; approved: boolean; gate: GateDecision; diff: string }>(`${base}/settings`, { yaml: text, title }),
+    () =>
+      api.put<{ change: MemoryChange | null; approved: boolean; gate: GateDecision; diff: string; before: Profile | null; after: Profile }>(`${base}/settings`, {
+        yaml: text,
+        title,
+      }),
     [["profile"], ["memory"], ["repos"]],
   );
   return (
@@ -463,7 +472,7 @@ function SettingsEditor({
               ? `${t("Saved; memory change")} ${save.data.change?.id} ${t("is")} ${save.data.change?.state}.`
               : `${t("Saved as memory change")} ${save.data.change?.id}; ${t("it waits for a maintainer's approval")} (${save.data.gate.reason}).`}
           </div>
-          <Diff text={save.data.diff} />
+          <ProfileChanges before={save.data.before} after={save.data.after} yaml={save.data.diff} />
         </div>
       )}
       <ErrorBox error={save.error} />

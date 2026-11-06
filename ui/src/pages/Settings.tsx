@@ -12,6 +12,7 @@ import { Diff, Empty, ErrorBox, PageHead, Section, Status, useAct, When } from "
 import { useSettings } from "../data";
 import { useT } from "../i18n";
 import { Icon, type IconName } from "../icons";
+import { agentName } from "../agentPicker";
 import { useAgentsData } from "./Agents";
 import { SettingsChangeCard } from "../settingsChange";
 import { Popover, Skeleton, Tabs, useTab, useToast } from "../ui";
@@ -333,6 +334,7 @@ function AgentsTab({ v, ask }: { v: SettingsView; ask: (p: string, send?: boolea
   };
   return (
     <Section title={t("Agents")} hint={t("The coding agent CLIs the service runs on this host")} aside={<ChangeButton onClick={() => ask(t("Change the agents: "))} />}>
+      <DefaultAgent v={v} ask={ask} />
       <div className="list">
         {v.agents.map((a) => {
           const provider = v.providers.find((p) => p.id === a.provider);
@@ -554,6 +556,29 @@ function ProviderRow({ p, canEdit, ask }: { p: SettingsProvider; canEdit: boolea
   );
 }
 
+/** The agent every task tries first, where it was chosen, and a way to change it. */
+function DefaultAgent({ v, ask }: { v: SettingsView; ask: (p: string, send?: boolean) => void }) {
+  const t = useT();
+  const { name, source } = v.default_agent;
+  return (
+    <div className="strip default-agent">
+      <Icon name="cpu" />
+      <span>
+        {t("Default agent")}: <strong>{name ? agentName(name) : t("none")}</strong>
+        <span className="muted">
+          {" · "}
+          {source === "setup"
+            ? t("chosen during setup")
+            : source === "settings"
+              ? t("set in the settings")
+              : t("each task follows its own order below")}
+        </span>
+      </span>
+      <ChangeButton onClick={() => ask(t("Make this the default agent for every task: "))} />
+    </div>
+  );
+}
+
 function RoutingTab({ v, ask }: { v: SettingsView; ask: (p: string, send?: boolean) => void }) {
   const t = useT();
   return (
@@ -563,6 +588,9 @@ function RoutingTab({ v, ask }: { v: SettingsView; ask: (p: string, send?: boole
       aside={<ChangeButton onClick={() => ask(t("Change which agent does which task: "))} />}
       flush
     >
+      <div style={{ padding: "0 14px 10px" }}>
+        <DefaultAgent v={v} ask={ask} />
+      </div>
       <div className="table-wrap">
         <table>
           <thead>

@@ -225,6 +225,7 @@ async def build_service(cfg: HostConfig, dev: bool = False) -> Service:
         write_caps=cfg.write_caps,
         code_repo=cfg.code_repo,
         poll_seconds=cfg.poll_seconds,
+        default_agent=cfg.default_agent,
         operators=set(cfg.operators),
         base_url=cfg.base_url,
         sandbox_repo=cfg.sandbox_repo,

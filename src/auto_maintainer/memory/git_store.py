@@ -195,13 +195,39 @@ class GitMemoryStore:
                 await self._push(self.branch)
             return await self.head()
 
+    async def _staged_tip(self, branch: str) -> str | None:
+        """Where ``branch`` already points, preferring the remote's copy, or ``None``
+        when it has not been staged."""
+        if self.remote_url:
+            await self._git(
+                "fetch",
+                "-q",
+                "origin",
+                f"+refs/heads/{branch}:refs/remotes/origin/{branch}",
+                check=False,
+            )
+            remote_ref = f"refs/remotes/origin/{branch}"
+            if await self._git("rev-parse", "-q", "--verify", remote_ref, check=False):
+                return remote_ref
+        local_ref = f"refs/heads/{branch}"
+        if await self._git("rev-parse", "-q", "--verify", local_ref, check=False):
+            return local_ref
+        return None
+
     async def stage_change(self, change: MemoryChange) -> str:
+        """Commit ``change.files`` on the change's branch and push it.
+
+        Staging again (a lock stamped with its approvals) adds a commit on top of the
+        branch as it was pushed, so the push fast-forwards and the memory PR keeps
+        its history.
+        """
         branch = change.branch or f"am/mem/{change.id}"
         async with self._lock:
+            start = await self._staged_tip(branch) or self.branch
             tmp = Path(tempfile.mkdtemp(prefix="am-mem-"))
             try:
                 await self._git(
-                    "worktree", "add", "-q", "-B", branch, str(tmp / "wt"), self.branch
+                    "worktree", "add", "-q", "-B", branch, str(tmp / "wt"), start
                 )
                 wt = tmp / "wt"
                 self._write_files(wt, change.files)

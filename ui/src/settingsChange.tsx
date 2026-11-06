@@ -7,6 +7,7 @@ import { Link } from "react-router-dom";
 import { api, type MemoryChange, type SettingsCheck } from "./api";
 import { Diff, ErrorBox, Pre, RejectButton, Status, useAct, When } from "./components";
 import { useMemoryChanges, useSettings } from "./data";
+import { ChangeProfiles } from "./profileView";
 import { useT } from "./i18n";
 import { Icon } from "./icons";
 import { useToast } from "./ui";
@@ -79,21 +80,24 @@ export function SettingsChangeCard({ change, compact = false }: { change: Memory
           <ErrorBox error={check.error} />
         )
       ) : (
-        <details open={!compact}>
-          <summary className="small">
-            {Object.keys(change.files).length} {t("files")}
-          </summary>
-          <div className="stack" style={{ marginTop: 6 }}>
-            {Object.entries(change.files)
-              .filter(([path]) => !path.endsWith("profile.lock.yaml"))
-              .map(([path, text]) => (
-                <div key={path} className="stack" style={{ gap: 4 }}>
-                  <span className="mono">{path}</span>
-                  {text !== null && <Pre text={text} />}
-                </div>
-              ))}
-          </div>
-        </details>
+        <>
+          <ChangeProfiles change={change} />
+          <details open={!compact && !change.profiles?.length}>
+            <summary className="small">
+              {Object.keys(change.files).length} {t("files")}
+            </summary>
+            <div className="stack" style={{ marginTop: 6 }}>
+              {Object.entries(change.files)
+                .filter(([path]) => !path.endsWith("profile.lock.yaml"))
+                .map(([path, text]) => (
+                  <div key={path} className="stack" style={{ gap: 4 }}>
+                    <span className="mono">{path}</span>
+                    {text !== null && <Pre text={text} />}
+                  </div>
+                ))}
+            </div>
+          </details>
+        </>
       )}
       {!done && change.state === "open" && (
         <div className="row">

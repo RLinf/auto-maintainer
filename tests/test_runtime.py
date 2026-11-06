@@ -414,6 +414,56 @@ async def test_git_memory_store_stages_and_merges(tmp_path: Path) -> None:
         await store.commit_direct({"../evil": "x"}, "m", "a")
 
 
+def _git_out(cwd: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", *args], cwd=cwd, capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
+async def test_git_memory_store_restages_a_pushed_change(tmp_path: Path) -> None:
+    """A lock change is pushed once when it is staged, and again after its lock is
+    stamped with the approvals; the second push must land on the remote branch."""
+    remote = tmp_path / "remote.git"
+    subprocess.run(
+        ["git", "init", "-q", "--bare", "-b", "main", str(remote)], check=True
+    )
+    seed = tmp_path / "seed"
+    subprocess.run(["git", "init", "-q", "-b", "main", str(seed)], check=True)
+    (seed / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
+    ident = ["-c", "user.name=t", "-c", "user.email=t@example.com"]
+    subprocess.run(["git", "add", "-A"], cwd=seed, check=True)
+    subprocess.run(["git", *ident, "commit", "-q", "-m", "seed"], cwd=seed, check=True)
+    subprocess.run(["git", "push", "-q", str(remote), "main"], cwd=seed, check=True)
+
+    store = GitMemoryStore(tmp_path / "mem", remote_url=str(remote))
+    await store.open()
+    change = MemoryChange(
+        tier=Tier.T2,
+        title="profile: approve configuration for a/b",
+        files={"repos/a/b/profile.lock.yaml": "approved_by: []\n"},
+        repos=["a/b"],
+    )
+    change.branch = await store.stage_change(change)
+    first = _git_out(remote, "rev-parse", f"refs/heads/{change.branch}")
+
+    change.files = {"repos/a/b/profile.lock.yaml": "approved_by: [maria]\n"}
+    assert await store.stage_change(change) == change.branch
+    second = _git_out(remote, "rev-parse", f"refs/heads/{change.branch}")
+    assert second != first
+    assert _git_out(remote, "merge-base", "--is-ancestor", first, second) == ""
+    assert (
+        _git_out(remote, "show", f"{second}:repos/a/b/profile.lock.yaml")
+        == "approved_by: [maria]"
+    )
+
+    await store.merge_change(change)
+    assert (
+        _git_out(remote, "show", "main:repos/a/b/profile.lock.yaml")
+        == "approved_by: [maria]"
+    )
+
+
 # -- labs ----------------------------------------------------------------------------
 
 

@@ -418,7 +418,9 @@ async def _settings_block(service: Any, user: User) -> str:
     text, legacy = await service.settings_text()
     config = service.service_config
     agents = effective_agents(config, legacy)
-    routes = effective_routing(service.default_routing, config)
+    host_agent = service.host_values["default_agent"]
+    routes = effective_routing(service.default_routing, config, host_agent)
+    default_agent = config.default_agent or host_agent
     names = secret_names(config)
     infos = await service.a.secrets.describe(names) if service.a.secrets else []
     decision = await service.service_gate(user.login)
@@ -455,12 +457,20 @@ async def _settings_block(service: Any, user: User) -> str:
             text.strip() or "(empty: every default applies)",
             "Agents as they run now:",
             *agent_lines,
+            "Default agent: "
+            + (
+                f"{default_agent} (from {'the settings' if config.default_agent else 'setup'})"
+                if default_agent
+                else "none; each task follows its route's own order"
+            ),
             "Default routes per task (a repository's own routing still overrides them):",
             *route_lines,
             f"Secrets the providers name: {secrets or 'none'}.",
             "Shape of the document; every section is optional and lists only what "
             "differs from the defaults:\n"
             "schema: 1\n"
+            "default_agent: <agent name> (every task tries it first, except verify, which "
+            "prefers a second agent; routes below still win)\n"
             "agents: {<name>: {enabled, model, provider, budget: {daily_usd, daily_runs}, "
             "permissions: auto | restricted | bypass (its mode for every task instead of "
             "the route's; bypass skips the CLI's permission checks on team PRs only, "

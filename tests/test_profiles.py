@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 
 from auto_maintainer.domain.actions import Autonomy
+from auto_maintainer.domain.events import Event, EventKind
 from auto_maintainer.domain.memory import (
     MemoryChange,
     MemoryChangeState,
@@ -322,5 +323,31 @@ async def test_release_changes_wait_for_approval(tmp_path: Path) -> None:
         )
         assert decision.allowed and change is not None
         assert profile_path(REPO) not in change.files
+    finally:
+        await h.close()
+
+
+async def test_adding_a_repo_again_drafts_a_profile_only_when_none_exists(
+    tmp_path: Path,
+) -> None:
+    h = await Harness.create(tmp_path)
+    try:
+        added: list[str] = []
+
+        async def seen(event: Event) -> None:
+            if event.kind == EventKind.REPO_ADDED and event.repo:
+                added.append(event.repo)
+
+        h.service.bus.subscribe(seen)
+        assert await h.service.profiles.lock(REPO) is not None
+        assert await h.memory.read_text(profile_path(REPO)) is None
+        await h.service.add_repo(REPO, "maria")
+        await h.service.bus.drain()
+        assert added == [REPO], "onboarding never drafted this repository's profile"
+
+        h.memory.files[profile_path(REPO)] = dump_yaml({"schema": 1})
+        await h.service.add_repo(REPO, "maria")
+        await h.service.bus.drain()
+        assert added == [REPO]
     finally:
         await h.close()

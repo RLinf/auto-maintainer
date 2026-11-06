@@ -33,7 +33,13 @@ from .actuator.pipeline import ActionPipeline
 from .domain.actions import ActionKind, ActionStatus, MemoryChangePayload, make_action
 from .domain.clock import Clock
 from .domain.events import Event, EventKind
-from .domain.memory import MemoryChange, MemoryChangeState, Tier
+from .domain.memory import (
+    MemoryChange,
+    MemoryChangeState,
+    Tier,
+    lock_path,
+    profile_path,
+)
 from .domain.permissions import Permission
 from .domain.ports import (
     AgentRunner,
@@ -87,7 +93,9 @@ from .playbooks.base import (
 )
 from .profiles.gate import ConfigGate, GateDecision
 from .profiles.knowledge import Knowledge
+from .profiles.layers import ProfileError
 from .profiles.loader import ProfileLoader
+from .profiles.lock import parse_lock
 from .profiles.packs import PackLibrary
 from .profiles.service import ProfileService
 
@@ -156,6 +164,8 @@ class ServiceSettings:
     write_caps: tuple[int, int] = (120, 40)
     code_repo: str | None = None
     poll_seconds: int = 120
+    default_agent: str | None = None
+    """The agent chosen during setup (``local.yaml``); the service settings override it."""
     operators: set[str] = field(default_factory=set)
     base_url: str | None = None
     """Where the dashboard is reached, for links in alerts."""
@@ -207,6 +217,7 @@ class Service:
         self.host_values = {
             "poll_seconds": settings.poll_seconds,
             "write_caps": settings.write_caps,
+            "default_agent": settings.default_agent,
         }
         self.service_config = ServiceConfig()
         """The settings in force, from ``config/service.yaml``."""
@@ -537,7 +548,9 @@ class Service:
     async def _apply_settings(
         self, config: ServiceConfig, legacy: dict[str, Any]
     ) -> None:
-        routes = effective_routing(self.default_routing, config)
+        routes = effective_routing(
+            self.default_routing, config, self.host_values["default_agent"]
+        )
         self.settings.routing.clear()
         self.settings.routing.update(routes)
         system = config.system
@@ -669,6 +682,10 @@ class Service:
     async def add_repo(self, repo: str, added_by: str) -> RepoRecord:
         """Start onboarding. The repository stays inactive until its maintainers approve a profile.
 
+        Adding it again drafts its profile again while the memory repo has no profile
+        layer for it, as when the onboarding agent never ran; the draft is a change
+        its maintainers approve like any other.
+
         Raises:
             ValueError: This is a development instance and ``repo`` is not its sandbox.
         """
@@ -690,11 +707,33 @@ class Service:
                 kind="config", repo=repo, actor=added_by, summary="repository added"
             )
         )
-        if lock is None:
+        drafted = await self.a.memory.read_text(profile_path(repo)) is not None
+        if lock is None or not drafted:
             await self.bus.publish(
                 Event(kind=EventKind.REPO_ADDED, repo=repo, payload={"by": added_by})
             )
         return record
+
+    async def open_lock_change(
+        self, repo: str, profile_hash: str
+    ) -> MemoryChange | None:
+        """The open change that locks ``repo`` at ``profile_hash``, if one waits.
+
+        Approving the same candidate again (after its write to the memory repo
+        failed) retries that change instead of staging a second one, which would
+        conflict with the first when both merge.
+        """
+        path = lock_path(repo)
+        for change in await self.store.list_memory_changes(MemoryChangeState.OPEN):
+            if change.service or change.repos != [repo] or path not in change.files:
+                continue
+            try:
+                lock = parse_lock(change.files[path], path)
+            except ProfileError:
+                continue
+            if lock is not None and lock.hash == profile_hash:
+                return change
+        return None
 
     async def approve_memory_change(
         self, change_id: str, login: str

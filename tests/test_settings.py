@@ -37,8 +37,10 @@ from auto_maintainer.domain.settings import (
     SETTINGS_PATH,
     ProviderBinding,
     RuntimeConfig,
+    ServiceConfig,
     SettingsError,
     check_settings,
+    effective_routing,
     parse_settings,
 )
 from auto_maintainer.testing.demo import DEMO_SETTINGS_CHANGE, build_demo
@@ -58,6 +60,28 @@ def _problems(text: str) -> list[str]:
 # -- the document ---------------------------------------------------------------------
 
 
+def test_the_default_agent_leads_every_default_route_but_verification() -> None:
+    defaults = {
+        **DEFAULTS,
+        "verify": Route(primary="codex", fallback=["claude-code", "antigravity"]),
+    }
+    from_setup = effective_routing(defaults, ServiceConfig(), "antigravity")
+    assert from_setup["review"].primary == "antigravity"
+    assert from_setup["review"].fallback == ["claude-code", "codex"]
+    assert from_setup["chat"].fallback == ["claude-code"]
+    assert from_setup["verify"].primary == "codex", "verification wants a second agent"
+
+    config = parse_settings(
+        "default_agent: codex\nrouting: {chat: {primary: claude-code, fallback: []}}"
+    )
+    routes = effective_routing(defaults, config, "antigravity")
+    assert routes["review"].primary == "codex", "the settings override setup's choice"
+    assert routes["chat"].primary == "claude-code" and routes["chat"].fallback == []
+    assert effective_routing(defaults, ServiceConfig()) == {
+        k: v.model_copy(deep=True) for k, v in defaults.items()
+    }
+
+
 def test_a_document_that_fits_has_no_problems() -> None:
     assert _problems(DEMO_SETTINGS_CHANGE) == []
     assert _problems("") == []
@@ -67,6 +91,11 @@ def test_a_document_that_fits_has_no_problems() -> None:
     ("text", "expected"),
     [
         ("agents: {claude-code: {provider: nowhere}}", "no provider named 'nowhere'"),
+        ("default_agent: devin", "default_agent: there is no agent named 'devin'"),
+        (
+            "default_agent: codex\nagents: {codex: {enabled: false}}",
+            "default_agent: agent 'codex' is disabled",
+        ),
         (
             "providers: {gw: {protocol: openai, base_url: 'https://gw.example/v1', models: [m]}}\n"
             "agents: {claude-code: {provider: gw}}",
@@ -124,6 +153,18 @@ async def _client(app, login: str) -> AsyncIterator[httpx.AsyncClient]:
         await client.get(f"/auth/dev?login={login}")
         client.headers["x-am-csrf"] = client.cookies.get("am_csrf") or ""
         yield client
+
+
+async def test_the_agent_chosen_during_setup_runs_every_task(demo) -> None:
+    h, app = demo
+    h.service.host_values["default_agent"] = "antigravity"
+    await h.service.reload_settings()
+    routes = h.service.settings.routing
+    assert routes["onboard"].primary == "antigravity"
+    assert routes["onboard"].fallback[0] == "claude-code"
+    async with _client(app, "maria") as maria:
+        view = (await maria.get("/api/settings")).json()
+    assert view["default_agent"] == {"name": "antigravity", "source": "setup"}
 
 
 async def test_a_maintainer_of_the_service_repo_applies_settings_at_once(demo) -> None:

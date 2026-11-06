@@ -266,6 +266,9 @@ class ServiceConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     schema_version: int = Field(default=SETTINGS_SCHEMA, alias="schema")
+    default_agent: str | None = None
+    """The agent every task kind tries first; unset keeps the one chosen during
+    setup. See ``effective_routing``."""
     agents: dict[str, dict[str, Any]] = Field(default_factory=dict)
     """Per agent, the fields that differ from its defaults (``RuntimeConfig``)."""
     providers: dict[str, Provider] = Field(default_factory=dict)
@@ -348,11 +351,35 @@ def effective_agents(
     return merge_configs(overrides)
 
 
+KEEPS_OWN_PRIMARY = frozenset({"verify"})
+"""Task kinds whose default route ignores the default agent: verification looks for
+a second opinion from another agent, and reaches the default agent through its
+fallbacks when no other is installed."""
+
+
 def effective_routing(
-    defaults: Mapping[str, Route], config: ServiceConfig
+    defaults: Mapping[str, Route],
+    config: ServiceConfig,
+    host_default_agent: str | None = None,
 ) -> dict[str, Route]:
-    """The code's default routes with the settings' changes laid over them."""
+    """The code's default routes, led by the default agent, with the settings' route
+    changes laid over them.
+
+    The default agent is ``config.default_agent``, else ``host_default_agent`` (the
+    one chosen during setup). It becomes the primary of every default route except
+    those in ``KEEPS_OWN_PRIMARY``, and the route's own primary its first fallback.
+    A route in ``config.routing``, and a repository's profile, still win.
+    """
     out = {name: route.model_copy(deep=True) for name, route in defaults.items()}
+    agent = config.default_agent or host_default_agent
+    if agent:
+        for task, route in out.items():
+            if task in KEEPS_OWN_PRIMARY or route.primary == agent:
+                continue
+            order = [route.primary, *route.fallback]
+            route.fallback = [name for name in order if name != agent]
+            route.primary = agent
+            route.model = None
     for task, changes in config.routing.items():
         base = out[task].model_dump() if task in out else {}
         out[task] = Route.model_validate({**base, **changes})
@@ -406,6 +433,15 @@ def check_settings(
             )
     for name, machine in config.labs.items():
         problems += [f"labs.{name}: {p}" for p in machine_problems(name, machine)]
+    if config.default_agent is not None:
+        if config.default_agent not in agents:
+            problems.append(
+                f"default_agent: there is no agent named {config.default_agent!r}"
+            )
+        elif not agents[config.default_agent].enabled:
+            problems.append(
+                f"default_agent: agent {config.default_agent!r} is disabled"
+            )
     known_tasks = {str(k) for k in TaskKind}
     for task in config.routing:
         if task not in known_tasks:
