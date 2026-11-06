@@ -5,7 +5,7 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { Link, useSearchParams } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { ApiError, api, type AgentJob, type JobStep } from "./api";
 import { agentName } from "./agentPicker";
 import { ErrorBox, prPath, useAct, When } from "./components";
@@ -27,6 +27,7 @@ const PLAYBOOK: Record<string, { label: string; icon: IconName }> = {
   reproduce: { label: "Reproduction", icon: "server" },
   onboard: { label: "Onboarding", icon: "repo" },
   self_improve: { label: "Self-improvement", icon: "settings" },
+  evaluate: { label: "Priority evaluation", icon: "sort" },
 };
 
 export function playbookLabel(name: string): string {
@@ -57,6 +58,132 @@ export function usePrWork(repo: string, number: number) {
     queryFn: () => api.get<AgentJob[]>(`/api/work?everyone=true&repo=${encodeURIComponent(repo)}&number=${number}`),
     refetchInterval: (q) => ((q.state.data ?? []).some((j) => ACTIVE.has(j.status)) ? 15_000 : false),
   });
+}
+
+/** Everyone's jobs of one playbook in one repository, from the last day: what the
+ * progress of a batch (every PR scored again) is counted from. */
+export function useRepoWork(repo: string, playbook: string) {
+  return useQuery({
+    queryKey: ["work", "repo", repo, playbook],
+    queryFn: () => api.get<AgentJob[]>(`/api/work?everyone=true&days=1&repo=${encodeURIComponent(repo)}&playbook=${playbook}`),
+    enabled: !!repo,
+    refetchInterval: (q) => ((q.state.data ?? []).some((j) => ACTIVE.has(j.status)) ? 15_000 : false),
+  });
+}
+
+/** The jobs to count progress over: those still running and every job of their
+ * batches (one request scores many PRs). With nothing running, the batch that ended
+ * last, for ten minutes after it ended. */
+export function currentBatch(jobs: AgentJob[], now = Date.now()): AgentJob[] {
+  const active = jobs.filter((j) => ACTIVE.has(j.status));
+  if (active.length) {
+    const batches = new Set(active.map((j) => j.batch).filter(Boolean));
+    return jobs.filter((j) => ACTIVE.has(j.status) || (j.batch && batches.has(j.batch)));
+  }
+  const recent = jobs.filter((j) => now - Date.parse(j.updated_at) < 10 * 60_000);
+  if (!recent.length) return [];
+  const last = recent.reduce((a, b) => (a.updated_at > b.updated_at ? a : b));
+  return last.batch ? jobs.filter((j) => j.batch === last.batch) : [last];
+}
+
+function batchCounts(jobs: AgentJob[]) {
+  return {
+    total: jobs.length,
+    done: jobs.filter((j) => j.status === "done").length,
+    running: jobs.filter((j) => j.status === "running" || j.status === "waiting").length,
+    queued: jobs.filter((j) => j.status === "queued").length,
+    failed: jobs.filter((j) => j.status === "failed" || j.status === "cancelled").length,
+  };
+}
+
+/** How far scoring a repository's PRs has got: a bar, the counts, and each agent's job
+ * (running ones first), each opening its live view. Nothing when no batch is recent. */
+export function ScoringProgress({ repo, me }: { repo: string; me: string }) {
+  const t = useT();
+  const work = useRepoWork(repo, "evaluate");
+  const [open, setOpen] = useState(false);
+  const [all, setAll] = useState(false);
+  const batch = currentBatch(work.data ?? []);
+  if (!batch.length) return null;
+  const c = batchCounts(batch);
+  const ended = c.done + c.failed;
+  const active = c.running + c.queued > 0;
+  const order = (j: AgentJob) => (j.status === "running" || j.status === "waiting" ? 0 : j.status === "queued" ? 1 : 2);
+  const rows = [...batch].sort((a, b) => order(a) - order(b) || b.updated_at.localeCompare(a.updated_at));
+  return (
+    <section className="card" style={{ marginBottom: 12 }} aria-label={t("Scoring priority")}>
+      <div className="row" style={{ gap: 10, flexWrap: "wrap" }}>
+        <span className={`work-icon ${active ? "live" : ""}`}>
+          <Icon name="sort" size={16} />
+        </span>
+        <strong>{active ? t("Scoring priority") : t("Scoring finished")}</strong>
+        <span className="small muted" style={{ fontVariantNumeric: "tabular-nums" }}>
+          {ended} / {c.total} {t("scored")}
+          {c.running ? ` · ${c.running} ${t("working")}` : ""}
+          {c.queued ? ` · ${c.queued} ${t("queued")}` : ""}
+          {c.failed ? ` · ${c.failed} ${t("failed")}` : ""}
+        </span>
+        <span className="spacer" />
+        <button className="ghost sm" onClick={() => setOpen(!open)} aria-expanded={open}>
+          {open ? t("Hide the agents' work") : t("Show the agents' work")}
+        </button>
+      </div>
+      <span
+        role="progressbar"
+        aria-valuemin={0}
+        aria-valuemax={c.total}
+        aria-valuenow={ended}
+        style={{ display: "block", height: 6, borderRadius: 3, marginTop: 10, background: "var(--surface-3)", overflow: "hidden" }}
+      >
+        <span style={{ display: "block", width: `${(100 * ended) / c.total}%`, height: "100%", borderRadius: 3, background: "var(--accent)", transition: "width .4s" }} />
+      </span>
+      {open && (
+        <div className="list" style={{ marginTop: 10 }}>
+          {(all ? rows : rows.slice(0, 8)).map((j) => (
+            <WorkRow key={j.id} job={j} me={me} />
+          ))}
+          {rows.length > 8 && (
+            <button className="ghost sm" onClick={() => setAll(!all)}>
+              {all ? t("Show fewer") : `${t("Show all")} (${rows.length})`}
+            </button>
+          )}
+        </div>
+      )}
+      <ErrorBox error={work.error} />
+    </section>
+  );
+}
+
+/** One line on Home for a repository's scoring jobs, opening its progress on the Pull
+ * requests page; individual scoring jobs would crowd out the other agents' work. */
+export function ScoringRow({ repo, jobs }: { repo: string; jobs: AgentJob[] }) {
+  const t = useT();
+  const navigate = useNavigate();
+  const active = jobs.some((j) => ACTIVE.has(j.status));
+  const batch = active ? currentBatch(jobs) : jobs;
+  const c = batchCounts(batch);
+  const latest = batch.reduce((a, b) => (a.updated_at > b.updated_at ? a : b));
+  return (
+    <button className="work-row" onClick={() => navigate(`/prs?repo=${encodeURIComponent(repo)}`)}>
+      <span className={`work-icon ${active ? "live" : ""}`}>
+        <Icon name="sort" size={16} />
+      </span>
+      <span className="main">
+        <span className="t">
+          {t("Priority evaluation")}
+          <span className="muted"> · {repo}</span>
+        </span>
+        <span className="meta">
+          {active ? `${c.done + c.failed} / ${c.total} ${t("scored")}` : `${c.done} ${t("scored")}`}
+          {c.failed ? ` · ${c.failed} ${t("failed")}` : ""} · <When at={latest.updated_at} />
+        </span>
+      </span>
+      <span className={`pill job-${active ? "running" : "done"}`}>
+        {active && <span className="pulse" />}
+        {t(active ? "Working" : "Done")}
+      </span>
+    </button>
+  );
 }
 
 /** Whether the job waits on the user: a question for them, or a draft for them. */
@@ -444,6 +571,13 @@ function Outcome({ job }: { job: AgentJob }) {
   if (job.status !== "done") return null;
   const lines: ReactNode[] = [];
   if (typeof r.skipped === "string") lines.push(<span key="s">{r.skipped}</span>);
+  if (job.playbook === "evaluate" && typeof r.tier === "string")
+    lines.push(
+      <span key="tier">
+        <strong>{r.tier as string}</strong> · {Number(r.total).toFixed(1)}
+        {r.scored === false ? <span className="muted"> · {t("the scores were kept; only the total was computed again")}</span> : null}
+      </span>,
+    );
   if (Array.isArray(r.refused)) lines.push(<span key="r">{(r.refused as string[]).join("; ")}</span>);
   if (typeof r.findings === "number")
     lines.push(

@@ -50,10 +50,20 @@ AGENT_PLAYBOOKS = {
     "reproduce": "reproduce",
     "onboard": "onboard",
     "self_improve": "self_improve",
+    "evaluate": "evaluate",
 }
 """Playbooks whose work is an agent's, and the task kind of their main agent run."""
 
+ASKED_FOR = {EventKind.DASHBOARD_COMMAND.value, EventKind.PRIORITY_RESCORE.value}
+"""Kinds of the events that start scoring someone waits for: a maintainer's request,
+or a rubric change that needs every dimension scored again."""
+
 ACTIVE = (JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.WAITING)
+
+
+def _first_kind(job: Job) -> str | None:
+    first = job.events[0] if job.events else {}
+    return first.get("kind") if isinstance(first, dict) else None
 
 
 def _payload(job: Job) -> dict[str, Any]:
@@ -124,6 +134,7 @@ async def job_view(
         "mine": bool(me and by and by.lower() == me.lower()),
         "agent": payload.get("agent") or ran or await _default_agent(service, job),
         "note": payload.get("note") or None,
+        "batch": payload.get("batch"),
         "created_at": job.created_at.isoformat(),
         "updated_at": job.updated_at.isoformat(),
         "error": job.error,
@@ -372,11 +383,12 @@ def build_router() -> APIRouter:
         days: int = 7,
         repo: str | None = None,
         number: int | None = None,
+        playbook: str | None = None,
         user: User = Depends(current_user),
     ) -> list[dict[str, Any]]:
-        """Agent jobs in the user's repositories (or in ``repo``, on PR ``number``):
-        running ones, then those that ended in the last ``days``, newest first; only
-        the user's own unless ``everyone``."""
+        """Agent jobs in the user's repositories (or in ``repo``, on PR ``number``, of
+        ``playbook``): running ones, then those that ended in the last ``days``, newest
+        first; only the user's own unless ``everyone``."""
         service = service_of(request)
         if repo is not None:
             await require_view(service, user, check_repo(repo))
@@ -388,12 +400,23 @@ def build_router() -> APIRouter:
         for job in await service.store.list_jobs(repo=repo, limit=500):
             if job.playbook not in AGENT_PLAYBOOKS or job.repo not in visible:
                 continue
+            if playbook is not None and job.playbook != playbook:
+                continue
             if number is not None and job.number != number:
                 continue
             if job.status not in ACTIVE and job.updated_at < since:
                 continue
             by = (_payload(job).get("by") or "").lower()
             if not everyone and by != user.login.lower():
+                continue
+            if (
+                job.playbook == "evaluate"
+                and _first_kind(job) not in ASKED_FOR
+                and not await service.progress.steps(job.id)
+            ):
+                # Scoring nobody asked for mostly runs no agent (a PR changed a
+                # little, so only its total is recomputed): it shows once an agent
+                # works on it.
                 continue
             view = await job_view(service, job, me=user.login)
             if (

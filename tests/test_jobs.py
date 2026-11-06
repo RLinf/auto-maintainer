@@ -233,3 +233,47 @@ async def test_a_prs_page_lists_everyones_work_on_that_pr(demo) -> None:
     async with _as(app, "eve") as eve:
         refused = await eve.get(f"/api/work?repo={REPO}&number=42&everyone=true")
         assert refused.status_code == 403
+
+
+async def test_scoring_someone_asked_for_is_agent_work_and_quiet_rescoring_is_not(
+    demo,
+) -> None:
+    from auto_maintainer.domain.events import Event, EventKind
+
+    h, app = demo
+    h.runner.steps["evaluate"] = [
+        AgentEvent(type=AgentEventType.MESSAGE, text="Weighing the rubric.")
+    ]
+    async with _as(app, "maria") as maria:
+        prs = [{"repo": REPO, "number": 42}, {"repo": REPO, "number": 43}]
+        await maria.post("/api/evaluations", json={"prs": prs})
+        await h.settle()
+        snapshot = await h.store.get_snapshot(REPO, 42)
+        assert snapshot is not None
+        # scored a moment ago and unchanged since: only the total is recomputed
+        await h.emit(
+            Event(
+                kind=EventKind.PR_UPDATED,
+                repo=REPO,
+                number=42,
+                sha=snapshot.head_sha,
+            )
+        )
+        scoring = (
+            await maria.get(f"/api/work?repo={REPO}&playbook=evaluate&everyone=true")
+        ).json()
+        asked = [j for j in scoring if j["by"] == "maria"]
+        assert sorted(j["number"] for j in asked) == [42, 43]
+        assert all(j["status"] == "done" and j["result"]["tier"] for j in asked)
+        assert asked[0]["batch"] and {j["batch"] for j in asked} == {asked[0]["batch"]}
+        job = (await maria.get(f"/api/jobs/{asked[0]['id']}")).json()
+        assert any(s["text"] == "Weighing the rubric." for s in job["steps"])
+        [quiet] = [
+            j
+            for j in await h.store.list_jobs(repo=REPO)
+            if j.playbook == "evaluate" and j.events[0]["kind"] == "pr.updated"
+        ]
+        assert quiet.result and quiet.result["scored"] is False
+        assert quiet.id not in {j["id"] for j in scoring}
+        mine = (await maria.get("/api/work")).json()
+        assert {j["id"] for j in mine} == {j["id"] for j in asked}

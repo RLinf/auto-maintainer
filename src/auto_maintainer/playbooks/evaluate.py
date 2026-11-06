@@ -210,7 +210,10 @@ class EvaluatePlaybook(Playbook):
                         kind=EventKind.PRIORITY_RESCORE,
                         repo=pr.repo,
                         number=pr.number,
-                        payload={"sha": event.payload.get("sha")},
+                        payload={
+                            "sha": event.payload.get("sha"),
+                            "batch": f"rubric:{event.payload.get('sha')}",
+                        },
                     )
                 )
                 continue

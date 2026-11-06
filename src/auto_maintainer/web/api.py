@@ -50,7 +50,7 @@ from ..domain.actions import (
 )
 from ..domain.agents import AgentAnswer, AgentQuestion, QuestionState
 from ..domain.events import Event, EventKind
-from ..domain.ids import check_repo
+from ..domain.ids import check_repo, new_id
 from ..domain.memory import (
     MemoryChange,
     MemoryChangeState,
@@ -89,7 +89,9 @@ async def start_evaluations(
     """Score each PR's priority again on request, every dimension, with the
     repository's lessons as they are now: at most ``MAX_EVALUATIONS``, skipping
     repositories whose priority is off, and joining a re-score already running for
-    a PR instead of starting another. The caller checks the user may view each one."""
+    a PR instead of starting another. The jobs share a ``batch`` id, which the
+    dashboard counts their progress by. The caller checks the user may view each one."""
+    batch = new_id("batch")
     manual: dict[tuple[str | None, int | None], Any] = {}
     for job in await service.store.list_jobs(
         [JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.WAITING], limit=5000
@@ -112,7 +114,7 @@ async def start_evaluations(
             kind=EventKind.DASHBOARD_COMMAND,
             repo=repo,
             number=number,
-            payload={"command": "evaluate", "by": login},
+            payload={"command": "evaluate", "by": login, "batch": batch},
             source=source,
         )
         await service.bus.publish(event)

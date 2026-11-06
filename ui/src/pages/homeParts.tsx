@@ -4,14 +4,14 @@
 import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState, type ReactNode } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { api, type Automation, type ChatThread, type Me, type PrRow, type RepoRow, type ReviewStart } from "../api";
+import { api, type AgentJob, type Automation, type ChatThread, type Me, type PrRow, type RepoRow, type ReviewStart } from "../api";
 import { useAgent } from "../agent";
 import { agentName, AgentPicker, reviewToast, useAgentChoice } from "../agentPicker";
 import { ErrorBox, prPath, Tier, useAct, When } from "../components";
 import { prKey, useSettings } from "../data";
 import { useT } from "../i18n";
 import { Icon } from "../icons";
-import { ACTIVE, needsMe, useWork, WorkRow } from "../jobs";
+import { ACTIVE, needsMe, ScoringRow, useWork, WorkRow } from "../jobs";
 import { openJob } from "../openJob";
 import { Popover, Skeleton, useToast } from "../ui";
 
@@ -318,13 +318,26 @@ export function AgentWork({ me }: { me: Me }) {
   const [everyone, setEveryone] = useState(false);
   const work = useWork(everyone);
   const jobs = work.data ?? [];
+  // Scoring jobs come in batches (every PR of a repository scored again): one line per
+  // repository, unless one waits for the person.
+  const scoring = jobs.filter((j) => j.playbook === "evaluate" && !needsMe(j, me.login));
+  const others = jobs.filter((j) => !scoring.includes(j));
+  const byRepo = new Map<string, AgentJob[]>();
+  for (const j of scoring) byRepo.set(j.repo ?? "", [...(byRepo.get(j.repo ?? "") ?? []), j]);
+  const batches = [...byRepo.entries()].map(([repo, list]) => ({ repo, jobs: list, active: list.some((j) => ACTIVE.has(j.status)) }));
   const groups = {
-    needs: jobs.filter((j) => needsMe(j, me.login)),
-    running: jobs.filter((j) => ACTIVE.has(j.status) && !needsMe(j, me.login)),
-    done: jobs.filter((j) => !ACTIVE.has(j.status) && !needsMe(j, me.login)),
+    needs: others.filter((j) => needsMe(j, me.login)),
+    running: others.filter((j) => ACTIVE.has(j.status) && !needsMe(j, me.login)),
+    done: others.filter((j) => !ACTIVE.has(j.status) && !needsMe(j, me.login)),
   };
+  const scoringIn = {
+    needs: [] as typeof batches,
+    running: batches.filter((b) => b.active),
+    done: batches.filter((b) => !b.active),
+  };
+  const size = (id: keyof typeof groups) => groups[id].length + scoringIn[id].length;
   const [tab, setTab] = useState<keyof typeof groups | null>(null);
-  const shown = tab ?? (groups.needs.length ? "needs" : groups.running.length || !groups.done.length ? "running" : "done");
+  const shown = tab ?? (size("needs") ? "needs" : size("running") || !size("done") ? "running" : "done");
   const [all, setAll] = useState(false);
   const rows = groups[shown];
   const tabs: { id: keyof typeof groups; label: string }[] = [
@@ -340,7 +353,7 @@ export function AgentWork({ me }: { me: Me }) {
           {tabs.map((x) => (
             <button key={x.id} role="tab" aria-selected={shown === x.id} className={shown === x.id ? "on" : ""} onClick={() => setTab(x.id)}>
               {x.label}
-              {groups[x.id].length ? <span className="muted"> {groups[x.id].length}</span> : null}
+              {size(x.id) ? <span className="muted"> {size(x.id)}</span> : null}
             </button>
           ))}
         </div>
@@ -351,7 +364,7 @@ export function AgentWork({ me }: { me: Me }) {
       </div>
       {work.isLoading ? (
         <Skeleton rows={2} />
-      ) : !rows.length ? (
+      ) : !size(shown) ? (
         <span className="small muted">
           {shown === "needs"
             ? t("No agent is waiting for you.")
@@ -361,6 +374,9 @@ export function AgentWork({ me }: { me: Me }) {
         </span>
       ) : (
         <div className="list">
+          {scoringIn[shown].map((b) => (
+            <ScoringRow key={b.repo} repo={b.repo} jobs={b.jobs} />
+          ))}
           {(all ? rows : rows.slice(0, 6)).map((j) => (
             <WorkRow key={j.id} job={j} me={me.login} />
           ))}

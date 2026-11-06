@@ -642,6 +642,8 @@ export interface AgentJob {
   mine: boolean;
   agent: string | null;
   note: string | null;
+  /** Jobs started by one request (every PR scored again) share it. */
+  batch: string | null;
   created_at: string;
   updated_at: string;
   error: string | null;

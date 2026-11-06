@@ -94,8 +94,11 @@ export interface EvaluationStart {
 
 /** Score PRs' priority again, every dimension, with the repository's lessons as they are now. */
 export function useReevaluate() {
+  const client = useQueryClient();
   return useMutation({
     mutationFn: (prs: { repo: string; number: number }[]) => api.post<EvaluationStart[]>("/api/evaluations", { prs }),
+    // The scoring jobs exist once the request returns: show their progress at once.
+    onSuccess: () => void client.invalidateQueries({ queryKey: ["work"] }),
   });
 }
 

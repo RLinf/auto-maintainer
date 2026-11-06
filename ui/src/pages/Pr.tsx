@@ -15,7 +15,7 @@ import { Markdown } from "../markdown";
 import { DataTable, ListToolbar, useList, type Column } from "../list";
 import { FixButton } from "../proposal";
 import { ReproduceButton } from "../reproduce";
-import { PrWork } from "../jobs";
+import { ACTIVE, PrWork, usePrWork } from "../jobs";
 import { openJob } from "../openJob";
 import { Skeleton, Tabs, useTab, useToast } from "../ui";
 
@@ -535,6 +535,8 @@ function EvaluationCard({ base, repo, number, evaluation }: { base: string; repo
   const t = useT();
   const toast = useToast();
   const again = useReevaluate();
+  // The agent scoring this PR now, if one is: its line opens what it is doing.
+  const scoring = (usePrWork(repo, number).data ?? []).find((j) => j.playbook === "evaluate" && ACTIVE.has(j.status));
   const [open, setOpen] = useState(false);
   const [scores, setScores] = useState<Record<string, string>>({});
   const [boost, setBoost] = useState("");
@@ -587,6 +589,15 @@ function EvaluationCard({ base, repo, number, evaluation }: { base: string; repo
         </div>
       ) : (
         <span className="small muted">{t("Not evaluated yet.")}</span>
+      )}
+      {scoring && (
+        <div className="row small" style={{ marginTop: 10, gap: 6 }}>
+          <span className="pulse" />
+          <span className="muted">{t("An agent is scoring this PR")}</span>
+          <button className="ghost sm" onClick={() => openJob(scoring.id)}>
+            {t("Watch")}
+          </button>
+        </div>
       )}
       {!open ? (
         <div className="row" style={{ marginTop: 10, gap: 6 }}>

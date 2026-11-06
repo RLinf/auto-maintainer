@@ -13,6 +13,7 @@ import { useT } from "../i18n";
 import { Icon } from "../icons";
 import { agentName, AgentPicker, reviewToast, useAgentChoice } from "../agentPicker";
 import { openJob } from "../openJob";
+import { ScoringProgress } from "../jobs";
 import { BulkBar, DataTable, ListToolbar, useList, type Column } from "../list";
 import { MenuItem, Popover, Skeleton, Tabs, useTab, useToast } from "../ui";
 
@@ -256,6 +257,7 @@ export default function QueuePage({ me }: { me: Me }) {
         }
       />
       <RepoTabs names={names} scope={scope} onPick={setScope} count={(repo) => allRows.filter((p) => p.repo === repo).length} />
+      <ScoringProgress key={scope} repo={scope} me={me.login} />
       <Tabs tabs={views} active={view} onChange={setView} />
       <ListToolbar list={list} placeholder={t("Search by title, number, author, label…")} />
       <ErrorBox error={all.error || review.error || again.error || sync.error} />

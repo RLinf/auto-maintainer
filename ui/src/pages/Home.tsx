@@ -106,7 +106,9 @@ export default function HomePage({ me }: { me: Me }) {
   const loadingFeed = questions.isLoading || proposals.isLoading || memory.isLoading;
   const first = (me.name || me.login).split(" ")[0];
 
-  const running = (work.data ?? []).filter((j) => ACTIVE.has(j.status)).length;
+  // A repository's scoring jobs count as one: they run as a batch.
+  const active = (work.data ?? []).filter((j) => ACTIVE.has(j.status));
+  const running = active.filter((j) => j.playbook !== "evaluate").length + new Set(active.filter((j) => j.playbook === "evaluate").map((j) => j.repo)).size;
   const p0 = byTier("P0");
   const p1 = byTier("P1");
   return (
