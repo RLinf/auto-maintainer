@@ -148,7 +148,17 @@ def _answer(task: AgentTask) -> dict[str, Any]:
             "message": "Kept as a one-off override for this PR.",
         }
     if kind == "chat":
-        last = task.prompt.rsplit("user: ", 1)[-1].lower()
+        last = task.prompt.rsplit("user: ", 1)[-1].split("\n", 1)[0].lower()
+        if any(word in last for word in ("summar", "risk", "focus")):
+            return {
+                "reply": (
+                    "#42 guards the loader against empty batches, which used to crash "
+                    "it, and adds a regression test. The change is small and on a core "
+                    "path; CI passes. One gap worth a comment: the test covers an empty "
+                    "batch but not a batch of exactly one item."
+                ),
+                "proposals": [],
+            }
         if any(word in last for word in _SETTINGS_WORDS):
             return {
                 "reply": (

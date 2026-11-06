@@ -12,6 +12,7 @@ import { useMe, useMemoryChanges, useProposals } from "./data";
 import { QUESTION_EVENT, useLiveEvents } from "./events";
 import { useLang, useT } from "./i18n";
 import { Icon } from "./icons";
+import { Logo } from "./logo";
 import { CommandPalette, NAV, type Command } from "./palette";
 import AgentsPage from "./pages/Agents";
 import AuditPage from "./pages/Audit";
@@ -145,9 +146,7 @@ function Shell({ me }: { me: Me }) {
       <header className="header">
         <div className="header-inner">
           <Link to="/" className="logo" aria-label="auto-maintainer home">
-            <span className="logo-mark">
-              <Icon name="merge" size={15} />
-            </span>
+            <Logo size={28} />
             <span className="name">auto-maintainer</span>
           </Link>
           <nav className="tabs-nav" aria-label={t("Main")}>

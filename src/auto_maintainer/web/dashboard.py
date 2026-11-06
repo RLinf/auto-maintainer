@@ -36,6 +36,7 @@ UI = Path(__file__).resolve().parents[3] / "ui"
 
 SOURCES = (
     "src",
+    "public",
     "index.html",
     "package.json",
     "package-lock.json",

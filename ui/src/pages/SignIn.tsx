@@ -4,7 +4,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { ErrorBox } from "../components";
 import { useT } from "../i18n";
-import { Icon } from "../icons";
+import { Logo } from "../logo";
 
 interface DeviceStart {
   flow_id: string;
@@ -69,9 +69,7 @@ export default function SignIn() {
   return (
     <div className="signin card" style={{ padding: 28 }}>
       <div className="row" style={{ gap: 10 }}>
-        <span className="logo-mark" style={{ width: 34, height: 34, borderRadius: 10 }}>
-          <Icon name="merge" size={18} />
-        </span>
+        <Logo size={40} />
         <h1>auto-maintainer</h1>
       </div>
       <p className="muted" style={{ margin: 0 }}>
