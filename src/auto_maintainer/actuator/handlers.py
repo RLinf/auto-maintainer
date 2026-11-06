@@ -475,7 +475,14 @@ async def _lab_reproduce(
         }
     finally:
         await x.workspace.release(workdir)
-    out = await x.labs.reproduce(p, action.repo, pr.number, code, holder=action.id)
+    out = await x.labs.reproduce(
+        p,
+        action.repo,
+        pr.number,
+        code,
+        holder=action.id,
+        binding=profile.labs.get(p.lab) if profile else None,
+    )
     return {**out, "base_sha": base, "head_sha": pr.head_sha}
 
 

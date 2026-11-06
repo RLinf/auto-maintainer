@@ -32,7 +32,7 @@
 
 - **Reviews pull requests.** Select PRs on Home, pick an agent, and press Review. The agent follows the repository's own review skill when it has one and may ask you questions; a second agent verifies the findings; the draft waits for you to edit and post, as the service or as yourself. Two people never run the same agent on the same commit. Reviews can also run every few hours or on every update, and re-review PRs that get new commits.
 - **Fixes what a review found.** One click hands the findings to an agent, which changes the PR's code. You read the diff, and the fix opens as your PR into the PR's branch, signed off by you.
-- **Reproduces what a PR claims.** Pick a test machine; an agent writes a script that checks the claim. You read and approve it, it runs on the machine before and after the change, and you get a draft report to post.
+- **Reproduces what a PR claims.** Pick a test machine; an agent writes a script that checks the claim. You read and approve it, it runs on the machine before and after the change, and you get a draft report to post. The service's maintainers add the machines; each repository chooses which ones it uses and sets up its own environment on them.
 - **Shows agents at work.** Every review, fix, and reproduction opens as a live view: what the agent reads and runs, the questions it waits on, and what it produced. Stop it if it goes the wrong way.
 - **Ranks the queue.** Every open PR gets an internal priority from a rubric your maintainers own. Scores never appear on GitHub. Overrides teach the rubric.
 - **Keeps CI moving.** Failed jobs are diagnosed as flaky, infrastructure, or caused by the PR; flaky ones are rerun.

@@ -377,6 +377,31 @@ async def _page_block(
             f"Its settings layer (what kind=configure with repo={context.repo} replaces):\n"
             + (layer or "(empty)")[:8000]
         )
+        offered = [
+            (name, m)
+            for name, m in sorted(service.machines.items())
+            if m.serves(context.repo)
+        ]
+        if offered:
+            profile = await service.profiles.active(context.repo)
+            lines.append(
+                "Test machines offered to it. The service settings own the machines; "
+                "this repository's layer decides whether it uses one and how, as "
+                "labs: {<machine>: {use: true, setup: <shell run before each "
+                "reproduction, such as activating its environment>, timeout_seconds, "
+                "guard: {forbid: [<regex>]}, protected_paths: [...]}}:"
+            )
+            for name, m in offered:
+                binding = profile.labs.get(name) if profile else None
+                lines.append(
+                    f"- {name}: {m.description or 'no description'}; "
+                    + ("used" if binding and binding.use else "not used")
+                    + (
+                        f", setup {binding.setup!r}"
+                        if binding and binding.setup
+                        else ""
+                    )
+                )
     elif context.page == "settings":
         lines.append(
             "The maintainer is on the Settings page: requests here are about the "

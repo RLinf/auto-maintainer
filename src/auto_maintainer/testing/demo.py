@@ -41,7 +41,10 @@ DEMO_LABS = """labs:
   gpu-01:
     description: 8× A100 80GB, CUDA 12.4
     host: ci@gpu-01
-    setup: source ~/envs/widget/bin/activate
+    setup: module load cuda/12.4
+  cpu-01:
+    description: 64 cores, no GPU
+    host: ci@cpu-01
 """
 
 DEMO_SETTINGS = (
@@ -228,6 +231,13 @@ LAYER: dict[str, Any] = {
     },
     "ci": {"required_workflows": ["CI"]},
     "merge": {"enabled": True},
+    "labs": {
+        "gpu-01": {
+            "use": True,
+            "setup": "source ~/envs/widget/bin/activate",
+            "timeout_seconds": 900,
+        }
+    },
     "policy": {
         "label.apply": {"level": "auto"},
         "review.post": {"level": "propose"},

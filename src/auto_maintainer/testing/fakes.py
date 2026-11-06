@@ -829,10 +829,22 @@ class FakeLabRunner:
         raise RuntimeError("template lab runs are not faked")
 
     async def reproduce(
-        self, payload: Any, repo: str, number: int, code: dict[str, str], holder: str
+        self,
+        payload: Any,
+        repo: str,
+        number: int,
+        code: dict[str, str],
+        holder: str,
+        binding: Any = None,
     ) -> dict[str, Any]:
         self.reproduced.append(
-            {"payload": payload, "repo": repo, "number": number, "code": code}
+            {
+                "payload": payload,
+                "repo": repo,
+                "number": number,
+                "code": code,
+                "binding": binding,
+            }
         )
         return {"lab": payload.lab, "gpu": None, **self.outcome}
 

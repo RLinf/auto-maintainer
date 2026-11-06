@@ -22,6 +22,7 @@ be the person who asked for it or a maintainer of the repository, checked live.
 
 from __future__ import annotations
 
+import re
 from datetime import timedelta
 from typing import Any
 
@@ -32,8 +33,12 @@ from ..domain.actions import ProposalState
 from ..domain.agents import QuestionState
 from ..domain.events import Event, EventKind
 from ..domain.ids import check_repo
+from ..domain.labs import unusable
+from ..domain.memory import profile_path
 from ..domain.permissions import Permission
+from ..domain.profile import LabBinding
 from ..domain.records import Job, JobStatus
+from ..profiles.layers import ProfileError, parse_yaml
 from ..service import Service
 from .api import require_view, service_of, visible_repos
 from .auth import User, current_user
@@ -160,11 +165,52 @@ async def _job(service: Service, user: User, job_id: str) -> Job:
     return job
 
 
+class MachineUseBody(BaseModel):
+    """How a repository uses a test machine (its profile's ``labs.<name>``)."""
+
+    use: bool = True
+    setup: str = Field(default="", max_length=2000)
+    timeout_seconds: int | None = Field(default=None, ge=60, le=6 * 3600)
+    forbid: list[str] = Field(default_factory=list)
+    protected_paths: list[str] = Field(default_factory=list)
+
+
 class ReproduceBody(BaseModel):
     lab: str
     note: str = Field(default="", max_length=2000)
     """What to check, when the PR does not make it obvious."""
     agent: str | None = None
+
+
+def _machine_entry(entry: dict[str, Any], body: MachineUseBody) -> dict[str, Any]:
+    """``labs.<machine>`` of a settings layer with ``body`` applied; keys the body
+    leaves empty are removed, and keys it does not cover (template paths) are kept."""
+    entry["use"] = body.use
+    setup = body.setup.strip()
+    if setup:
+        entry["setup"] = setup
+    else:
+        entry.pop("setup", None)
+    if body.timeout_seconds:
+        entry["timeout_seconds"] = body.timeout_seconds
+    else:
+        entry.pop("timeout_seconds", None)
+    guard = dict(entry.get("guard") or {})
+    forbid = [f.strip() for f in body.forbid if f.strip()]
+    if forbid:
+        guard["forbid"] = forbid
+    else:
+        guard.pop("forbid", None)
+    if guard:
+        entry["guard"] = guard
+    else:
+        entry.pop("guard", None)
+    paths = [x.strip() for x in body.protected_paths if x.strip()]
+    if paths:
+        entry["protected_paths"] = paths
+    else:
+        entry.pop("protected_paths", None)
+    return entry
 
 
 def build_router() -> APIRouter:
@@ -173,19 +219,103 @@ def build_router() -> APIRouter:
     @r.get("/labs")
     async def labs(
         request: Request, repo: str, user: User = Depends(current_user)
-    ) -> list[dict[str, Any]]:
-        """The test machines ``repo`` may use, for the PR page's Reproduce button."""
+    ) -> dict[str, Any]:
+        """The test machines offered to ``repo``, each with whether the repository
+        uses it and how; and whether the user may change that."""
         service = service_of(request)
         await require_view(service, user, check_repo(repo))
-        return [
-            {
-                "name": name,
-                "description": machine.description,
-                "transport": machine.transport,
-            }
-            for name, machine in sorted(service.machines.items())
-            if machine.serves(repo)
-        ]
+        profile = await service.profiles.active(repo)
+        gate = (
+            await service.gate.check(repo, user.login, profile, person=True)
+            if profile
+            else None
+        )
+        out = []
+        for name, machine in sorted(service.machines.items()):
+            if not machine.serves(repo):
+                continue
+            binding = profile.labs.get(name) if profile else None
+            out.append(
+                {
+                    "name": name,
+                    "description": machine.description,
+                    "transport": machine.transport,
+                    "machine_setup": machine.setup,
+                    "machine_timeout_seconds": machine.timeout_seconds,
+                    "used": binding is not None and binding.use,
+                    "setup": (binding.setup or "") if binding else "",
+                    "timeout_seconds": binding.timeout_seconds if binding else None,
+                    "forbid": binding.guard.forbid if binding else [],
+                    "protected_paths": binding.protected_paths if binding else [],
+                }
+            )
+        return {
+            "repo": repo,
+            "machines": out,
+            "can_configure": bool(gate and gate.allowed),
+            "reason": gate.reason if gate else f"{repo} has no approved profile yet",
+        }
+
+    @r.put("/repos/{owner}/{name}/labs/{lab}")
+    async def use_machine(
+        request: Request,
+        owner: str,
+        name: str,
+        lab: str,
+        body: MachineUseBody,
+        user: User = Depends(current_user),
+    ) -> dict[str, Any]:
+        """Change how the repository uses a test machine, in its settings layer: a
+        maintainer of the repository applies it by making it, anyone else proposes
+        it."""
+        service = service_of(request)
+        repo = check_repo(f"{owner}/{name}")
+        await require_view(service, user, repo)
+        machine = service.machines.get(lab)
+        if machine is None or not machine.serves(repo):
+            raise HTTPException(404, f"there is no test machine {lab!r} for {repo}")
+        current = await service.profiles.active(repo)
+        if current is None:
+            raise HTTPException(409, f"{repo} has no approved profile yet")
+        layer = parse_yaml(
+            await service.a.memory.read_text(profile_path(repo)) or "", "settings"
+        )
+        labs = dict(layer.get("labs") or {})
+        for pattern in body.forbid:
+            try:
+                re.compile(pattern)
+            except re.error as e:
+                raise HTTPException(
+                    422, f"{pattern!r} is not a regular expression ({e})"
+                ) from e
+        entry = _machine_entry(dict(labs.get(lab) or {}), body)
+        try:
+            LabBinding.model_validate(entry)
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from e
+        labs[lab] = entry
+        layer["labs"] = labs
+        what = f"labs: {'use' if body.use else 'stop using'} {lab}"
+        try:
+            merged, change = await service.profiles.propose_memory_layer(
+                repo, layer, user.login, what
+            )
+        except ProfileError as e:
+            raise HTTPException(422, str(e)) from e
+        decision = await service.gate.check(
+            repo, user.login, current, merged.profile, person=True
+        )
+        if decision.allowed:
+            change.approvals = {repo: [user.login]}
+        change.requested_by = user.login
+        await service.store.save_memory_change(change)
+        await service.submit_memory_change(change)
+        stored = await service.store.get_memory_change(change.id)
+        return {
+            "applied": bool(stored and stored.state == "merged"),
+            "change": stored.model_dump(mode="json") if stored else None,
+            "reason": decision.reason,
+        }
 
     @r.post("/prs/{owner}/{name}/{number}/reproduce")
     async def reproduce(
@@ -201,11 +331,15 @@ def build_router() -> APIRouter:
         service = service_of(request)
         repo = check_repo(f"{owner}/{name}")
         await require_view(service, user, repo)
-        machine = service.machines.get(body.lab)
-        if machine is None or not machine.serves(repo):
-            raise HTTPException(
-                404, f"there is no test machine {body.lab!r} for {repo}"
-            )
+        profile = await service.profiles.active(repo)
+        why = unusable(
+            repo,
+            body.lab,
+            service.machines.get(body.lab),
+            profile.labs.get(body.lab) if profile else None,
+        )
+        if why:
+            raise HTTPException(409, why)
         pr = await service.store.get_snapshot(repo, number)
         if pr is None:
             raise HTTPException(404, f"{repo}#{number} is not known yet")

@@ -7,6 +7,7 @@ import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { api, type Agreement, type GateDecision, type MemoryChange, type ProfileResponse, type RepoRow } from "../api";
 import { useAgent } from "../agent";
+import { RepoMachinesSection } from "../machines";
 import { Diff, Empty, ErrorBox, PageHead, Section, Status, timeOf, useAct, When } from "../components";
 import { useRepos } from "../data";
 import { useT } from "../i18n";
@@ -396,7 +397,12 @@ export function RepoDetailPage() {
         </Section>
       )}
 
-      {tab === "settings" && <SettingsEditor repo={full} base={base} initial={p.memory_layer} canConfigure={p.can_configure} gateReason={p.gate.reason} />}
+      {tab === "settings" && (
+        <div className="stack" style={{ gap: 16 }}>
+          <RepoMachinesSection repo={full} />
+          <SettingsEditor repo={full} base={base} initial={p.memory_layer} canConfigure={p.can_configure} gateReason={p.gate.reason} />
+        </div>
+      )}
     </>
   );
 }

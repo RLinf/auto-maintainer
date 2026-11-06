@@ -36,7 +36,7 @@ from ..domain.ports import (
     Store,
     Workspace,
 )
-from ..domain.profile import RepoProfile
+from ..domain.profile import LabBinding, RepoProfile
 from ..domain.snapshot import PrSnapshot
 from ..domain.visibility import PublicText
 from ..policy.leak_guard import make_public
@@ -72,6 +72,7 @@ class LabRunner(Protocol):
         number: int,
         code: dict[str, str],
         holder: str,
+        binding: LabBinding | None = None,
     ) -> dict[str, Any]: ...
 
     async def check(self, lab: str) -> dict[str, Any]: ...

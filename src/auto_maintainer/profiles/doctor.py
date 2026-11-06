@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import shlex
+from collections.abc import Mapping
 
 import yaml
 from pydantic import BaseModel
@@ -24,6 +25,7 @@ from pydantic import BaseModel
 from ..domain.codeowners import CODEOWNERS_LOCATIONS, parse_codeowners
 from ..domain.ports import ForgeReader
 from ..domain.profile import RepoProfile
+from ..domain.settings import LabMachine
 
 
 class DoctorItem(BaseModel):
@@ -46,8 +48,13 @@ async def workflow_names(forge: ForgeReader, repo: str) -> set[str]:
 
 
 async def run_doctor(
-    profile: RepoProfile, forge: ForgeReader, lab_hosts: set[str]
+    profile: RepoProfile,
+    forge: ForgeReader,
+    lab_hosts: set[str],
+    machines: Mapping[str, LabMachine] | None = None,
 ) -> list[DoctorItem]:
+    """Check ``profile`` against the live repository. ``lab_hosts`` are the hosts the
+    host config declares; ``machines`` are the test machines of the service settings."""
     repo = profile.repo
     items: list[DoctorItem] = []
     info = await forge.get_repo(repo)
@@ -118,17 +125,26 @@ async def run_doctor(
             )
     for lab, binding in profile.labs.items():
         if binding.use:
-            ok = lab in lab_hosts
+            machine = (machines or {}).get(lab)
+            ok = lab in lab_hosts or (machine is not None and machine.serves(repo))
             items.append(
                 DoctorItem(
                     check=f"lab {lab}",
                     ok=ok,
-                    detail="declared by the operators"
+                    detail="a test machine in the service settings"
+                    if machine is not None and ok
+                    else "declared in the host config"
                     if ok
-                    else "no such lab host in local.yaml",
+                    else f"test machine {lab!r} is not offered to {repo}"
+                    if machine is not None
+                    else "no such test machine in the service settings or host config",
                 )
             )
-            if ok and not (binding.base_clone and binding.worktree_root):
+            if (
+                ok
+                and binding.templates
+                and not (binding.base_clone and binding.worktree_root)
+            ):
                 items.append(
                     DoctorItem(
                         check=f"lab {lab} paths",

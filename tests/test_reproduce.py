@@ -30,6 +30,7 @@ from auto_maintainer.domain.actions import LabReproducePayload
 from auto_maintainer.domain.clock import FixedClock
 from auto_maintainer.domain.permissions import Permission
 from auto_maintainer.domain.ports import CommandResult, GpuStatus
+from auto_maintainer.domain.profile import LabBinding
 from auto_maintainer.domain.records import JobStatus
 from auto_maintainer.domain.settings import LabMachine, machine_problems
 from auto_maintainer.labs.executor import LabExecutor
@@ -100,16 +101,25 @@ async def test_both_sides_run_in_a_folder_of_their_own_that_is_removed(
         CommandResult(exit_code=0),
         CommandResult(exit_code=0, stdout="1 passed"),
     ]
-    machine = LabMachine(setup="source ~/venv/bin/activate")
+    machine = LabMachine(setup="module load cuda/12.4", timeout_seconds=3600)
     executor = await _executor(tmp_path, machine, host)
+    used = LabBinding(setup="source ~/venv/bin/activate", timeout_seconds=600)
     out = await executor.reproduce(
-        _payload(), REPO, 42, {"base": "QkFTRQ==", "head": "SEVBRA=="}, "act_12345678"
+        _payload(timeout_seconds=1800),
+        REPO,
+        42,
+        {"base": "QkFTRQ==", "head": "SEVBRA=="},
+        "act_12345678",
+        binding=used,
     )
     run_dir = "/home/ci/am-labs/acme__widget-42-12345678"
     commands = [c for c, _, _ in host.commands]
     assert host.stdin == ["QkFTRQ==", "SEVBRA=="]
     assert f"mkdir -p {run_dir}/base" in commands[1]
-    assert commands[2].startswith("source ~/venv/bin/activate\npip install -e .\n")
+    # the machine's setup, then the repository's, then the script's own
+    assert commands[2].startswith(
+        "module load cuda/12.4\nsource ~/venv/bin/activate\npip install -e .\n"
+    )
     assert host.commands[2][1] == f"{run_dir}/base"
     assert commands[-1] == f"rm -rf {run_dir}"
     assert out["runs"]["base"]["exit_code"] == 1
@@ -122,11 +132,23 @@ async def test_a_script_the_guard_refuses_never_reaches_the_machine(
 ) -> None:
     host = FakeLabHost("gpu-01")
     executor = await _executor(tmp_path, LabMachine(forbid=[r"\bdocker\b"]), host)
-    for script in ("sudo rm -rf build", "ray stop --force", "docker run x"):
+    used = LabBinding(guard={"forbid": [r"\bwget\b"]}, protected_paths=["/data/ckpt"])
+    for script in (
+        "sudo rm -rf build",
+        "ray stop --force",
+        "docker run x",
+        "wget http://example.com/x",
+        "cp out.pt /data/ckpt/latest.pt",
+    ):
         out = await executor.reproduce(
-            _payload(script=script), REPO, 42, {"base": "", "head": ""}, "act_1"
+            _payload(script=script),
+            REPO,
+            42,
+            {"base": "", "head": ""},
+            "act_1",
+            binding=used,
         )
-        assert out["refused"]
+        assert out["refused"], script
     assert host.commands == []
 
 
@@ -137,12 +159,22 @@ async def test_a_machine_for_other_repositories_or_without_a_free_gpu_runs_nothi
         "gpu-01", gpus=[GpuStatus(index=0, memory_used_mib=40000, processes=1)]
     )
     executor = await _executor(tmp_path, LabMachine(repos=["acme/other"]), host)
-    with pytest.raises(RuntimeError, match="not for acme/widget"):
-        await executor.reproduce(_payload(), REPO, 42, {}, "act_1")
+    with pytest.raises(RuntimeError, match="not offered to acme/widget"):
+        await executor.reproduce(
+            _payload(), REPO, 42, {}, "act_1", binding=LabBinding()
+        )
     executor = await _executor(tmp_path / "2", LabMachine(), host)
+    for unused in (None, LabBinding(use=False)):
+        with pytest.raises(RuntimeError, match="does not use"):
+            await executor.reproduce(_payload(), REPO, 42, {}, "act_1", binding=unused)
     host.results = [CommandResult(exit_code=0, stdout="/home/ci")]
     out = await executor.reproduce(
-        _payload(needs_gpu=True), REPO, 42, {"base": "", "head": ""}, "act_1"
+        _payload(needs_gpu=True),
+        REPO,
+        42,
+        {"base": "", "head": ""},
+        "act_1",
+        binding=LabBinding(),
     )
     assert out["deferred"] and not host.stdin
 
@@ -188,8 +220,9 @@ async def test_only_service_maintainers_add_machines(demo) -> None:
         )
         assert applied.json()["approved"] is True
         assert h.service.machines["a100-2"].description == "4× A100"
-        names = [m["name"] for m in (await maria.get(f"/api/labs?repo={REPO}")).json()]
-        assert "a100-2" in names
+        offered = (await maria.get(f"/api/labs?repo={REPO}")).json()["machines"]
+        [added] = [m for m in offered if m["name"] == "a100-2"]
+        assert added["used"] is False
         checked = (await maria.post("/api/settings/labs/a100-2/check")).json()
         assert checked["ok"] and checked["gpus"][0]["idle"]
 
@@ -275,3 +308,75 @@ async def test_a_script_the_machine_would_refuse_is_never_proposed(demo) -> None
     assert "lab.reproduce" not in kinds
     [job] = [j for j in await h.store.list_jobs() if j.playbook == "reproduce"]
     assert job.result and job.result["refused"]
+
+
+# -- each repository decides --------------------------------------------------------------
+
+
+async def test_each_repository_turns_machines_on_and_sets_how_it_uses_them(
+    demo,
+) -> None:
+    h, app = demo
+    async with _as(app, "maria") as maria:
+        view = (await maria.get(f"/api/labs?repo={REPO}")).json()
+        used = {m["name"]: m for m in view["machines"]}
+        assert used["gpu-01"]["used"] and not used["cpu-01"]["used"]
+        assert used["gpu-01"]["setup"] == "source ~/envs/widget/bin/activate"
+        assert view["can_configure"] is True
+        refused = await maria.post(
+            f"/api/prs/{REPO}/42/reproduce", json={"lab": "cpu-01"}
+        )
+        assert refused.status_code == 409 and "does not use" in refused.text
+    body = {
+        "use": True,
+        "setup": "source ~/envs/cpu/bin/activate",
+        "timeout_seconds": 600,
+        "forbid": [r"\bwget\b"],
+    }
+    async with _as(app, "walt") as walt:
+        assert (await walt.get(f"/api/labs?repo={REPO}")).json()[
+            "can_configure"
+        ] is False
+        proposed = (await walt.put(f"/api/repos/{REPO}/labs/cpu-01", json=body)).json()
+        assert proposed["applied"] is False
+        bad = await walt.put(
+            f"/api/repos/{REPO}/labs/cpu-01", json={**body, "forbid": ["("]}
+        )
+        assert bad.status_code == 422
+    profile = await h.service.profiles.active(REPO)
+    assert profile is not None and "cpu-01" not in profile.labs
+    async with _as(app, "maria") as maria:
+        applied = (await maria.put(f"/api/repos/{REPO}/labs/cpu-01", json=body)).json()
+        assert applied["applied"] is True
+        profile = await h.service.profiles.active(REPO)
+        assert profile is not None
+        binding = profile.labs["cpu-01"]
+        assert binding.use and binding.timeout_seconds == 600
+        assert binding.setup == "source ~/envs/cpu/bin/activate"
+        assert binding.guard.forbid == [r"\bwget\b"]
+        started = await maria.post(
+            f"/api/prs/{REPO}/42/reproduce", json={"lab": "cpu-01"}
+        )
+        assert started.status_code == 200, started.text
+        await h.settle()
+        [plan] = [t for t in h.runner.tasks if t.kind == "reproduce"]
+        assert "source ~/envs/cpu/bin/activate" in plan.prompt
+        assert "at most 10 minutes" in plan.prompt
+        off = await maria.put(f"/api/repos/{REPO}/labs/gpu-01", json={"use": False})
+        assert off.json()["applied"] is True
+        offered = (await maria.get(f"/api/labs?repo={REPO}")).json()["machines"]
+        assert not [m for m in offered if m["name"] == "gpu-01"][0]["used"]
+
+
+async def test_the_doctor_checks_the_machines_a_repository_uses(demo) -> None:
+    from auto_maintainer.profiles.doctor import run_doctor
+
+    h, _ = demo
+    profile = await h.service.profiles.active(REPO)
+    assert profile is not None
+    machines = dict(h.service.machines)
+    items = {i.check: i for i in await run_doctor(profile, h.forge, set(), machines)}
+    assert items["lab gpu-01"].ok and "lab gpu-01 paths" not in items
+    machines["gpu-01"] = machines["gpu-01"].model_copy(update={"repos": ["acme/other"]})
+    items = {i.check: i for i in await run_doctor(profile, h.forge, set(), machines)}
+    assert not items["lab gpu-01"].ok and "not offered" in items["lab gpu-01"].detail

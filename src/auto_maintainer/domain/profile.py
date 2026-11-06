@@ -305,14 +305,22 @@ class LabGuard(_Section):
 
 
 class LabBinding(_Section):
+    """How this repository uses a lab or test machine. A repository uses only the
+    machines its profile lists with ``use: true``; the machine itself (how to reach
+    it, its limits) belongs to the service settings or the host config."""
+
     use: bool = True
+    timeout_seconds: int | None = Field(default=None, ge=60, le=6 * 3600)
+    """The longest a reproduction may run for this repository; the machine's own
+    limit still applies."""
     base_clone: str | None = None
     worktree_root: str | None = None
     env_roots: list[str] = Field(default_factory=list)
     throwaway_env_root: str | None = None
     protected_paths: list[str] = Field(default_factory=list)
     setup: str | None = None
-    """Shell prefix run before each template, such as activating an environment."""
+    """Shell run before each template and each reproduction, after the machine's own
+    setup, such as activating this repository's environment."""
     guard: LabGuard = Field(default_factory=LabGuard)
     templates: dict[str, LabTemplate] = Field(default_factory=dict)
 

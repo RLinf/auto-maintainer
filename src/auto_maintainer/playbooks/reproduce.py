@@ -19,7 +19,9 @@ reproduce``), naming a machine. In three steps, each starting from fresh reads:
 
 1. An agent reads the PR in a checkout of its head and writes a reproduction: setup
    commands and a script, and what each result would mean. It may ask the maintainer.
-   The playbook checks the script against the machine's guard and proposes it as a
+   The machine must be one the repository uses (its profile's ``labs``), whose setup
+   and limits apply. The playbook checks the script against the machine's and the
+   repository's guards and proposes it as a
    ``lab.reproduce`` action drafted for the maintainer, then waits.
 2. Once the maintainer approves the script, the actuator runs it on the machine on
    the code before the PR and at its head.
@@ -43,7 +45,13 @@ from ..domain.actions import (
 )
 from ..domain.agents import AgentTask, TaskKind
 from ..domain.events import Event, EventKind
-from ..domain.labs import script_refusals
+from ..domain.labs import (
+    forbidden,
+    script_refusals,
+    setup_lines,
+    time_limit,
+    unusable,
+)
 from ..domain.records import ActionRecord
 from ..domain.snapshot import PrState
 from .base import Playbook, PlaybookContext, PlaybookResult, Wait
@@ -141,10 +149,12 @@ class ReproducePlaybook(Playbook):
         if pr is None or pr.state != PrState.OPEN:
             return PlaybookResult(result={"skipped": "the PR is not open"})
         machine = ctx.service.machines.get(lab)
-        if machine is None or not machine.serves(pr.repo):
-            return PlaybookResult(
-                result={"skipped": f"there is no test machine {lab!r} for {pr.repo}"}
-            )
+        binding = profile.labs.get(lab)
+        why = unusable(pr.repo, lab, machine, binding)
+        if why or machine is None:
+            return PlaybookResult(result={"skipped": why})
+        before = setup_lines(machine, binding)
+        limit = time_limit(machine, binding)
         ctx.trusted_input = await ctx.author_is_team(pr)
         info = await ctx.forge.get_repo(pr.repo)
         workdir = await ctx.workspace.prepare(
@@ -160,10 +170,10 @@ class ReproducePlaybook(Playbook):
                     f"About {lab}: {machine.description}"
                     if machine.description
                     else "",
-                    f"Before your setup, every run does: {machine.setup}"
-                    if machine.setup
+                    "Before your setup, every run does: " + " && ".join(before)
+                    if before
                     else "",
-                    f"A run may take at most {machine.timeout_seconds // 60} minutes.",
+                    f"A run may take at most {limit // 60} minutes.",
                 )
                 if line
             )
@@ -201,7 +211,7 @@ class ReproducePlaybook(Playbook):
             raise RuntimeError(f"reproduction agent failed: {answer.error}")
         plan = ReproPlan.model_validate(answer.structured)
         refused = script_refusals(
-            "\n".join([machine.setup, plan.setup, plan.script]), machine.forbid
+            "\n".join([*before, plan.setup, plan.script]), forbidden(machine, binding)
         )
         if refused:
             return PlaybookResult(
@@ -221,7 +231,7 @@ class ReproducePlaybook(Playbook):
                 script=plan.script,
                 expect=plan.expect,
                 needs_gpu=plan.needs_gpu,
-                timeout_seconds=min(plan.timeout_minutes * 60, machine.timeout_seconds),
+                timeout_seconds=min(plan.timeout_minutes * 60, limit),
                 runtime=answer.runtime,
                 requested_by=by,
             ),

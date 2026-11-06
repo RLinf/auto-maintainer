@@ -527,7 +527,7 @@ function LabsTab({ v, ask }: { v: SettingsView; ask: (p: string, send?: boolean)
         }
       >
         <p className="small muted" style={{ marginTop: 0 }}>
-          {t("The service reaches a machine over SSH as its own user, with the key in that user's SSH config; nothing is installed there. Each reproduction copies the PR's code into a folder of its own and removes it afterwards. Scripts run only after the person who asked approves them.")}
+          {t("The service reaches a machine over SSH as its own user, with the key in that user's SSH config; nothing is installed there. Each repository chooses on its own page which offered machines it uses and sets up its environment there. Each reproduction copies the PR's code into a folder of its own and removes it afterwards. Scripts run only after the person who asked approves them.")}
         </p>
         {adding && <MachineForm onDone={() => setAdding(false)} />}
         {!v.labs.length ? (
@@ -560,7 +560,7 @@ function MachineRow({ m, canChange }: { m: LabMachine; canChange: boolean }) {
           {m.name} <span className="muted small">{m.transport === "ssh" ? m.host || m.name : t("this host")}</span>
         </span>
         <span className="meta" style={{ whiteSpace: "normal" }}>
-          {m.description || t("No description")} · {m.repos.length ? `${t("only")} ${m.repos.join(", ")}` : t("every repository")} · {t("at most")}{" "}
+          {m.description || t("No description")} · {m.repos.length ? `${t("offered only to")} ${m.repos.join(", ")}` : t("offered to every repository")} · {t("at most")}{" "}
           {Math.round(m.timeout_seconds / 60)} {t("minutes")}
           {m.setup ? (
             <>
@@ -669,11 +669,11 @@ function MachineForm({ onDone }: { onDone: () => void }) {
           <input value={description} onChange={(e) => setDescription(e.target.value)} placeholder={t("8× A100 80GB, CUDA 12.4")} />
         </label>
         <label className="stack" style={{ gap: 4 }}>
-          <span className="small muted">{t("Run before each reproduction (optional)")}</span>
+          <span className="small muted">{t("Run on this machine before every reproduction (optional)")}</span>
           <input className="mono-input" value={setup} onChange={(e) => setSetup(e.target.value)} placeholder="source ~/envs/dev/bin/activate" />
         </label>
         <label className="stack" style={{ gap: 4 }}>
-          <span className="small muted">{t("Only for these repositories (optional)")}</span>
+          <span className="small muted">{t("Offer only to these repositories (optional)")}</span>
           <input value={repos} onChange={(e) => setRepos(e.target.value)} placeholder="owner/name, …" />
         </label>
       </div>

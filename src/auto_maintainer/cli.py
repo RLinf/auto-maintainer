@@ -523,9 +523,10 @@ def profile_doctor(repo: str) -> None:
 
     async def main() -> None:
         async with _service() as service:
+            await service.reload_settings()
             merged = await service.loader.candidate(repo)
             items = await run_doctor(
-                merged.profile, service.a.forge, set(service.a.labs)
+                merged.profile, service.a.forge, set(service.a.labs), service.machines
             )
             for item in items:
                 typer.echo(f"{'ok ' if item.ok else 'XX '} {item.check}: {item.detail}")

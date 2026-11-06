@@ -30,7 +30,13 @@ from pydantic import BaseModel
 
 from ..domain.actions import LabReproducePayload, LabRunPayload
 from ..domain.clock import Clock
-from ..domain.labs import script_refusals
+from ..domain.labs import (
+    forbidden,
+    script_refusals,
+    setup_lines,
+    time_limit,
+    unusable,
+)
 from ..domain.ports import GpuStatus, LabHost, Store
 from ..domain.profile import LabBinding, RepoProfile
 from ..domain.secrets import redact_secrets
@@ -160,20 +166,22 @@ class LabExecutor:
         number: int,
         code: dict[str, str],
         holder: str,
+        binding: LabBinding | None = None,
     ) -> dict[str, Any]:
         """Run an approved reproduction: copy each side's code (base64 tar.gz) into a
-        run folder of its own on the machine, run the machine's setup, the script's
-        setup, and the script there, and remove the folder whatever happens."""
-        machine = self.machines.get(payload.lab, LabMachine())
+        run folder of its own on the machine, run the machine's setup, the
+        repository's (``binding``), the script's setup, and the script there, and
+        remove the folder whatever happens."""
+        machine = self.machines.get(payload.lab)
         host = self.hosts.get(payload.lab)
+        why = unusable(repo, payload.lab, machine, binding)
+        if why or machine is None:
+            raise RuntimeError(why)
         if host is None:
             raise RuntimeError(f"there is no test machine named {payload.lab!r}")
-        if not machine.serves(repo):
-            raise RuntimeError(f"test machine {payload.lab!r} is not for {repo}")
-        steps = "\n".join(
-            x for x in (machine.setup, payload.setup, payload.script) if x
-        )
-        refused = script_refusals(steps, machine.forbid)
+        before = setup_lines(machine, binding)
+        steps = "\n".join([*before, *(x for x in (payload.setup, payload.script) if x)])
+        refused = script_refusals(steps, forbidden(machine, binding))
         if refused:
             return {"lab": payload.lab, "refused": refused}
         home = await host.run('printf %s "$HOME"', timeout=60)
@@ -185,7 +193,7 @@ class LabExecutor:
         run_dir = f"{root}/{repo.replace('/', '__')}-{number}-{holder[-8:]}"
         env: dict[str, str] = {}
         gpu: int | None = None
-        timeout = min(payload.timeout_seconds, machine.timeout_seconds)
+        timeout = min(payload.timeout_seconds, time_limit(machine, binding))
         if payload.needs_gpu:
             gpu = await self._lease_gpu(payload.lab, host, holder, timeout)
             if gpu is None:
