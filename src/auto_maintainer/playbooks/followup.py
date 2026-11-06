@@ -38,8 +38,11 @@ from ..domain.review import (
 from ..domain.snapshot import PrSnapshot, PrState
 from .base import PR_EVENTS, Playbook, PlaybookContext, PlaybookResult, in_scope
 from .prompts import (
+    accepted_labels,
     headless,
     interactive,
+    label_block,
+    label_choices,
     pr_block,
     review_skill_block,
     schema_hint,
@@ -102,6 +105,8 @@ class Followup(Playbook):
         prior = await self._prior_findings(ctx, pr)
 
         info = await ctx.forge.get_repo(pr.repo)
+        choices = label_choices(info.labels, profile, pr)
+        limit = profile.review.max_suggested_labels
         workdir = await ctx.workspace.prepare(
             pr.repo, pr.number, pr.head_sha, info.default_branch
         )
@@ -144,6 +149,7 @@ class Followup(Playbook):
                     + ", ".join(
                         repr(v) for v in profile.review.recommendations.values()
                     ),
+                    label_block(choices, limit),
                     schema_hint(FollowupResult.model_json_schema()),
                 ]
             )
@@ -162,6 +168,7 @@ class Followup(Playbook):
         finally:
             await ctx.workspace.release(workdir)
 
+        result.labels = accepted_labels(result.labels, choices, limit)
         meaning = profile.review.meaning_of(result.recommendation)
         rendered = render_followup(result, pr.head_sha, previous_sha, profile)
         team = ctx.trusted_input
@@ -220,9 +227,27 @@ class Followup(Playbook):
                     draft_for=request.by if request else None,
                 )
             )
+        if result.labels:
+            actions.append(
+                make_action(
+                    ActionKind.LABEL_APPLY,
+                    pr.repo,
+                    LabelPayload(labels=result.labels),
+                    number=pr.number,
+                    head_sha=pr.head_sha,
+                    discriminator="followup:labels",
+                    rationale=f"labels the follow-up suggests: {', '.join(result.labels)}",
+                    hints=hints,
+                    draft_for=request.by if request else None,
+                )
+            )
         return PlaybookResult(
             actions=actions,
-            result={"statuses": len(result.statuses), "new": len(result.new_findings)},
+            result={
+                "statuses": len(result.statuses),
+                "new": len(result.new_findings),
+                "labels": result.labels,
+            },
         )
 
     async def _prior_findings(self, ctx: PlaybookContext, pr: PrSnapshot) -> str:

@@ -645,6 +645,19 @@ class Service:
         await self.actuator.drain()
 
     async def _settings_event(self, event: Event) -> None:
+        if (
+            event.kind == EventKind.ACTION_EXECUTED
+            and event.repo
+            and event.number is not None
+            and self.serves(event.repo)
+        ):
+            # Show what the service just wrote (a label, a review) without waiting
+            # for the next poll.
+            try:
+                await self.poller.poll_pr(event.repo, event.number)
+            except Exception:
+                log.exception("refreshing %s#%s failed", event.repo, event.number)
+            return
         if event.kind != EventKind.MEMORY_CHANGED:
             return
         paths = set(event.payload.get("paths") or [])

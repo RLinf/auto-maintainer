@@ -281,6 +281,12 @@ def _answer(task: AgentTask) -> dict[str, Any]:
             ],
             "recommendation": "Ready",
             "remaining_actions": ["Add the boundary case."],
+            # a label that fits the PR under review; one it already has is dropped
+            "labels": ["enhancement"]
+            if "progress bar" in task.prompt
+            else ["documentation"]
+            if "docs: explain" in task.prompt
+            else ["bug"],
         }
     if kind == "verify":
         return {

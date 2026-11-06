@@ -217,6 +217,24 @@ class Poller:
             await self.bus.publish(event)
         return events
 
+    async def poll_pr(self, repo: str, number: int) -> list[Event]:
+        """Refresh one PR's snapshot now, as the next poll would, and publish what
+        changed; used after the service wrote to it, so the dashboard shows the write
+        without waiting for the poll."""
+        profile = await self.profiles.active(repo)
+        prefix = profile.comments.command_prefix if profile else "/am"
+        fresh = await self.forge.get_pr(repo, number)
+        if fresh is None:
+            return []
+        old = await self.store.get_snapshot(repo, number)
+        if old is not None and old.fingerprint() == fresh.fingerprint():
+            return []
+        events = diff_snapshots(old, fresh, self.service_login, prefix)
+        await self.store.save_snapshot(fresh)
+        for event in events:
+            await self.bus.publish(event)
+        return events
+
     async def _file_hashes(self, repo: str) -> dict[str, str]:
         hashes = {}
         for path in WATCHED_FILES:

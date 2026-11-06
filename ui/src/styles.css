@@ -626,3 +626,11 @@ textarea.mono-input { width: 100%; }
 .machine-use { border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; background: var(--surface); }
 .machine-use.on { border-color: color-mix(in srgb, var(--ok) 40%, var(--border)); }
 .pr-work .list { margin: 0 -8px; }
+.merge-queue { padding: 8px 10px; border-radius: 8px; background: var(--surface-2); display: flex; flex-direction: column; gap: 4px; }
+.merge-queue .pill { margin-left: 4px; }
+.level-row { display: grid; grid-template-columns: minmax(0, 1fr) 90px 40px 120px; align-items: center; gap: 10px; }
+.level-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.level-bar { height: 6px; border-radius: 3px; background: var(--surface-3); overflow: hidden; }
+.level-bar span { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
+.level-rate { text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
+.level-row select { height: 30px; }

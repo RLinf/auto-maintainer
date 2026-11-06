@@ -117,7 +117,9 @@ export function ProposalCard({
   const payload = (action?.payload ?? {}) as Record<string, unknown>;
   const kind = action?.kind ?? "";
   const [editing, setEditing] = useState(false);
-  const [expanded, setExpanded] = useState(!compact);
+  // One-line actions (labels, reviewers, reruns) show in full even in compact lists.
+  const short = !POSTED_BODY.has(kind) && kind !== "lab.reproduce" && !Array.isArray(payload.comments);
+  const [expanded, setExpanded] = useState(!compact || short);
   const [raw, setRaw] = useState(false);
   const [body, setBody] = useState(str(payload.body));
   const [title, setTitle] = useState(str(payload.title));

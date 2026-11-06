@@ -46,6 +46,8 @@ class EventKind(StrEnum):
     PRIORITY_OVERRIDDEN = "priority.overridden"
     MERGE_ARMED = "merge.armed"
     MERGE_DISARMED = "merge.disarmed"
+    MERGE_QUEUE = "merge.queue"
+    """The merge queue gave this PR its turn; wakes its merge job."""
     MEMORY_CHANGED = "memory.changed"
     CODE_CHANGED = "code.changed"
     ACTION_EXECUTED = "action.executed"

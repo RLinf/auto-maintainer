@@ -8,6 +8,7 @@ import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom"
 import { api, type Agreement, type GateDecision, type MemoryChange, type ProfileResponse, type RepoRow } from "../api";
 import { useAgent } from "../agent";
 import { RepoMachinesSection } from "../machines";
+import { kindLabel } from "../proposal";
 import { Diff, Empty, ErrorBox, PageHead, Section, Status, timeOf, useAct, When } from "../components";
 import { useRepos } from "../data";
 import { useT } from "../i18n";
@@ -209,7 +210,6 @@ export function RepoDetailPage() {
   const full = `${owner}/${repo}`;
   const base = `/api/repos/${full}`;
   const profile = useQuery({ queryKey: ["profile", full], queryFn: () => api.get<ProfileResponse>(`${base}/profile`) });
-  const agreement = useQuery({ queryKey: ["profile", full, "agreement"], queryFn: () => api.get<Agreement>(`${base}/agreement`) });
   const repos = useRepos();
   const row = repos.data?.find((r) => r.repo === full);
   const keys = [["profile"], ["repos"], ["memory"]];
@@ -340,31 +340,7 @@ export function RepoDetailPage() {
               <Empty icon="shield">{t("No approved profile yet. The service only reads this repository until a maintainer approves one.")}</Empty>
             )}
           </Section>
-          <Section title={t("Agreement with maintainers")} hint={t("from shadow actions")}>
-            {agreement.data && Object.keys(agreement.data.kinds).length ? (
-              <div className="stack small">
-                <span className="muted">
-                  {agreement.data.shadowed} {t("shadow actions recorded. Raise an action to propose or auto when agreement is high.")}
-                </span>
-                {Object.entries(agreement.data.kinds).map(([kind, a]) => (
-                  <div key={kind} className="row" style={{ flexWrap: "nowrap" }} title={`${a.matched}/${a.total}`}>
-                    <span className="mono" style={{ width: 150, flexShrink: 0 }}>
-                      {kind}
-                    </span>
-                    <span style={{ flex: 1, height: 6, borderRadius: 3, background: "var(--surface-3)", overflow: "hidden" }}>
-                      <span style={{ display: "block", height: "100%", width: `${(a.agreement ?? 0) * 100}%`, background: "var(--accent)", borderRadius: 3 }} />
-                    </span>
-                    <span style={{ width: 70, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
-                      {a.agreement === null ? "—" : `${Math.round(a.agreement * 100)}%`} <span className="muted">({a.total})</span>
-                    </span>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <Empty icon="activity">{t("No shadow actions to compare yet.")}</Empty>
-            )}
-            <ErrorBox error={agreement.error} />
-          </Section>
+          <LevelsSection repo={full} />
         </div>
       )}
 
@@ -491,6 +467,89 @@ function SettingsEditor({
         </div>
       )}
       <ErrorBox error={save.error} />
+    </Section>
+  );
+}
+
+const LEVELS = [
+  { id: "off", label: "Off" },
+  { id: "shadow", label: "Record only" },
+  { id: "propose", label: "Ask first" },
+  { id: "auto", label: "Automatic" },
+] as const;
+
+/** What the service does on its own in the repository, one action at a time: off,
+ * record only (shadow), ask first (propose), or automatic. Beside each, how often
+ * what it recorded matched what maintainers did. Changing a level is a settings change
+ * a maintainer of the repository applies. */
+function LevelsSection({ repo }: { repo: string }) {
+  const t = useT();
+  const toast = useToast();
+  const base = `/api/repos/${repo}`;
+  const view = useQuery({ queryKey: ["profile", repo, "agreement"], queryFn: () => api.get<Agreement>(`${base}/agreement`) });
+  const set = useAct(
+    ({ kind, level }: { kind: string; level: string }) => api.put<{ applied: boolean; reason: string }>(`${base}/policy/${kind}`, { level }),
+    [["profile"], ["memory"]],
+  );
+  const d = view.data;
+  const levels = d?.levels ?? {};
+  const kinds = Object.keys(levels).sort((a, b) => {
+    const order = (k: string) => (levels[k] === "auto" ? 0 : levels[k] === "propose" ? 1 : levels[k] === "shadow" ? 2 : 3);
+    return order(a) - order(b) || a.localeCompare(b);
+  });
+  return (
+    <Section title={t("What the service does on its own")} hint={t("per action")}>
+      {view.isLoading ? (
+        <Skeleton rows={4} />
+      ) : !kinds.length ? (
+        <Empty icon="shield">{t("No approved profile yet. The service only reads this repository until a maintainer approves one.")}</Empty>
+      ) : (
+        <div className="stack small" style={{ gap: 6 }}>
+          <span className="muted">
+            {t("Record only: the service notes what it would do. The match rate shows how often maintainers then did the same; raise an action when it is high.")}
+            {!d?.can_configure && ` ${t("Changes you make here are proposals for a maintainer of the repository.")}`}
+          </span>
+          {kinds.map((kind) => {
+            const a = d?.kinds[kind];
+            return (
+              <div key={kind} className="level-row">
+                <span className="level-name" title={kind}>
+                  {t(kindLabel(kind))}
+                </span>
+                <span className="level-bar" title={a ? `${a.matched}/${a.total}` : t("nothing recorded yet")}>
+                  {a && a.agreement !== null && <span style={{ width: `${a.agreement * 100}%` }} />}
+                </span>
+                <span className="level-rate">{a && a.agreement !== null ? `${Math.round(a.agreement * 100)}%` : "—"}</span>
+                <select
+                  aria-label={`${t(kindLabel(kind))}: ${t("level")}`}
+                  value={levels[kind]}
+                  disabled={set.isPending}
+                  onChange={(e) =>
+                    set.mutate(
+                      { kind, level: e.target.value },
+                      {
+                        onSuccess: (r) =>
+                          toast({
+                            title: r.applied ? t("Saved") : t("Change proposed"),
+                            body: r.applied ? undefined : `${t("A maintainer of the repository applies it.")} ${r.reason}`,
+                            icon: r.applied ? "check" : "inbox",
+                          }),
+                      },
+                    )
+                  }
+                >
+                  {LEVELS.map((l) => (
+                    <option key={l.id} value={l.id}>
+                      {t(l.label)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      <ErrorBox error={view.error || set.error} />
     </Section>
   );
 }

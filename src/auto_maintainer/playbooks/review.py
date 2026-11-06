@@ -40,8 +40,11 @@ from ..domain.review import (
 from ..domain.snapshot import PrState
 from .base import PR_EVENTS, Playbook, PlaybookContext, PlaybookResult, in_scope
 from .prompts import (
+    accepted_labels,
     headless,
     interactive,
+    label_block,
+    label_choices,
     pr_block,
     review_skill_block,
     schema_hint,
@@ -123,6 +126,8 @@ class ReviewPlaybook(Playbook):
                 )
 
         info = await ctx.forge.get_repo(pr.repo)
+        choices = label_choices(info.labels, profile, pr)
+        limit = profile.review.max_suggested_labels
         workdir = await ctx.workspace.prepare(
             pr.repo, pr.number, pr.head_sha, info.default_branch
         )
@@ -144,6 +149,7 @@ class ReviewPlaybook(Playbook):
                     f"The working directory is a checkout of the PR head {pr.head_sha}. "
                     f"Compare against origin/{info.default_branch}.",
                     pr_block(pr, diff),
+                    label_block(choices, limit),
                     schema_hint(ReviewResult.model_json_schema()),
                 ]
             )
@@ -165,6 +171,7 @@ class ReviewPlaybook(Playbook):
         finally:
             await ctx.workspace.release(workdir)
 
+        result.labels = accepted_labels(result.labels, choices, limit)
         meaning = profile.review.meaning_of(result.recommendation)
         if meaning is None:
             meaning = (
@@ -244,12 +251,29 @@ class ReviewPlaybook(Playbook):
                         draft_for=request.by if request else None,
                     )
                 )
+        if result.labels:
+            actions.append(
+                make_action(
+                    ActionKind.LABEL_APPLY,
+                    pr.repo,
+                    LabelPayload(labels=result.labels),
+                    number=pr.number,
+                    head_sha=pr.head_sha,
+                    discriminator=f"req:{event.id}:labels"
+                    if manual
+                    else "review:labels",
+                    rationale=f"labels the review suggests: {', '.join(result.labels)}",
+                    hints=hints,
+                    draft_for=request.by if request else None,
+                )
+            )
         return PlaybookResult(
             actions=actions,
             result={
                 "findings": len(result.findings),
                 "dismissed": len(result.dismissed),
                 "recommendation": result.recommendation,
+                "labels": result.labels,
             },
         )
 

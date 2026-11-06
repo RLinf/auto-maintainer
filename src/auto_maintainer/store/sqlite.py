@@ -674,6 +674,14 @@ class SqliteStore:
         )
         return _load(MergeArm, await self._one(stmt))
 
+    async def list_arms(self, repo: str) -> list[MergeArm]:
+        stmt = (
+            select(m.merge_arms.c.data)
+            .where(m.merge_arms.c.repo == repo)
+            .order_by(m.merge_arms.c.number)
+        )
+        return _many(MergeArm, await self._fetch(stmt))
+
     async def delete_arm(self, repo: str, number: int) -> None:
         await self._exec(
             delete(m.merge_arms).where(

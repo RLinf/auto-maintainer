@@ -424,6 +424,12 @@ function Outcome({ job }: { job: AgentJob }) {
       </span>,
     );
   if (Array.isArray(r.files)) lines.push(<span key="files">{(r.files as string[]).join(", ")}</span>);
+  if (Array.isArray(r.labels) && r.labels.length)
+    lines.push(
+      <span key="labels">
+        {t("Suggested labels")}: {(r.labels as string[]).join(", ")}
+      </span>,
+    );
   if (typeof r.conclusion === "string") {
     const runs = (r.runs ?? {}) as Record<string, { exit_code?: number; timed_out?: boolean; duration_seconds?: number; error?: string }>;
     lines.push(

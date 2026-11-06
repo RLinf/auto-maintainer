@@ -4,10 +4,10 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { api, type Evaluation, type Me, type PrDetail, type ReviewStart } from "../api";
+import { api, type Evaluation, type Me, type PrDetail, type ReviewStart, type RunCiPlan } from "../api";
 import { useAgent } from "../agent";
 import { agentName, AgentPicker, useAgentChoice } from "../agentPicker";
-import { Empty, ErrorBox, Labels, PageHead, Pre, Section, Status, Tier, timeOf, useAct, When } from "../components";
+import { Empty, ErrorBox, Labels, PageHead, Pre, prPath, Section, Status, Tier, timeOf, useAct, When } from "../components";
 import { REVIEW_STATES, usePrs } from "../data";
 import { useT } from "../i18n";
 import { Icon } from "../icons";
@@ -137,6 +137,7 @@ export default function PrPage({ me }: { me: Me }) {
             </button>
             {latestReview && <FixButton repo={full} number={pr.number} review={latestReview} align="right" />}
             <ReproduceButton repo={full} number={pr.number} />
+            <RunCiButton repo={full} number={pr.number} plan={d.run_ci} />
             {claimedBy === me.login ? (
               <button onClick={() => unclaim.mutate(undefined)}>{t("Unclaim")}</button>
             ) : (
@@ -233,6 +234,7 @@ export default function PrPage({ me }: { me: Me }) {
                     </span>
                   )}
                 </span>
+                {d.merge_queue && d.merge_queue.order.length > 1 && <MergeQueueLine q={d.merge_queue} number={pr.number} repo={full} />}
                 <ul className="checklist small">
                   {d.gate.items.map((i) => (
                     <li key={i.name}>
@@ -561,3 +563,86 @@ function EvaluationCard({ base, evaluation }: { base: string; evaluation: Evalua
   );
 }
 
+
+/** Get CI going on the PR's head: add the CI gate label, or rerun what failed. The
+ * click is the approval; it runs at once unless the policy holds it. */
+function RunCiButton({ repo, number, plan }: { repo: string; number: number; plan: RunCiPlan }) {
+  const t = useT();
+  const toast = useToast();
+  const run = useAct(
+    () => api.post<{ actions: { kind: string; status: string; error: string | null }[] }>(`/api/prs/${repo}/${number}/ci`),
+    [["pr"], ["prs"], ["audit"]],
+  );
+  if (plan.state === "running")
+    return (
+      <button disabled title={t("CI is running at this commit")}>
+        <span className="pulse" /> {t("CI running")}
+      </button>
+    );
+  if (plan.state === "passed")
+    return (
+      <button disabled title={t("CI passed at this commit; there is nothing to run")}>
+        <Icon name="check" size={14} /> {t("CI passed")}
+      </button>
+    );
+  const what =
+    plan.state === "gated"
+      ? `${t("Adds the label")} ${plan.label}, ${t("which starts the full CI")}`
+      : plan.state === "failed"
+        ? `${t("Reruns the failed jobs of")} ${plan.reruns.map((r) => r.workflow || `#${r.run_id}`).join(", ")}`
+        : t("No CI ran at this commit; this repository starts it on push");
+  return (
+    <button
+      disabled={plan.state === "none" || run.isPending}
+      title={what}
+      onClick={() =>
+        run.mutate(undefined, {
+          onSuccess: (out) => {
+            const held = out.actions.filter((a) => !["executed", "queued", "intent"].includes(a.status));
+            toast(
+              held.length
+                ? { title: t("Not run"), body: held.map((a) => a.error || a.status).join("; "), icon: "pause" }
+                : { title: plan.state === "gated" ? t("CI started") : t("Rerunning failed CI"), body: what, icon: "play" },
+            );
+          },
+          onError: (e) => toast({ title: t("Not run"), body: String((e as Error).message), icon: "x" }),
+        })
+      }
+    >
+      <Icon name="play" size={14} />
+      {run.isPending ? t("Starting…") : t("Run CI")}
+    </button>
+  );
+}
+
+/** Where this PR stands among the repository's armed PRs: they take turns so a merge
+ * does not make the others run their CI twice. */
+function MergeQueueLine({ q, number, repo }: { q: NonNullable<PrDetail["merge_queue"]>; number: number; repo: string }) {
+  const t = useT();
+  const position = q.order.findIndex((e) => e.number === number);
+  return (
+    <div className="merge-queue small">
+      <div>
+      <span className="muted">{t("Merge queue")}:</span>{" "}
+      {q.order.map((e, i) => (
+        <span key={e.number}>
+          {i > 0 && " → "}
+          {e.number === number ? (
+            <strong>
+              #{e.number} {t("(this PR)")}
+            </strong>
+          ) : (
+            <Link to={prPath(repo, e.number)} title={e.title}>
+              #{e.number}
+            </Link>
+          )}
+          {e.number === q.head && <span className="pill status-info">{t("its turn")}</span>}
+        </span>
+      ))}
+      </div>
+      {position > 0 && q.head !== number && (
+        <div className="muted">{t("It merges main and runs its CI when its turn comes, so the PRs before it do not make it run CI twice.")}</div>
+      )}
+    </div>
+  );
+}

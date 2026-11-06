@@ -180,6 +180,10 @@ class Review(_Section):
     verify: bool = True
     cross_agent: bool = False
     max_inline_comments: int = 20
+    suggest_labels: bool = True
+    """Whether reviews and follow-ups suggest labels from the repository's own (never
+    the role labels the service manages); a suggestion is a ``label.apply`` action."""
+    max_suggested_labels: int = Field(default=3, ge=1, le=10)
 
     def meaning_of(self, recommendation: str | None) -> str | None:
         """Map a recommendation label back to ``ready``, ``changes``, or ``blocked``."""

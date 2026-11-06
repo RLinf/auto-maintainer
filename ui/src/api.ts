@@ -285,6 +285,14 @@ export interface PrDetail {
   hygiene: { sha: string; results: HygieneResult[] } | null;
   arm: { sha: string; armed_by: string; armed_at: string } | null;
   gate: { outcome: string; items: GateItem[]; needs_ci_gate: boolean } | null;
+  run_ci: RunCiPlan;
+  merge_queue: { head: number | null; order: { number: number; title: string }[] } | null;
+}
+
+export interface RunCiPlan {
+  state: "gated" | "failed" | "running" | "passed" | "none";
+  label: string | null;
+  reruns: { run_id: number; attempt: number | null; workflow: string | null }[];
 }
 
 export interface HygieneResult {
@@ -442,6 +450,8 @@ export interface AgreementRow {
 export interface Agreement {
   shadowed: number;
   kinds: Record<string, AgreementRow>;
+  levels?: Record<string, "off" | "shadow" | "propose" | "auto">;
+  can_configure?: boolean;
 }
 
 export interface SecretInfo {

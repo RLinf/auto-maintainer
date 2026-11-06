@@ -282,3 +282,86 @@ async def test_a_fix_is_drafted_for_the_reviewer_and_opened_as_them(demo) -> Non
         opened["author"] == "maria"
         and opened["title"] == "test(loader): cover a batch of one"
     )
+
+
+# -- labels the review suggests ----------------------------------------------------------
+
+
+def _review_with_labels(labels: list[str]):
+    from auto_maintainer.testing.demo import _answer
+
+    def answer(task: Any) -> dict:
+        return {**_answer(task), "labels": labels}
+
+    return answer
+
+
+async def test_a_review_suggests_only_the_repositorys_own_labels(demo) -> None:
+    h, app = demo
+    pr = h.forge.prs[(REPO, 42)]
+    h.runner.on(
+        "review",
+        _review_with_labels(
+            [
+                "enhancement",
+                "needs review",  # a role label the service manages
+                "no-such-label",
+                *pr.labels,  # already on the PR
+                "documentation",
+                "enhancement",
+                "reproduced",
+            ]
+        ),
+    )
+    await _review(app, "maria", 42)
+    await h.settle()
+    [task] = [t for t in h.runner.tasks if t.kind == TaskKind.REVIEW]
+    offered = task.prompt.split("Suggesting labels:")[1].split("Only these exist:")[1]
+    offered = offered.split("</untrusted-data>")[0]
+    assert "documentation" in offered and "enhancement" in offered
+    assert "needs review" not in offered and "run-ci" not in offered
+    async with _as(app, "maria") as maria:
+        drafts = [
+            p
+            for p in (await maria.get("/api/proposals")).json()
+            if p["action"]["action"]["kind"] == "label.apply"
+            and p["action"]["action"]["payload"]["labels"]
+        ]
+    [labels] = drafts
+    assert labels["requested_by"] == "maria"
+    assert labels["action"]["action"]["payload"]["labels"] == [
+        "enhancement",
+        "documentation",
+        "reproduced",
+    ]
+    async with _as(app, "maria") as maria:
+        ok = await maria.post(f"/api/proposals/{labels['id']}/approve", json={})
+        assert ok.status_code == 200, ok.text
+    await h.settle()
+    # the PR page shows the new labels at once, not after the next poll
+    snapshot = await h.store.get_snapshot(REPO, 42)
+    assert snapshot is not None
+    assert {"enhancement", "documentation", "reproduced"} <= set(snapshot.labels)
+
+
+async def test_a_repository_can_turn_label_suggestions_off(demo) -> None:
+    from auto_maintainer.domain.memory import profile_path
+    from auto_maintainer.profiles.layers import dump_yaml, parse_yaml
+
+    h, app = demo
+    layer = parse_yaml(h.memory.files[profile_path(REPO)], "settings")
+    layer["review"] = {**(layer.get("review") or {}), "suggest_labels": False}
+    h.memory.files[profile_path(REPO)] = dump_yaml(layer)
+    await h.approve_directly(REPO, "maria")
+    h.runner.on("review", _review_with_labels(["enhancement"]))
+    await _review(app, "maria", 42)
+    await h.settle()
+    [task] = [t for t in h.runner.tasks if t.kind == TaskKind.REVIEW]
+    assert "Suggesting labels:" not in task.prompt
+    async with _as(app, "maria") as maria:
+        assert not [
+            p
+            for p in (await maria.get("/api/proposals")).json()
+            if p["action"]["action"]["kind"] == "label.apply"
+            and p["action"]["action"]["payload"]["labels"]
+        ]

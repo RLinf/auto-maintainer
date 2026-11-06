@@ -32,11 +32,15 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from ..domain.actions import (
+    Action,
     ActionKind,
     ActionStatus,
+    Autonomy,
     CodeMergePayload,
+    LabelPayload,
     MemoryChangePayload,
     ProposalState,
+    RerunPayload,
     ServiceDeployPayload,
     make_action,
 )
@@ -54,8 +58,9 @@ from ..domain.memory import (
 from ..domain.merge_gate import MergeArm, evaluate_merge_gate
 from ..domain.permissions import Permission
 from ..domain.profile import RepoProfile
-from ..domain.records import AuditEntry, JobStatus
+from ..domain.records import ActionRecord, AuditEntry, JobStatus
 from ..domain.review import classify_review_state
+from ..domain.run_ci import plan_run_ci
 from ..domain.scoring import Evaluation, recompute
 from ..domain.snapshot import PrState
 from ..playbooks.evaluate import haystack, rubric_of
@@ -71,6 +76,50 @@ PERMISSION_TTL = timedelta(minutes=10)
 MAX_DIFF = 2_000_000
 _DIFFS: dict[tuple[str, int, str], str] = {}
 """Recent PR diffs by (repo, number, head SHA); a head never changes its diff."""
+
+
+async def _run_now(service: Service, user: User, action: Action) -> ActionRecord:
+    """Submit ``action`` as drafted for ``user`` and approve it as them at once: a
+    button a person pressed. The policy decides again on approval, so a pause, a
+    budget, or a hard limit can still hold or deny it; the record says which."""
+    record = await service.pipeline.submit(action)
+    if record.status == ActionStatus.PROPOSED:
+        proposal = next(
+            (
+                p
+                for p in await service.store.list_proposals(
+                    ProposalState.PENDING, action.repo
+                )
+                if p.action_id == record.action.id
+            ),
+            None,
+        )
+        if proposal is not None:
+            try:
+                await service.pipeline.approve(proposal.id, user.login)
+            except ValueError as e:
+                raise HTTPException(409, str(e)) from e
+    return await service.store.get_action(record.action.id) or record
+
+
+async def _merge_queue(service: Service, repo: str) -> dict[str, Any]:
+    """The repository's armed PRs in the order they merge, as the merge playbook last
+    worked it out, and whose turn it is (``merge-queue:<repo>``)."""
+    state = await service.store.get_state(f"merge-queue:{repo}") or {}
+    armed = {a.number: a for a in await service.store.list_arms(repo)}
+    order = [n for n in state.get("order") or [] if n in armed]
+    order += sorted(n for n in armed if n not in order)
+    head = state.get("head") if state.get("head") in armed else None
+    if head is not None:
+        order = [head, *(n for n in order if n != head)]
+    titles = {}
+    for n in order:
+        snap = await service.store.get_snapshot(repo, n)
+        titles[n] = snap.title if snap else ""
+    return {
+        "head": head,
+        "order": [{"number": n, "title": titles[n]} for n in order],
+    }
 
 
 def service_of(request: Request) -> Service:
@@ -195,6 +244,10 @@ async def code_maintainer(service: Service, user: User) -> tuple[bool, str]:
 class PrTarget(BaseModel):
     repo: str
     number: int
+
+
+class LevelBody(BaseModel):
+    level: Autonomy
 
 
 class AutomationBody(BaseModel):
@@ -567,7 +620,71 @@ def build_router() -> APIRouter:
         service = service_of(request)
         repo = _repo(owner, name)
         await require_view(service, user, repo)
-        return await agreement_scores(service, repo)
+        out = await agreement_scores(service, repo)
+        profile = await service.profiles.active(repo)
+        if profile is not None:
+            gate = await service.gate.check(repo, user.login, profile, person=True)
+            levels = {}
+            for kind in ActionKind:
+                if kind.touches_repository:
+                    rule = profile.policy.get(kind)
+                    levels[str(kind)] = str(rule.level if rule else Autonomy.SHADOW)
+            out["levels"] = levels
+            out["can_configure"] = gate.allowed
+        return out
+
+    @r.put("/repos/{owner}/{name}/policy/{kind}")
+    async def set_level(
+        request: Request,
+        owner: str,
+        name: str,
+        kind: str,
+        body: LevelBody,
+        user: User = Depends(current_user),
+    ) -> dict[str, Any]:
+        """How far one action kind may go on its own in the repository (off, record
+        only, propose, auto), in its settings layer: a maintainer applies it by making
+        it, anyone else proposes it. Conditions on the level are kept."""
+        service = service_of(request)
+        repo = _repo(owner, name)
+        await require_view(service, user, repo)
+        try:
+            action_kind = ActionKind(kind)
+        except ValueError as e:
+            raise HTTPException(404, f"there is no action kind {kind!r}") from e
+        if not action_kind.touches_repository:
+            raise HTTPException(422, f"{kind} does not act on the repository")
+        current = await service.profiles.active(repo)
+        if current is None:
+            raise HTTPException(409, f"{repo} has no approved profile yet")
+        layer = parse_yaml(
+            await service.a.memory.read_text(profile_path(repo)) or "", "settings"
+        )
+        policy = dict(layer.get("policy") or {})
+        rule = dict(policy.get(kind) or {})
+        rule["level"] = str(body.level)
+        policy[kind] = rule
+        layer["policy"] = policy
+        try:
+            merged, change = await service.profiles.propose_memory_layer(
+                repo, layer, user.login, f"policy: {kind} at {body.level}"
+            )
+        except ProfileError as e:
+            raise HTTPException(422, str(e)) from e
+        decision = await service.gate.check(
+            repo, user.login, current, merged.profile, person=True
+        )
+        if decision.allowed:
+            change.approvals = {repo: [user.login]}
+        change.requested_by = user.login
+        await service.store.save_memory_change(change)
+        await service.submit_memory_change(change)
+        stored = await service.store.get_memory_change(change.id)
+        return {
+            "applied": bool(stored and stored.state == "merged"),
+            "change": stored.model_dump(mode="json") if stored else None,
+            "reason": decision.reason,
+        }
 
     # -- pull requests -------------------------------------------------------------------
 
@@ -724,7 +841,89 @@ def build_router() -> APIRouter:
             ],
             "hygiene": await service.store.get_state(hygiene_key(repo, number)),
             "arm": arm.model_dump(mode="json") if arm else None,
+            "merge_queue": await _merge_queue(service, repo) if arm else None,
             "gate": gate,
+            "run_ci": plan_run_ci(
+                pr, profile.label_for("ci_gate") if profile else None
+            ).model_dump(mode="json"),
+        }
+
+    @r.post("/prs/{owner}/{name}/{number}/ci")
+    async def run_ci(
+        request: Request,
+        owner: str,
+        name: str,
+        number: int,
+        user: User = Depends(current_user),
+    ) -> dict[str, Any]:
+        """Get CI going on the PR's head: add the CI gate label when the repository
+        starts its full CI on one and the PR lacks it, else rerun the failed runs.
+        The click is the person's approval; the policy still decides (pauses, the
+        gate budget, the rerun limit), and the audit log records them."""
+        service = service_of(request)
+        repo = _repo(owner, name)
+        await require_view(service, user, repo)
+        profile = await service.profiles.active(repo)
+        if profile is None:
+            raise HTTPException(409, f"{repo} has no approved profile yet")
+        pr = await service.a.forge.get_pr(
+            repo, number
+        ) or await service.store.get_snapshot(repo, number)
+        if pr is None or pr.state != PrState.OPEN:
+            raise HTTPException(409, f"{repo}#{number} is not open")
+        plan = plan_run_ci(pr, profile.label_for("ci_gate"))
+        if not plan.can_run:
+            raise HTTPException(
+                409,
+                {
+                    "running": "CI is already running at this commit",
+                    "passed": "CI passed at this commit; there is nothing to run",
+                    "none": "no CI ran at this commit, and this repository starts it "
+                    "on push, not on a label",
+                }[plan.state],
+            )
+        actions = (
+            [
+                make_action(
+                    ActionKind.LABEL_CI_GATE,
+                    repo,
+                    LabelPayload(roles=["ci_gate"]),
+                    number=number,
+                    head_sha=pr.head_sha,
+                    discriminator="run-ci",
+                    rationale=f"{user.login} pressed Run CI",
+                    draft_for=user.login,
+                )
+            ]
+            if plan.state == "gated"
+            else [
+                make_action(
+                    ActionKind.CI_RERUN_FAILED,
+                    repo,
+                    RerunPayload(
+                        run_id=run.run_id, workflow=run.workflow, attempt=run.attempt
+                    ),
+                    number=number,
+                    head_sha=pr.head_sha,
+                    discriminator=f"run-ci:{run.run_id}:{run.attempt or 1}",
+                    rationale=f"{user.login} pressed Run CI",
+                    draft_for=user.login,
+                )
+                for run in plan.reruns
+            ]
+        )
+        results = [await _run_now(service, user, a) for a in actions]
+        return {
+            "plan": plan.model_dump(mode="json"),
+            "actions": [
+                {
+                    "id": r.action.id,
+                    "kind": r.action.kind,
+                    "status": r.status,
+                    "error": r.error,
+                }
+                for r in results
+            ],
         }
 
     @r.get("/prs/{owner}/{name}/{number}/diff")

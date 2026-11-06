@@ -177,3 +177,34 @@ def template_block(profile: RepoProfile) -> str:
         "Fill `sections` for any section that is not Summary, Findings, Tests and docs, or Recommendation.\n"
         f"`recommendation` must be exactly one of: {recs}."
     )
+
+
+def label_choices(
+    repo_labels: list[str], profile: RepoProfile, pr: PrSnapshot
+) -> list[str]:
+    """The labels a review may suggest for ``pr``: the repository's labels, except the
+    role labels the service sets itself and those the PR already has. Empty when the
+    profile turns suggestions off."""
+    if not profile.review.suggest_labels:
+        return []
+    managed = {label for label in profile.labels.roles.values() if label}
+    have = set(pr.labels)
+    return sorted(label for label in repo_labels if label not in managed | have)
+
+
+def label_block(choices: list[str], limit: int) -> str:
+    """The prompt part that asks for labels, or nothing when there are none to pick."""
+    if not choices:
+        return ""
+    return (
+        f"Suggesting labels: if this PR should carry labels it does not have yet, list at most "
+        f"{limit} of these in `labels`; leave it empty when none clearly applies. "
+        "Only these exist: " + untrusted("repository.labels", ", ".join(choices), 4000)
+    )
+
+
+def accepted_labels(suggested: list[str], choices: list[str], limit: int) -> list[str]:
+    """The agent's suggestions that name an allowed label, in its order, at most
+    ``limit``: agent output names a target, so it is checked against the list."""
+    allowed = set(choices)
+    return [label for label in dict.fromkeys(suggested) if label in allowed][:limit]

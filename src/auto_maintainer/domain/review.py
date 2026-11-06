@@ -170,6 +170,11 @@ class ReviewResult(BaseModel):
     sections: dict[str, str] = Field(default_factory=dict)
     recommendation: str
     remaining_actions: list[str] = Field(default_factory=list)
+    labels: list[str] = Field(
+        default_factory=list,
+        description="Labels from the list you were given that this PR should carry "
+        "and does not have yet; empty when none clearly applies.",
+    )
 
 
 class FindingStatus(BaseModel):
@@ -185,6 +190,11 @@ class FollowupResult(BaseModel):
     new_findings: list[Finding] = Field(default_factory=list)
     summary: str = ""
     recommendation: str
+    labels: list[str] = Field(
+        default_factory=list,
+        description="Labels from the list you were given that this PR should carry "
+        "now and does not have yet; empty when none clearly applies.",
+    )
 
 
 class RenderedReview(BaseModel):
