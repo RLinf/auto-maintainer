@@ -4,11 +4,12 @@
 // answerable in place.
 
 import { useMemo, type ReactNode } from "react";
-import { Link, useSearchParams } from "react-router-dom";
-import { api, type Me, type PrRow, type ServiceView } from "../api";
+import { Link } from "react-router-dom";
+import { api, type Me, type ServiceView } from "../api";
 import { CaughtUp, ErrorBox, Tier, timeOf, useAct } from "../components";
 import { useMemoryChanges, useProposals, usePrs, useQuestions, useRepos, useService } from "../data";
 import { useT } from "../i18n";
+import { RepoTabs, useRepoScope } from "../repoScope";
 import { Icon } from "../icons";
 import { ProposalCard } from "../proposal";
 import { Skeleton, useTab } from "../ui";
@@ -50,29 +51,17 @@ export default function HomePage({ me }: { me: Me }) {
   const repos = useRepos();
   const service = useService();
 
-  // The page can show one repository or all of them. Priorities come from each
-  // repository's own rubric, so counts by tier are never added across repositories.
-  const [params, setParams] = useSearchParams();
+  // One repository at a time: priorities come from each repository's own rubric, so
+  // PRs, counts, and tiers are never mixed across repositories.
   const repoRows = repos.data ?? [];
   const names = repoRows.map((r) => r.repo).sort((a, b) => a.localeCompare(b));
-  const scope = names.includes(params.get("repo") ?? "") ? (params.get("repo") as string) : "";
-  const multi = names.length > 1;
-  const setScope = (repo: string) =>
-    setParams(
-      (prev) => {
-        const next = new URLSearchParams(prev);
-        if (repo) next.set("repo", repo);
-        else next.delete("repo");
-        return next;
-      },
-      { replace: true },
-    );
-  const inScope = (repo: string | null | undefined) => !scope || repo === scope;
+  const [scope, setScope] = useRepoScope(names);
+  const inScope = (repo: string | null | undefined) => !scope || !repo || repo === scope;
   const allRows = prs.data ?? [];
-  const rows = allRows.filter((p) => inScope(p.repo));
+  const rows = allRows.filter((p) => !scope || p.repo === scope);
   const needs = rows.filter((p) => NEEDS_REVIEW.has(p.review_state));
   const byTier = (tier: string) => rows.filter((p) => p.tier === tier).length;
-  const repoQuery = scope ? `&f.repo=${encodeURIComponent(scope)}` : "";
+  const repoQuery = scope ? `&repo=${encodeURIComponent(scope)}` : "";
   const sv = service.data;
   const updates = serviceUpdates(sv);
   const automations = useAutomations(repoRows);
@@ -82,8 +71,8 @@ export default function HomePage({ me }: { me: Me }) {
     const out: FeedItem[] = [];
     for (const q of (questions.data ?? []).filter((x) => inScope(x.repo))) out.push({ id: q.id, kind: "question", at: q.created_at, node: <QuestionCard question={q} compact />, mine: q.asked_for === me.login });
     for (const p of (proposals.data ?? []).filter((x) => inScope(x.repo))) out.push({ id: p.id, kind: "proposal", at: p.created_at, node: <ProposalCard proposal={p} compact /> });
-    for (const c of (memory.data ?? []).filter((x) => !scope || x.repos.includes(scope))) out.push({ id: c.id, kind: "memory", at: c.created_at, node: <ChangeCard change={c} compact /> });
-    if (!scope) for (const u of updates) out.push(u);
+    for (const c of (memory.data ?? []).filter((x) => !scope || !x.repos.length || x.repos.includes(scope))) out.push({ id: c.id, kind: "memory", at: c.created_at, node: <ChangeCard change={c} compact /> });
+    for (const u of updates) out.push(u);
     return out;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [questions.data, proposals.data, memory.data, updates, me.login, scope]);
@@ -132,23 +121,19 @@ export default function HomePage({ me }: { me: Me }) {
               <Icon name="inbox" size={14} />
               {items.length ? `${items.length} ${t(items.length === 1 ? "decision waits for you" : "decisions wait for you")}` : t("Nothing waits for your decision.")}
             </a>
-            {(!multi || scope) && (
-              <>
-                <Link to={`/prs?tab=review${repoQuery}`}>
-                  <Icon name="pr" size={14} />
-                  {prs.isLoading ? "…" : needs.length} {t("PRs need review")}
-                </Link>
-                {p0 > 0 && (
-                  <Link to={`/prs?f.tier=P0${repoQuery}`} title={t("Open PRs at P0")}>
-                    <Tier tier="P0" /> {p0}
-                  </Link>
-                )}
-                {p1 > 0 && (
-                  <Link to={`/prs?f.tier=P1${repoQuery}`} title={t("Open PRs at P1")}>
-                    <Tier tier="P1" /> {p1}
-                  </Link>
-                )}
-              </>
+            <Link to={`/prs?tab=review${repoQuery}`}>
+              <Icon name="pr" size={14} />
+              {prs.isLoading ? "…" : needs.length} {t("PRs need review")}
+            </Link>
+            {p0 > 0 && (
+              <Link to={`/prs?f.tier=P0${repoQuery}`} title={t("Open PRs at P0")}>
+                <Tier tier="P0" /> {p0}
+              </Link>
+            )}
+            {p1 > 0 && (
+              <Link to={`/prs?f.tier=P1${repoQuery}`} title={t("Open PRs at P1")}>
+                <Tier tier="P1" /> {p1}
+              </Link>
             )}
             {running > 0 && (
               <a href="#work">
@@ -164,11 +149,10 @@ export default function HomePage({ me }: { me: Me }) {
         </div>
       </div>
 
-      {multi && <RepoSwitcher names={names} scope={scope} onPick={setScope} rows={allRows} />}
-      {multi && !scope && <RepoSummary names={names} rows={allRows} onPick={setScope} />}
+      <RepoTabs names={names} scope={scope} onPick={setScope} count={(repo) => allRows.filter((p) => p.repo === repo && NEEDS_REVIEW.has(p.review_state)).length} />
       <GettingStarted repos={repoRows} prs={rows} automations={automations} />
       <AgentWork me={me} />
-      <ReviewCard rows={needs} loading={prs.isLoading} me={me} automations={automations} byRepo={multi && !scope} />
+      <ReviewCard rows={needs} loading={prs.isLoading} me={me} automations={automations} />
 
       <section id="decisions" className="stack" style={{ gap: 12, minWidth: 0 }}>
         <div className="row">
@@ -291,62 +275,5 @@ function MergeCard({ pr, repo }: { pr: NonNullable<ServiceView["prs"]>[number]; 
       </div>
       <ErrorBox error={merge.error} />
     </div>
-  );
-}
-
-/** Which repository the page shows: all of them, or one. */
-function RepoSwitcher({ names, scope, onPick, rows }: { names: string[]; scope: string; onPick: (repo: string) => void; rows: PrRow[] }) {
-  const t = useT();
-  const waiting = (repo: string) => rows.filter((p) => p.repo === repo && NEEDS_REVIEW.has(p.review_state)).length;
-  return (
-    <div className="row repo-switch" role="tablist" aria-label={t("Repository")}>
-      <button role="tab" aria-selected={!scope} className={`chip-btn ${!scope ? "on" : ""}`} onClick={() => onPick("")}>
-        {t("All repositories")}
-      </button>
-      {names.map((repo) => (
-        <button key={repo} role="tab" aria-selected={scope === repo} className={`chip-btn ${scope === repo ? "on" : ""}`} onClick={() => onPick(repo)}>
-          <Icon name="repo" size={13} />
-          {repo}
-          {waiting(repo) ? <span className="muted">{waiting(repo)}</span> : null}
-        </button>
-      ))}
-    </div>
-  );
-}
-
-/** One line per repository: what waits for review there and its own top tiers. */
-function RepoSummary({ names, rows, onPick }: { names: string[]; rows: PrRow[]; onPick: (repo: string) => void }) {
-  const t = useT();
-  return (
-    <section className="card repo-summary">
-      {names.map((repo) => {
-        const mine = rows.filter((p) => p.repo === repo);
-        const needs = mine.filter((p) => NEEDS_REVIEW.has(p.review_state)).length;
-        const q = `f.repo=${encodeURIComponent(repo)}`;
-        const tier = (x: string) => mine.filter((p) => p.tier === x).length;
-        return (
-          <div key={repo} className="repo-summary-row">
-            <button className="link-button" onClick={() => onPick(repo)}>
-              <Icon name="repo" size={14} /> <strong>{repo}</strong>
-            </button>
-            <Link to={`/prs?tab=review&${q}`}>
-              {needs} {t("PRs need review")}
-            </Link>
-            <span className="row" style={{ gap: 10 }}>
-              {["P0", "P1"].map((x) =>
-                tier(x) ? (
-                  <Link key={x} to={`/prs?f.tier=${x}&${q}`} title={`${repo}: ${x}`}>
-                    <Tier tier={x} /> {tier(x)}
-                  </Link>
-                ) : null,
-              )}
-              <span className="small muted">
-                {mine.length} {t("open PRs")}
-              </span>
-            </span>
-          </div>
-        );
-      })}
-    </section>
   );
 }

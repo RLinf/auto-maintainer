@@ -7,7 +7,8 @@ import { Link, useNavigate } from "react-router-dom";
 import { api, type Me, type PrRow, type ReviewActivity, type ReviewStart } from "../api";
 import { useAgent } from "../agent";
 import { ErrorBox, Labels, PageHead, prPath, ReviewState, Tier, timeOf, useAct, When } from "../components";
-import { evaluationToast, prKey, REVIEW_ORDER, REVIEW_STATES, TIER_ORDER, usePrs, useReevaluate, useSyncPrs } from "../data";
+import { evaluationToast, prKey, REVIEW_ORDER, REVIEW_STATES, TIER_ORDER, usePrs, useReevaluate, useRepos, useSyncPrs } from "../data";
+import { RepoTabs, useRepoScope } from "../repoScope";
 import { useT } from "../i18n";
 import { Icon } from "../icons";
 import { agentName, AgentPicker, reviewToast, useAgentChoice } from "../agentPicker";
@@ -24,18 +25,24 @@ export default function QueuePage({ me }: { me: Me }) {
   const agent = useAgent();
   const all = usePrs();
   const mine = useQuery({ queryKey: ["prs", "mine"], queryFn: () => api.get<PrRow[]>("/api/prs?mine=true") });
-  const rows = all.data ?? [];
+  // One repository at a time: each ranks its PRs by its own rubric.
+  const repos = useRepos();
+  const names = (repos.data ?? []).map((r) => r.repo).sort((a, b) => a.localeCompare(b));
+  const [scope, setScope] = useRepoScope(names);
+  const allRows = all.data ?? [];
+  const rows = allRows.filter((p) => !scope || p.repo === scope);
+  const myRows = (mine.data ?? []).filter((p) => !scope || p.repo === scope);
   const views = [
     { id: "all", label: t("All open"), count: rows.length },
     { id: "review", label: t("Needs review"), count: rows.filter((p) => NEEDS_REVIEW.has(p.review_state)).length },
-    { id: "mine", label: t("Mine"), count: mine.data?.length },
+    { id: "mine", label: t("Mine"), count: myRows.length },
     { id: "unrated", label: t("Not evaluated"), count: rows.filter((p) => !p.tier).length },
     { id: "reviewed", label: t("Reviewed"), count: rows.filter((p) => p.review_state === "UP_TO_DATE").length },
   ];
   const [view, setView] = useTab(views);
   const source =
     view === "mine"
-      ? mine.data ?? []
+      ? myRows
       : view === "review"
         ? rows.filter((p) => NEEDS_REVIEW.has(p.review_state))
         : view === "unrated"
@@ -49,7 +56,6 @@ export default function QueuePage({ me }: { me: Me }) {
     key: prKey,
     search: (p) => `${p.title} ${p.repo}#${p.number} #${p.number} ${p.author} ${p.labels.join(" ")} ${p.summary} ${p.claimed_by ?? ""}`,
     facets: [
-      { id: "repo", label: t("Repository"), values: (p) => p.repo },
       { id: "tier", label: t("Priority"), values: (p) => p.tier ?? t("Not evaluated") },
       { id: "state", label: t("Review state"), values: (p) => t(REVIEW_STATES[p.review_state] ?? p.review_state) },
       { id: "author", label: t("Author"), values: (p) => p.author },
@@ -66,11 +72,7 @@ export default function QueuePage({ me }: { me: Me }) {
       { id: "state", label: t("Review state"), value: (p) => REVIEW_ORDER.indexOf(p.review_state) },
     ],
     defaultSort: "-priority",
-    // Each repository scores against its own rubric, so with several, PRs rank
-    // within their repository rather than in one mixed list.
-    defaultGroup: new Set(rows.map((p) => p.repo)).size > 1 ? "repo" : undefined,
     groups: [
-      { id: "repo", label: t("Repository"), value: (p) => p.repo },
       { id: "tier", label: t("Priority"), value: (p) => p.tier ?? t("Not evaluated"), order: [...TIER_ORDER, t("Not evaluated")] },
       { id: "state", label: t("Review state"), value: (p) => t(REVIEW_STATES[p.review_state] ?? p.review_state), order: REVIEW_ORDER.map((s) => t(REVIEW_STATES[s])) },
       { id: "author", label: t("Author"), value: (p) => p.author },
@@ -214,7 +216,7 @@ export default function QueuePage({ me }: { me: Me }) {
               disabled={sync.isPending}
               title={t("Read every repository's PRs from GitHub now instead of at the next poll")}
               onClick={() =>
-                sync.mutate([], {
+                sync.mutate(scope ? [scope] : [], {
                   onSuccess: (r) =>
                     toast({
                       title: t("Checking GitHub for changes"),
@@ -253,6 +255,7 @@ export default function QueuePage({ me }: { me: Me }) {
           </>
         }
       />
+      <RepoTabs names={names} scope={scope} onPick={setScope} count={(repo) => allRows.filter((p) => p.repo === repo).length} />
       <Tabs tabs={views} active={view} onChange={setView} />
       <ListToolbar list={list} placeholder={t("Search by title, number, author, label…")} />
       <ErrorBox error={all.error || review.error || again.error || sync.error} />

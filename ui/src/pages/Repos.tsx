@@ -90,7 +90,7 @@ export function ReposPage() {
       header: t("Open PRs"),
       sort: "prs",
       className: "num",
-      cell: (r) => <Link to={`/prs?f.repo=${encodeURIComponent(r.repo)}`}>{r.open_prs}</Link>,
+      cell: (r) => <Link to={`/prs?repo=${encodeURIComponent(r.repo)}`}>{r.open_prs}</Link>,
     },
     { id: "proposals", header: t("Approvals"), sort: "proposals", className: "num", cell: (r) => r.pending_proposals || <span className="muted">0</span> },
     {
@@ -262,7 +262,7 @@ export function RepoDetailPage() {
               <Icon name="sparkles" />
               {t("Configure with the agent")}
             </button>
-            <Link className="button" to={`/prs?f.repo=${encodeURIComponent(full)}`}>
+            <Link className="button" to={`/prs?repo=${encodeURIComponent(full)}`}>
               <Icon name="pr" />
               {row?.open_prs ?? ""} {t("PRs")}
             </Link>

@@ -81,7 +81,7 @@ export default function PrPage({ me }: { me: Me }) {
       <PageHead
         crumbs={[
           { to: "/prs", label: t("Pull requests") },
-          { to: `/prs?f.repo=${encodeURIComponent(full)}`, label: full },
+          { to: `/prs?repo=${encodeURIComponent(full)}`, label: full },
         ]}
         title={
           <>
