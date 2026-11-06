@@ -172,6 +172,64 @@ async def test_anyone_else_only_proposes_even_an_operator(demo, login: str) -> N
     assert h.service.scheduler.poll_seconds == 600
 
 
+async def test_an_agent_is_switched_to_skip_permissions_through_the_gate(
+    demo,
+) -> None:
+    h, app = demo
+    body = {"permissions": "bypass"}
+    async with _client(app, "walt") as walt:
+        proposed = (
+            await walt.put("/api/settings/agents/antigravity/permissions", json=body)
+        ).json()
+        assert proposed["approved"] is False
+        missing = await walt.put("/api/settings/agents/nobody/permissions", json=body)
+        assert missing.status_code == 404
+    assert (
+        h.service.service_config.agents.get("antigravity", {}).get("permissions")
+        is None
+    )
+    async with _client(app, "maria") as maria:
+        applied = (
+            await maria.put("/api/settings/agents/antigravity/permissions", json=body)
+        ).json()
+        assert applied["approved"] is True
+        [agy] = [
+            a
+            for a in (await maria.get("/api/settings")).json()["agents"]
+            if a["name"] == "antigravity"
+        ]
+        assert agy["permissions"] == "bypass" and agy["can_bypass"] is True
+        agents, _ = h.service.a.reconfigure.calls[-1]
+        assert agents["antigravity"].permissions == "bypass"
+        back = (
+            await maria.put(
+                "/api/settings/agents/antigravity/permissions",
+                json={"permissions": None},
+            )
+        ).json()
+        assert back["approved"] is True
+    assert "permissions" not in (
+        h.service.service_config.agents.get("antigravity") or {}
+    )
+
+
+def test_only_a_cli_with_a_bypass_mode_can_be_set_to_bypass() -> None:
+    text = (
+        "schema: 1\nagents:\n  pi:\n    adapter: generic\n    enabled: true\n"
+        "    command: [pi, '{prompt_file}']\n    permissions: bypass\n"
+    )
+    assert any("no bypass mode" in p for p in _problems(text))
+    assert not [
+        p
+        for p in _problems(
+            text.replace(
+                "permissions: bypass", "bypass_args: [--yes]\n    permissions: bypass"
+            )
+        )
+        if "bypass" in p
+    ]
+
+
 async def test_the_service_account_approves_only_when_a_person_signed_in_as_it(
     demo,
 ) -> None:

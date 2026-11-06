@@ -460,6 +460,8 @@ export interface SettingsAgent {
   provider: string | null;
   budget: { daily_usd: number | null; daily_runs: number | null };
   allow_bypass: boolean;
+  permissions: "auto" | "restricted" | "bypass" | null;
+  can_bypass: boolean;
   binary: string | null;
   from_settings: boolean;
   providers_supported: string[];

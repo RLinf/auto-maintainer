@@ -23,7 +23,7 @@ carries one.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 import yaml
@@ -38,6 +38,7 @@ from ..domain.settings import (
     LabMachine,
     Provider,
     SettingsError,
+    can_bypass,
     effective_agents,
     effective_routing,
     machine_problems,
@@ -100,9 +101,11 @@ async def settings_view(service: Service, user: User) -> dict[str, Any]:
                         "provider",
                         "budget",
                         "allow_bypass",
+                        "permissions",
                         "binary",
                     },
                 ),
+                "can_bypass": can_bypass(cfg),
                 "from_settings": name in config.agents or name in legacy,
                 "providers_supported": sorted(PROVIDER_PROTOCOLS.get(cfg.adapter, ())),
             }
@@ -160,6 +163,35 @@ async def settings_view(service: Service, user: User) -> dict[str, Any]:
             for name, machine in config.labs.items()
         ],
     }
+
+
+class AgentModeBody(BaseModel):
+    permissions: Literal["auto", "restricted", "bypass"] | None = None
+    """The mode the agent runs every task in; ``None`` follows each task's route."""
+
+
+def _with_agent_mode(text: str, name: str, mode: str | None) -> str:
+    """The settings document with agent ``name``'s own permission mode set (or
+    removed when ``None``); its other settings are kept."""
+    data = yaml.safe_load(text or "") or {}
+    if not isinstance(data, dict):
+        raise SettingsError(["the settings file is not a mapping"])
+    data.setdefault("schema", 1)
+    agents = dict(data.get("agents") or {})
+    entry = dict(agents.get(name) or {})
+    if mode is None:
+        entry.pop("permissions", None)
+    else:
+        entry["permissions"] = mode
+    if entry:
+        agents[name] = entry
+    else:
+        agents.pop(name, None)
+    if agents:
+        data["agents"] = agents
+    else:
+        data.pop("agents", None)
+    return yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
 
 
 class MachineBody(BaseModel):
@@ -325,6 +357,30 @@ def build_router() -> APIRouter:
         )
         await service.reload_settings()
         return {"name": name, "deleted": True}
+
+    @r.put("/agents/{name}/permissions")
+    async def set_agent_mode(
+        request: Request,
+        name: str,
+        body: AgentModeBody,
+        user: User = Depends(current_user),
+    ) -> dict[str, Any]:
+        """Give an agent its own permission mode for every task (``bypass`` skips
+        its CLI's permission checks on the team's PRs), or let it follow each route:
+        a settings change like any other."""
+        service = service_of(request)
+        text, legacy = await service.settings_text()
+        if name not in effective_agents(service.service_config, legacy):
+            raise HTTPException(404, f"there is no agent named {name!r}")
+        mode = body.permissions or "the task's route"
+        return await save(
+            request,
+            DocumentBody(
+                yaml=_with_agent_mode(text, name, body.permissions),
+                title=f"settings: {name} runs in {mode} mode",
+            ),
+            user,
+        )
 
     @r.put("/labs/{name}")
     async def set_machine(

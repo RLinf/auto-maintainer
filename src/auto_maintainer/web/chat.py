@@ -425,7 +425,8 @@ async def _settings_block(service: Any, user: User) -> str:
     agent_lines = [
         f"- {name}: {a.adapter}, {'enabled' if a.enabled else 'disabled'}, "
         f"model {a.model or 'CLI default'}, "
-        f"provider {a.provider or 'its own sign-in'}; custom providers it can use: "
+        f"provider {a.provider or 'its own sign-in'}, "
+        f"permissions {a.permissions or 'per task route'}; custom providers it can use: "
         f"{', '.join(sorted(PROVIDER_PROTOCOLS.get(a.adapter, ()))) or 'none'}"
         for name, a in agents.items()
     ]
@@ -454,7 +455,10 @@ async def _settings_block(service: Any, user: User) -> str:
             "Shape of the document; every section is optional and lists only what "
             "differs from the defaults:\n"
             "schema: 1\n"
-            "agents: {<name>: {enabled, model, provider, budget: {daily_usd, daily_runs}}}\n"
+            "agents: {<name>: {enabled, model, provider, budget: {daily_usd, daily_runs}, "
+            "permissions: auto | restricted | bypass (its mode for every task instead of "
+            "the route's; bypass skips the CLI's permission checks on team PRs only, "
+            "unless a route sets bypass_untrusted; omit to follow each route)}}\n"
             "providers: {<id>: {name, protocol: anthropic | openai | openai-responses, "
             "base_url, api_key: <SECRET_NAME>, models: [...]}}\n"
             "routing: {<task>: {primary, fallback: [...], verifier, model, effort, "

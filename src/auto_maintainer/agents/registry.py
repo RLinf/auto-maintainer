@@ -83,6 +83,7 @@ def build_runtime(
         "model": config.model,
         "extra_args": config.extra_args,
         "allow_bypass": config.allow_bypass,
+        "permissions": config.permissions,
         "command_prefix": config.command_prefix,
         **config.options,
     }

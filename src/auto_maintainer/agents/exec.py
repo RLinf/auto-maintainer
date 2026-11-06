@@ -307,6 +307,7 @@ class ExecRuntime:
         command_prefix: Iterable[str] = (),
         questions: AgentQuestions | None = None,
         provider: ProviderBinding | None = None,
+        permissions: str | None = None,
     ) -> None:
         self.name = name or self.default_name
         self.binary = binary or self.default_binary
@@ -321,6 +322,9 @@ class ExecRuntime:
         self.search_dirs = tuple(search_dirs)
         self.kill_grace_seconds = kill_grace_seconds
         self.allow_bypass = allow_bypass
+        self.own_permissions = permissions
+        """The mode the service settings give this agent for every task, or ``None``
+        to follow each route (``RuntimeConfig.permissions``)."""
         self.command_prefix = list(command_prefix)
         self.questions = questions
         """Where questions go that ``auto_answer`` does not settle; set by the router."""
@@ -501,7 +505,8 @@ class ExecRuntime:
             )
             return
         if task.permissions == "bypass" and not (
-            self.allow_bypass and self.capabilities().bypass
+            (self.allow_bypass or self.own_permissions == "bypass")
+            and self.capabilities().bypass
         ):
             task = task.model_copy(update={"permissions": "restricted"})
         invocation = self.build_invocation(task, files, binary)

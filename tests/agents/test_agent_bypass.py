@@ -113,6 +113,47 @@ def test_bypass_needs_the_route_the_operator_and_trusted_input(
     assert effective_permissions(route, runtime, task) == expected
 
 
+@pytest.mark.parametrize(
+    ("route", "own", "untrusted", "expected"),
+    [
+        # the agent's own bypass needs no allow_bypass, but only team PRs get it
+        (Route(primary="x"), "bypass", False, "bypass"),
+        (Route(primary="x"), "bypass", True, "auto"),
+        (Route(primary="x", bypass_untrusted=True), "bypass", True, "bypass"),
+        # the agent's own mode wins over the route's either way
+        (Route(primary="x", permissions="bypass"), "restricted", False, "restricted"),
+        (Route(primary="x", permissions="restricted"), "auto", False, "auto"),
+        (Route(primary="x", permissions="restricted"), None, False, "restricted"),
+    ],
+)
+def test_an_agent_can_have_its_own_mode_for_every_task(
+    tmp_path: Path, route: Route, own: str | None, untrusted: bool, expected: str
+) -> None:
+    runtime = build_runtime(
+        "antigravity", RuntimeConfig(adapter="antigravity", permissions=own)
+    )
+    task = _task(tmp_path, untrusted_input=untrusted)
+    mode = effective_permissions(route, runtime, task)
+    assert mode == expected
+    argv = _argv(runtime, task.model_copy(update={"permissions": mode}), tmp_path)
+    assert ("--dangerously-skip-permissions" in argv) is (expected == "bypass")
+
+
+async def test_an_agent_set_to_bypass_runs_without_allow_bypass(
+    tmp_path: Path, fake_cli
+) -> None:
+    cli = fake_cli(
+        stdout='{"type":"result","subtype":"success","result":"ok","session_id":"s"}\n',
+        read_stdin=False,
+    )
+    runtime = ClaudeCodeRuntime(
+        binary=str(cli.path), runs_dir=tmp_path / "runs", permissions="bypass"
+    )
+    events = [e async for e in runtime.run(_task(tmp_path, permissions="bypass"))]
+    assert events[-1].type == AgentEventType.FINAL
+    assert "--dangerously-skip-permissions" in cli.argv()
+
+
 def test_defaults_never_bypass() -> None:
     from auto_maintainer.agents.registry import DEFAULT_RUNTIMES
 
@@ -120,6 +161,7 @@ def test_defaults_never_bypass() -> None:
     assert route.permissions == "auto" and not route.bypass_untrusted
     for name in ("claude-code", "codex", "antigravity", "opencode", "gemini"):
         assert not DEFAULT_RUNTIMES[name].allow_bypass, name
+        assert DEFAULT_RUNTIMES[name].permissions is None, name
         runtime = build_runtime(name, DEFAULT_RUNTIMES[name])
         assert runtime.capabilities().bypass and runtime.capabilities().questions, name
 

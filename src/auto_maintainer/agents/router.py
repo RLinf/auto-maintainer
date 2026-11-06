@@ -79,12 +79,16 @@ class BreakerState:
 
 
 def effective_permissions(route: Route, runtime: AgentRuntime, task: AgentTask) -> str:
-    """The route's mode, except that ``bypass`` falls back to ``auto`` unless the
-    operator set ``allow_bypass`` on this runtime, the CLI has a bypass mode, and the
-    input is trusted or the route sets ``bypass_untrusted``."""
-    if route.permissions != "bypass":
-        return route.permissions
-    if not (getattr(runtime, "allow_bypass", False) and runtime.capabilities().bypass):
+    """The agent's own mode when the service settings give it one, else the route's;
+    ``bypass`` falls back to ``auto`` unless it is allowed on this runtime (by
+    ``allow_bypass`` or by the agent's own ``bypass``), the CLI has a bypass mode, and
+    the input is trusted or the route sets ``bypass_untrusted``."""
+    own = getattr(runtime, "own_permissions", None)
+    mode = own or route.permissions
+    if mode != "bypass":
+        return mode
+    allowed = own == "bypass" or getattr(runtime, "allow_bypass", False)
+    if not (allowed and runtime.capabilities().bypass):
         return "auto"
     if task.untrusted_input and not route.bypass_untrusted:
         return "auto"

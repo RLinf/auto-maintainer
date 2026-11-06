@@ -114,6 +114,11 @@ class RuntimeConfig(BaseModel):
     allow_bypass: bool = False
     """Whether routes that ask for bypass mode may run this CLI with every permission
     check skipped. Off by default; without it such routes run in ``auto`` mode."""
+    permissions: Literal["auto", "restricted", "bypass"] | None = None
+    """The mode this agent runs every task in, instead of the task route's. ``None``
+    (the default) follows the route. ``bypass`` is itself the opt-in, so it needs no
+    ``allow_bypass``, but it still applies only to input from the repository's team
+    unless the route sets ``bypass_untrusted``; other input runs in ``auto``."""
     command_prefix: list[str] = Field(default_factory=list)
     """A wrapper put before the command, such as a sandbox (``bwrap ... --``) or a
     switch to an unprivileged user. ``{workdir}`` and ``{run_dir}`` are filled in."""
@@ -375,6 +380,11 @@ def check_settings(
     for name, agent in agents.items():
         if agent.adapter == "generic" and agent.enabled and not agent.command:
             problems.append(f"agents.{name}: the generic adapter needs a command")
+        if agent.permissions == "bypass" and not can_bypass(agent):
+            problems.append(
+                f"agents.{name}: this CLI has no bypass mode; for the generic "
+                "adapter, set bypass_args"
+            )
         if agent.provider is None:
             continue
         provider = config.providers.get(agent.provider)
@@ -447,6 +457,11 @@ def machine_problems(name: str, machine: LabMachine) -> list[str]:
         if not re.match(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", repo):
             out.append(f"repos: {repo!r} is not owner/name")
     return out
+
+
+def can_bypass(agent: RuntimeConfig) -> bool:
+    """Whether the CLI has a mode that skips its permission checks."""
+    return agent.adapter != "generic" or bool(agent.bypass_args)
 
 
 def secret_names(config: ServiceConfig) -> list[str]:

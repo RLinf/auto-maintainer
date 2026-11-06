@@ -14,7 +14,7 @@ import { useT } from "../i18n";
 import { Icon, type IconName } from "../icons";
 import { useAgentsData } from "./Agents";
 import { SettingsChangeCard } from "../settingsChange";
-import { Skeleton, Tabs, useTab, useToast } from "../ui";
+import { Popover, Skeleton, Tabs, useTab, useToast } from "../ui";
 
 const CONTEXT: AgentContext = { page: "settings", repo: null, number: null, label: "Settings" };
 
@@ -225,6 +225,79 @@ function Row({ icon, title, sub, value, actions }: { icon?: IconName; title: Rea
   );
 }
 
+/** What skipping permission checks means for each CLI. */
+const SKIP_FLAG: Record<string, string> = {
+  "claude-code": "--dangerously-skip-permissions",
+  antigravity: "--dangerously-skip-permissions",
+  codex: "sandbox danger-full-access, approvals never",
+  gemini: "--approval-mode yolo",
+  opencode: "every permission set to allow",
+};
+
+/** Turn an agent's own skip-permissions mode on or off: a settings change, applied at
+ * once for a maintainer of the service's repository and proposed otherwise. */
+function AgentModeSwitch({ agent, canChange }: { agent: SettingsAgent; canChange: boolean }) {
+  const t = useT();
+  const toast = useToast();
+  const set = useAct(
+    (mode: "bypass" | null) => api.put<{ approved: boolean }>(`/api/settings/agents/${agent.name}/permissions`, { permissions: mode }),
+    [["settings"], ["memory"]],
+  );
+  const done = (r: { approved: boolean }) => toast({ title: r.approved ? t("Saved") : t("Change proposed"), icon: r.approved ? "check" : "inbox" });
+  if (agent.permissions === "bypass")
+    return (
+      <button className="ghost sm" disabled={set.isPending} onClick={() => set.mutate(null, { onSuccess: done })}>
+        {t("Check permissions again")}
+      </button>
+    );
+  return (
+    <Popover
+      align="right"
+      label={t("Skip permission checks")}
+      trigger={(open, toggle) => (
+        <button className={`ghost sm ${open ? "on" : ""}`} aria-expanded={open} onClick={toggle}>
+          <Icon name="shield" size={13} />
+          {t("Skip permission checks")}
+        </button>
+      )}
+    >
+      {(close) => (
+        <div className="stack" style={{ gap: 10, padding: 8, width: 380, maxWidth: "calc(100vw - 48px)" }}>
+          <strong className="small">
+            {agent.name}: {t("skip permission checks on every task")}
+          </strong>
+          <span className="small">
+            {t("It runs with")} <code>{SKIP_FLAG[agent.adapter] ?? t("its CLI's bypass mode")}</code> {t("on PRs from the repository's team, instead of asking a reviewer. PRs from outside contributors keep the normal mode.")}
+          </span>
+          <span className="small muted">
+            {t("In this mode the agent can run any command as the service's user, which can read the service's files: the GitHub sign-ins it keeps and the SSH keys for test machines. Turn it on only for an agent you trust with that.")}
+          </span>
+          <div className="row">
+            <button
+              className="primary sm"
+              disabled={set.isPending}
+              onClick={() =>
+                set.mutate("bypass", {
+                  onSuccess: (r) => {
+                    close();
+                    done(r);
+                  },
+                })
+              }
+            >
+              {canChange ? t("Turn on") : t("Propose")}
+            </button>
+            <button className="ghost sm" onClick={close}>
+              {t("Cancel")}
+            </button>
+          </div>
+          <ErrorBox error={set.error} />
+        </div>
+      )}
+    </Popover>
+  );
+}
+
 function ChangeButton({ onClick }: { onClick: () => void }) {
   const t = useT();
   return (
@@ -274,7 +347,15 @@ function AgentsTab({ v, ask }: { v: SettingsView; ask: (p: string, send?: boolea
                   <span className="mono" style={{ fontSize: 13.5 }}>{a.name}</span>
                   {status(a)}
                   <FromSettings on={a.from_settings} />
-                  {a.allow_bypass && <span className="pill status-warn">{t("bypass allowed")}</span>}
+                  {a.permissions === "bypass" ? (
+                    <span className="pill status-warn" title={t("Every task skips the CLI's permission checks on PRs from the repository's team")}>
+                      {t("skips permission checks")}
+                    </span>
+                  ) : a.permissions === "restricted" ? (
+                    <span className="pill">{t("restricted")}</span>
+                  ) : a.allow_bypass ? (
+                    <span className="pill status-warn">{t("bypass allowed")}</span>
+                  ) : null}
                 </span>
               }
               sub={
@@ -287,7 +368,12 @@ function AgentsTab({ v, ask }: { v: SettingsView; ask: (p: string, send?: boolea
                   {a.providers_supported.length === 0 && <> · {t("cannot use custom providers")}</>}
                 </>
               }
-              actions={<ChangeButton onClick={() => ask(`${t("For the")} ${a.name} ${t("agent")}, `)} />}
+              actions={
+                <span className="row" style={{ gap: 4 }}>
+                  {a.can_bypass && <AgentModeSwitch agent={a} canChange={v.access.allowed} />}
+                  <ChangeButton onClick={() => ask(`${t("For the")} ${a.name} ${t("agent")}, `)} />
+                </span>
+              }
             />
           );
         })}
