@@ -136,7 +136,7 @@ On the dashboard, open **Repositories → Add repository**, or run `uv run am re
 The service needs two things from GitHub, and they are different:
 
 - **An account to act as.** It polls pull requests and posts what maintainers approve, around the clock, whether or not anyone is signed in. Usually that is the GitHub CLI's login on the host, or a GitHub App's bot account.
-- **To know who you are when you sign in.** Every approval and configuration change is checked against the signer's GitHub permission on that repository. On a one-person host, `am login` links are enough. For a team, the setup page has GitHub create a sign-in app. Signing in with GitHub also lets you post a review or open a fix PR as yourself; the service keeps that token on the host until you sign out.
+- **To know who you are when you sign in.** Every approval and configuration change is checked against the signer's GitHub permission on that repository. When the host has the GitHub CLI, each person signs in by entering a one-time code on github.com; that token reaches every repository the person can, so posting a review or opening a fix PR as yourself works wherever you have access. Each sign-in uses a folder of its own, never the host's `gh` login, and the service keeps the token on the host under your login only, for what you approve as yourself, until you sign out. A GitHub App's sign-in, if the setup page created one, is offered too, but its token stops at the repositories the app is installed on. Agents run as the same system user as the service and could read those tokens; on a shared host, give each agent a `command_prefix` that confines it (Settings → Agents, design 5.7).
 
 ## Configure it
 

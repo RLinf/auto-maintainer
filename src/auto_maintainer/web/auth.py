@@ -231,10 +231,16 @@ def router(
     @r.post("/auth/gh/start")
     async def gh_start() -> dict[str, Any]:
         """Sign in by authorizing the GitHub CLI on github.com with a one-time code.
-        The service keeps the token on the host to post the reviews you approve as
-        you, deletes the CLI's files, and forgets the token when you sign out."""
-        if gh_signin is None or client_id:
-            raise HTTPException(404, "this instance signs in with GitHub directly")
+
+        Offered whenever the host has the GitHub CLI, beside a GitHub App's sign-in:
+        the CLI's token can do what the person can do on every repository they can
+        reach, where an app's token stops at the repositories the app is installed on.
+        Each sign-in runs in a folder of its own, never the host's ``gh``
+        configuration; the service keeps the token on the host, under the person's
+        login only, to do what they approve as themselves, deletes the CLI's files,
+        and forgets the token when they sign out."""
+        if gh_signin is None:
+            raise HTTPException(404, "this host has no GitHub CLI for signing in")
         now = time.time()
         for fid, flow in list(gh_flows.items()):
             if flow["exp"] < now:
@@ -397,7 +403,7 @@ def router(
             "device_flow": bool(client_id),
             "dev_login": dev,
             "links": links_path is not None,
-            "gh": gh_signin is not None and not client_id,
+            "gh": gh_signin is not None,
         }
 
     @r.post("/auth/logout")

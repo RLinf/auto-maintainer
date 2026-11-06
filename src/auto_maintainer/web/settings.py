@@ -106,6 +106,7 @@ async def settings_view(service: Service, user: User) -> dict[str, Any]:
                     },
                 ),
                 "can_bypass": can_bypass(cfg),
+                "confined": bool(cfg.command_prefix),
                 "from_settings": name in config.agents or name in legacy,
                 "providers_supported": sorted(PROVIDER_PROTOCOLS.get(cfg.adapter, ())),
             }

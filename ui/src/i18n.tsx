@@ -364,7 +364,17 @@ const zh: Record<string, string> = {
   "Each agent runs in its CLI's auto mode; what it would ask a person goes to": "每个智能体都以其 CLI 的自动模式运行；需要询问人的事项会发到",
   "Each repository runs on a profile its maintainers approved. Until then the service only reads it.": "每个仓库都按其维护者批准的配置运行。批准之前，服务只读取不操作。",
   "Endpoints agents use instead of their CLI's own sign-in": "智能体用来替代其 CLI 自身登录的模型接口",
-  "Enter a one-time code on github.com. The service only reads who you are.": "在 github.com 上输入一次性验证码。服务只读取你的身份。",
+  "Enter a one-time code on github.com to authorize the GitHub CLI. What you approve here then runs as you on every repository your account can reach. The token stays on this host, under your login only, and is deleted when you sign out.":
+    "在 github.com 上输入一次性验证码，授权 GitHub CLI。之后你在这里批准的操作，会以你的身份在你的账号能访问的所有仓库上执行。令牌只保存在本机、只归你的登录名所有，退出登录时即删除。",
+  "Or sign in through the service's GitHub App. Its token acts only on repositories the app is installed on, so posting as yourself and private repositories elsewhere may fail.":
+    "也可以通过服务的 GitHub App 登录。它的令牌只能作用于安装了该应用的仓库，因此以你的身份发布、以及访问其他私有仓库可能会失败。",
+  "Sign in through the GitHub App": "通过 GitHub App 登录",
+  "Runs under a command prefix, not as the service's own user": "在命令前缀包装下运行，而不是以服务自身的用户运行",
+  confined: "已隔离",
+  "Agents without a command prefix run as this host's user, so they can read its files, including the tokens reviewers signed in with. On a shared host, confine them.":
+    "没有设置命令前缀的智能体以本机服务用户的身份运行，能读取该用户的文件，包括审阅者登录时留下的令牌。在共享主机上，请为它们加上隔离。",
+  "Confine the agents so they cannot read the service's files: ": "隔离这些智能体，使它们无法读取服务的文件：",
+  "Ask how": "问问怎么做",
   "Enter it on GitHub": "到 GitHub 输入",
   "Error": "错误",
   "Every agent run: which CLI, which task, how it went, and what it cost.": "每次智能体运行：用了哪个 CLI、做什么任务、结果如何、花费多少。",

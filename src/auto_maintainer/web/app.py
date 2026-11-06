@@ -61,7 +61,8 @@ def create_app(
 
     ``links_path`` enables sign-in with one-time links from ``am login``;
     ``gh_signin`` (a factory of ``hostsetup.GhLogin`` by flow id) enables signing in
-    on the web by authorizing the GitHub CLI, for instances without an OAuth client.
+    on the web by authorizing the GitHub CLI, offered beside an OAuth client's sign-in
+    when there is one.
     ``setup_steps`` and ``on_host_change`` let maintainers of the service's repository
     change the host setup from the dashboard (``web/setup.py``).
     """

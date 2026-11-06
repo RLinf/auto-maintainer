@@ -387,3 +387,17 @@ def test_opencode_gets_an_inline_provider_that_reads_the_key_from_env(
 def test_a_provider_key_is_scrubbed_from_transcripts(tmp_path: Path) -> None:
     build_runtime("codex", RuntimeConfig(adapter="codex"), tmp_path, _binding("openai"))
     assert KEY not in scrub(f"the key is {KEY}.")
+
+
+async def test_the_settings_say_which_agents_are_confined(demo) -> None:
+    h, app = demo
+    h.memory.files[SETTINGS_PATH] = (
+        "agents: {codex: {command_prefix: [sudo, -u, am-agent, --]}}\n"
+    )
+    assert (await h.service.reload_settings()).applied is True
+    async with _client(app, "maria") as maria:
+        agents = {
+            a["name"]: a for a in (await maria.get("/api/settings")).json()["agents"]
+        }
+    assert agents["codex"]["confined"] is True
+    assert agents["claude-code"]["confined"] is False

@@ -107,20 +107,31 @@ class GhLogin:
     The login lands in ``config_dir`` (``GH_CONFIG_DIR``), never in the host user's
     own GitHub CLI configuration, and git's global configuration is redirected into
     the same directory so the login cannot install itself as git's credential helper.
+
+    ``throwaway`` is for a person signing in to the dashboard: the token is written to
+    a file in ``config_dir`` (mode 0700) instead of the system keyring, which every
+    ``gh`` on the host shares and which would keep it after ``discard()``.
     """
 
     CODE = re.compile(r"\b([A-Z0-9]{4}-[A-Z0-9]{4})\b")
     URL = re.compile(r"(https://\S+/login/device)")
 
-    def __init__(self, config_dir: Path, web_url: str = "https://github.com") -> None:
+    def __init__(
+        self,
+        config_dir: Path,
+        web_url: str = "https://github.com",
+        *,
+        throwaway: bool = False,
+    ) -> None:
         self.config_dir = config_dir
+        self.throwaway = throwaway
         self.host = web_url.split("://", 1)[-1].rstrip("/")
         self.proc: asyncio.subprocess.Process | None = None
         self.output: list[str] = []
         self._done: asyncio.Task[None] | None = None
 
     def env(self) -> dict[str, str]:
-        self.config_dir.mkdir(parents=True, exist_ok=True)
+        self.config_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         return {
             **os.environ,
             "GH_CONFIG_DIR": str(self.config_dir),
@@ -147,6 +158,7 @@ class GhLogin:
             "https",
             "--web",
             "--skip-ssh-key",
+            *(["--insecure-storage"] if self.throwaway else []),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,

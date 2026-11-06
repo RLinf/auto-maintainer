@@ -472,6 +472,8 @@ export interface SettingsAgent {
   allow_bypass: boolean;
   permissions: "auto" | "restricted" | "bypass" | null;
   can_bypass: boolean;
+  /** Runs under a ``command_prefix`` wrapper instead of as the service's own user. */
+  confined: boolean;
   binary: string | null;
   from_settings: boolean;
   providers_supported: string[];

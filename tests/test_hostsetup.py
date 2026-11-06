@@ -31,6 +31,7 @@ import httpx
 import pytest
 import yaml
 
+from auto_maintainer import cli
 from auto_maintainer.config import (
     HostConfig,
     load_host_config,
@@ -262,6 +263,7 @@ async def test_gh_mode_reads_only_the_github_cli(tmp_path: Path) -> None:
 FAKE_GH = """#!/bin/sh
 if [ "$1 $2" = "auth login" ]; then
   echo "$GIT_CONFIG_GLOBAL" > "$GH_CONFIG_DIR/git-config-was"
+  echo "$@" > "$GH_CONFIG_DIR/args"
   echo "! First copy your one-time code: ABCD-1234"
   echo "Open this URL to continue in your web browser: https://github.com/login/device"
   while [ ! -f "$GH_CONFIG_DIR/approve" ]; do sleep 0.05; done
@@ -478,10 +480,16 @@ async def test_signing_in_on_the_web_through_the_github_cli_keeps_nothing(
     tmp_path: Path, fake_gh, monkeypatch
 ) -> None:
     h = await build_demo(tmp_path)
+    cfg = HostConfig(data_dir=str(tmp_path / "data"))
+    left = cfg.data_path / "sign-in" / "from-a-run-before"
+    left.mkdir(parents=True)
+    (left / "hosts").write_text(TOKEN)
+    factory = cli._gh_signin(cfg)
+    assert not left.exists()
     logins: list[GhLogin] = []
 
-    def factory(flow_id: str) -> GhLogin:
-        logins.append(GhLogin(tmp_path / "sign-in" / flow_id))
+    def tracked(flow_id: str) -> GhLogin:
+        logins.append(factory(flow_id))
         return logins[-1]
 
     async def who(api_url: str, token: str) -> auth.User:
@@ -489,13 +497,21 @@ async def test_signing_in_on_the_web_through_the_github_cli_keeps_nothing(
         return auth.User(login="maria", name="Maria")
 
     monkeypatch.setattr(auth, "_github_user", who)
-    app = create_app(h.service, data_dir=tmp_path, gh_signin=factory)
+    # Offered beside a GitHub App's sign-in, whose token reaches fewer repositories.
+    app = create_app(
+        h.service, data_dir=tmp_path, gh_signin=tracked, oauth_client_id="Iv1.app"
+    )
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://box"
     ) as client:
-        assert (await client.get("/auth/config")).json()["gh"] is True
+        offered = (await client.get("/auth/config")).json()
+        assert offered["gh"] is True and offered["oauth"] is True
         started = (await client.post("/auth/gh/start")).json()
         assert started["code"] == "ABCD-1234"
+        folder = logins[0].config_dir
+        # The token goes to the sign-in's own folder, never the keyring every gh shares.
+        assert "--insecure-storage" in (folder / "args").read_text()
+        assert stat.S_IMODE(folder.stat().st_mode) == 0o700
         pending = await client.post(
             "/auth/gh/poll", json={"flow_id": started["flow_id"]}
         )

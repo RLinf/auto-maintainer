@@ -426,7 +426,13 @@ async def _settings_block(service: Any, user: User) -> str:
         f"- {name}: {a.adapter}, {'enabled' if a.enabled else 'disabled'}, "
         f"model {a.model or 'CLI default'}, "
         f"provider {a.provider or 'its own sign-in'}, "
-        f"permissions {a.permissions or 'per task route'}; custom providers it can use: "
+        f"permissions {a.permissions or 'per task route'}, "
+        + (
+            f"confined by command_prefix {a.command_prefix}"
+            if a.command_prefix
+            else "unconfined (runs as the service's user and can read its files)"
+        )
+        + "; custom providers it can use: "
         f"{', '.join(sorted(PROVIDER_PROTOCOLS.get(a.adapter, ()))) or 'none'}"
         for name, a in agents.items()
     ]
@@ -458,7 +464,11 @@ async def _settings_block(service: Any, user: User) -> str:
             "agents: {<name>: {enabled, model, provider, budget: {daily_usd, daily_runs}, "
             "permissions: auto | restricted | bypass (its mode for every task instead of "
             "the route's; bypass skips the CLI's permission checks on team PRs only, "
-            "unless a route sets bypass_untrusted; omit to follow each route)}}\n"
+            "unless a route sets bypass_untrusted; omit to follow each route), "
+            "command_prefix: [<argv of a wrapper the CLI runs under, such as sudo -u "
+            "<agent-user> -- or bwrap ... --; {workdir} and {run_dir} are filled in per "
+            "run>] (keeps the agent from reading the host's files, such as the tokens "
+            "reviewers signed in with)}}\n"
             "providers: {<id>: {name, protocol: anthropic | openai | openai-responses, "
             "base_url, api_key: <SECRET_NAME>, models: [...]}}\n"
             "routing: {<task>: {primary, fallback: [...], verifier, model, effort, "

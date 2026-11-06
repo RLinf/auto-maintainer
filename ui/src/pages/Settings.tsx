@@ -356,6 +356,11 @@ function AgentsTab({ v, ask }: { v: SettingsView; ask: (p: string, send?: boolea
                   ) : a.allow_bypass ? (
                     <span className="pill status-warn">{t("bypass allowed")}</span>
                   ) : null}
+                  {a.confined && (
+                    <span className="pill" title={t("Runs under a command prefix, not as the service's own user")}>
+                      {t("confined")}
+                    </span>
+                  )}
                 </span>
               }
               sub={
@@ -378,6 +383,14 @@ function AgentsTab({ v, ask }: { v: SettingsView; ask: (p: string, send?: boolea
           );
         })}
       </div>
+      {v.agents.some((a) => a.enabled && !a.confined) && (
+        <p className="small muted" style={{ marginBottom: 0 }}>
+          {t("Agents without a command prefix run as this host's user, so they can read its files, including the tokens reviewers signed in with. On a shared host, confine them.")}{" "}
+          <button className="link-button" style={{ color: "var(--accent)" }} onClick={() => ask(t("Confine the agents so they cannot read the service's files: "))}>
+            {t("Ask how")}
+          </button>
+        </p>
+      )}
       <p className="small muted" style={{ marginBottom: 0 }}>
         {t("Each agent runs in its CLI's auto mode; what it would ask a person goes to")} <Link to="/questions">{t("Agent questions")}</Link>. {t("Runs and costs are on")} <Link to="/agents">{t("Agents")}</Link>.
       </p>

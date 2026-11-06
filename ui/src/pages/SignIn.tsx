@@ -1,4 +1,6 @@
-// Sign-in: GitHub OAuth web flow, or the device flow when the browser cannot reach the callback.
+// Sign-in: authorizing the GitHub CLI with a one-time code when the host has it (its token
+// reaches every repository the person can), else or besides the GitHub App's OAuth web flow
+// and device flow (its token stops at the repositories the app is installed on).
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
@@ -86,7 +88,9 @@ export default function SignIn() {
         <GhWebLogin
           start="/auth/gh/start"
           poll="/auth/gh/poll"
-          body={t("Enter a one-time code on github.com. The service only reads who you are.")}
+          body={t(
+            "Enter a one-time code on github.com to authorize the GitHub CLI. What you approve here then runs as you on every repository your account can reach. The token stays on this host, under your login only, and is deleted when you sign out.",
+          )}
           onDone={() => void client.invalidateQueries()}
         />
       )}
@@ -97,28 +101,34 @@ export default function SignIn() {
           <pre className="pre">uv run am login</pre>
         </div>
       )}
-      {config.data?.oauth === false ? null : (
-      <a className="button primary" href="/auth/login" style={{ height: 40, textDecoration: "none" }}>
-        {t("Sign in with GitHub")}
-      </a>
-      )}
-      {config.data?.oauth === false ? null : device ? (
-        <div className="stack" style={{ alignItems: "center", textAlign: "center" }}>
-          <span>
-            {t("Open")}{" "}
-            <a href={device.verification_uri} target="_blank" rel="noreferrer">
-              {device.verification_uri}
-            </a>{" "}
-            {t("and enter")}:
-          </span>
-          <span className="code">{device.user_code}</span>
-          <span className="muted small">{t("Waiting for GitHub…")}</span>
+      {config.data?.oauth && config.data.gh && (
+        <div className="stack" style={{ gap: 4 }}>
+          <span className="small muted">{t("Or sign in through the service's GitHub App. Its token acts only on repositories the app is installed on, so posting as yourself and private repositories elsewhere may fail.")}</span>
         </div>
-      ) : (
-        <button className="ghost" onClick={start}>
-          {t("Sign in with a device code")}
-        </button>
       )}
+      {config.data?.oauth && (
+        <a className={`button ${config.data.gh ? "" : "primary"}`} href="/auth/login" style={{ height: 40, textDecoration: "none" }}>
+          {config.data.gh ? t("Sign in through the GitHub App") : t("Sign in with GitHub")}
+        </a>
+      )}
+      {config.data?.oauth &&
+        (device ? (
+          <div className="stack" style={{ alignItems: "center", textAlign: "center" }}>
+            <span>
+              {t("Open")}{" "}
+              <a href={device.verification_uri} target="_blank" rel="noreferrer">
+                {device.verification_uri}
+              </a>{" "}
+              {t("and enter")}:
+            </span>
+            <span className="code">{device.user_code}</span>
+            <span className="muted small">{t("Waiting for GitHub…")}</span>
+          </div>
+        ) : (
+          <button className="ghost" onClick={start}>
+            {t("Sign in with a device code")}
+          </button>
+        ))}
       <ErrorBox error={error} />
     </div>
   );

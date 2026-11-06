@@ -156,11 +156,17 @@ STOP_SECONDS = 15.0
 
 
 def _gh_signin(cfg: HostConfig) -> Any:
-    """GitHub CLI logins for signing in on the web, each in its own throwaway folder."""
+    """GitHub CLI logins for signing in on the web, each in its own throwaway folder.
+
+    Sign-ins in progress live in the web server's memory, so none survives a restart:
+    folders a previous run left behind (a browser closed before the poll that deletes
+    them) are removed here, with any token in them.
+    """
     from .hostsetup import GhLogin
 
     root = cfg.data_path / "sign-in"
-    return lambda flow_id: GhLogin(root / flow_id, cfg.github.web_url)
+    shutil.rmtree(root, ignore_errors=True)
+    return lambda flow_id: GhLogin(root / flow_id, cfg.github.web_url, throwaway=True)
 
 
 class _Switch:
