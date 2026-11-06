@@ -66,6 +66,8 @@ def _task(tmp_path: Path, **kw: object) -> AgentTask:
         "workdir": tmp_path,
         "repo": "acme/widget",
         "pr": 42,
+        # A review someone asked for: its questions go to people.
+        "requested_by": "maria",
     }
     data.update(kw)
     return AgentTask.model_validate(data)
@@ -551,3 +553,26 @@ async def test_an_acp_cli_reports_its_models_and_levels_without_a_prompt(
     assert choices.efforts == ["low", "medium", "high"]
     assert choices.default_effort == "medium"
     assert await runtime.choices() is choices, "kept for an hour"
+
+
+async def test_a_background_read_only_task_is_not_left_waiting_on_people(
+    tmp_path: Path,
+) -> None:
+    """Triage, scoring, and scheduled reviews have nobody waiting for them: what the
+    automatic rules do not settle is denied at once instead of becoming a question
+    that holds the run until it expires."""
+    from auto_maintainer.agents.adapters.antigravity import AntigravityRuntime
+    from auto_maintainer.domain.agents import AgentQuestion
+
+    runtime = AntigravityRuntime(runs_dir=tmp_path / "runs")
+    desk = FakeDesk(AgentAnswer(allow=True, by="maria"))
+    runtime.questions = desk
+    question = AgentQuestion(
+        kind=QuestionKind.PERMISSION, title="run", tool="execute", detail="pytest -q"
+    )
+    background = _task(tmp_path, requested_by=None, kind=TaskKind.EVALUATE)
+    answer = await runtime.resolve(background, question)
+    assert answer.allow is False and "background" in (answer.message or "")
+    assert desk.questions == []
+    requested = await runtime.resolve(_task(tmp_path), question)
+    assert requested.allow is True and len(desk.questions) == 1

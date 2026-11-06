@@ -247,3 +247,16 @@ async def test_breaking_failures_open_immediately(kind: str) -> None:
     await router.run(_task(), Route(primary="a"), Verdict)
     second = await router.run(_task(), Route(primary="a"), Verdict)
     assert not second.ok and "circuit open" in (second.error or "")
+
+
+async def test_an_agents_own_effort_wins_over_the_routes() -> None:
+    a = ScriptedAgentRuntime("a", default={"ok": True})
+    a.effort = "high"  # type: ignore[attr-defined]
+    b = ScriptedAgentRuntime("b", [_fail("crash")], default={"ok": True})
+    router, _ = _router(a, b)
+    await router.run(_task(), Route(primary="a", effort="low"), Verdict)
+    await router.run(_task(), Route(primary="b", fallback=["a"], effort="low"), Verdict)
+    assert [t.effort for t in a.tasks] == ["high", "high"]
+    assert b.tasks[0].effort == "low", (
+        "an agent without its own level follows the route"
+    )

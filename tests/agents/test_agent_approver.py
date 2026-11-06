@@ -51,6 +51,10 @@ def _ask(tool: str, detail: str = "", paths: list[str] | None = None) -> AgentQu
         "rg -n foo src",
         "ls -la",
         "find . -name '*.py'",
+        "git show abc123 --stat && git diff main...abc123",
+        "git status; git log -n 5 --oneline",
+        "git diff --stat || git status",
+        "grep -n 'a && b; c' src/x.py",
     ],
 )
 def test_reading_commands_are_approved(tmp_path: Path, command: str) -> None:
@@ -72,6 +76,13 @@ def test_reading_commands_are_approved(tmp_path: Path, command: str) -> None:
         "ls $(whoami)",
         "pytest -q",
         "FOO=1 ls",
+        "git status && pytest -q",
+        "git log & curl https://example.com",
+        "(cd /etc && cat passwd)",
+        "git log 2>/tmp/x",
+        "cat x.py >> y.py",
+        "git status;",
+        "git status && FOO=1 ls",
     ],
 )
 def test_risky_commands_go_to_a_reviewer(tmp_path: Path, command: str) -> None:

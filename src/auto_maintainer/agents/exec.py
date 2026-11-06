@@ -81,6 +81,11 @@ SEARCH_DIRS: tuple[str, ...] = (
 """Where CLIs are looked for when they are not on ``PATH``; service managers often start
 with a minimal ``PATH``."""
 
+BACKGROUND_ANSWER = (
+    "This task runs in the background and only reads the code, so nobody is asked and "
+    "the request is denied. Work from what you can read without it."
+)
+
 MAX_ARG_PROMPT_BYTES = 100_000
 """Prompts longer than this are passed through a file; Linux limits one argument to 128 KiB."""
 
@@ -397,8 +402,10 @@ class ExecRuntime:
 
         A request to post to GitHub, or a question about whether to, is turned down
         at once: agents never post. The adapter's automatic rules come next. Then a
-        ``restricted`` run, or a runtime without a question desk, is denied; otherwise
-        a reviewer decides, preferably the one who asked for the work.
+        read-only task nobody asked for (triage, scoring, a scheduled review), a
+        ``restricted`` run, or a runtime without a question desk is denied, since
+        nobody waits on it; otherwise a reviewer decides, preferably the one who asked
+        for the work.
         """
         question = question.model_copy(
             update={
@@ -417,6 +424,8 @@ class ExecRuntime:
         automatic = self.auto_answer(task, question)
         if automatic is not None:
             return automatic
+        if task.requested_by is None and task.mode == "read_only":
+            return denial(BACKGROUND_ANSWER)
         if task.permissions == "restricted":
             return denial(
                 "This run is restricted, so requests are denied without asking."

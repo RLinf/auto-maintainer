@@ -373,6 +373,7 @@ def build_router() -> APIRouter:
             output_schema=ChatAnswer.model_json_schema(),
             resume_session=thread.session,
             job_id=run,
+            requested_by=user.login,
         )
         thread.live_run = run
         await service.store.save_thread(thread)

@@ -15,11 +15,12 @@
 """Automatic answers for CLIs that have no auto mode of their own (the ACP runtimes).
 
 The rules approve what is clearly safe for the task and nothing else: reading and
-searching inside the run's directories, read-only shell commands there, and, for
-tasks that may write, edits inside the worktree and running tests or linters. Edits
-in a read-only task are refused. Everything else, including any path outside the
-run's directories, network access, and shell syntax that can hide a second command,
-goes to a reviewer.
+searching inside the run's directories, read-only shell commands there (also several
+joined with ``&&``, ``||``, ``;``, or ``|`` when each one is), and, for tasks that
+may write, edits inside the worktree and running tests or linters. Edits in a
+read-only task are refused. Everything else, including any path outside the run's
+directories, network access, and shell syntax that can hide a command (substitution,
+redirection, subshells, a background ``&``), goes to a reviewer.
 """
 
 from __future__ import annotations
@@ -49,7 +50,10 @@ GIT_WRITE = frozenset(
 )
 TEST_COMMANDS = frozenset({"pytest", "ruff"})
 _FIND_ACTIONS = frozenset({"-exec", "-execdir", "-delete", "-ok", "-okdir", "-fprint"})
-_SHELL_META = ("$(", "`", ">", "<", "&", ";", "\n", "\\")
+_SHELL_META = ("$(", "`", "\n", "\\")
+"""Text that can hide a command anywhere in a command line."""
+_JOINS = frozenset({"&&", "||", ";", "|"})
+"""Operators that run one command after another; each command is checked alone."""
 
 
 POSTING_ANSWER = (
@@ -109,15 +113,35 @@ def auto_answer(task: AgentTask, question: AgentQuestion) -> AgentAnswer | None:
     return None
 
 
+def _commands(command: str) -> list[list[str]] | None:
+    """The simple commands in ``command`` joined by ``&&``, ``||``, ``;``, or ``|``,
+    each as its words; ``None`` when it uses any other shell operator (redirection,
+    a background ``&``, a subshell) or does not parse."""
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    try:
+        tokens = list(lexer)
+    except ValueError:
+        return None
+    commands: list[list[str]] = [[]]
+    for token in tokens:
+        if token in _JOINS:
+            commands.append([])
+        elif token and set(token) <= set(lexer.punctuation_chars):
+            return None  # >, <, &, (, ) and their combinations
+        else:
+            commands[-1].append(token)
+    return commands
+
+
 def safe_command(command: str, mode: str, roots: list[Path]) -> bool:
     """Whether ``command`` only reads (or, for writing tasks, tests) inside ``roots``."""
     if any(token in command for token in _SHELL_META):
         return False
-    for segment in command.split("|"):
-        try:
-            words = shlex.split(segment)
-        except ValueError:
-            return False
+    commands = _commands(command)
+    if commands is None:
+        return False
+    for words in commands:
         if not words or "=" in words[0]:
             return False
         if not _safe_words(words, mode):

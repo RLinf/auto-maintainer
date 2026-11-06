@@ -22,8 +22,8 @@ runtime after an ``auth``, ``quota``, ``crash``, or ``timeout`` failure, and for
 task kind on that runtime after two invalid structured answers in a row (a CLI that
 cannot answer one kind of task still runs the others); both close after the
 cool-down. ``route.model`` applies to the primary runtime only, since
-model names differ between CLIs; ``route.effort`` and ``route.timeout_seconds``
-apply to every attempt.
+model names differ between CLIs; ``route.effort`` (unless the agent has its own
+``effort``) and ``route.timeout_seconds`` apply to every attempt.
 """
 
 from __future__ import annotations
@@ -204,7 +204,11 @@ class AgentRouter:
             attempt = task.model_copy(
                 update={
                     "model": (route.model or task.model) if index == 0 else None,
-                    "effort": route.effort or task.effort,
+                    # An agent's own reasoning level wins over the route's, as its
+                    # own permission mode does.
+                    "effort": getattr(runtime, "effort", None)
+                    or route.effort
+                    or task.effort,
                     "timeout_seconds": route.timeout_seconds,
                     "question_timeout_seconds": route.question_timeout_seconds,
                     "permissions": effective_permissions(route, runtime, task),
