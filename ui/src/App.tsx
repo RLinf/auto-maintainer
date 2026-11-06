@@ -3,7 +3,7 @@
 // the routes.
 
 import { useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Link, NavLink, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { api, ApiError, type Me } from "./api";
 import { AgentProvider, useAgent } from "./agent";
@@ -61,8 +61,6 @@ export default function App() {
   );
 }
 
-const PRIMARY = NAV.slice(0, 3);
-const MORE = NAV.slice(3);
 
 function Shell({ me }: { me: Me }) {
   const t = useT();
@@ -143,7 +141,6 @@ function Shell({ me }: { me: Me }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [me.paused, lang, agent, t, canNotify]);
 
-  const moreActive = MORE.some((n) => location.pathname.startsWith(n.to));
   return (
     <>
       <header className="header">
@@ -152,63 +149,10 @@ function Shell({ me }: { me: Me }) {
             <Logo size={28} />
             <span className="name">auto-maintainer</span>
           </Link>
-          <nav className="tabs-nav" aria-label={t("Main")}>
-            {PRIMARY.map((n) => (
-              <NavLink key={n.to} to={n.to} end={n.to === "/"} title={t(n.label)}>
-                <Icon name={n.icon} size={15} />
-                <span className="label-text">{t(n.label)}</span>
-                {n.to === "/" && waiting > 0 && <span className="count">{waiting}</span>}
-              </NavLink>
-            ))}
-            <Popover
-              label={t("More")}
-              trigger={(_, toggle) => (
-                <a
-                  href="#more"
-                  className={moreActive ? "active" : ""}
-                  onClick={(e) => {
-                    e.preventDefault();
-                    toggle();
-                  }}
-                  aria-haspopup="menu"
-                >
-                  <span className="label-text">{moreActive ? t(MORE.find((n) => location.pathname.startsWith(n.to))!.label) : t("More")}</span>
-                  <Icon name="chevronDown" size={14} />
-                </a>
-              )}
-            >
-              {(close) => (
-                <div style={{ width: 300 }}>
-                  {MORE.map((n) => (
-                    <button
-                      key={n.to}
-                      className="menu-item"
-                      style={{ height: "auto", padding: "8px 10px", alignItems: "flex-start" }}
-                      onClick={() => {
-                        navigate(n.to);
-                        close();
-                      }}
-                    >
-                      <Icon name={n.icon} />
-                      <span className="stack" style={{ gap: 0 }}>
-                        <span style={{ fontWeight: 550 }}>
-                          {t(n.label)}
-                          {n.to === "/inbox" && counts.proposals > 0 && <span className="muted"> · {counts.proposals}</span>}
-                          {n.to === "/questions" && counts.questions > 0 && <span className="muted"> · {counts.questions}</span>}
-                          {n.to === "/memory" && counts.memory > 0 && <span className="muted"> · {counts.memory}</span>}
-                        </span>
-                        <span className="small muted">{t(n.hint)}</span>
-                      </span>
-                    </button>
-                  ))}
-                </div>
-              )}
-            </Popover>
-          </nav>
-          <span className="spacer" />
-          <button className="search-trigger" onClick={() => setPalette(true)} aria-label={t("Search")}>
+          <TopNav waiting={waiting} counts={counts} />
+          <button className="search-trigger" onClick={() => setPalette(true)} aria-label={t("Search")} title={t("Search or run a command")}>
             <Icon name="search" />
-            <span className="grow">{t("Search or run a command")}</span>
+            <span className="grow">{t("Search")}</span>
             <span className="kbd">⌘K</span>
           </button>
           <button className="agent hide-narrow" onClick={() => agent.toggle()} title={`${t("Ask agent")} (⌘J)`}>
@@ -447,6 +391,135 @@ function ShortcutsDialog({ onClose }: { onClose: () => void }) {
           </dl>
           <span className="small muted">{t("On Windows and Linux, use Ctrl for ⌘.")}</span>
         </div>
+      </div>
+    </div>
+  );
+}
+
+/** The top bar's pages: as many as fit, in ``NAV`` order, and the rest under More. A
+ * hidden copy of every tab measures the widths, so the split follows the window, the
+ * language, and the fonts. */
+function TopNav({ waiting, counts }: { waiting: number; counts: { questions: number; proposals: number; memory: number } }) {
+  const t = useT();
+  const { lang } = useLang();
+  const navigate = useNavigate();
+  const location = useLocation();
+  const wrap = useRef<HTMLDivElement>(null);
+  const measure = useRef<HTMLDivElement>(null);
+  const [fit, setFit] = useState(3);
+  // The More button shows the current page's name when that page is under it, so it
+  // is measured with that name.
+  const current = NAV.find((n) => n.to !== "/" && location.pathname.startsWith(n.to));
+  const badge = (to: string) =>
+    to === "/" ? waiting : to === "/inbox" ? counts.proposals : to === "/questions" ? counts.questions : to === "/memory" ? counts.memory : 0;
+
+  useLayoutEffect(() => {
+    const box = wrap.current;
+    const ruler = measure.current;
+    if (!box || !ruler) return;
+    const compute = () => {
+      const tabs = Array.from(ruler.children) as HTMLElement[];
+      const more = tabs.pop()?.offsetWidth ?? 0;
+      const style = getComputedStyle(ruler);
+      const gap = parseFloat(style.columnGap || "0") || 0;
+      const chrome = (parseFloat(style.paddingLeft) || 0) + (parseFloat(style.paddingRight) || 0);
+      const room = box.clientWidth - chrome;
+      const widths = tabs.map((el) => el.offsetWidth);
+      const all = widths.reduce((sum, w, i) => sum + w + (i ? gap : 0), 0);
+      if (all <= room) {
+        setFit(widths.length);
+        return;
+      }
+      let used = more;
+      let n = 0;
+      for (const w of widths) {
+        if (used + gap + w > room) break;
+        used += gap + w;
+        n += 1;
+      }
+      setFit(Math.max(1, n));
+    };
+    compute();
+    const observer = new ResizeObserver(compute);
+    observer.observe(box);
+    observer.observe(ruler);
+    void document.fonts?.ready.then(compute);
+    return () => observer.disconnect();
+  }, [lang, waiting, counts.questions, counts.proposals, counts.memory, current]);
+
+  const shown = NAV.slice(0, fit);
+  const rest = NAV.slice(fit);
+  const restActive = rest.find((n) => n.to !== "/" && location.pathname.startsWith(n.to));
+  const tab = (n: (typeof NAV)[number]) => (
+    <>
+      <Icon name={n.icon} size={15} />
+      <span className="label-text">{t(n.label)}</span>
+      {badge(n.to) > 0 && <span className="count">{badge(n.to)}</span>}
+    </>
+  );
+  return (
+    <div className="nav-wrap" ref={wrap}>
+      <nav className="tabs-nav" aria-label={t("Main")}>
+        {shown.map((n) => (
+          <NavLink key={n.to} to={n.to} end={n.to === "/"} title={t(n.label)}>
+            {tab(n)}
+          </NavLink>
+        ))}
+        {rest.length > 0 && (
+          <Popover
+            label={t("More")}
+            trigger={(_, toggle) => (
+              <a
+                href="#more"
+                className={restActive ? "active" : ""}
+                onClick={(e) => {
+                  e.preventDefault();
+                  toggle();
+                }}
+                aria-haspopup="menu"
+              >
+                <span className="label-text">{restActive ? t(restActive.label) : t("More")}</span>
+                <Icon name="chevronDown" size={14} />
+              </a>
+            )}
+          >
+            {(close) => (
+              <div style={{ width: 300 }}>
+                {rest.map((n) => (
+                  <button
+                    key={n.to}
+                    className="menu-item"
+                    style={{ height: "auto", padding: "8px 10px", alignItems: "flex-start" }}
+                    onClick={() => {
+                      navigate(n.to);
+                      close();
+                    }}
+                  >
+                    <Icon name={n.icon} />
+                    <span className="stack" style={{ gap: 0 }}>
+                      <span style={{ fontWeight: 550 }}>
+                        {t(n.label)}
+                        {badge(n.to) > 0 && <span className="muted"> · {badge(n.to)}</span>}
+                      </span>
+                      <span className="small muted">{t(n.hint)}</span>
+                    </span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </Popover>
+        )}
+      </nav>
+      <div className="nav-ruler-box" aria-hidden="true">
+      <div className="tabs-nav nav-ruler" ref={measure}>
+        {NAV.map((n) => (
+          <a key={n.to}>{tab(n)}</a>
+        ))}
+        <a>
+          <span className="label-text">{current ? t(current.label) : t("More")}</span>
+          <Icon name="chevronDown" size={14} />
+        </a>
+      </div>
       </div>
     </div>
   );

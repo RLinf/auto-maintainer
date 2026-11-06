@@ -148,6 +148,10 @@ code { background: var(--code-bg); padding: 1px 5px; border-radius: 5px; }
 .logo:hover { text-decoration: none; }
 .logo svg { filter: drop-shadow(0 2px 6px rgba(91, 76, 245, 0.28)); }
 .tabs-nav { display: flex; gap: 2px; padding: 3px; border-radius: 11px; background: var(--surface-2); }
+.nav-wrap { position: relative; flex: 1 1 auto; min-width: 0; display: flex; }
+.nav-wrap > .tabs-nav:first-child { min-width: 0; }
+.nav-ruler-box { position: absolute; left: 0; top: 0; width: 0; height: 0; overflow: hidden; visibility: hidden; pointer-events: none; }
+.nav-ruler { position: absolute; left: 0; top: 0; width: max-content; }
 .tabs-nav a {
   display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; border-radius: 8px;
   color: var(--muted); font-weight: 520; white-space: nowrap;
@@ -157,7 +161,7 @@ code { background: var(--code-bg); padding: 1px 5px; border-radius: 5px; }
 .tabs-nav .count { font-size: 11px; padding: 0 6px; border-radius: 999px; background: var(--accent); color: var(--accent-text); font-weight: 600; }
 .spacer { flex: 1; }
 .search-trigger {
-  display: flex; align-items: center; gap: 8px; height: 36px; padding: 0 10px 0 12px; min-width: 230px;
+  display: flex; align-items: center; gap: 8px; height: 36px; padding: 0 10px 0 12px; min-width: 130px; flex-shrink: 0;
   border: 1px solid var(--border); border-radius: 10px; background: var(--surface); color: var(--muted); cursor: pointer;
   box-shadow: var(--shadow-sm); font: inherit;
 }

@@ -20,17 +20,18 @@ export interface Command {
   run: () => void;
 }
 
+/** Every page, in the order the top bar shows them while they fit. */
 export const NAV: { to: string; label: string; icon: IconName; keys?: string; hint: string }[] = [
   { to: "/", label: "Home", icon: "home", keys: "g h", hint: "Decisions waiting for you and the state of the service" },
   { to: "/prs", label: "Pull requests", icon: "pr", keys: "g p", hint: "The review queue, ranked by priority" },
   { to: "/repos", label: "Repositories", icon: "repo", keys: "g r", hint: "Profiles, settings, and onboarding" },
   { to: "/inbox", label: "Approvals", icon: "inbox", keys: "g i", hint: "Actions waiting for approval" },
   { to: "/questions", label: "Agent questions", icon: "question", keys: "g q", hint: "What running agents are asking" },
+  { to: "/settings", label: "Settings", icon: "settings", keys: "g s", hint: "Agents, model providers, routing, and system" },
   { to: "/memory", label: "Memory", icon: "book", keys: "g m", hint: "Memory changes and the memory repository" },
   { to: "/ci", label: "CI health", icon: "activity", hint: "Diagnosed failures, flaky jobs, reruns" },
   { to: "/agents", label: "Agents", icon: "cpu", hint: "Runtime health, runs, and cost" },
   { to: "/chat", label: "Conversations", icon: "message", hint: "Your conversations with the agent" },
-  { to: "/settings", label: "Settings", icon: "settings", keys: "g s", hint: "Agents, model providers, routing, and system" },
   { to: "/service", label: "Service", icon: "server", hint: "Running version, updates, self-improvement" },
   { to: "/audit", label: "Audit log", icon: "shield", hint: "Every decision and change" },
 ];
