@@ -25,7 +25,9 @@ uv run am setup                           # print that link again; AM_CONFIG_DIR
 uv run am login                           # one-time sign-in link for the GitHub account logged in on the host
 uv run am doctor [--live]                 # probe forge auth, memory repo, agent CLIs, labs
 uv run am serve --demo                    # the whole service on fakes with sample data, on :7777
-uv run am supervise [serve options]       # production: restarts after a deploy, rolls back a failed one
+uv run am start [serve options]           # production, in the background: am supervise with a rotated log
+uv run am logs -f | am status | am stop   # follow the log, check, stop the background service
+uv run am supervise [serve options]       # the same in the foreground: restarts after a deploy, rolls back a failed one
 uv run am serve --dev                     # real forge: only sandbox_repo, or every repository at shadow
 uv run am repo add <owner>/<repo>         # start onboarding (needs your gh identity to pass the gate)
 uv run am profile show|doctor <owner>/<repo>

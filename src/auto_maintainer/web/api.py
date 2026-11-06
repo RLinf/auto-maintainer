@@ -24,7 +24,9 @@ from __future__ import annotations
 
 import json
 import re
+from collections import deque
 from datetime import timedelta
+from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -62,6 +64,7 @@ from ..domain.records import ActionRecord, AuditEntry, JobStatus
 from ..domain.review import classify_review_state
 from ..domain.run_ci import plan_run_ci
 from ..domain.scoring import Evaluation, recompute
+from ..domain.secrets import redact_secrets
 from ..domain.snapshot import PrState
 from ..playbooks.evaluate import haystack, rubric_of
 from ..playbooks.hygiene import hygiene_key
@@ -1290,6 +1293,30 @@ def build_router() -> APIRouter:
         return proposal.model_dump(mode="json")
 
     # -- the service's own code ---------------------------------------------------------
+
+    @r.get("/service/logs")
+    async def service_logs(
+        request: Request,
+        lines: int = Query(default=300, ge=1, le=5000),
+        user: User = Depends(current_user),
+    ) -> dict[str, Any]:
+        """The end of the log ``am start`` keeps (``<data>/logs/service.log``), for
+        maintainers of the service's repository; anything that looks like a
+        credential is removed."""
+        service = service_of(request)
+        allowed, why = await code_maintainer(service, user)
+        if not allowed:
+            raise HTTPException(403, why)
+        path = Path(request.app.state.log_path)
+        if not path.exists():
+            return {"path": str(path), "lines": [], "kept": False}
+        with path.open(encoding="utf-8", errors="replace") as f:
+            last = [line.rstrip("\n") for line in deque(f, maxlen=lines)]
+        return {
+            "path": str(path),
+            "lines": [redact_secrets(line)[0] for line in last],
+            "kept": True,
+        }
 
     @r.get("/service")
     async def service_status(

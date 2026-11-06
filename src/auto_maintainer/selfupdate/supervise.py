@@ -20,17 +20,27 @@ growing delay, except when the service dies before it confirmed a fresh deploy
 (``deploy.json`` without ``confirmed``): then the checkout goes back to the previous
 commit, its environment is synced, and the service starts on the old code. Exit code
 0 (a deliberate stop) ends the supervisor.
+
+With a log file (``am start`` runs it that way), the supervisor writes everything the
+service prints, and its own messages, to that file, rotating it by size. It is the
+only writer, so the rotation never races another process.
 """
 
 from __future__ import annotations
 
 import json
+import logging
+import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable
+from datetime import UTC, datetime
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from typing import IO
 
 from .updater import RESTART_EXIT_CODE
 
@@ -65,6 +75,33 @@ def rollback(
     return ok
 
 
+class LogFile:
+    """Lines into ``path``, rotated at ``max_bytes`` with ``backups`` old files kept."""
+
+    def __init__(
+        self, path: Path, max_bytes: int = 20_000_000, backups: int = 5
+    ) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.path = path
+        handler = RotatingFileHandler(
+            path, maxBytes=max_bytes, backupCount=backups, encoding="utf-8"
+        )
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        self._logger = logging.Logger(f"am.supervise.{path}")
+        self._logger.addHandler(handler)
+        self._logger.propagate = False
+        self._lock = threading.Lock()
+
+    def write(self, line: str) -> None:
+        with self._lock:
+            self._logger.info(line.rstrip("\n"))
+
+    def pump(self, stream: IO[str]) -> None:
+        """Copy ``stream`` line by line until it closes."""
+        for line in stream:
+            self.write(line)
+
+
 class _Stop(Exception):
     """Ctrl+C or SIGTERM reached the supervisor."""
 
@@ -76,9 +113,8 @@ def supervise(
     *,
     max_backoff: float = 60.0,
     stop_grace: float = 20.0,
-    log: Callable[[str], None] = lambda m: print(
-        f"[am supervise] {m}", file=sys.stderr
-    ),
+    log: Callable[[str], None] | None = None,
+    log_file: Path | None = None,
 ) -> int:
     """Run ``command`` until it exits with 0 or the supervisor is told to stop.
 
@@ -86,17 +122,68 @@ def supervise(
     finish; a second Ctrl+C, or the grace running out, kills it. The supervisor never
     exits while the service is still running.
     """
-    backoff = 1.0
-    child: subprocess.Popen | None = None
+    sink = LogFile(log_file) if log_file else None
+    if log is None:
+        if sink is not None:
+            to_file = sink
+
+            def log(m: str) -> None:
+                stamp = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S,%f")[:-3]
+                to_file.write(f"{stamp} INFO am.supervise: {m}")
+        else:
+
+            def log(m: str) -> None:
+                print(f"[am supervise] {m}", file=sys.stderr)
+
+    env = {**os.environ, "PYTHONUNBUFFERED": "1"} if sink else None
 
     def stop(_signum: int, _frame: object) -> None:
         raise _Stop
 
-    signal.signal(signal.SIGTERM, stop)
-    signal.signal(signal.SIGINT, stop)
+    previous = {
+        sig: signal.signal(sig, stop) for sig in (signal.SIGTERM, signal.SIGINT)
+    }
+    try:
+        return _run(
+            command, checkout, state_file, log, env, sink, max_backoff, stop_grace
+        )
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+
+
+def _run(
+    command: list[str],
+    checkout: Path,
+    state_file: Path,
+    log: Callable[[str], None],
+    env: dict[str, str] | None,
+    sink: LogFile | None,
+    max_backoff: float,
+    stop_grace: float,
+) -> int:
+    backoff = 1.0
+    child: subprocess.Popen | None = None
     try:
         while True:
-            child = subprocess.Popen(command, cwd=checkout)
+            if sink is None:
+                child = subprocess.Popen(command, cwd=checkout)
+            else:
+                child = subprocess.Popen(
+                    command,
+                    cwd=checkout,
+                    env=env,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    errors="replace",
+                    bufsize=1,
+                )
+                assert child.stdout is not None
+                threading.Thread(
+                    target=sink.pump, args=(child.stdout,), daemon=True
+                ).start()
             code = child.wait()
             if code == 0:
                 return 0

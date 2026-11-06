@@ -23,7 +23,9 @@ import logging
 import os
 import shutil
 import tempfile
+import time
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -333,7 +335,14 @@ def serve(
             await service.a.user_tokens.set(DEMO_USER, UserToken(token="demo"))
             # Agents take their steps slowly enough to watch them in the live view.
             harness.runner.step_delay = 0.7
-            web = create_app(service, data_dir=root, allow_dev_login=True)
+            from .background import log_file
+
+            web = create_app(
+                service,
+                data_dir=root,
+                allow_dev_login=True,
+                log_path=log_file(_cfg().data_path),
+            )
             await service.start()
             bind = host or "0.0.0.0"
             url = f"http://{'127.0.0.1' if bind == '0.0.0.0' else bind}:{port or 7777}"
@@ -388,7 +397,12 @@ def serve(
 @app.command(
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True}
 )
-def supervise(ctx: typer.Context) -> None:
+def supervise(
+    ctx: typer.Context,
+    log_file: Path | None = typer.Option(
+        None, help="Write the service's output here, rotated by size."
+    ),
+) -> None:
     """Run ``am serve`` and keep it running: restart it after a deploy, roll back a
     deploy whose new code fails to start. Extra arguments go to ``am serve``."""
     import sys
@@ -396,15 +410,146 @@ def supervise(ctx: typer.Context) -> None:
     from .selfupdate.supervise import supervise as run_supervisor
 
     cfg = _cfg()
-    checkout = (
+    command = [sys.executable, "-m", "auto_maintainer.cli", "serve", *ctx.args]
+    raise typer.Exit(
+        run_supervisor(
+            command,
+            _checkout(cfg),
+            cfg.data_path / "deploys" / "deploy.json",
+            log_file=log_file,
+        )
+    )
+
+
+def _checkout(cfg: HostConfig) -> Path:
+    return (
         Path(cfg.self_update.checkout).expanduser()
         if cfg.self_update.checkout
         else Path(__file__).resolve().parents[2]
     )
-    command = [sys.executable, "-m", "auto_maintainer.cli", "serve", *ctx.args]
-    raise typer.Exit(
-        run_supervisor(command, checkout, cfg.data_path / "deploys" / "deploy.json")
-    )
+
+
+@app.command(
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True}
+)
+def start(ctx: typer.Context) -> None:
+    """Run the service in the background, supervised: it keeps running when the
+    terminal closes. Extra arguments go to ``am serve``. Follow it with ``am logs -f``;
+    stop it with ``am stop``."""
+    import sys
+
+    from . import background
+
+    cfg = _cfg()
+    data = cfg.data_path
+    log = background.log_file(data)
+    command = [
+        sys.executable,
+        "-m",
+        "auto_maintainer.cli",
+        "supervise",
+        "--log-file",
+        str(log),
+        *ctx.args,
+    ]
+    try:
+        pid = background.start(command, data, _checkout(cfg))
+    except RuntimeError as e:
+        typer.echo(str(e))
+        raise typer.Exit(1) from e
+    time.sleep(3)
+    if background.running(data) is None:
+        typer.echo("the service stopped right after starting; its last lines:")
+        for line in background.tail(log, 30) or background.tail(
+            background.start_log(data), 30
+        ):
+            typer.echo(f"  {line}")
+        raise typer.Exit(1)
+    typer.echo(f"auto-maintainer runs in the background (pid {pid}).")
+    typer.echo(f"  dashboard: {_serving_url(cfg, background.tail(log, 200))}")
+    typer.echo(f"  logs:      {log}   (am logs -f to follow)")
+    typer.echo("  stop:      am stop")
+    for line in background.tail(log, 200):
+        if "/setup/start?code=" in line:
+            typer.echo(f"  not set up yet; open: {line.split()[-1]}")
+
+
+def _serving_url(cfg: HostConfig, lines: list[str]) -> str:
+    """The configured address, with the port the server last said it listens on
+    (``--port`` may differ from the configuration)."""
+    from urllib.parse import urlsplit
+
+    for line in reversed(lines):
+        if "Uvicorn running on http" in line:
+            port = line.split("Uvicorn running on ")[1].split()[0].rsplit(":", 1)[-1]
+            base = urlsplit(cfg.base_url)
+            if port.isdigit() and str(base.port or "") != port:
+                return f"{base.scheme}://{base.hostname}:{port}"
+            break
+    return cfg.base_url
+
+
+@app.command()
+def stop() -> None:
+    """Stop the service that ``am start`` runs in the background."""
+    from . import background
+
+    data = _cfg().data_path
+    pid = background.running(data)
+    if pid is None:
+        typer.echo("the service does not run in the background")
+        raise typer.Exit(1)
+    typer.echo(f"stopping (pid {pid}); running jobs get up to 20 s to finish")
+    background.stop(data)
+    typer.echo("stopped")
+
+
+@app.command()
+def status() -> None:
+    """Whether the service runs in the background, and where its logs are."""
+    from . import background
+
+    cfg = _cfg()
+    data = cfg.data_path
+    pid = background.running(data)
+    log = background.log_file(data)
+    if pid is None:
+        typer.echo("not running in the background (start it with am start)")
+    else:
+        since = datetime.fromtimestamp(background.pid_file(data).stat().st_mtime, UTC)
+        typer.echo(f"running (pid {pid}) since {since:%Y-%m-%d %H:%M} UTC")
+        typer.echo(f"  dashboard: {_serving_url(cfg, background.tail(log, 400))}")
+    typer.echo(f"  logs:      {log}")
+    for line in background.tail(log, 5):
+        typer.echo(f"  | {line}")
+
+
+@app.command()
+def logs(
+    follow: bool = typer.Option(
+        False, "--follow", "-f", help="Keep printing new lines."
+    ),
+    lines: int = typer.Option(
+        100, "--lines", "-n", help="How many lines to show first."
+    ),
+) -> None:
+    """Show the log of the service that ``am start`` runs in the background."""
+    from . import background
+
+    log = background.log_file(_cfg().data_path)
+    if not log.exists():
+        typer.echo(
+            f"no log yet at {log}; the service writes one when started with am start"
+        )
+        raise typer.Exit(1)
+    for line in background.tail(log, lines):
+        typer.echo(line)
+    if follow:
+        try:
+            for line in background.follow(log):
+                typer.echo(line)
+        except KeyboardInterrupt:
+            pass
 
 
 @app.command()

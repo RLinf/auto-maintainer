@@ -97,7 +97,10 @@ There are no configuration files to write. Start the service, open the link it p
 git clone https://github.com/RLinf/auto-maintainer.git
 cd auto-maintainer
 uv sync
-uv run am supervise       # serves on :7777, restarts after deploys, rolls back a bad one
+uv run am start           # in the background: serves on :7777, restarts after deploys, rolls back a bad one
+uv run am logs -f         # follow its log (also on the dashboard: Service → Logs)
+uv run am status          # is it running, where, and the last lines
+uv run am stop            # stop it; running jobs get 20 s to finish
 ```
 
 Open the service's address in a browser (for example `http://192.168.1.20:7777`). Until it is set up, every page is the setup page, and it asks:
@@ -114,7 +117,7 @@ The terminal also prints a one-time setup link (`uv run am setup` prints it agai
 
 **Finish** saves everything and starts the service without a restart. When the service acts as your own GitHub account, it also signs you in; with a GitHub App, you sign in with GitHub. The answers are kept in `~/.config/auto-maintainer/` (`local.yaml`, and `secrets.env` with mode 600), which you never need to open. To change them later, go to **Settings → System → Change host setup**.
 
-`am supervise` runs `am serve` and keeps it running. Use `am serve` directly when you develop. Press <kbd>Ctrl</kbd>+<kbd>C</kbd> once to stop either. To try it against GitHub without touching real repositories, run `uv run am serve --dev`: it holds every repository action in shadow.
+`am start` runs `am supervise` in the background, which runs `am serve` and keeps it running; closing the terminal does not stop it. Its log is `service.log` in the data folder (`~/.local/share/auto-maintainer/logs/` by default), rotated at 20 MB with five old files kept, and maintainers of the service's repository can read it on the Service page. Run `am supervise` instead to keep it in the foreground, or `am serve` directly when you develop; press <kbd>Ctrl</kbd>+<kbd>C</kbd> once to stop either. To try it against GitHub without touching real repositories, run `uv run am serve --dev`: it holds every repository action in shadow.
 
 ### 3. Sign in
 

@@ -51,6 +51,7 @@ def create_app(
     gh_signin: Callable[[str], Any] | None = None,
     setup_steps: Callable[[], Any] | None = None,
     on_host_change: Callable[[Any], Awaitable[None]] | None = None,
+    log_path: Path | None = None,
 ) -> FastAPI:
     """Build the app. ``verify_webhook`` and ``webhook_target`` come from the forge adapter.
 
@@ -68,6 +69,9 @@ def create_app(
         title="auto-maintainer", docs_url="/api/docs", openapi_url="/api/openapi.json"
     )
     app.state.service = service
+    app.state.data_dir = data_dir
+    app.state.log_path = log_path or data_dir / "logs" / "service.log"
+    """The log ``am start`` keeps, which the Service page shows to its maintainers."""
     app.state.sessions = auth.Sessions(data_dir / ".session_secret")
     app.state.cookie_secure = cookie_secure
 

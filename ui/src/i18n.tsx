@@ -1046,6 +1046,13 @@ const zh: Record<string, string> = {
   "Record only": "仅记录",
   "Ask first": "先询问",
   "Automatic": "自动",
+  "Logs": "日志",
+  "Filter": "筛选",
+  "Errors and warnings only": "只看错误和警告",
+  "Follow": "实时跟随",
+  "This service writes no log file: it was not started with am start, so its log goes to the terminal that started it.": "这个服务没有写日志文件：它不是用 am start 启动的，日志输出在启动它的终端里。",
+  "Nothing matches.": "没有匹配的内容。",
+  "Show HTTP requests": "显示 HTTP 请求",
 };
 
 const LangContext = createContext<{ lang: Lang; setLang: (l: Lang) => void }>({ lang: "zh", setLang: () => {} });

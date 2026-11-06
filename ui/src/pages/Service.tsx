@@ -1,6 +1,8 @@
 // The service's own code: what it runs, what waits on its default branch, and the
 // self-improvement PRs it opened. Only maintainers of its repository merge and deploy.
 
+import { useQuery } from "@tanstack/react-query";
+import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, type ServiceView } from "../api";
 import { useAgent } from "../agent";
@@ -182,6 +184,69 @@ export default function ServicePage() {
       </div>
       <h2>{t("History")}</h2>
       <DataTable list={history} columns={columns} empty={t("Nothing yet.")} />
+      {v.can_approve && <LogsSection />}
     </>
+  );
+}
+
+/** The end of the log ``am start`` keeps, refreshed every few seconds while open. */
+function LogsSection() {
+  const t = useT();
+  const [live, setLive] = useState(true);
+  const [filter, setFilter] = useState("");
+  const [problems, setProblems] = useState(false);
+  const [requests, setRequests] = useState(false);
+  const logs = useQuery({
+    queryKey: ["service", "logs"],
+    queryFn: () => api.get<{ path: string; lines: string[]; kept: boolean }>("/api/service/logs?lines=500"),
+    refetchInterval: live ? 4000 : false,
+  });
+  const box = useRef<HTMLPreElement>(null);
+  const lines = (logs.data?.lines ?? []).filter(
+    (l) =>
+      (!filter || l.toLowerCase().includes(filter.toLowerCase())) &&
+      (!problems || /\b(ERROR|WARNING|CRITICAL|Traceback)\b/.test(l)) &&
+      // the dashboard's own requests (this view polls too) are noise unless asked for
+      (requests || !/"(GET|POST|PUT|DELETE|PATCH) \//.test(l)),
+  );
+  useEffect(() => {
+    const el = box.current;
+    if (el && live) el.scrollTop = el.scrollHeight;
+  }, [lines.length, live]);
+  return (
+    <section className="stack" style={{ gap: 10, marginTop: 18 }}>
+      <div className="row">
+        <h2>{t("Logs")}</h2>
+        {logs.data?.path && (
+          <code className="small muted ellipsis" title={logs.data.path} style={{ maxWidth: 260 }}>
+            {logs.data.path.split("/").pop()}
+          </code>
+        )}
+        <span className="spacer" />
+        <input placeholder={t("Filter")} value={filter} onChange={(e) => setFilter(e.target.value)} style={{ width: 180, height: 30 }} />
+        <label className="row small" style={{ gap: 6 }}>
+          <input type="checkbox" checked={problems} onChange={(e) => setProblems(e.target.checked)} />
+          {t("Errors and warnings only")}
+        </label>
+        <label className="row small" style={{ gap: 6 }}>
+          <input type="checkbox" checked={requests} onChange={(e) => setRequests(e.target.checked)} />
+          {t("Show HTTP requests")}
+        </label>
+        <button className={`sm ${live ? "on" : ""}`} onClick={() => setLive(!live)}>
+          <Icon name={live ? "pause" : "play"} size={13} />
+          {live ? t("Pause") : t("Follow")}
+        </button>
+      </div>
+      {logs.data && !logs.data.kept ? (
+        <Empty icon="list">
+          {t("This service writes no log file: it was not started with am start, so its log goes to the terminal that started it.")}
+        </Empty>
+      ) : (
+        <pre ref={box} className="log-view">
+          {lines.length ? lines.join("\n") : logs.isLoading ? "…" : t("Nothing matches.")}
+        </pre>
+      )}
+      <ErrorBox error={logs.error} />
+    </section>
   );
 }
