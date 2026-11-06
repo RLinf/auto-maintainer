@@ -23,7 +23,18 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from pydantic import BaseModel
-from sqlalchemy import and_, delete, event, func, insert, or_, select, update
+from sqlalchemy import (
+    Float,
+    and_,
+    cast,
+    delete,
+    event,
+    func,
+    insert,
+    or_,
+    select,
+    update,
+)
 from sqlalchemy.engine import Row
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
@@ -224,8 +235,10 @@ class SqliteStore:
         stmt = select(m.evaluations.c.data)
         if repo:
             stmt = stmt.where(m.evaluations.c.repo == repo)
+        # ``total`` is stored as text; order by its number, not its spelling.
         return _many(
-            Evaluation, await self._fetch(stmt.order_by(m.evaluations.c.total.desc()))
+            Evaluation,
+            await self._fetch(stmt.order_by(cast(m.evaluations.c.total, Float).desc())),
         )
 
     # -- jobs --------------------------------------------------------------------

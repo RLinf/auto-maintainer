@@ -677,3 +677,15 @@ details.pv-section[open] > summary { margin-bottom: 6px; }
 .run-steps > summary { cursor: pointer; }
 .run-steps[open] > summary { margin-bottom: 6px; }
 .change-note { margin: 0; padding: 6px 10px; border-left: 3px solid var(--accent); background: var(--surface-2); border-radius: var(--r-sm); white-space: pre-wrap; }
+
+/* ---- Home across repositories ---------------------------------------------------- */
+.repo-switch { gap: 6px; flex-wrap: wrap; margin: -4px 0 4px; }
+.repo-switch .chip-btn { border-style: solid; height: 30px; gap: 6px; }
+.repo-summary { display: flex; flex-direction: column; gap: 0; padding: 4px 18px; }
+.repo-summary-row { display: grid; grid-template-columns: minmax(180px, 1.2fr) 1fr auto; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--border); font-size: 13.5px; }
+.repo-summary-row:last-child { border-bottom: 0; }
+.repo-summary-row a { color: inherit; }
+.repo-summary-row .link-button { justify-self: start; display: inline-flex; align-items: center; gap: 6px; text-align: left; color: inherit; }
+.review-repo { gap: 8px; margin: 8px 0 2px; font-size: 13px; }
+.review-repo a { color: inherit; }
+@media (max-width: 640px) { .repo-summary-row { grid-template-columns: 1fr; gap: 4px; } }

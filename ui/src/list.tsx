@@ -37,6 +37,8 @@ export interface ListConfig<T> {
   defaultSort?: string;
   /** ``-id`` sorts descending. */
   groups?: GroupDef<T>[];
+  /** The grouping used until the person picks another (or none). */
+  defaultGroup?: string;
   pageSize?: number;
   /** Prefix for URL parameters when a page has several lists. */
   param?: string;
@@ -61,7 +63,9 @@ export function useList<T>(config: ListConfig<T>) {
   const [params, setParams] = useSearchParams();
   const query = params.get(p("q")) ?? "";
   const sortParam = params.get(p("sort")) ?? config.defaultSort ?? "";
-  const groupId = params.get(p("group")) ?? "";
+  // "none" in the URL turns a default grouping off.
+  const groupParam = params.get(p("group"));
+  const groupId = groupParam === "none" ? "" : (groupParam ?? config.defaultGroup ?? "");
   const page = Math.max(0, Number(params.get(p("page")) ?? "0") || 0);
   const selectedFacets: Record<string, string[]> = {};
   for (const f of facets) {
@@ -171,7 +175,7 @@ export function useList<T>(config: ListConfig<T>) {
     },
     groups,
     groupId: groupDef ? groupId : "",
-    setGroup: (id: string) => update({ group: id || null }),
+    setGroup: (id: string) => update({ group: id || (config.defaultGroup ? "none" : null) }),
     key,
     selection,
     isSelected: (row: T) => selection.has(key(row)),

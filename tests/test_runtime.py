@@ -548,3 +548,19 @@ async def test_lab_executor_leases_idle_gpu_and_cleans_up(tmp_path: Path) -> Non
         assert out["deferred"] and host.commands[-2][2]["CUDA_VISIBLE_DEVICES"] == ""
     finally:
         await store.close()
+
+
+async def test_evaluations_list_by_score_as_a_number(tmp_path: Path) -> None:
+    from auto_maintainer.domain.scoring import Evaluation
+    from auto_maintainer.store.sqlite import SqliteStore
+
+    store = await SqliteStore.open(tmp_path / "am.db")
+    try:
+        for number, total in ((1, 9.5), (2, 65.5), (3, 100.0)):
+            await store.save_evaluation(
+                Evaluation(repo="a/b", number=number, total=total, tier="P2")
+            )
+        listed = [e.number for e in await store.list_evaluations("a/b")]
+        assert listed == [3, 2, 1], "65.5 ranks above 9.5, and 100 above both"
+    finally:
+        await store.close()

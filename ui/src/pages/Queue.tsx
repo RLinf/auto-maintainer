@@ -66,6 +66,9 @@ export default function QueuePage({ me }: { me: Me }) {
       { id: "state", label: t("Review state"), value: (p) => REVIEW_ORDER.indexOf(p.review_state) },
     ],
     defaultSort: "-priority",
+    // Each repository scores against its own rubric, so with several, PRs rank
+    // within their repository rather than in one mixed list.
+    defaultGroup: new Set(rows.map((p) => p.repo)).size > 1 ? "repo" : undefined,
     groups: [
       { id: "repo", label: t("Repository"), value: (p) => p.repo },
       { id: "tier", label: t("Priority"), value: (p) => p.tier ?? t("Not evaluated"), order: [...TIER_ORDER, t("Not evaluated")] },

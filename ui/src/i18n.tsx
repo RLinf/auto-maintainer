@@ -1272,6 +1272,7 @@ const zh: Record<string, string> = {
   "Declined": "已拒绝",
   "Declined by": "拒绝人",
   "Requests from conversations": "对话中提出的请求",
+  "All repositories": "所有仓库",
 };
 
 const LangContext = createContext<{ lang: Lang; setLang: (l: Lang) => void }>({ lang: "zh", setLang: () => {} });

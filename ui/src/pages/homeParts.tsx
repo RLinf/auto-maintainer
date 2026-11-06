@@ -156,7 +156,10 @@ function activity(p: PrRow, me: Me, t: (s: string) => string): ReactNode {
   return null;
 }
 
-export function ReviewCard({ rows, loading, me, automations }: { rows: PrRow[]; loading: boolean; me: Me; automations: Automation[] }) {
+/** PRs that need a review, ranked by priority. With ``byRepo``, each repository ranks
+ * its own PRs under its own heading: scores come from each repository's rubric, so they
+ * do not compare across repositories. */
+export function ReviewCard({ rows, loading, me, automations, byRepo = false }: { rows: PrRow[]; loading: boolean; me: Me; automations: Automation[]; byRepo?: boolean }) {
   const t = useT();
   const toast = useToast();
   const agent = useAgent();
@@ -165,7 +168,13 @@ export function ReviewCard({ rows, loading, me, automations }: { rows: PrRow[]; 
   const [who, setWho] = useAgentChoice("review");
   const [showAll, setShowAll] = useState(false);
   const sorted = [...rows].sort((a, b) => (b.total ?? -1) - (a.total ?? -1));
-  const shown = showAll ? sorted : sorted.slice(0, 8);
+  const perRepo = new Map<string, PrRow[]>();
+  for (const p of sorted) perRepo.set(p.repo, [...(perRepo.get(p.repo) ?? []), p]);
+  const sections: [string | null, PrRow[]][] = byRepo
+    ? [...perRepo.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([repo, list]) => [repo, showAll ? list : list.slice(0, 5)])
+    : [[null, showAll ? sorted : sorted.slice(0, 8)]];
+  const shown = sections.flatMap(([, list]) => list);
+  const more = byRepo ? [...perRepo.values()].some((list) => list.length > 5) : rows.length > 8;
   const review = useAct(
     (prs: PrRow[]) => api.post<ReviewStart[]>("/api/reviews", { prs: prs.map((p) => ({ repo: p.repo, number: p.number })), agent: who || null }),
     [["prs"], ["proposals"]],
@@ -202,8 +211,18 @@ export function ReviewCard({ rows, loading, me, automations }: { rows: PrRow[]; 
       ) : !rows.length ? (
         <span className="small muted">{t("No PR needs a review.")}</span>
       ) : (
+        sections.map(([repo, list]) => (
+        <div key={repo ?? "all"} className="stack" style={{ gap: 4 }}>
+        {repo && (
+          <div className="row review-repo">
+            <Link to={`/prs?tab=review&f.repo=${encodeURIComponent(repo)}`}>
+              <Icon name="repo" size={13} /> <strong>{repo}</strong>
+            </Link>
+            <span className="small muted">{perRepo.get(repo)?.length ?? 0}</span>
+          </div>
+        )}
         <div className="list">
-          {shown.map((p) => (
+          {list.map((p) => (
             <label key={prKey(p)} className="list-row" style={{ cursor: "pointer" }}>
               <input
                 type="checkbox"
@@ -244,8 +263,10 @@ export function ReviewCard({ rows, loading, me, automations }: { rows: PrRow[]; 
             </label>
           ))}
         </div>
+        </div>
+        ))
       )}
-      {rows.length > 8 && (
+      {more && (
         <button className="ghost sm" style={{ marginTop: 8 }} onClick={() => setShowAll(!showAll)}>
           {showAll ? t("Show fewer") : `${t("Show all")} (${rows.length})`}
         </button>
