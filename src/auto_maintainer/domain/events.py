@@ -44,6 +44,9 @@ class EventKind(StrEnum):
     DASHBOARD_COMMAND = "dashboard.command"
     CHAT_MESSAGE = "chat.message"
     PRIORITY_OVERRIDDEN = "priority.overridden"
+    PRIORITY_RESCORE = "priority.rescore"
+    """The rubric's dimensions changed since this PR was scored; the evaluate
+    playbook scores every dimension again."""
     MERGE_ARMED = "merge.armed"
     MERGE_DISARMED = "merge.disarmed"
     MERGE_QUEUE = "merge.queue"

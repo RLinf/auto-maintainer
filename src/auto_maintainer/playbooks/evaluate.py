@@ -68,13 +68,25 @@ def material_change(
     return grew or pr.title != previous.title
 
 
+def scored_elsewhere(evaluation: Evaluation, rubric: Rubric) -> bool:
+    """Whether ``evaluation`` was scored on dimensions ``rubric`` does not have, so a
+    score kept under a shared name may mean something else: score it again in full."""
+    return any(name not in rubric.dimensions for name in evaluation.scores)
+
+
 class EvaluatePlaybook(Playbook):
     """Scores a PR when it opens or changes materially, and again on request: a
     maintainer's ``evaluate`` command scores every dimension afresh, with the
-    repository's lessons as they are now."""
+    repository's lessons as they are now. A rubric change recomputes every total; a PR
+    scored on other dimensions keeps its last total until an agent scores it again."""
 
     name = "evaluate"
-    triggers = (*PR_EVENTS, EventKind.MEMORY_CHANGED, EventKind.DASHBOARD_COMMAND)
+    triggers = (
+        *PR_EVENTS,
+        EventKind.MEMORY_CHANGED,
+        EventKind.DASHBOARD_COMMAND,
+        EventKind.PRIORITY_RESCORE,
+    )
     pool = "agent"
 
     def accepts(self, event: Event, profile: RepoProfile | None) -> bool:
@@ -88,6 +100,8 @@ class EvaluatePlaybook(Playbook):
             return event.repo is not None and any(
                 "rubric" in p or "profile" in p for p in event.payload.get("paths", [])
             )
+        if event.kind == EventKind.PRIORITY_RESCORE:
+            return event.number is not None
         return True
 
     def key(self, event: Event) -> str:
@@ -95,6 +109,8 @@ class EvaluatePlaybook(Playbook):
             return f"evaluate:{event.repo}#{event.number}:manual:{event.id}"
         if event.kind == EventKind.MEMORY_CHANGED:
             return f"evaluate:{event.repo}:memory:{event.payload.get('sha')}"
+        if event.kind == EventKind.PRIORITY_RESCORE:
+            return f"evaluate:{event.repo}#{event.number}:rubric:{event.payload.get('sha')}"
         return f"evaluate:{event.repo}#{event.number}@{(event.sha or '-')[:12]}:{event.kind}"
 
     async def run(self, ctx: PlaybookContext, event: Event) -> PlaybookResult:
@@ -102,7 +118,7 @@ class EvaluatePlaybook(Playbook):
         assert event.repo
         rubric = rubric_of(profile)
         if event.kind == EventKind.MEMORY_CHANGED:
-            return await self._rescore_all(ctx, profile, rubric)
+            return await self._rescore_all(ctx, profile, rubric, event)
         assert event.number
         pr = await ctx.forge.get_pr(event.repo, event.number)
         if pr is None or not in_scope(pr, profile):
@@ -119,7 +135,10 @@ class EvaluatePlaybook(Playbook):
             previous if previous and previous.head_sha != pr.head_sha else None,
         )
         need = need or bool(missing_dimensions(evaluation, rubric))
-        forced = event.kind == EventKind.DASHBOARD_COMMAND
+        forced = event.kind in (
+            EventKind.DASHBOARD_COMMAND,
+            EventKind.PRIORITY_RESCORE,
+        ) or scored_elsewhere(evaluation, rubric)
         scored = False
         if need or forced:
             answer = await self._ask(
@@ -133,7 +152,11 @@ class EvaluatePlaybook(Playbook):
             )
             if answer is not None:
                 scores = {
-                    **evaluation.scores,
+                    **{
+                        k: v
+                        for k, v in evaluation.scores.items()
+                        if k in rubric.dimensions
+                    },
                     **{
                         k: max(0.0, min(10.0, v))
                         for k, v in answer.scores.items()
@@ -169,13 +192,27 @@ class EvaluatePlaybook(Playbook):
         )
 
     async def _rescore_all(
-        self, ctx: PlaybookContext, profile: RepoProfile, rubric: Rubric
+        self, ctx: PlaybookContext, profile: RepoProfile, rubric: Rubric, event: Event
     ) -> PlaybookResult:
+        """Recompute each open PR's total under the current rubric and stage goals. A
+        PR without a score for every dimension is not recomputed, since the missing
+        ones would count as zero: an agent scores it again in full."""
         goals = await ctx.knowledge.stage_goals(profile.repo, profile)
         count = 0
+        again: list[Event] = []
         for pr in await ctx.store.list_snapshots(profile.repo, open_only=True):
             evaluation = await ctx.store.get_evaluation(pr.repo, pr.number)
             if evaluation is None:
+                continue
+            if missing_dimensions(evaluation, rubric):
+                again.append(
+                    Event(
+                        kind=EventKind.PRIORITY_RESCORE,
+                        repo=pr.repo,
+                        number=pr.number,
+                        payload={"sha": event.payload.get("sha")},
+                    )
+                )
                 continue
             state = ctx.classify(pr).state
             await ctx.store.save_evaluation(
@@ -188,7 +225,9 @@ class EvaluatePlaybook(Playbook):
                 )
             )
             count += 1
-        return PlaybookResult(result={"rescored": count})
+        return PlaybookResult(
+            events=again, result={"rescored": count, "scoring_again": len(again)}
+        )
 
     async def _ask(
         self,

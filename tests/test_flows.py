@@ -624,6 +624,62 @@ async def test_a_maintainer_refreshes_and_scores_prs_again_on_request(
     assert polls["started"] + polls["running"] == ["acme/widget"]
 
 
+async def test_a_rubric_with_new_dimensions_scores_each_pr_again_in_full(
+    harness: Harness,
+) -> None:
+    from auto_maintainer.domain.events import Event
+    from auto_maintainer.domain.memory import lock_path, profile_path, repo_dir
+    from auto_maintainer.profiles.layers import dump_yaml, parse_yaml
+
+    asked: list[str] = []
+
+    def evaluate(task):
+        asked.append(task.prompt)
+        names = ("impact", "urgency", "strategic", "readiness", "safety")
+        return {
+            "scores": {n: 8 for n in names if f"- {n} (weight" in task.prompt},
+            "summary": "s",
+            "rationale": "r",
+        }
+
+    harness.runner.on("evaluate", evaluate)
+    harness.runner.on("triage", lambda t: {"summary": "s", "labels": []})
+    harness.forge.put_pr(_pr())
+    await harness.poll()
+    before = await harness.store.get_evaluation("acme/widget", 42)
+    assert before is not None and before.total == 80.0
+
+    path = profile_path("acme/widget")
+    layer = parse_yaml(harness.memory.files[path], path)
+    layer["priority"] = {"rubric": "rubric/rubric.yaml"}
+    harness.memory.files[path] = dump_yaml(layer)
+    harness.memory.files[f"{repo_dir('acme/widget')}/rubric/rubric.yaml"] = dump_yaml(
+        {
+            "dimensions": {
+                "safety": {"weight": 0.5, "rule": "Protects the hardware."},
+                "urgency": {"weight": 0.5, "rule": "Blocks a release."},
+            }
+        }
+    )
+    await harness.approve_directly("acme/widget", "maria")
+    asked.clear()
+    await harness.emit(
+        Event(
+            kind=EventKind.MEMORY_CHANGED,
+            repo="acme/widget",
+            payload={"sha": "m1", "paths": [lock_path("acme/widget")]},
+        )
+    )
+
+    assert len(asked) == 1, "the PR is scored again instead of counting zeros"
+    assert "- safety (weight" in asked[0] and "- urgency (weight" in asked[0], (
+        "a score kept under a shared name is asked again too"
+    )
+    after = await harness.store.get_evaluation("acme/widget", 42)
+    assert after is not None and after.scores == {"safety": 8.0, "urgency": 8.0}
+    assert after.total == 80.0
+
+
 async def test_the_chat_agent_scores_every_open_pr_again(
     harness: Harness, tmp_path: Path
 ) -> None:
