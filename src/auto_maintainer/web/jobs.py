@@ -71,7 +71,7 @@ async def _default_agent(service: Service, job: Job) -> str | None:
         if profile
         else service.info.routing.get(kind)
     )
-    return route.primary if route else None
+    return service.runs_on(route)
 
 
 async def job_view(

@@ -99,6 +99,7 @@ async def settings_view(service: Service, user: User) -> dict[str, Any]:
                         "adapter",
                         "enabled",
                         "model",
+                        "effort",
                         "provider",
                         "budget",
                         "allow_bypass",
@@ -107,6 +108,7 @@ async def settings_view(service: Service, user: User) -> dict[str, Any]:
                     },
                 ),
                 "can_bypass": can_bypass(cfg),
+                "installed": service.agent_ready(name) if cfg.enabled else None,
                 "confined": bool(cfg.command_prefix),
                 "from_settings": name in config.agents or name in legacy,
                 "providers_supported": sorted(PROVIDER_PROTOCOLS.get(cfg.adapter, ())),
@@ -148,6 +150,7 @@ async def settings_view(service: Service, user: User) -> dict[str, Any]:
                     },
                 ),
                 "from_settings": task in config.routing,
+                "runs_on": service.runs_on(route),
             }
             for task, route in routes.items()
         ],
@@ -183,16 +186,38 @@ class AgentModeBody(BaseModel):
 def _with_agent_mode(text: str, name: str, mode: str | None) -> str:
     """The settings document with agent ``name``'s own permission mode set (or
     removed when ``None``); its other settings are kept."""
+    return _with_agent_fields(text, name, {"permissions": mode})
+
+
+def _settings_data(text: str) -> dict[str, Any]:
     data = yaml.safe_load(text or "") or {}
     if not isinstance(data, dict):
         raise SettingsError(["the settings file is not a mapping"])
     data.setdefault("schema", 1)
+    return data
+
+
+def _with_default_agent(text: str, name: str | None) -> str:
+    """The settings document with ``default_agent`` set, or removed when ``None``."""
+    data = _settings_data(text)
+    if name:
+        data["default_agent"] = name
+    else:
+        data.pop("default_agent", None)
+    return yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
+
+
+def _with_agent_fields(text: str, name: str, fields: dict[str, Any]) -> str:
+    """The settings document with agent ``name``'s ``fields`` set (each ``None``
+    removed, so the default applies); its other settings are kept."""
+    data = _settings_data(text)
     agents = dict(data.get("agents") or {})
     entry = dict(agents.get(name) or {})
-    if mode is None:
-        entry.pop("permissions", None)
-    else:
-        entry["permissions"] = mode
+    for key, value in fields.items():
+        if value is None:
+            entry.pop(key, None)
+        else:
+            entry[key] = value
     if entry:
         agents[name] = entry
     else:
@@ -202,6 +227,15 @@ def _with_agent_mode(text: str, name: str, mode: str | None) -> str:
     else:
         data.pop("agents", None)
     return yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
+
+
+class AgentModelBody(BaseModel):
+    model: str | None = None
+    effort: str | None = None
+
+
+class DefaultAgentBody(BaseModel):
+    agent: str | None = None
 
 
 class MachineBody(BaseModel):
@@ -388,6 +422,53 @@ def build_router() -> APIRouter:
             DocumentBody(
                 yaml=_with_agent_mode(text, name, body.permissions),
                 title=f"settings: {name} runs in {mode} mode",
+            ),
+            user,
+        )
+
+    @r.put("/agents/{name}/model")
+    async def set_agent_model(
+        request: Request,
+        name: str,
+        body: AgentModelBody,
+        user: User = Depends(current_user),
+    ) -> dict[str, Any]:
+        """Choose the model and reasoning level an agent uses when a route names
+        none; empty keeps the CLI's own. A settings change like any other."""
+        service = service_of(request)
+        text, legacy = await service.settings_text()
+        if name not in effective_agents(service.service_config, legacy):
+            raise HTTPException(404, f"there is no agent named {name!r}")
+        what = ", ".join(
+            f"{k} {v}" for k, v in (("model", body.model), ("effort", body.effort)) if v
+        )
+        return await save(
+            request,
+            DocumentBody(
+                yaml=_with_agent_fields(
+                    text,
+                    name,
+                    {"model": body.model or None, "effort": body.effort or None},
+                ),
+                title=f"settings: {name} uses {what or 'its own defaults'}",
+            ),
+            user,
+        )
+
+    @r.put("/default-agent")
+    async def set_default_agent(
+        request: Request, body: DefaultAgentBody, user: User = Depends(current_user)
+    ) -> dict[str, Any]:
+        """Choose the agent every task tries first; empty keeps setup's choice."""
+        service = service_of(request)
+        text, _ = await service.settings_text()
+        return await save(
+            request,
+            DocumentBody(
+                yaml=_with_default_agent(text, body.agent or None),
+                title=f"settings: {body.agent} runs every task first"
+                if body.agent
+                else "settings: the agent chosen during setup runs every task first",
             ),
             user,
         )

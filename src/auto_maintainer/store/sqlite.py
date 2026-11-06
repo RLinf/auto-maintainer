@@ -817,6 +817,24 @@ class SqliteStore:
             )
         )
 
+    async def messages_with_pending_requests(self) -> list[ChatMessage]:
+        """Messages in any conversation with a request card still waiting."""
+        stmt = select(m.chat_messages.c.data).where(
+            m.chat_messages.c.data.like('%"state":"pending"%')
+        )
+        return [
+            msg
+            for msg in _many(ChatMessage, await self._fetch(stmt))
+            if any(r.state == "pending" for r in msg.requests)
+        ]
+
+    async def save_message(self, message: ChatMessage) -> None:
+        await self._exec(
+            update(m.chat_messages)
+            .where(m.chat_messages.c.id == message.id)
+            .values(data=_dump(message))
+        )
+
     async def list_messages(self, thread_id: str) -> list[ChatMessage]:
         stmt = (
             select(m.chat_messages.c.data)

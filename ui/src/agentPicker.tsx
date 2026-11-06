@@ -1,5 +1,5 @@
-// Which agent does a review: the route's default, or one the reviewer picks. Only
-// enabled agents are offered.
+// Which agent does a review: the one its route runs on (the first installed agent in
+// its order), or one the reviewer picks among the agents installed on the host.
 
 import { useState } from "react";
 import type { ReviewStart } from "./api";
@@ -54,8 +54,10 @@ export function AgentPicker({
 }) {
   const t = useT();
   const settings = useSettings();
-  const agents = (settings.data?.agents ?? []).filter((a) => a.enabled);
-  const primary = settings.data?.routing.find((r) => r.task === task)?.primary;
+  // Only agents that can run here: turned on, and their CLI installed on the host.
+  const agents = (settings.data?.agents ?? []).filter((a) => a.enabled && a.installed !== false);
+  const route = settings.data?.routing.find((r) => r.task === task);
+  const primary = route?.runs_on ?? route?.primary;
   // A remembered agent that was disabled since falls back to the default.
   const current = value && !agents.some((a) => a.name === value) && settings.data ? "" : value;
   return (

@@ -45,6 +45,7 @@ from typing import Any
 
 from ...domain.agents import (
     AgentAnswer,
+    AgentChoices,
     AgentEvent,
     AgentEventType,
     AgentTask,
@@ -90,6 +91,8 @@ class CodexRuntime(ExecRuntime):
             (Codex's reviewer subagent, its auto mode) or ``user`` (the dashboard).
         **kwargs: Passed to ``ExecRuntime``.
     """
+
+    known_choices = AgentChoices(efforts=["minimal", "low", "medium", "high", "xhigh"])
 
     default_name = "codex"
     default_binary = "codex"

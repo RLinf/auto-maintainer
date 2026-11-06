@@ -46,11 +46,13 @@ from typing import Any
 
 from ...domain.agents import (
     AgentAnswer,
+    AgentChoices,
     AgentEvent,
     AgentEventType,
     AgentQuestion,
     AgentTask,
     Capabilities,
+    ModelChoice,
     QuestionKind,
     QuestionOption,
 )
@@ -96,6 +98,15 @@ class ClaudeCodeRuntime(ExecRuntime):
         write_allowed: ``--allowedTools`` entries for ``workspace_write`` tasks.
         **kwargs: Passed to ``ExecRuntime``.
     """
+
+    known_choices = AgentChoices(
+        models=[
+            ModelChoice(id="opus", name="Opus (latest)"),
+            ModelChoice(id="sonnet", name="Sonnet (latest)"),
+            ModelChoice(id="haiku", name="Haiku (latest)"),
+        ],
+        efforts=["low", "medium", "high", "xhigh", "max"],
+    )
 
     default_name = "claude-code"
     default_binary = "claude"

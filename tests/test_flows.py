@@ -548,3 +548,119 @@ async def test_agent_tasks_are_untrusted_unless_the_author_is_on_the_team(
         if t.kind == "review"
     }
     assert by_pr == {"50": True, "51": False}
+
+
+async def test_a_maintainer_refreshes_and_scores_prs_again_on_request(
+    harness: Harness, tmp_path: Path
+) -> None:
+    import httpx
+
+    from auto_maintainer.domain.memory import repo_dir
+    from auto_maintainer.web.app import create_app
+
+    scores = iter([5, 9])
+    prompts: list[str] = []
+
+    def evaluate(task):
+        prompts.append(task.prompt)
+        value = next(scores)
+        return {
+            "scores": dict.fromkeys(
+                ("impact", "urgency", "strategic", "readiness"), value
+            ),
+            "summary": f"scored {value}",
+            "rationale": "r",
+        }
+
+    harness.runner.on("evaluate", evaluate)
+    harness.runner.on("triage", lambda t: {"summary": "s", "labels": []})
+    harness.forge.put_pr(_pr())
+    await harness.poll()
+    first = await harness.store.get_evaluation("acme/widget", 42)
+    assert first is not None and first.scores["impact"] == 5
+    await harness.poll()
+    assert len(prompts) == 1, "an unchanged PR is not scored again on its own"
+
+    harness.memory.files[f"{repo_dir('acme/widget')}/knowledge/review_lessons.md"] = (
+        "# Review lessons\n- Docs-only PRs are P3.\n"
+    )
+    harness.forge.put_pr(_pr(title="fix(core): handle empty and short batches"))
+    app = create_app(harness.service, data_dir=tmp_path, allow_dev_login=True)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as maria:
+        await maria.get("/auth/dev?login=maria")
+        maria.headers["x-am-csrf"] = maria.cookies.get("am_csrf") or ""
+        refreshed = (await maria.post("/api/prs/acme/widget/42/refresh")).json()
+        snapshot = await harness.store.get_snapshot("acme/widget", 42)
+        assert snapshot is not None and snapshot.title.endswith("short batches")
+        assert refreshed["changes"], "the title change is published"
+        await harness.settle()
+        prompts.clear()
+        scores = iter([9])
+        out = (
+            await maria.post(
+                "/api/evaluations",
+                json={"prs": [{"repo": "acme/widget", "number": 42}]},
+            )
+        ).json()
+        await harness.settle()
+        polls = (await maria.post("/api/prs/refresh", json={})).json()
+    assert out == [
+        {
+            "repo": "acme/widget",
+            "number": 42,
+            "run": "evaluate",
+            "event": out[0]["event"],
+        }
+    ]
+    assert len(prompts) == 1 and "Docs-only PRs are P3." in prompts[0]
+    second = await harness.store.get_evaluation("acme/widget", 42)
+    assert second is not None and second.scores["impact"] == 9
+    assert polls["started"] + polls["running"] == ["acme/widget"]
+
+
+async def test_the_chat_agent_scores_every_open_pr_again(
+    harness: Harness, tmp_path: Path
+) -> None:
+    import httpx
+
+    from auto_maintainer.web.app import create_app
+
+    harness.forge.put_pr(_pr())
+    harness.forge.put_pr(_pr(number=43, sha="d" * 40))
+    harness.runner.on("triage", lambda t: {"summary": "s", "labels": []})
+    harness.runner.on(
+        "evaluate",
+        lambda t: {
+            "scores": dict.fromkeys(("impact", "urgency", "strategic", "readiness"), 4),
+            "summary": "s",
+            "rationale": "r",
+        },
+    )
+    await harness.poll()
+    harness.runner.on(
+        "chat",
+        lambda t: {
+            "reply": "Scoring again.",
+            "proposals": [{"kind": "evaluate", "repo": "acme/widget"}],
+        },
+    )
+    before = len([t for t in harness.runner.tasks if str(t.kind) == "evaluate"])
+    app = create_app(harness.service, data_dir=tmp_path, allow_dev_login=True)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as maria:
+        await maria.get("/auth/dev?login=maria")
+        maria.headers["x-am-csrf"] = maria.cookies.get("am_csrf") or ""
+        thread = (await maria.post("/api/chat/threads", json={"text": "hi"})).json()
+        answer = (
+            await maria.post(
+                f"/api/chat/threads/{thread['id']}/messages",
+                json={"text": "Score them again"},
+            )
+        ).json()
+        await harness.settle()
+    assert "2 PR(s) in acme/widget" in answer["text"]
+    after = len([t for t in harness.runner.tasks if str(t.kind) == "evaluate"])
+    assert after - before == 2

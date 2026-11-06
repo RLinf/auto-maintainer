@@ -6,7 +6,7 @@
 
 import { useEffect, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
-import { api, type LabMachine, type MachineCheck, type SettingsAgent, type SettingsCheck, type SettingsProvider, type SettingsView } from "../api";
+import { api, type AgentChoices, type LabMachine, type MachineCheck, type SettingsAgent, type SettingsCheck, type SettingsProvider, type SettingsView } from "../api";
 import { useAgent, type AgentContext } from "../agent";
 import { Diff, Empty, ErrorBox, PageHead, Section, Status, useAct, When } from "../components";
 import { useSettings } from "../data";
@@ -238,6 +238,62 @@ const SKIP_FLAG: Record<string, string> = {
 
 /** Turn an agent's own skip-permissions mode on or off: a settings change, applied at
  * once for a maintainer of the service's repository and proposed otherwise. */
+/** The model and reasoning level an agent uses when a route names none, chosen among
+ * what its CLI offers (asked of the CLI itself where it can say). */
+function ModelControls({ agent, choices, canChange }: { agent: SettingsAgent; choices: AgentChoices | null | undefined; canChange: boolean }) {
+  const t = useT();
+  const toast = useToast();
+  const set = useAct(
+    (body: { model: string | null; effort: string | null }) => api.put<{ approved: boolean }>(`/api/settings/agents/${agent.name}/model`, body),
+    [["settings"], ["memory"]],
+  );
+  const done = (r: { approved: boolean }) => toast({ title: r.approved ? t("Saved") : t("Change proposed"), icon: r.approved ? "check" : "inbox" });
+  const models = choices?.models ?? [];
+  const efforts = choices?.efforts ?? [];
+  const nameOf = (id: string | null | undefined) => (id ? models.find((m) => m.id === id)?.name || id : null);
+  const cliModel = nameOf(choices?.default_model);
+  const cliEffort = choices?.default_effort;
+  const disabled = !canChange || set.isPending;
+  const title = canChange ? undefined : t("Only maintainers of the service's repository change agents.");
+  return (
+    <span className="row model-controls" style={{ gap: 6 }}>
+      {models.length > 0 ? (
+        <select
+          value={agent.model ?? ""}
+          disabled={disabled}
+          title={title}
+          aria-label={`${agent.name}: ${t("Model")}`}
+          onChange={(e) => set.mutate({ model: e.target.value || null, effort: agent.effort }, { onSuccess: done })}
+        >
+          <option value="">{cliModel ? `${cliModel} (${t("the CLI's default")})` : t("the CLI's default")}</option>
+          {models.map((m) => (
+            <option key={m.id} value={m.id}>
+              {m.name || m.id}
+            </option>
+          ))}
+          {agent.model && !models.some((m) => m.id === agent.model) && <option value={agent.model}>{agent.model}</option>}
+        </select>
+      ) : null}
+      {efforts.length > 0 ? (
+        <select
+          value={agent.effort ?? ""}
+          disabled={disabled}
+          title={title}
+          aria-label={`${agent.name}: ${t("Thinking")}`}
+          onChange={(e) => set.mutate({ model: agent.model, effort: e.target.value || null }, { onSuccess: done })}
+        >
+          <option value="">{cliEffort ? `${t("Thinking")}: ${cliEffort} (${t("default")})` : `${t("Thinking")}: ${t("default")}`}</option>
+          {efforts.map((e) => (
+            <option key={e} value={e}>
+              {t("Thinking")}: {e}
+            </option>
+          ))}
+        </select>
+      ) : null}
+    </span>
+  );
+}
+
 function AgentModeSwitch({ agent, canChange }: { agent: SettingsAgent; canChange: boolean }) {
   const t = useT();
   const toast = useToast();
@@ -338,6 +394,8 @@ function AgentsTab({ v, ask }: { v: SettingsView; ask: (p: string, send?: boolea
       <div className="list">
         {v.agents.map((a) => {
           const provider = v.providers.find((p) => p.id === a.provider);
+          const choices = byName.get(a.name)?.choices;
+          const modelName = (id: string) => choices?.models.find((m) => m.id === id)?.name || id;
           const budget = [a.budget.daily_usd != null ? `$${a.budget.daily_usd}/${t("day")}` : null, a.budget.daily_runs != null ? `${a.budget.daily_runs} ${t("runs/day")}` : null]
             .filter(Boolean)
             .join(" · ");
@@ -369,7 +427,17 @@ function AgentsTab({ v, ask }: { v: SettingsView; ask: (p: string, send?: boolea
               sub={
                 <>
                   {t("Model")}:{" "}
-                  <strong>{a.model ?? provider?.models[0] ?? t("the CLI's default")}</strong>
+                  <strong>
+                    {a.model
+                      ? modelName(a.model)
+                      : (provider?.models[0] ?? (choices?.default_model ? `${modelName(choices.default_model)} (${t("the CLI's default")})` : t("the CLI's default")))}
+                  </strong>
+                  {(a.effort || choices?.default_effort) && (
+                    <>
+                      {" "}
+                      · {t("Thinking")}: <strong>{a.effort ?? `${choices?.default_effort} (${t("default")})`}</strong>
+                    </>
+                  )}
                   {!a.model && provider?.models[0] ? <span className="muted"> ({t("the provider's first")})</span> : null} · {t("Through")}:{" "}
                   <strong>{provider ? provider.name || provider.id : t("its own sign-in")}</strong>
                   {budget ? ` · ${t("Budget")}: ${budget}` : ""}
@@ -378,6 +446,9 @@ function AgentsTab({ v, ask }: { v: SettingsView; ask: (p: string, send?: boolea
               }
               actions={
                 <span className="row" style={{ gap: 4 }}>
+                  {a.enabled && a.installed !== false && !a.provider && (
+                    <ModelControls agent={a} choices={choices} canChange={v.access.allowed} />
+                  )}
                   {a.can_bypass && <AgentModeSwitch agent={a} canChange={v.access.allowed} />}
                   <ChangeButton onClick={() => ask(`${t("For the")} ${a.name} ${t("agent")}, `)} />
                 </span>
@@ -557,24 +628,43 @@ function ProviderRow({ p, canEdit, ask }: { p: SettingsProvider; canEdit: boolea
 }
 
 /** The agent every task tries first, where it was chosen, and a way to change it. */
-function DefaultAgent({ v, ask }: { v: SettingsView; ask: (p: string, send?: boolean) => void }) {
+function DefaultAgent({ v }: { v: SettingsView; ask: (p: string, send?: boolean) => void }) {
   const t = useT();
+  const toast = useToast();
   const { name, source } = v.default_agent;
+  const set = useAct((agent: string | null) => api.put<{ approved: boolean }>("/api/settings/default-agent", { agent }), [["settings"], ["memory"]]);
+  // Only agents that can run here are offered.
+  const ready = v.agents.filter((a) => a.enabled && a.installed !== false);
+  const runsOn = v.routing.find((r) => r.task === "review")?.runs_on;
   return (
     <div className="strip default-agent">
       <Icon name="cpu" />
       <span>
-        {t("Default agent")}: <strong>{name ? agentName(name) : t("none")}</strong>
-        <span className="muted">
-          {" · "}
-          {source === "setup"
-            ? t("chosen during setup")
-            : source === "settings"
-              ? t("set in the settings")
-              : t("each task follows its own order below")}
-        </span>
+        {t("Default agent")}:{" "}
+        <select
+          value={source === "settings" ? (name ?? "") : ""}
+          disabled={!v.access.allowed || set.isPending}
+          title={v.access.allowed ? undefined : t("Only maintainers of the service's repository change agents.")}
+          aria-label={t("Default agent")}
+          onChange={(e) =>
+            set.mutate(e.target.value || null, {
+              onSuccess: (r) => toast({ title: r.approved ? t("Saved") : t("Change proposed"), icon: r.approved ? "check" : "inbox" }),
+            })
+          }
+        >
+          <option value="">
+            {source === "setup" && name
+              ? `${agentName(name)} (${t("chosen during setup")})`
+              : `${runsOn ? agentName(runsOn) : t("none")} (${t("the first installed agent")})`}
+          </option>
+          {ready.map((a) => (
+            <option key={a.name} value={a.name}>
+              {agentName(a.name)}
+            </option>
+          ))}
+        </select>
       </span>
-      <ChangeButton onClick={() => ask(t("Make this the default agent for every task: "))} />
+      <span className="small muted">{t("Every task tries it first; others installed here take over when it cannot run.")}</span>
     </div>
   );
 }
@@ -615,7 +705,13 @@ function RoutingTab({ v, ask }: { v: SettingsView; ask: (p: string, send?: boole
                   <div className="small muted">{t(TASKS[r.task] ?? "")}</div>
                 </td>
                 <td>
-                  <strong>{r.primary}</strong>
+                  <strong>{agentName(r.runs_on ?? r.primary)}</strong>
+                  {r.runs_on && r.runs_on !== r.primary && (
+                    <div className="small muted">
+                      {agentName(r.primary)} {t("is not installed")}
+                    </div>
+                  )}
+                  {!r.runs_on && <div className="small" style={{ color: "var(--bad)" }}>{t("No agent in this order is installed")}</div>}
                   {r.verifier && <div className="small muted">{t("verified by")} {r.verifier}</div>}
                 </td>
                 <td className="small">{r.fallback.length ? r.fallback.join(" → ") : <span className="muted">—</span>}</td>

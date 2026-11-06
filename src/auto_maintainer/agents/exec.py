@@ -37,6 +37,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import os
 import re
 import shutil
@@ -50,6 +51,7 @@ from typing import Any, ClassVar
 
 from ..domain.agents import (
     AgentAnswer,
+    AgentChoices,
     AgentEvent,
     AgentEventType,
     AgentQuestion,
@@ -65,6 +67,8 @@ from ..domain.settings import ProviderBinding
 from .approver import POSTING_ANSWER, posting_request
 from .sandbox import build_env, scrub
 from .structured import extract_json
+
+log = logging.getLogger(__name__)
 
 DEFAULT_RUNS_DIR = Path(tempfile.gettempdir()) / "auto-maintainer-runs"
 SEARCH_DIRS: tuple[str, ...] = (
@@ -281,6 +285,7 @@ class ExecRuntime:
         runs_dir: Where per-run directories go.
         env_allow: Extra environment names or patterns the process may inherit.
         model: Default model when the task does not name one.
+        effort: Default reasoning level when the task's route names none.
         extra_args: Arguments appended to every command line.
         search_dirs: Directories searched for ``binary`` when it is not on ``PATH``.
         kill_grace_seconds: Time between SIGTERM and SIGKILL on timeout.
@@ -291,6 +296,9 @@ class ExecRuntime:
     default_env_allow: ClassVar[tuple[str, ...]] = ()
     line_mode: ClassVar[bool] = True
     """Parse output line by line; otherwise the whole output is parsed at the end."""
+    known_choices: ClassVar[AgentChoices | None] = None
+    """The models and reasoning levels this CLI accepts, for CLIs that cannot list
+    them; adapters set it."""
 
     def __init__(
         self,
@@ -300,6 +308,7 @@ class ExecRuntime:
         runs_dir: Path | str | None = None,
         env_allow: Iterable[str] = (),
         model: str | None = None,
+        effort: str | None = None,
         extra_args: Iterable[str] = (),
         search_dirs: Iterable[str] = SEARCH_DIRS,
         kill_grace_seconds: float = 5.0,
@@ -318,6 +327,7 @@ class ExecRuntime:
         self.model = model or (
             provider.models[0] if provider and provider.models else None
         )
+        self.effort = effort
         self.extra_args = list(extra_args)
         self.search_dirs = tuple(search_dirs)
         self.kill_grace_seconds = kill_grace_seconds
@@ -445,6 +455,16 @@ class ExecRuntime:
 
     # -- AgentRuntime ------------------------------------------------------------------
 
+    async def choices(self) -> AgentChoices | None:
+        """The models and reasoning levels this CLI offers; ``None`` when unknown."""
+        return self.known_choices
+
+    def cached_choices(self) -> AgentChoices | None:
+        """What ``choices`` last found, or the adapter's known list, without asking
+        the CLI again."""
+        cached = getattr(self, "_choices", None)
+        return cached[1] if cached is not None else self.known_choices
+
     def installed(self) -> bool:
         """Whether the CLI's binary is on this host; the router skips the runtime
         when it is not."""
@@ -481,14 +501,22 @@ class ExecRuntime:
             )
         text = out.decode("utf-8", "replace").strip()
         version_match = re.search(r"\d+\.\d+(?:\.\d+)?(?:[-+.\w]*)?", text)
+        latency = round(time.monotonic() - start, 3)
+        choices: AgentChoices | None = None
+        if proc.returncode == 0:
+            try:
+                choices = await self.choices()
+            except Exception as exc:  # the CLI still runs; its options stay unknown
+                log.warning("could not read %s's models: %r", self.name, exc)
         return RuntimeHealth(
             name=self.name,
             available=proc.returncode == 0,
             version=version_match.group(0)
             if version_match
             else (text.splitlines()[0] if text else None),
-            latency_seconds=round(time.monotonic() - start, 3),
+            latency_seconds=latency,
             detail="" if proc.returncode == 0 else text[-500:],
+            choices=choices,
         )
 
     async def run(self, task: AgentTask) -> AsyncIterator[AgentEvent]:
@@ -509,6 +537,8 @@ class ExecRuntime:
                 kind="crash",
             )
             return
+        if not task.effort and self.effort:
+            task = task.model_copy(update={"effort": self.effort})
         if task.permissions == "bypass" and not (
             (self.allow_bypass or self.own_permissions == "bypass")
             and self.capabilities().bypass

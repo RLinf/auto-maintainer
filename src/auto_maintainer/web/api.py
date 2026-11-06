@@ -83,6 +83,43 @@ log = logging.getLogger(__name__)
 T = TypeVar("T")
 
 
+async def start_evaluations(
+    service: Service, login: str, targets: list[tuple[str, int]], source: str
+) -> list[dict[str, Any]]:
+    """Score each PR's priority again on request, every dimension, with the
+    repository's lessons as they are now: at most ``MAX_EVALUATIONS``, skipping
+    repositories whose priority is off, and joining a re-score already running for
+    a PR instead of starting another. The caller checks the user may view each one."""
+    manual: dict[tuple[str | None, int | None], Any] = {}
+    for job in await service.store.list_jobs(
+        [JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.WAITING], limit=5000
+    ):
+        if job.playbook == "evaluate" and ":manual:" in job.key:
+            manual[(job.repo, job.number)] = job
+    out = []
+    for repo, number in targets[:MAX_EVALUATIONS]:
+        item: dict[str, Any] = {"repo": repo, "number": number}
+        profile = await service.profiles.active(repo)
+        if profile is None or not profile.priority.enabled:
+            out.append({**item, "run": "skip", "reason": "priority is off here"})
+            continue
+        running = manual.get((repo, number))
+        if running is not None:
+            first = running.events[0].get("id") if running.events else None
+            out.append({**item, "run": "joined", "event": first or running.id})
+            continue
+        event = Event(
+            kind=EventKind.DASHBOARD_COMMAND,
+            repo=repo,
+            number=number,
+            payload={"command": "evaluate", "by": login},
+            source=source,
+        )
+        await service.bus.publish(event)
+        out.append({**item, "run": "evaluate", "event": event.id})
+    return out
+
+
 def _memory_write_failed(error: str) -> str:
     return (
         "The approval is recorded, but writing it to the memory repo failed: "
@@ -237,6 +274,10 @@ class RejectBody(BaseModel):
     reason: str
 
 
+class EditBody(BaseModel):
+    payload: dict[str, Any]
+
+
 class RepoBody(BaseModel):
     repo: str
 
@@ -339,6 +380,19 @@ class ReviewsBody(BaseModel):
 
 class ReviewBody(BaseModel):
     agent: str | None = None
+
+
+MAX_EVALUATIONS = 500
+"""PRs one request may re-score; each runs an agent."""
+
+
+class EvaluationsBody(BaseModel):
+    prs: list[PrTarget]
+
+
+class RefreshBody(BaseModel):
+    repos: list[str] = Field(default_factory=list)
+    """Repositories to read now; empty means every one the user sees."""
 
 
 class FixBody(BaseModel):
@@ -852,6 +906,58 @@ def build_router() -> APIRouter:
             )
         return out
 
+    @r.post("/prs/refresh")
+    async def refresh_prs(
+        request: Request, body: RefreshBody, user: User = Depends(current_user)
+    ) -> dict[str, Any]:
+        """Read the PRs of ``body.repos`` (every repository the user sees when empty)
+        from GitHub now, in the background, instead of at the next poll."""
+        service = service_of(request)
+        visible = await visible_repos(service, user)
+        repos = [r_ for r_ in body.repos if r_ in visible] if body.repos else visible
+        active = {rec.repo for rec in await service.store.list_repos() if rec.active}
+        started, running = [], []
+        for repo in repos:
+            if repo not in active:
+                continue
+            (started if service.poll_now(repo) else running).append(repo)
+        return {"started": started, "running": running}
+
+    @r.post("/prs/{owner}/{name}/{number}/refresh")
+    async def refresh_pr(
+        request: Request,
+        owner: str,
+        name: str,
+        number: int,
+        user: User = Depends(current_user),
+    ) -> dict[str, Any]:
+        """Read one PR from GitHub now and publish what changed."""
+        service = service_of(request)
+        repo = _repo(owner, name)
+        await require_view(service, user, repo)
+        record = await service.store.get_repo(repo)
+        if record is None or not record.active or not service.serves(repo):
+            raise HTTPException(
+                409, f"the service does not read {repo} until its profile is approved"
+            )
+        events = await service.poller.poll_pr(repo, number)
+        return {"changes": [str(e.kind) for e in events]}
+
+    @r.post("/evaluations")
+    async def request_evaluations(
+        request: Request, body: EvaluationsBody, user: User = Depends(current_user)
+    ) -> list[dict[str, Any]]:
+        """Score each PR's priority again, every dimension, with the repository's
+        lessons as they are now. A PR already being re-scored on request joins that
+        job instead of starting another."""
+        service = service_of(request)
+        targets = body.prs[:MAX_EVALUATIONS]
+        for target in targets:
+            await require_view(service, user, target.repo)
+        return await start_evaluations(
+            service, user.login, [(t.repo, t.number) for t in targets], "dashboard"
+        )
+
     @r.get("/prs/{owner}/{name}/{number}")
     async def pr_detail(
         request: Request,
@@ -1349,6 +1455,31 @@ def build_router() -> APIRouter:
         except ValueError as e:
             raise HTTPException(409, str(e)) from e
         return proposal.model_dump(mode="json")
+
+    @r.post("/proposals/{proposal_id}/edit")
+    async def save_edits(
+        request: Request,
+        proposal_id: str,
+        body: EditBody,
+        user: User = Depends(current_user),
+    ) -> dict[str, Any]:
+        """Save edits to a pending draft without posting it."""
+        service = service_of(request)
+        proposal = await service.store.get_proposal(proposal_id)
+        if proposal is None:
+            raise HTTPException(404, "unknown proposal")
+        await require_view(service, user, proposal.repo)
+        try:
+            proposal = await service.pipeline.save_edits(
+                proposal_id, user.login, body.payload
+            )
+        except ValueError as e:  # a stale proposal, or a payload that does not fit
+            raise HTTPException(409, str(e)) from e
+        record = await service.store.get_action(proposal.action_id)
+        return {
+            **proposal.model_dump(mode="json"),
+            "action": record.model_dump(mode="json") if record else None,
+        }
 
     @r.post("/proposals/{proposal_id}/reject")
     async def reject(
@@ -1887,11 +2018,17 @@ async def _request_review(
         "followup" if state in ("FOLLOWUP_REVIEW", "APPROVED_NEW_COMMITS") else "review"
     )
     route = profile.route(run, service.settings.routing)
-    default_agent = route.primary if route else None
+    default_agent = service.runs_on(route)
     chosen = agent or default_agent
     known = getattr(service.a.agents, "runtimes", None)
     if agent and known is not None and agent not in known:
         return {**out, "run": "skip", "reason": f"no enabled agent named {agent!r}"}
+    if agent and not service.agent_ready(agent):
+        return {
+            **out,
+            "run": "skip",
+            "reason": f"{agent} is not installed on this host",
+        }
     head = pr.head_sha[:12]
     active = [JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.WAITING]
     for job in await service.store.list_jobs(active, repo=repo):

@@ -27,16 +27,25 @@ the handshake.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
+import os
+import signal
+import tempfile
+import time
+from pathlib import Path
 from typing import Any
 
 from ..domain.agents import (
     AgentAnswer,
+    AgentChoices,
     AgentEvent,
     AgentEventType,
     AgentQuestion,
     AgentTask,
     Capabilities,
+    ModelChoice,
     QuestionKind,
     QuestionOption,
 )
@@ -50,7 +59,10 @@ from .exec import (
     RunFiles,
     Step,
     classify_failure,
+    isolation_env,
+    resolve_binary,
 )
+from .sandbox import build_env
 
 _OPTION_KINDS = {
     "allow_once": "allow",
@@ -80,6 +92,42 @@ class AcpRuntime(ExecRuntime):
         """The command that starts the ACP server; subclasses override."""
         raise NotImplementedError
 
+    async def choices(self) -> AgentChoices | None:
+        """Ask the CLI itself: start its ACP server, open a session, read the model
+        and reasoning options it offers, and stop. No prompt is sent, so it costs no
+        tokens. Kept for ``CHOICES_TTL`` seconds."""
+        cached = getattr(self, "_choices", None)
+        if cached is not None and time.monotonic() - cached[0] < CHOICES_TTL:
+            return cached[1]
+        binary = resolve_binary(self.binary, self.search_dirs)
+        if binary is None:
+            return None
+        with tempfile.TemporaryDirectory(prefix="am-acp-probe-") as tmp:
+            root = Path(tmp)
+            task = AgentTask(
+                kind="probe", prompt="", workdir=root, mode="workspace_write"
+            )
+            files = RunFiles.create(root, "probe")
+            argv = [*self.acp_argv(task, files, binary), *self.extra_args]
+            if self.command_prefix:
+                fill = {"workdir": str(root), "run_dir": str(files.dir)}
+                argv = [*(p.format(**fill) for p in self.command_prefix), *argv]
+            env = build_env(task, self.env_allow)
+            env.update(isolation_env(files.dir))
+            env.update(self.task_env(task))
+            for name, value in self.provider_env().items():
+                if value is None:
+                    env.pop(name, None)
+                else:
+                    env[name] = value
+            session = await _open_session(argv, env, root)
+        found = choices_from_session(session) if session is not None else None
+        # A CLI that did not answer (still starting, not signed in) is asked again
+        # within a minute instead of an hour.
+        kept = time.monotonic() - (0 if found else CHOICES_TTL - CHOICES_RETRY)
+        self._choices = (kept, found)
+        return found
+
     def session_setup(
         self, task: AgentTask, session: dict[str, Any]
     ) -> list[tuple[str, dict[str, Any]]]:
@@ -103,6 +151,114 @@ class AcpRuntime(ExecRuntime):
         if task.permissions == "bypass":
             return AgentAnswer(allow=True, by="service", automatic=True)
         return auto_answer(task, question)
+
+
+CHOICES_TTL = 3600.0
+"""Seconds a CLI's reported models and reasoning levels are reused."""
+CHOICES_RETRY = 60.0
+"""Seconds before asking again a CLI that did not report them."""
+
+
+def choices_from_session(session: dict[str, Any]) -> AgentChoices:
+    """The models and reasoning levels in a ``session/new`` result: its config
+    options of category ``model`` and ``thought_level``, else its ``models``."""
+    models: list[ModelChoice] = []
+    default_model: str | None = None
+    efforts: list[str] = []
+    default_effort: str | None = None
+    for option in session.get("configOptions") or []:
+        if not isinstance(option, dict):
+            continue
+        values = [
+            ModelChoice(
+                id=str(o.get("value") or o.get("id")), name=str(o.get("name") or "")
+            )
+            for o in option.get("options") or []
+            if isinstance(o, dict) and (o.get("value") or o.get("id"))
+        ]
+        kind = option.get("category") or option.get("id")
+        current = option.get("currentValue")
+        if kind == "model":
+            models, default_model = values, str(current) if current else None
+        elif kind in ("thought_level", "effort", "reasoning_effort"):
+            efforts = [v.id for v in values]
+            default_effort = str(current) if current else None
+    if not models and isinstance(session.get("models"), dict):
+        listed = session["models"]
+        models = [
+            ModelChoice(id=str(m["modelId"]), name=str(m.get("name") or ""))
+            for m in listed.get("availableModels") or []
+            if isinstance(m, dict) and m.get("modelId")
+        ]
+        current = listed.get("currentModelId")
+        default_model = str(current) if current else None
+    return AgentChoices(
+        models=models,
+        default_model=default_model,
+        efforts=efforts,
+        default_effort=default_effort,
+        source="cli",
+    )
+
+
+async def _open_session(
+    argv: list[str], env: dict[str, str], cwd: Path, timeout: float = 30.0
+) -> dict[str, Any] | None:
+    """Start an ACP server, send ``initialize`` and ``session/new``, and return the
+    session's result; ``None`` when it does not answer in ``timeout`` seconds."""
+    proc = await asyncio.create_subprocess_exec(
+        *argv,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+        env=env,
+        cwd=cwd,
+        start_new_session=True,
+    )
+    assert proc.stdin is not None and proc.stdout is not None
+
+    async def call(request_id: int, method: str, params: dict[str, Any]) -> Any:
+        assert proc.stdin is not None and proc.stdout is not None
+        message = {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": method,
+            "params": params,
+        }
+        proc.stdin.write((json.dumps(message) + "\n").encode())
+        await proc.stdin.drain()
+        while True:
+            line = await proc.stdout.readline()
+            if not line:
+                return None
+            reply = loads_object(line.decode("utf-8", "replace"))
+            if reply is not None and reply.get("id") == request_id:
+                return reply.get("result")
+
+    async def handshake() -> dict[str, Any] | None:
+        await call(
+            1,
+            "initialize",
+            {
+                "protocolVersion": 1,
+                "clientCapabilities": {
+                    "fs": {"readTextFile": False, "writeTextFile": False},
+                    "terminal": False,
+                },
+            },
+        )
+        result = await call(2, "session/new", {"cwd": str(cwd), "mcpServers": []})
+        return result if isinstance(result, dict) else None
+
+    try:
+        return await asyncio.wait_for(handshake(), timeout)
+    except (TimeoutError, OSError, ValueError):
+        return None
+    finally:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(proc.wait(), 5)
 
 
 class AcpConversation(Conversation):

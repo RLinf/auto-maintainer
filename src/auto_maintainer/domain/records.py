@@ -212,6 +212,22 @@ class ChatThread(BaseModel):
     created_at: datetime = Field(default_factory=utc_now)
 
 
+class ChatRequest(BaseModel):
+    """Something an answer asks to do that waits for a person's approval on its card:
+    a change to the service's own code (``improve``), approved by a maintainer of the
+    service's repository, or onboarding a repository (``add_repo``), approved by one
+    who may configure it."""
+
+    kind: Literal["improve", "add_repo"]
+    text: str
+    """The request for ``improve``; the ``owner/name`` for ``add_repo``."""
+    state: Literal["pending", "approved", "declined"] = "pending"
+    decided_by: str | None = None
+    job: str | None = None
+    """For an approved ``improve``: the id the jobs API opens its job by."""
+    id: str = Field(default_factory=lambda: new_id("req"))
+
+
 class ChatMessage(BaseModel):
     thread_id: str
     role: str
@@ -222,8 +238,10 @@ class ChatMessage(BaseModel):
     changes: list[str] = Field(default_factory=list)
     """Memory changes this message made (configuration drafts, lessons), by id."""
     jobs: list[str] = Field(default_factory=list)
-    """Jobs this message started (self-improvements), by the id of the request
-    event, which the jobs API resolves."""
+    """Jobs this message started, by the id of the request event, which the jobs API
+    resolves."""
+    requests: list[ChatRequest] = Field(default_factory=list)
+    """What this message asks to do once a person approves it."""
     run_id: str | None = None
     """For an answer: the agent run that wrote it, whose steps stay readable."""
     id: str = Field(default_factory=lambda: new_id("msg"))

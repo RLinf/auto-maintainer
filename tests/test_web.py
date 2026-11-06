@@ -200,6 +200,50 @@ async def test_a_lesson_from_chat_stays_on_the_answer(demo) -> None:
     assert other.status_code == 404
 
 
+async def test_edits_to_a_review_draft_are_saved_without_posting(demo) -> None:
+    h, app = demo
+    async with _client(app, "maria") as maria:
+        targets = [{"repo": "acme/widget", "number": 42}]
+        await maria.post("/api/reviews", json={"prs": targets})
+        await h.settle()
+        review = next(
+            p
+            for p in (await maria.get("/api/proposals")).json()
+            if p["action"]["action"]["kind"] == "review.post"
+            and p["action"]["action"]["number"] == 42
+        )
+        payload = dict(review["action"]["action"]["payload"])
+        payload["body"] = payload["body"] + "\n\nThanks for the fix."
+        saved = await maria.post(
+            f"/api/proposals/{review['id']}/edit", json={"payload": payload}
+        )
+        assert saved.status_code == 200, saved.text
+        bad = await maria.post(
+            f"/api/proposals/{review['id']}/edit",
+            json={"payload": {**payload, "body": None}},
+        )
+        after = next(
+            p
+            for p in (await maria.get("/api/proposals")).json()
+            if p["id"] == review["id"]
+        )
+    assert bad.status_code == 409
+    assert after["state"] == "pending" and after["edited"] is True
+    assert after["action"]["action"]["payload"]["body"].endswith("Thanks for the fix.")
+    assert h.forge.writes_of("create_review") == [], "saving posts nothing"
+
+
+async def test_refreshing_a_pr_needs_an_active_repository(demo) -> None:
+    h, app = demo
+    record = await h.store.get_repo("acme/widget")
+    assert record is not None
+    record.active = False
+    await h.store.save_repo(record)
+    async with _client(app, "maria") as maria:
+        out = await maria.post("/api/prs/acme/widget/42/refresh")
+    assert out.status_code == 409 and "until its profile is approved" in out.text
+
+
 async def test_approve_and_edit_a_proposal(demo) -> None:
     h, app = demo
     async with _client(app, "maria") as maria:

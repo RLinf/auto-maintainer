@@ -354,6 +354,7 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 input[type="checkbox"], input[type="radio"] { height: auto; width: 15px; height: 15px; accent-color: var(--accent); padding: 0; }
 textarea { width: 100%; height: auto; padding: 8px 10px; font-family: var(--mono); font-size: 12.5px; min-height: 80px; resize: vertical; line-height: 1.5; }
 textarea.prose { font-family: var(--sans); font-size: 14px; }
+textarea.prose.editor { width: 100%; min-height: 160px; resize: vertical; line-height: 1.55; padding: 10px 12px; }
 label.field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); font-weight: 500; }
 .filters { display: flex; gap: 10px; flex-wrap: wrap; align-items: end; }
 

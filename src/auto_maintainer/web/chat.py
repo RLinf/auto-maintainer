@@ -26,7 +26,9 @@ is merged and deployed (design 5.12).
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import re
 from pathlib import Path
 from typing import Any, Literal
 
@@ -45,7 +47,7 @@ from ..domain.actions import (
 )
 from ..domain.agents import AgentTask, TaskKind
 from ..domain.events import Event, EventKind
-from ..domain.ids import new_id
+from ..domain.ids import check_repo, new_id
 from ..domain.memory import (
     MemoryChange,
     Signal,
@@ -54,7 +56,7 @@ from ..domain.memory import (
     profile_path,
     repo_dir,
 )
-from ..domain.records import ChatMessage, ChatThread, JobStatus
+from ..domain.records import ChatMessage, ChatRequest, ChatThread, JobStatus
 from ..domain.secrets import redact_secrets
 from ..domain.settings import (
     PROVIDER_PROTOCOLS,
@@ -65,7 +67,13 @@ from ..domain.settings import (
 )
 from ..playbooks.prompts import schema_hint, untrusted
 from ..profiles.layers import ProfileError, parse_yaml
-from .api import require_view, service_of, visible_repos
+from .api import (
+    code_maintainer,
+    require_view,
+    service_of,
+    start_evaluations,
+    visible_repos,
+)
 from .auth import User, current_user
 
 log = logging.getLogger(__name__)
@@ -79,12 +87,20 @@ class ProposedAction(BaseModel):
         "comment",
         "nudge",
         "review",
+        "evaluate",
         "lesson",
         "improve",
+        "add_repo",
         "configure",
     ]
-    repo: str = Field(default="", description="The repository; empty for kind=improve.")
-    number: int | None = None
+    repo: str = Field(
+        default="",
+        description="The repository (owner/name); empty for kind=improve. For kind=add_repo, the repository to onboard.",
+    )
+    number: int | None = Field(
+        default=None,
+        description="The PR; for kind=evaluate, empty means every open PR of the repository.",
+    )
     labels: list[str] = Field(default_factory=list)
     run_id: int | None = None
     logins: list[str] = Field(default_factory=list)
@@ -184,6 +200,83 @@ def build_router() -> APIRouter:
             for m in await service.store.list_messages(thread_id)
         ]
 
+    @r.get("/requests")
+    async def pending_requests(
+        request: Request, user: User = Depends(current_user)
+    ) -> list[dict[str, Any]]:
+        """Request cards waiting in any conversation that ``user`` may decide (an
+        ``improve`` for maintainers of the service's repository, an ``add_repo`` for
+        those who may configure that repository), and their own."""
+        service = service_of(request)
+        out = []
+        for message in await service.store.messages_with_pending_requests():
+            thread = await service.store.get_thread(message.thread_id)
+            if thread is None:
+                continue
+            for req in message.requests:
+                if req.state != "pending":
+                    continue
+                allowed, _ = await _may_decide(service, user, req)
+                if allowed or thread.owner == user.login:
+                    out.append(
+                        {
+                            "thread_id": thread.id,
+                            "message_id": message.id,
+                            "asked_by": thread.owner,
+                            "created_at": message.created_at.isoformat(),
+                            "can_decide": allowed,
+                            "request": req.model_dump(mode="json"),
+                        }
+                    )
+        return out
+
+    @r.post("/threads/{thread_id}/requests/{request_id}/{decision}")
+    async def decide_request(
+        request: Request,
+        thread_id: str,
+        request_id: str,
+        decision: Literal["approve", "decline"],
+        user: User = Depends(current_user),
+    ) -> dict[str, Any]:
+        """Approve or decline a request card. Approving needs the right the card
+        asks for (``_may_decide``); whoever asked may also decline their own.
+        Nothing starts before approval."""
+        service = service_of(request)
+        thread = await service.store.get_thread(thread_id)
+        if thread is None:
+            raise HTTPException(404, "unknown thread")
+        history = await service.store.list_messages(thread_id)
+        found = next(
+            ((m, r) for m in history for r in m.requests if r.id == request_id),
+            None,
+        )
+        if found is None:
+            raise HTTPException(404, "no such request in this conversation")
+        message, req = found
+        allowed, why = await _may_decide(service, user, req)
+        own = thread.owner == user.login
+        if not own and not allowed:
+            raise HTTPException(404, "no such request in this conversation")
+        if req.state != "pending":
+            raise HTTPException(409, f"this request was already {req.state}")
+        if decision == "approve":
+            if not allowed:
+                raise HTTPException(403, why)
+            if req.kind == "improve":
+                running = await _running_improvement(service, thread_id)
+                req.job = running or await _start_improve(
+                    service, thread.owner, user.login, req.text, thread_id, history
+                )
+            else:
+                try:
+                    await service.add_repo(check_repo(req.text), user.login)
+                except ValueError as e:
+                    raise HTTPException(409, str(e)) from e
+        req.state = "approved" if decision == "approve" else "declined"
+        req.decided_by = user.login
+        await service.store.save_message(message)
+        return message.model_dump(mode="json")
+
     @r.get("/threads/{thread_id}/steps")
     async def steps(
         request: Request,
@@ -242,14 +335,20 @@ def build_router() -> APIRouter:
                 "Answer from the data below. You cannot act directly: put any change you suggest in `proposals`. "
                 "Each proposal appears as a card under your answer, and they differ in what happens next: actions on a PR "
                 "(label, comment, rerun, ...) and configuration changes wait for the maintainer to approve the card; "
+                "review and evaluate (score a PR's priority again, or every open PR's when number is empty, with "
+                "the repository's lessons as they are now) start at once; "
                 "a lesson is saved at once when this maintainer may configure the repository, and otherwise waits for one "
-                "who may; an improve request starts at once in the background. Say which of these happens; never ask the "
-                "maintainer to approve a lesson they may save or an improve request. Internal priorities are private: never "
-                "put them in public text. When the maintainer asks for something the service cannot do yet, or for a change "
-                "in how it works that needs code rather than a setting or a lesson, propose kind=improve with the request "
-                "spelled out: the service changes its own code in the background and opens a PR on its own repository, which "
-                "a maintainer of that repository reviews before it is merged and deployed. A conversation runs one such "
-                "request at a time: if the history shows one already started, do not propose it again.",
+                "who may; an improve request and add_repo (onboard a repository: the service reads it and drafts its "
+                "profile for its maintainers to approve) wait on a request card for a person who may approve them. Say "
+                "which of these happens; never ask the maintainer to approve a lesson they may save. Internal priorities "
+                "are private: never put them in public text. Before proposing improve, check the service guide below: "
+                "if the dashboard or a proposal already does what is asked, say how instead. When the maintainer asks for "
+                "something the service cannot do yet, or for a change in how it works that needs code rather than a "
+                "setting or a lesson, propose kind=improve with the request spelled out: once a maintainer of the "
+                "service's repository approves the card, the service changes its own code in the background and opens a "
+                "PR on its own repository, which a maintainer reviews before it is merged and deployed. A conversation "
+                "runs one such change at a time: if the history shows one pending or running, do not propose it again.",
+                await _guide(service),
                 f"Memory index:\n{memory_index or '(empty)'}",
                 "Review queue (internal):\n" + ("\n".join(queue) or "(empty)"),
                 await _page_block(service, user, body.context, repos),
@@ -291,6 +390,7 @@ def build_router() -> APIRouter:
         created: list[str] = []
         changes: list[str] = []
         jobs: list[str] = []
+        requests: list[ChatRequest] = []
         notes: list[str] = []
         if removed:
             notes.append(
@@ -300,13 +400,34 @@ def build_router() -> APIRouter:
             )
         for p in answer.proposals:
             if p.kind == "improve":
-                job, note = await _improve(service, user, p, thread_id, history)
-                jobs += [job] if job else []
+                if any(r.kind == "improve" for r in requests):
+                    notes.append(
+                        "I asked for one change to the service's code at a time; "
+                        "the first request is below."
+                    )
+                    continue
+                job, note = await _improve_request(service, p, thread_id)
+                if job:
+                    jobs.append(job)
+                elif not note:
+                    requests.append(ChatRequest(kind="improve", text=p.request.strip()))
                 notes += [note] if note else []
+                continue
+            if p.kind == "add_repo":
+                try:
+                    requests.append(
+                        ChatRequest(kind="add_repo", text=check_repo(p.repo))
+                    )
+                except ValueError as e:
+                    notes.append(str(e))
                 continue
             if p.kind == "lesson":
                 if p.repo in repos and p.lesson.strip():
                     changes.append(await _lesson(service, user, p))
+                continue
+            if p.kind == "evaluate":
+                if p.repo in repos:
+                    notes.append(await _evaluate(service, user, p))
                 continue
             if p.kind == "configure":
                 change_id, problem = await _configure(service, user, p, repos)
@@ -326,6 +447,7 @@ def build_router() -> APIRouter:
             proposals=created,
             changes=changes,
             jobs=jobs,
+            requests=requests,
             run_id=run,
         )
         await service.store.add_message(message)
@@ -476,9 +598,25 @@ async def _settings_block(service: Any, user: User) -> str:
     names = secret_names(config)
     infos = await service.a.secrets.describe(names) if service.a.secrets else []
     decision = await service.service_gate(user.login)
+    runtimes = getattr(service.a.agents, "runtimes", {}) or {}
+
+    def offered(name: str) -> str:
+        found = runtimes.get(name)
+        cached = getattr(found, "cached_choices", None)
+        choices = cached() if callable(cached) else None
+        if choices is None:
+            return ""
+        models = ", ".join(m.id for m in choices.models) or "any it accepts"
+        levels = ", ".join(choices.efforts) or "none"
+        return (
+            f"; models it offers: {models} (its default: {choices.default_model or 'unknown'}); "
+            f"reasoning levels: {levels} (its default: {choices.default_effort or 'unknown'})"
+        )
+
     agent_lines = [
         f"- {name}: {a.adapter}, {'enabled' if a.enabled else 'disabled'}, "
-        f"model {a.model or 'CLI default'}, "
+        f"{'installed' if service.agent_ready(name) else 'NOT installed on this host'}, "
+        f"model {a.model or 'CLI default'}, effort {a.effort or 'route or CLI default'}, "
         f"provider {a.provider or 'its own sign-in'}, "
         f"permissions {a.permissions or 'per task route'}, "
         + (
@@ -488,10 +626,11 @@ async def _settings_block(service: Any, user: User) -> str:
         )
         + "; custom providers it can use: "
         f"{', '.join(sorted(PROVIDER_PROTOCOLS.get(a.adapter, ()))) or 'none'}"
+        + offered(name)
         for name, a in agents.items()
     ]
     route_lines = [
-        f"- {task}: {r.primary}"
+        f"- {task}: runs on {service.runs_on(r)}; order {r.primary}"
         + (f" then {', '.join(r.fallback)}" if r.fallback else "")
         + (f", model {r.model}" if r.model else "")
         + f", timeout {r.timeout_seconds}s, permissions {r.permissions}"
@@ -523,7 +662,8 @@ async def _settings_block(service: Any, user: User) -> str:
             "schema: 1\n"
             "default_agent: <agent name> (every task tries it first, except verify, which "
             "prefers a second agent; routes below still win)\n"
-            "agents: {<name>: {enabled, model, provider, budget: {daily_usd, daily_runs}, "
+            "agents: {<name>: {enabled, model, effort (one of its reasoning levels), provider, "
+            "budget: {daily_usd, daily_runs}, "
             "permissions: auto | restricted | bypass (its mode for every task instead of "
             "the route's; bypass skips the CLI's permission checks on team PRs only, "
             "unless a route sets bypass_untrusted; omit to follow each route), "
@@ -593,38 +733,90 @@ async def _configure(
 ACTIVE = [JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.WAITING]
 
 
-async def _improve(
-    service: Any, user: User, p: ProposedAction, thread_id: str, history: list[Any]
-) -> tuple[str | None, str | None]:
-    """Start the ``self_improve`` playbook for a maintainer's request.
+async def _guide(service: Any) -> str:
+    """The service guide the chat agent follows (``skills/maintainer-chat``): what
+    the service is, where each feature lives, and what each proposal does."""
+    path = Path(service.settings.skills_dir) / "maintainer-chat" / "SKILL.md"
+    try:
+        text = await asyncio.to_thread(path.read_text, encoding="utf-8")
+    except OSError:
+        return ""
+    return "Service guide:\n" + re.sub(r"\A---\n.*?\n---\n", "", text, flags=re.S)
 
-    Returns the id the jobs API opens the job by (its request event's id) and a note
-    for the answer. A conversation runs one request at a time: while one is queued
-    or running, asking again links it instead of starting another agent.
-    """
-    if not p.request.strip():
-        return None, None
-    if not service.settings.code_repo:
-        return None, (
-            "This service has no code repository configured, so it cannot change "
-            "its own code."
-        )
+
+async def _may_decide(service: Any, user: User, req: ChatRequest) -> tuple[bool, str]:
+    """Whether ``user`` may approve ``req``, and why not: an ``improve`` needs the
+    right to approve changes to the service's code, an ``add_repo`` the right to
+    configure that repository."""
+    if req.kind == "improve":
+        return await code_maintainer(service, user)
+    try:
+        repo = check_repo(req.text)
+    except ValueError as e:
+        return False, str(e)
+    gate = await service.gate.check(
+        repo, user.login, await service.profiles.active(repo), person=True
+    )
+    return gate.allowed, gate.reason
+
+
+async def _running_improvement(service: Any, thread_id: str) -> str | None:
+    """The job id of this conversation's self-improvement still queued or running."""
     for job in await service.store.list_jobs(ACTIVE, limit=1000):
         if job.playbook == "self_improve" and job.key.startswith(
             f"self_improve:{thread_id}:"
         ):
             first = job.events[0].get("id") if job.events else None
-            return first or job.id, (
+            return first or job.id
+    return None
+
+
+async def _improve_request(
+    service: Any, p: ProposedAction, thread_id: str
+) -> tuple[str | None, str | None]:
+    """Check an improve proposal before it becomes a request card: returns a running
+    job to link instead (a conversation runs one change at a time), or a note when it
+    cannot be done here."""
+    if not p.request.strip():
+        return None, "The request was empty."
+    if not service.settings.code_repo:
+        return None, (
+            "This service has no code repository configured, so it cannot change "
+            "its own code."
+        )
+    running = await _running_improvement(service, thread_id)
+    if running:
+        return running, (
+            "A change to the service's code from this conversation is still "
+            "running, so I did not ask for another one; it is linked below."
+        )
+    for message in await service.store.list_messages(thread_id):
+        if any(r.kind == "improve" and r.state == "pending" for r in message.requests):
+            return None, (
                 "A change to the service's code from this conversation is still "
-                "running, so I did not start another one; it is linked below."
+                "waiting for approval above; approve or decline that one first."
             )
+    return None, None
+
+
+async def _start_improve(
+    service: Any,
+    asked_by: str,
+    approved_by: str,
+    request: str,
+    thread_id: str,
+    history: list[Any],
+) -> str:
+    """Start the ``self_improve`` playbook for an approved request; returns the id
+    the jobs API opens it by."""
     context = "\n".join(f"{m.role}: {m.text}" for m in history[-10:])
     event = Event(
         kind=EventKind.DASHBOARD_COMMAND,
         payload={
             "command": "improve",
-            "request": p.request.strip(),
-            "by": user.login,
+            "request": request,
+            "by": asked_by,
+            "approved_by": approved_by,
             "thread_id": thread_id,
             "context": context[-8000:],
             "request_id": f"{thread_id}:{service.clock.now().timestamp()}",
@@ -632,7 +824,36 @@ async def _improve(
         source="chat",
     )
     await service.bus.publish(event)
-    return event.id, None
+    return event.id
+
+
+async def _evaluate(service: Any, user: User, p: ProposedAction) -> str:
+    """Score ``p.number``'s priority again, or every open PR's in ``p.repo`` when it
+    has no number, with the same limits as the dashboard; returns a note for the
+    answer."""
+    numbers = (
+        [p.number]
+        if p.number
+        else [
+            s.number for s in await service.store.list_snapshots(p.repo, open_only=True)
+        ]
+    )
+    out = await start_evaluations(
+        service, user.login, [(p.repo, n) for n in numbers], "chat"
+    )
+    started = sum(1 for o in out if o["run"] == "evaluate")
+    joined = sum(1 for o in out if o["run"] == "joined")
+    if not started and not joined:
+        return f"Priority scoring is off for {p.repo}, so nothing was scored."
+    parts = [f"Scoring the priority of {started} PR(s) in {p.repo} again"]
+    if joined:
+        parts.append(f"{joined} already being scored again")
+    if len(numbers) > len(out):
+        parts.append(f"the first {len(out)} of {len(numbers)}")
+    return (
+        "; ".join(parts)
+        + ". The new tiers appear on the Pull requests page as each finishes."
+    )
 
 
 async def _lesson(service: Any, user: User, p: ProposedAction) -> str:

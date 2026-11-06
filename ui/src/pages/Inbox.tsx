@@ -1,9 +1,10 @@
 // Proposals: every action that waits for a maintainer, showing exactly what will be
 // posted, editable before approval, with filters, sorting, grouping, and bulk approval.
 
+import { useQuery } from "@tanstack/react-query";
 import { Fragment } from "react";
-import { api, type Me, type ProposalWithAction } from "../api";
-import { useAgent } from "../agent";
+import { api, type Me, type PendingRequest, type ProposalWithAction } from "../api";
+import { RequestCard, useAgent } from "../agent";
 import { CaughtUp, ErrorBox, PageHead, timeOf, useAct } from "../components";
 import { useProposals } from "../data";
 import { useT } from "../i18n";
@@ -51,6 +52,8 @@ export default function InboxPage({ me }: { me: Me }) {
     ],
     pageSize: 25,
   });
+  // Changes to the service's code and repositories to add, asked for in conversations.
+  const requests = useQuery({ queryKey: ["chat", "requests"], queryFn: () => api.get<PendingRequest[]>("/api/chat/requests") });
   const bulk = useAct(async (ids: string[]) => {
     for (const id of ids) await api.post(`/api/proposals/${id}/approve`, {});
     return ids.length;
@@ -69,6 +72,14 @@ export default function InboxPage({ me }: { me: Me }) {
           </button>
         }
       />
+      {(requests.data ?? []).length > 0 && (
+        <section className="stack" style={{ gap: 10, marginBottom: 16 }}>
+          <strong className="small">{t("Requests from conversations")}</strong>
+          {(requests.data ?? []).map((r) => (
+            <RequestCard key={r.request.id} threadId={r.thread_id} request={r.request} askedBy={r.asked_by} />
+          ))}
+        </section>
+      )}
       <Tabs tabs={tabs} active={tab} onChange={setTab} />
       <ListToolbar list={list} placeholder={t("Search proposals")} />
       <ErrorBox error={proposals.error || bulk.error} />

@@ -502,3 +502,52 @@ def test_acp_thoughts_are_thinking_events_and_stay_out_of_the_answer(
     )
     assert event.type == AgentEventType.THINKING and event.text == "Checking the diff"
     assert conversation.current == []
+
+
+async def test_an_acp_cli_reports_its_models_and_levels_without_a_prompt(
+    tmp_path: Path, talking_cli
+) -> None:
+    from auto_maintainer.agents.adapters.antigravity import AntigravityRuntime
+
+    session = {
+        "sessionId": "s1",
+        "configOptions": [
+            {
+                "id": "model",
+                "category": "model",
+                "currentValue": "gemini-4-argon",
+                "options": [
+                    {"value": "gemini-4-argon", "name": "Gemini 4 Argon"},
+                    {"value": "claude-opus-5-5", "name": "Claude Opus 5.5"},
+                ],
+            },
+            {
+                "id": "thought_level",
+                "category": "thought_level",
+                "currentValue": "medium",
+                "options": [{"value": v, "name": v} for v in ("low", "medium", "high")],
+            },
+        ],
+    }
+    cli = talking_cli(
+        [
+            {
+                "wait": '"initialize"',
+                "emit": [{"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": 1}}],
+            },
+            {
+                "wait": '"session/new"',
+                "emit": [{"jsonrpc": "2.0", "id": 2, "result": session}],
+            },
+            {"wait": '"session/prompt"', "emit": []},
+        ]
+    )
+    runtime = AntigravityRuntime(binary=str(cli.path), runs_dir=tmp_path / "runs")
+    choices = await runtime.choices()
+    assert choices is not None and choices.source == "cli"
+    assert [m.id for m in choices.models] == ["gemini-4-argon", "claude-opus-5-5"]
+    assert choices.models[0].name == "Gemini 4 Argon"
+    assert choices.default_model == "gemini-4-argon"
+    assert choices.efforts == ["low", "medium", "high"]
+    assert choices.default_effort == "medium"
+    assert await runtime.choices() is choices, "kept for an hour"

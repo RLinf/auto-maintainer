@@ -25,7 +25,7 @@ import httpx
 import pytest
 
 from auto_maintainer.domain.actions import ActionKind, ActionStatus
-from auto_maintainer.domain.agents import AgentTask
+from auto_maintainer.domain.agents import AgentResult, AgentTask
 from auto_maintainer.domain.permissions import Permission
 from auto_maintainer.playbooks.self_improve import LINT, TESTS
 from auto_maintainer.testing.fakes import make_pr
@@ -54,25 +54,27 @@ async def _client(app, login: str) -> AsyncIterator[httpx.AsyncClient]:
         yield client
 
 
-def _implement(task: AgentTask) -> dict:
+def _implement(task: AgentTask) -> AgentResult | dict:
+    """The agent edits the worktree and ends without any JSON, as Antigravity does on
+    long tasks; a second, read-only task describes the diff."""
+    assert task.repo == CODE and "Add a ping endpoint" in task.prompt
+    if task.mode == "read_only":
+        assert "ping.py" in task.prompt, "the summary is written from the diff"
+        return {"title": "add a ping endpoint", "summary": "Adds ping()."}
+    assert task.mode == "workspace_write" and "AGENTS.md" in task.prompt
     target = Path(task.workdir) / "src" / "ping.py"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text("def ping() -> str:\n    return 'pong'\n")
-    assert "Add a ping endpoint" in task.prompt and "AGENTS.md" in task.prompt
-    assert task.mode == "workspace_write" and task.repo == CODE
-    return {
-        "done": True,
-        "title": "add a ping endpoint",
-        "summary": "Adds ping().",
-        "tests": "uv run pytest -q: 220 passed",
-    }
+    return AgentResult(runtime="scripted", ok=True, text="Added ping(); pytest passed.")
 
 
-async def test_a_chat_request_becomes_a_pr(h: Harness, tmp_path: Path) -> None:
+async def test_a_chat_request_waits_for_approval_then_becomes_a_pr(
+    h: Harness, tmp_path: Path
+) -> None:
     h.runner.on(
         "chat",
         lambda task: {
-            "reply": "I will change my code for that.",
+            "reply": "I can change my code for that once you approve.",
             "proposals": [{"kind": "improve", "request": "Add a ping endpoint."}],
         },
     )
@@ -80,13 +82,36 @@ async def test_a_chat_request_becomes_a_pr(h: Harness, tmp_path: Path) -> None:
     app = create_app(h.service, data_dir=tmp_path, allow_dev_login=True)
     async with _client(app, "walt") as walt:
         thread = (await walt.post("/api/chat/threads", json={"text": "ping"})).json()
-        out = await walt.post(
-            f"/api/chat/threads/{thread['id']}/messages",
-            json={"text": "Can you answer pings?"},
-        )
-        assert out.status_code == 200, out.text
+        out = (
+            await walt.post(
+                f"/api/chat/threads/{thread['id']}/messages",
+                json={"text": "Can you answer pings?"},
+            )
+        ).json()
+        [card] = out["requests"]
         await h.settle()
-        messages = (await walt.get(f"/api/chat/threads/{thread['id']}/messages")).json()
+        assert h.service.a.publisher.published == [], "nothing starts before approval"  # type: ignore[union-attr]
+        denied = await walt.post(
+            f"/api/chat/threads/{thread['id']}/requests/{card['id']}/approve"
+        )
+        assert denied.status_code == 403, (
+            "write access is not enough to change the service"
+        )
+
+    async with _client(app, "maria") as maria:
+        # A maintainer of the service's repository finds walt's card and approves it.
+        [waiting] = (await maria.get("/api/chat/requests")).json()
+        assert waiting["asked_by"] == "walt" and waiting["can_decide"] is True
+        base = f"/api/chat/threads/{waiting['thread_id']}"
+        approved = (
+            await maria.post(f"{base}/requests/{waiting['request']['id']}/approve")
+        ).json()
+        [decided] = approved["requests"]
+        assert decided["state"] == "approved" and decided["job"]
+        assert decided["decided_by"] == "maria"
+        await h.settle()
+    async with _client(app, "walt") as walt:
+        messages = (await walt.get(f"{base}/messages")).json()
 
     [published] = h.service.a.publisher.published  # type: ignore[union-attr]
     assert published["repo"] == CODE and published["base"] == "b" * 40
@@ -101,7 +126,9 @@ async def test_a_chat_request_becomes_a_pr(h: Harness, tmp_path: Path) -> None:
         and pr["head"] == published["branch"]
     )
     assert pr["title"] == "feat: add a ping endpoint"
-    assert "Requested by walt" in pr["body"] and "must approve the merge" in pr["body"]
+    assert "Requested by walt in chat, approved to start by maria" in pr["body"]
+    assert "must approve the merge" in pr["body"]
+    assert "Added ping(); pytest passed." in pr["body"], "the agent's account is kept"
     assert TESTS in h.sandbox.runs and LINT in h.sandbox.runs
     assert any("I opened" in m["text"] for m in messages if m["role"] == "assistant")
 
@@ -112,23 +139,29 @@ async def test_a_conversation_runs_one_code_change_at_a_time(
     h.runner.on(
         "chat",
         lambda task: {
-            "reply": "Started.",
+            "reply": "Here is the request.",
             "proposals": [{"kind": "improve", "request": "Add a ping endpoint."}],
         },
     )
     app = create_app(h.service, data_dir=tmp_path, allow_dev_login=True)
-    async with _client(app, "walt") as walt:
-        thread = (await walt.post("/api/chat/threads", json={"text": "ping"})).json()
-        url = f"/api/chat/threads/{thread['id']}/messages"
-        first = (await walt.post(url, json={"text": "Answer pings."})).json()
+    async with _client(app, "maria") as maria:
+        thread = (await maria.post("/api/chat/threads", json={"text": "ping"})).json()
+        base = f"/api/chat/threads/{thread['id']}"
+        first = (
+            await maria.post(f"{base}/messages", json={"text": "Answer pings."})
+        ).json()
+        waiting = (await maria.post(f"{base}/messages", json={"text": "Again."})).json()
+        assert waiting["requests"] == [] and "waiting for approval" in waiting["text"]
+        approved = (
+            await maria.post(f"{base}/requests/{first['requests'][0]['id']}/approve")
+        ).json()
+        job_id = approved["requests"][0]["job"]
         await h.service.bus.drain()
-        second = (await walt.post(url, json={"text": "I don't see it."})).json()
-        job = await walt.get(f"/api/jobs/{first['jobs'][0]}")
+        again = (await maria.post(f"{base}/messages", json={"text": "And?"})).json()
+        job = await maria.get(f"/api/jobs/{job_id}")
         assert job.status_code == 200, job.text
-        job = job.json()
-    assert first["jobs"] and second["jobs"] == first["jobs"]
-    assert "did not start another" in second["text"]
-    assert job["playbook"] == "self_improve"
+    assert again["jobs"] == [job_id] and "did not ask for another" in again["text"]
+    assert job.json()["playbook"] == "self_improve"
     improves = [
         j for j in await h.store.list_jobs(limit=1000) if j.playbook == "self_improve"
     ]
@@ -140,12 +173,9 @@ async def test_no_change_means_no_pr(h: Harness, tmp_path: Path) -> None:
 
     h.runner.on(
         "self_improve",
-        lambda task: {
-            "done": False,
-            "title": "x",
-            "summary": "Not a code change.",
-            "tests": "",
-        },
+        lambda task: AgentResult(
+            runtime="scripted", ok=True, text="That is not a code change."
+        ),
     )
     await h.emit(
         Event(
@@ -201,3 +231,32 @@ async def test_a_failed_deploy_keeps_the_service_running(
     assert record.status == ActionStatus.FAILED and "tests failed" in (
         record.error or ""
     )
+
+
+async def test_the_agent_offers_to_add_a_repository_and_a_maintainer_approves(
+    h: Harness, tmp_path: Path
+) -> None:
+    from auto_maintainer.domain.snapshot import RepoInfo
+
+    h.forge.add_repo(RepoInfo(name="acme/gadget", default_branch_sha="f" * 40))
+    h.forge.set_permission("acme/gadget", "maria", Permission.MAINTAIN)
+    h.runner.on(
+        "chat",
+        lambda task: {
+            "reply": "I can add it.",
+            "proposals": [{"kind": "add_repo", "repo": "acme/gadget"}],
+        },
+    )
+    app = create_app(h.service, data_dir=tmp_path, allow_dev_login=True)
+    async with _client(app, "maria") as maria:
+        thread = (await maria.post("/api/chat/threads", json={"text": "hi"})).json()
+        base = f"/api/chat/threads/{thread['id']}"
+        out = (await maria.post(f"{base}/messages", json={"text": "Add gadget"})).json()
+        [card] = out["requests"]
+        assert card["kind"] == "add_repo" and card["text"] == "acme/gadget"
+        assert await h.store.get_repo("acme/gadget") is None, "nothing before approval"
+        decided = (await maria.post(f"{base}/requests/{card['id']}/approve")).json()
+        again = await maria.post(f"{base}/requests/{card['id']}/approve")
+    assert decided["requests"][0]["state"] == "approved"
+    assert again.status_code == 409
+    assert await h.store.get_repo("acme/gadget") is not None

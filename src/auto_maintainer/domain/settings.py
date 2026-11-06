@@ -104,6 +104,8 @@ class RuntimeConfig(BaseModel):
     binary: str | None = None
     model: str | None = None
     """The model when a route names none; with a provider, its first model by default."""
+    effort: str | None = None
+    """The reasoning level when a route names none; unset keeps the CLI's own."""
     provider: str | None = None
     """A provider in ``providers``; without one the CLI uses its own sign-in."""
     env_allow: list[str] = Field(default_factory=list)
@@ -351,6 +353,10 @@ def effective_agents(
     return merge_configs(overrides)
 
 
+EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max")
+"""Reasoning levels an agent's ``effort`` may name; each adapter maps them to its
+CLI's own (the Settings page offers only the levels the CLI reports)."""
+
 KEEPS_OWN_PRIMARY = frozenset({"verify"})
 """Task kinds whose default route ignores the default agent: verification looks for
 a second opinion from another agent, and reaches the default agent through its
@@ -433,6 +439,11 @@ def check_settings(
             )
     for name, machine in config.labs.items():
         problems += [f"labs.{name}: {p}" for p in machine_problems(name, machine)]
+    for name, agent in agents.items():
+        if agent.effort is not None and agent.effort not in EFFORTS:
+            problems.append(
+                f"agents.{name}.effort: use one of {', '.join(EFFORTS)}, not {agent.effort!r}"
+            )
     if config.default_agent is not None:
         if config.default_agent not in agents:
             problems.append(

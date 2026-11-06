@@ -81,6 +81,7 @@ def build_runtime(
         "provider": provider,
         "env_allow": config.env_allow,
         "model": config.model,
+        "effort": config.effort,
         "extra_args": config.extra_args,
         "allow_bypass": config.allow_bypass,
         "permissions": config.permissions,

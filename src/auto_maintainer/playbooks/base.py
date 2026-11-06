@@ -66,6 +66,15 @@ class Wait(BaseModel):
     action_ids: list[str] = Field(default_factory=list)
 
 
+def may_succeed_later(result: AgentResult) -> bool:
+    """Whether a failed agent run may succeed if the job runs again later: a timeout,
+    a quota, a crash, or every agent paused for now. The engine retries those with
+    backoff; other failures end the job (``PlaybookResult.failed``)."""
+    return result.error_kind in ("timeout", "quota", "crash") or (
+        result.error or ""
+    ).startswith("no runtime available")
+
+
 class PlaybookResult(BaseModel):
     actions: list[Action] = Field(default_factory=list)
     signals: list[Signal] = Field(default_factory=list)
@@ -73,6 +82,9 @@ class PlaybookResult(BaseModel):
     wait: Wait | None = None
     retry_after: int | None = None
     """Run again after this many seconds, from fresh reads."""
+    failed: str | None = None
+    """Why the job failed, when it did and running it again would not help (an
+    agent that could not do the work); the job ends ``failed``, not retried."""
     result: dict[str, Any] = Field(default_factory=dict)
 
 

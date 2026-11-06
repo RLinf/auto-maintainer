@@ -294,10 +294,12 @@ class Engine:
             await self.store.add_signal(signal)
         now = self.clock.now()
         job.result = result.result or None
-        job.error = None
+        job.error = result.failed
         job.lease_until = None
         job.updated_at = now
-        if result.wait is not None:
+        if result.failed is not None:
+            job.status = JobStatus.FAILED
+        elif result.wait is not None:
             job.status = JobStatus.WAITING
             job.attempts = 0
             job.wait = WaitSpec(

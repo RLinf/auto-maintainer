@@ -32,7 +32,7 @@ from ..domain.events import Event, EventKind
 from ..domain.ids import short_sha
 from ..domain.review import ReviewResult
 from ..domain.snapshot import PrState
-from .base import Playbook, PlaybookContext, PlaybookResult
+from .base import Playbook, PlaybookContext, PlaybookResult, may_succeed_later
 from .prompts import pr_block, review_skill_block, schema_hint, untrusted
 
 FIX = """You are fixing a pull request for {reviewer}, a maintainer, inside an automated maintainer service. The working directory is a checkout of the PR's head commit.
@@ -40,7 +40,10 @@ FIX = """You are fixing a pull request for {reviewer}, a maintainer, inside an a
 - Run the repository's quick checks for what you changed when you can (its tests or linters).
 - Do not commit, push, or post, and never ask whether to: the service shows your changes to {reviewer}, who decides whether to open a PR with them.
 - When something blocks a sound fix (the intended behavior is unclear, two fixes are equally plausible), ask {reviewer} with your tool for asking the user.
-- Write any text in {public_language}: plain and specific."""
+- Write any text in {public_language}: plain and specific.
+- When you are done, end with a short message: what you changed for each finding, what you left and why, and the checks you ran."""
+
+DESCRIBE = """Describe fixes that an agent made to a pull request, for the PR that proposes them. Read the diff and the findings; do not change any file. Write in {public_language}: plain and specific."""
 
 
 class FixedFinding(BaseModel):
@@ -126,31 +129,71 @@ class FixPlaybook(Playbook):
                     if note
                     else "",
                     pr_block(pr, diff),
-                    schema_hint(FixResult.model_json_schema()),
                 ]
             )
+            # The agent edits; the diff says what it did. Long edits often end
+            # without a final answer in any fixed form, so a short second task
+            # describes the diff for the PR.
             answer = await ctx.ask(
                 AgentTask(
                     kind=TaskKind.FIX,
                     prompt=prompt,
                     workdir=workdir,
                     mode="workspace_write",
-                    output_schema=FixResult.model_json_schema(),
                     skill_dirs=ctx.skill_dirs(),
                     repo=pr.repo,
                     timeout_seconds=2400,
-                ),
-                FixResult,
+                )
             )
-            if not answer.ok or answer.structured is None:
-                raise RuntimeError(f"fix agent failed: {answer.error}")
-            fix = FixResult.model_validate(answer.structured)
+            if not answer.ok:
+                if may_succeed_later(answer):
+                    raise RuntimeError(f"fix agent failed: {answer.error}")
+                return PlaybookResult(failed=f"fix agent failed: {answer.error}")
+            account = answer.text.strip()
             changes = await ctx.workspace.changes(workdir)
+            described = None
+            if changes.files:
+                described = await ctx.ask(
+                    AgentTask(
+                        kind=TaskKind.FIX,
+                        prompt="\n\n".join(
+                            [
+                                DESCRIBE.format(
+                                    public_language=profile.languages.public
+                                ),
+                                "Review findings it was asked to fix:\n"
+                                + untrusted("review.findings", listing, 20_000),
+                                *(
+                                    [untrusted("agent.account", account[-4000:], 4000)]
+                                    if account
+                                    else []
+                                ),
+                                untrusted("fix.diff", changes.patch, 60_000),
+                                schema_hint(FixResult.model_json_schema()),
+                            ]
+                        ),
+                        workdir=workdir,
+                        mode="read_only",
+                        repo=pr.repo,
+                        untrusted_input=True,
+                    ),
+                    FixResult,
+                )
         finally:
             await ctx.workspace.release(workdir)
         if not changes.files:
             return PlaybookResult(
-                result={"skipped": "the agent changed nothing", "summary": fix.summary}
+                result={
+                    "skipped": "the agent changed nothing",
+                    "summary": account[-1000:],
+                }
+            )
+        if described is not None and described.ok and described.structured is not None:
+            fix = FixResult.model_validate(described.structured)
+        else:  # the PR still names the findings and shows the diff
+            fix = FixResult(
+                title=f"Fix review findings on #{pr.number}",
+                summary=account[-2000:] or "Fixes for the review's findings.",
             )
         lines = [fix.summary, ""]
         lines += [f"- {f.id}: {f.change}" for f in fix.fixed]

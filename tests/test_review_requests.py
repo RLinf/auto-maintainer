@@ -29,6 +29,7 @@ import pytest
 from auto_maintainer.agents.approver import posting_request
 from auto_maintainer.domain.agents import (
     AgentQuestion,
+    AgentResult,
     InputQuestion,
     QuestionKind,
     TaskKind,
@@ -229,7 +230,15 @@ async def test_a_fix_is_drafted_for_the_reviewer_and_opened_as_them(demo) -> Non
     await _review(app, "maria", 42)
     await h.settle()
 
-    def fix(task: Any) -> dict:
+    def fix(task: Any) -> Any:
+        if task.mode == "read_only":
+            # The second, short task describes the diff the edit left.
+            assert "test_one.py" in task.prompt and "Added a test" in task.prompt
+            return {
+                "title": "test(loader): cover a batch of one",
+                "summary": "Adds the missing boundary test.",
+                "fixed": [{"id": "F1", "change": "added a test for one item"}],
+            }
         assert (
             "reviewing" not in task.prompt
             and "fixing a pull request for maria" in task.prompt
@@ -239,19 +248,17 @@ async def test_a_fix_is_drafted_for_the_reviewer_and_opened_as_them(demo) -> Non
         (Path(task.workdir) / "tests" / "test_one.py").write_text(
             "def test_one(): ...\n"
         )
-        return {
-            "title": "test(loader): cover a batch of one",
-            "summary": "Adds the missing boundary test.",
-            "fixed": [{"id": "F1", "change": "added a test for one item"}],
-        }
+        # Like a long edit on some CLIs: a plain closing message, no JSON.
+        return AgentResult(runtime="scripted", ok=True, text="Added a test for F1.")
 
     h.runner.on("fix", fix)
     async with _as(app, "maria") as maria:
         started = await maria.post(f"/api/prs/{REPO}/42/fix", json={"agent": "codex"})
         assert started.status_code == 200, started.text
         await h.settle()
-        [i] = [i for i, t in enumerate(h.runner.tasks) if t.kind == TaskKind.FIX]
-        assert h.runner.routes[i].primary == "codex"
+        fixes = [i for i, t in enumerate(h.runner.tasks) if t.kind == TaskKind.FIX]
+        assert len(fixes) == 2, "the edit, then the description of its diff"
+        assert all(h.runner.routes[i].primary == "codex" for i in fixes)
         [draft] = [
             p
             for p in (await maria.get("/api/proposals")).json()

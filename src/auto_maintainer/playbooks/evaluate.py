@@ -69,13 +69,21 @@ def material_change(
 
 
 class EvaluatePlaybook(Playbook):
+    """Scores a PR when it opens or changes materially, and again on request: a
+    maintainer's ``evaluate`` command scores every dimension afresh, with the
+    repository's lessons as they are now."""
+
     name = "evaluate"
-    triggers = (*PR_EVENTS, EventKind.MEMORY_CHANGED)
+    triggers = (*PR_EVENTS, EventKind.MEMORY_CHANGED, EventKind.DASHBOARD_COMMAND)
     pool = "agent"
 
     def accepts(self, event: Event, profile: RepoProfile | None) -> bool:
         if profile is None or not profile.priority.enabled:
             return False
+        if event.kind == EventKind.DASHBOARD_COMMAND:
+            return (
+                event.payload.get("command") == "evaluate" and event.number is not None
+            )
         if event.kind == EventKind.MEMORY_CHANGED:
             return event.repo is not None and any(
                 "rubric" in p or "profile" in p for p in event.payload.get("paths", [])
@@ -83,6 +91,8 @@ class EvaluatePlaybook(Playbook):
         return True
 
     def key(self, event: Event) -> str:
+        if event.kind == EventKind.DASHBOARD_COMMAND:
+            return f"evaluate:{event.repo}#{event.number}:manual:{event.id}"
         if event.kind == EventKind.MEMORY_CHANGED:
             return f"evaluate:{event.repo}:memory:{event.payload.get('sha')}"
         return f"evaluate:{event.repo}#{event.number}@{(event.sha or '-')[:12]}:{event.kind}"
@@ -109,14 +119,17 @@ class EvaluatePlaybook(Playbook):
             previous if previous and previous.head_sha != pr.head_sha else None,
         )
         need = need or bool(missing_dimensions(evaluation, rubric))
+        forced = event.kind == EventKind.DASHBOARD_COMMAND
         scored = False
-        if need:
+        if need or forced:
             answer = await self._ask(
                 ctx,
                 pr,
                 rubric,
                 profile,
-                missing_dimensions(evaluation, rubric) if evaluation.scores else None,
+                missing_dimensions(evaluation, rubric)
+                if evaluation.scores and not forced
+                else None,
             )
             if answer is not None:
                 scores = {
@@ -191,11 +204,20 @@ class EvaluatePlaybook(Playbook):
         )
         workdir = ctx.service.scratch_dir / ctx.job.id
         workdir.mkdir(parents=True, exist_ok=True)
+        lessons = await ctx.knowledge.review_lessons(pr.repo, profile)
         prompt = "\n\n".join(
             [
                 "Score this pull request for the maintainers' private review queue. "
                 "Give each dimension a score from 0 to 10 using its rule. This evaluation is never shown publicly.",
                 f"Dimensions:\n{rules}",
+                *(
+                    [
+                        "Lessons from this repository's maintainers; apply those about "
+                        f"priority when you score:\n{lessons}"
+                    ]
+                    if lessons
+                    else []
+                ),
                 f"Write the summary and rationale in {profile.languages.internal}.",
                 pr_block(pr),
                 schema_hint(EvalAnswer.model_json_schema()),

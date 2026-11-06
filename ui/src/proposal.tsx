@@ -135,19 +135,20 @@ export function ProposalCard({
   const diff = usePrDiff(action?.repo ?? "", action?.number, expanded && hasComments);
   const files = useMemo(() => (diff.data ? parseDiff(diff.data.diff) : null), [diff.data]);
 
+  const editedPayload = (): Record<string, unknown> => ({
+    ...payload,
+    ...(typeof payload.body === "string" ? { body } : {}),
+    ...(Array.isArray(payload.comments) ? { comments } : {}),
+    ...(isFix ? { title } : {}),
+    ...(kind === "lab.reproduce" ? { script, setup } : {}),
+  });
   const approve = useAct((as?: boolean) => {
-    const edited: Record<string, unknown> | undefined = editing
-      ? {
-          ...payload,
-          ...(typeof payload.body === "string" ? { body } : {}),
-          ...(Array.isArray(payload.comments) ? { comments } : {}),
-          ...(isFix ? { title } : {}),
-          ...(kind === "lab.reproduce" ? { script, setup } : {}),
-        }
-      : undefined;
+    const edited = editing ? editedPayload() : undefined;
     const mine = as ?? postAsMe;
     return api.post(`/api/proposals/${proposal.id}/approve`, { ...(edited ? { payload: edited } : {}), ...(mine ? { as_me: true } : {}) });
   }, PROPOSAL_KEYS);
+  // Keeps the edits on the draft without posting it; posting later sends what was saved.
+  const save = useAct(() => api.post(`/api/proposals/${proposal.id}/edit`, { payload: editedPayload() }), PROPOSAL_KEYS);
   const reject = useAct((reason: string) => api.post(`/api/proposals/${proposal.id}/reject`, { reason }), PROPOSAL_KEYS);
 
   if (!action) return <div className="proposal muted">Action {proposal.action_id} is missing.</div>;
@@ -277,9 +278,24 @@ export function ProposalCard({
               </Popover>
             )}
           </div>
+          {editing && (
+            <button disabled={save.isPending} onClick={() => save.mutate(undefined, { onSuccess: () => setEditing(false) })}>
+              <Icon name="check" size={14} />
+              {save.isPending ? t("Saving…") : t("Save")}
+            </button>
+          )}
           {editable && (
             <button
+              className={editing ? "ghost" : ""}
               onClick={() => {
+                if (editing) {
+                  // Discarding returns to what the draft holds now (saved edits included).
+                  setBody(str(payload.body));
+                  setTitle(str(payload.title));
+                  setScript(str(payload.script));
+                  setSetup(str(payload.setup));
+                  setComments(Array.isArray(payload.comments) ? (payload.comments as InlineComment[]) : []);
+                }
                 setExpanded(true);
                 setRaw(false);
                 setEditing(!editing);
@@ -297,7 +313,8 @@ export function ProposalCard({
         </div>
       )}
       {isFix && !done && me && !me.can_post_as_me && <span className="small muted">{t("Sign in with GitHub to open it as yourself.")}</span>}
-      <ErrorBox error={approve.error || reject.error} />
+      {proposal.edited && !editing && !done && <span className="small muted">{t("Edited; posting sends the saved version.")}</span>}
+      <ErrorBox error={approve.error || reject.error || save.error} />
     </div>
   );
 }
@@ -374,7 +391,7 @@ function KindBody({
   if (typeof payload.body === "string") {
     parts.push(
       editing ? (
-        <textarea key="body" className="prose" value={body} onChange={(e) => setBody(e.target.value)} rows={Math.min(24, body.split("\n").length + 2)} />
+        <textarea key="body" className="prose editor" value={body} onChange={(e) => setBody(e.target.value)} rows={Math.max(16, Math.min(60, body.split("\n").length + 4))} />
       ) : (
         posted(str(payload.body))
       ),
@@ -399,7 +416,12 @@ function KindBody({
           >
             {editing ? (
               <div className="stack" style={{ gap: 6 }}>
-                <textarea className="prose" value={c.body} onChange={(e) => setComments(comments.map((x, j) => (j === i ? { ...x, body: e.target.value } : x)))} />
+                <textarea
+                  className="prose editor"
+                  rows={Math.max(5, Math.min(24, c.body.split("\n").length + 2))}
+                  value={c.body}
+                  onChange={(e) => setComments(comments.map((x, j) => (j === i ? { ...x, body: e.target.value } : x)))}
+                />
                 <button className="ghost sm danger-text" style={{ alignSelf: "flex-start" }} onClick={() => setComments(comments.filter((_, j) => j !== i))}>
                   <Icon name="x" size={13} />
                   {t("Remove this comment")}

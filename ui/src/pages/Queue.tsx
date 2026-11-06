@@ -2,11 +2,12 @@
 // views, search, filters, sorting, grouping, and review in bulk. The view lives in the URL.
 
 import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api, type Me, type PrRow, type ReviewActivity, type ReviewStart } from "../api";
 import { useAgent } from "../agent";
 import { ErrorBox, Labels, PageHead, prPath, ReviewState, Tier, timeOf, useAct, When } from "../components";
-import { prKey, REVIEW_ORDER, REVIEW_STATES, TIER_ORDER, usePrs } from "../data";
+import { evaluationToast, prKey, REVIEW_ORDER, REVIEW_STATES, TIER_ORDER, usePrs, useReevaluate, useSyncPrs } from "../data";
 import { useT } from "../i18n";
 import { Icon } from "../icons";
 import { agentName, AgentPicker, reviewToast, useAgentChoice } from "../agentPicker";
@@ -76,6 +77,9 @@ export default function QueuePage({ me }: { me: Me }) {
   });
 
   const [reviewer, setReviewer] = useAgentChoice("review");
+  const again = useReevaluate();
+  const sync = useSyncPrs();
+  const [confirmAll, setConfirmAll] = useState(false);
   const review = useAct(
     (prs: PrRow[]) => api.post<ReviewStart[]>("/api/reviews", { prs: prs.map((r) => ({ repo: r.repo, number: r.number })), agent: reviewer || null }),
     [["prs"], ["proposals"]],
@@ -180,6 +184,17 @@ export default function QueuePage({ me }: { me: Me }) {
   ];
 
   const selected = list.selected;
+  const inView = list.all;
+  const scoreAgain = (prs: PrRow[], done?: () => void) =>
+    again.mutate(
+      prs.map((p) => ({ repo: p.repo, number: p.number })),
+      {
+        onSuccess: (out) => {
+          done?.();
+          toast(evaluationToast(out, t));
+        },
+      },
+    );
   return (
     <>
       <PageHead
@@ -191,15 +206,53 @@ export default function QueuePage({ me }: { me: Me }) {
           </span>
         }
         actions={
-          <button className="agent" onClick={() => agent.open()}>
-            <Icon name="sparkles" />
-            {t("Ask about the queue")}
-          </button>
+          <>
+            <button
+              disabled={sync.isPending}
+              title={t("Read every repository's PRs from GitHub now instead of at the next poll")}
+              onClick={() =>
+                sync.mutate([], {
+                  onSuccess: (r) =>
+                    toast({
+                      title: t("Checking GitHub for changes"),
+                      body: `${r.started.length + r.running.length} ${t("repositories")} · ${t("the list updates as each finishes")}`,
+                      icon: "refresh",
+                    }),
+                })
+              }
+            >
+              <Icon name="refresh" />
+              {t("Sync with GitHub")}
+            </button>
+            {confirmAll ? (
+              <>
+                <button className="primary" disabled={again.isPending} onClick={() => scoreAgain(inView, () => setConfirmAll(false))}>
+                  {again.isPending ? t("Starting…") : `${t("Score again")}: ${inView.length} PR`}
+                </button>
+                <button className="ghost" onClick={() => setConfirmAll(false)}>
+                  {t("Cancel")}
+                </button>
+              </>
+            ) : (
+              <button
+                disabled={!inView.length}
+                title={t("An agent scores every PR in this view again, with the repository's lessons as they are now; each PR is one agent run")}
+                onClick={() => setConfirmAll(true)}
+              >
+                <Icon name="sparkles" />
+                {t("Score again")}
+              </button>
+            )}
+            <button className="agent" onClick={() => agent.open()}>
+              <Icon name="sparkles" />
+              {t("Ask about the queue")}
+            </button>
+          </>
         }
       />
       <Tabs tabs={views} active={view} onChange={setView} />
       <ListToolbar list={list} placeholder={t("Search by title, number, author, label…")} />
-      <ErrorBox error={all.error || review.error} />
+      <ErrorBox error={all.error || review.error || again.error || sync.error} />
       {all.isLoading || (view === "mine" && mine.isLoading) ? (
         <div className="card">
           <Skeleton rows={8} />
@@ -217,6 +270,10 @@ export default function QueuePage({ me }: { me: Me }) {
         <AgentPicker value={reviewer} onChange={setReviewer} compact />
         <button className="primary sm" disabled={review.isPending} onClick={() => startReview(selected)}>
           {review.isPending ? t("Starting…") : `${t("Review")} ${selected.length}`}
+        </button>
+        <button className="sm" disabled={again.isPending} onClick={() => scoreAgain(selected, list.clearSelection)}>
+          <Icon name="sparkles" size={14} />
+          {`${t("Score again")} ${selected.length}`}
         </button>
         <button
           className="sm"

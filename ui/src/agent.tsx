@@ -16,7 +16,7 @@ import {
   type ReactNode,
 } from "react";
 import { Link, matchPath, useLocation, useNavigate } from "react-router-dom";
-import { api, type ChatMessage, type ChatSteps, type ChatThread } from "./api";
+import { api, type ChatMessage, type ChatRequest, type ChatSteps, type ChatThread } from "./api";
 import { ErrorBox } from "./components";
 import { useProposals } from "./data";
 import { useT } from "./i18n";
@@ -384,6 +384,10 @@ export function Conversation({
             {(m.jobs ?? []).map((id) => (
               <JobById key={id} id={id} />
             ))}
+            {threadId &&
+              (m.requests ?? []).map((r) => (
+                <RequestCard key={r.id} threadId={threadId} request={r} />
+              ))}
             {(m.changes ?? []).map((id) => (
               <ChangeById key={id} id={id} />
             ))}
@@ -516,5 +520,62 @@ function RunSteps({ threadId, run }: { threadId: string; run: string }) {
         <span className="small muted">…</span>
       )}
     </details>
+  );
+}
+
+/** Something an answer asks to do, waiting for a person: a change to the service's own
+ * code (a maintainer of its repository approves) or onboarding a repository (someone
+ * who may configure it approves). Nothing starts before Approve. */
+export function RequestCard({ threadId, request, askedBy }: { threadId: string; request: ChatRequest; askedBy?: string }) {
+  const t = useT();
+  const client = useQueryClient();
+  const decide = useMutation({
+    mutationFn: (decision: "approve" | "decline") => api.post<ChatMessage>(`/api/chat/threads/${threadId}/requests/${request.id}/${decision}`),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: ["chat", "messages", threadId] });
+      void client.invalidateQueries({ queryKey: ["chat", "requests"] });
+    },
+  });
+  const improve = request.kind === "improve";
+  return (
+    <div className="proposal request-card">
+      <div className="row" style={{ gap: 8 }}>
+        <Icon name={improve ? "settings" : "repo"} size={15} />
+        <strong>{improve ? t("Change the service's code") : t("Add a repository")}</strong>
+        {askedBy && (
+          <span className="small muted">
+            {t("asked by")} {askedBy}
+          </span>
+        )}
+        <span className={`pill ${request.state === "approved" ? "status-ok" : request.state === "declined" ? "" : "status-warn"}`}>
+          {t(request.state === "pending" ? "Waiting for approval" : request.state === "approved" ? "Approved" : "Declined")}
+        </span>
+      </div>
+      {improve ? <blockquote className="change-note">{request.text}</blockquote> : <code>{request.text}</code>}
+      <span className="small muted">
+        {improve
+          ? t("An agent changes the code in a separate worktree; the service runs the tests and opens a PR. Merging and deploying it each need a maintainer's approval again.")
+          : t("The service reads the repository and drafts its profile; its maintainers approve the profile before the service does anything there.")}
+      </span>
+      {request.state === "pending" ? (
+        <div className="row">
+          <button className="primary sm" disabled={decide.isPending} onClick={() => decide.mutate("approve")}>
+            <Icon name="check" size={14} />
+            {improve ? t("Approve and start") : t("Approve and add")}
+          </button>
+          <button className="ghost sm" disabled={decide.isPending} onClick={() => decide.mutate("decline")}>
+            {t("Decline")}
+          </button>
+        </div>
+      ) : (
+        request.decided_by && (
+          <span className="small muted">
+            {t(request.state === "approved" ? "Approved by" : "Declined by")} {request.decided_by}
+          </span>
+        )
+      )}
+      {request.job && <JobById id={request.job} />}
+      <ErrorBox error={decide.error} />
+    </div>
   );
 }

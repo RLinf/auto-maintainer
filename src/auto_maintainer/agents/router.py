@@ -17,9 +17,11 @@
 A route names a primary runtime and fallbacks. The router tries them in order and
 skips a runtime that is unknown, disabled, not installed (its ``installed()`` says
 so), over its daily budget, or whose circuit breaker is open. A missing CLI opens
-no breaker, so installing it makes it usable at once. A breaker opens after an
-``auth``, ``quota``, ``crash``, or ``timeout`` failure, or after two invalid
-structured answers in a row, and closes after the cool-down. ``route.model`` applies to the primary runtime only, since
+no breaker, so installing it makes it usable at once. A breaker opens for the whole
+runtime after an ``auth``, ``quota``, ``crash``, or ``timeout`` failure, and for one
+task kind on that runtime after two invalid structured answers in a row (a CLI that
+cannot answer one kind of task still runs the others); both close after the
+cool-down. ``route.model`` applies to the primary runtime only, since
 model names differ between CLIs; ``route.effort`` and ``route.timeout_seconds``
 apply to every attempt.
 """
@@ -128,6 +130,8 @@ class AgentRouter:
         self.cooldown = timedelta(seconds=cooldown_seconds)
         self.disabled = set(disabled)
         self.breakers: dict[str, BreakerState] = {}
+        self.output_breakers: dict[tuple[str, str], BreakerState] = {}
+        """Breakers opened by invalid answers, per runtime and task kind."""
         self.questions: AgentQuestions | None = None
         self.progress: ProgressObserver | None = None
 
@@ -192,7 +196,7 @@ class AgentRouter:
         skipped: list[str] = []
         last: AgentResult | None = None
         for index, name in enumerate(names):
-            reason = await self._unusable(name)
+            reason = await self._unusable(name, str(task.kind))
             if reason:
                 skipped.append(f"{name}: {reason}")
                 continue
@@ -219,6 +223,26 @@ class AgentRouter:
             error_kind="other",
         )
 
+    def ready(self, name: str) -> bool:
+        """Whether ``name`` is configured, enabled, and installed on this host
+        (breakers and budgets aside)."""
+        runtime = self.runtimes.get(name)
+        if runtime is None or name in self.disabled:
+            return False
+        installed = getattr(runtime, "installed", None)
+        return not callable(installed) or bool(installed())
+
+    def runs_on(self, route: Route) -> str | None:
+        """The agent ``route`` runs on now: its first ready runtime."""
+        return next(
+            (
+                n
+                for n in dict.fromkeys([route.primary, *route.fallback])
+                if self.ready(n)
+            ),
+            None,
+        )
+
     async def health(self) -> list[RuntimeHealth]:
         """Probe every runtime and report its breaker state."""
         names = list(self.runtimes)
@@ -239,6 +263,15 @@ class AgentRouter:
                 notes.append(
                     f"circuit open until {breaker.open_until.isoformat()} ({breaker.reason})"
                 )
+            for (runtime, kind), held in self.output_breakers.items():
+                if (
+                    runtime == name
+                    and held.open_until
+                    and held.open_until > self.clock.now()
+                ):
+                    notes.append(
+                        f"{kind} paused until {held.open_until.isoformat()} ({held.reason})"
+                    )
             if notes:
                 probe = probe.model_copy(
                     update={"detail": "; ".join([probe.detail, *notes]).strip("; ")}
@@ -248,7 +281,7 @@ class AgentRouter:
 
     # -- internals -------------------------------------------------------------------
 
-    async def _unusable(self, name: str) -> str | None:
+    async def _unusable(self, name: str, kind: str = "") -> str | None:
         if name not in self.runtimes:
             return "not configured"
         if name in self.disabled:
@@ -256,12 +289,15 @@ class AgentRouter:
         installed = getattr(self.runtimes[name], "installed", None)
         if callable(installed) and not installed():
             return "not installed on this host"
-        breaker = self.breakers.get(name)
-        if breaker and breaker.open_until:
-            if breaker.open_until > self.clock.now():
-                return f"circuit open ({breaker.reason})"
-            breaker.open_until = None
-            breaker.invalid_streak = 0
+        for breaker in (
+            self.breakers.get(name),
+            self.output_breakers.get((name, kind)),
+        ):
+            if breaker and breaker.open_until:
+                if breaker.open_until > self.clock.now():
+                    return f"circuit open ({breaker.reason})"
+                breaker.open_until = None
+                breaker.invalid_streak = 0
         budget = self.budgets.get(name)
         if (
             budget
@@ -290,18 +326,18 @@ class AgentRouter:
         task = task.model_copy(update={"output_schema": schema})
         result = await self._attempt(runtime, task)
         if not result.ok and result.error_kind != "invalid_output":
-            self._failed(runtime.name, result)
+            self._failed(runtime.name, result, kind=str(task.kind))
             return result
         if output_model is None:
             if result.ok:
-                self._succeeded(runtime.name)
+                self._succeeded(runtime.name, str(task.kind))
             else:
-                self._failed(runtime.name, result)
+                self._failed(runtime.name, result, kind=str(task.kind))
             return result
 
         checked, error = self._check(result, output_model)
         if checked is not None:
-            self._succeeded(runtime.name)
+            self._succeeded(runtime.name, str(task.kind))
             return checked
 
         # One repair turn: resume the session when the runtime can, else start fresh.
@@ -318,11 +354,11 @@ class AgentRouter:
         repair = repair.model_copy(update={"id": f"{task.id}-repair"})
         second = await self._attempt(runtime, repair)
         if not second.ok and second.error_kind != "invalid_output":
-            self._failed(runtime.name, second)
+            self._failed(runtime.name, second, kind=str(task.kind))
             return second
         checked, error = self._check(second, output_model)
         if checked is not None:
-            self._succeeded(runtime.name)
+            self._succeeded(runtime.name, str(task.kind))
             return checked
         failure = second.model_copy(
             update={
@@ -331,7 +367,7 @@ class AgentRouter:
                 "error_kind": "invalid_output",
             }
         )
-        self._failed(runtime.name, failure, streak=2)
+        self._failed(runtime.name, failure, streak=2, kind=str(task.kind))
         return failure
 
     def _check(
@@ -407,17 +443,19 @@ class AgentRouter:
             )
         return result
 
-    def _succeeded(self, name: str) -> None:
-        breaker = self.breakers.setdefault(name, BreakerState())
-        breaker.invalid_streak = 0
+    def _succeeded(self, name: str, kind: str = "") -> None:
+        self.output_breakers.setdefault((name, kind), BreakerState()).invalid_streak = 0
 
-    def _failed(self, name: str, result: AgentResult, streak: int = 1) -> None:
-        breaker = self.breakers.setdefault(name, BreakerState())
+    def _failed(
+        self, name: str, result: AgentResult, streak: int = 1, kind: str = ""
+    ) -> None:
         if result.error_kind in _BREAKING_KINDS:
+            breaker = self.breakers.setdefault(name, BreakerState())
             breaker.open_until = self.clock.now() + self.cooldown
             breaker.reason = str(result.error_kind)
             return
         if result.error_kind == "invalid_output":
+            breaker = self.output_breakers.setdefault((name, kind), BreakerState())
             breaker.invalid_streak += streak
             if breaker.invalid_streak >= 2:
                 breaker.open_until = self.clock.now() + self.cooldown

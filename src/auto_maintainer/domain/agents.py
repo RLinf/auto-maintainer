@@ -234,6 +234,24 @@ class AgentEvent(BaseModel):
     """Set on the ``final`` event only."""
 
 
+class ModelChoice(BaseModel):
+    id: str
+    name: str = ""
+
+
+class AgentChoices(BaseModel):
+    """What an agent CLI offers: its models and reasoning levels, and what it uses
+    when the service names none. ``cli`` means the CLI reported them itself (ACP's
+    session options); ``known`` means the adapter lists what that CLI accepts."""
+
+    models: list[ModelChoice] = Field(default_factory=list)
+    """Empty when the CLI cannot list them; any model name it accepts still works."""
+    default_model: str | None = None
+    efforts: list[str] = Field(default_factory=list)
+    default_effort: str | None = None
+    source: Literal["cli", "known"] = "known"
+
+
 class RuntimeHealth(BaseModel):
     name: str
     available: bool
@@ -242,3 +260,5 @@ class RuntimeHealth(BaseModel):
     structured_output: bool | None = None
     latency_seconds: float | None = None
     detail: str = ""
+    choices: AgentChoices | None = None
+    """Its models and reasoning levels, when it is installed."""

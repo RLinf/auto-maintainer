@@ -181,6 +181,8 @@ async def test_two_invalid_answers_fall_back_and_open_the_breaker() -> None:
     assert result.ok and result.runtime == "b"
     await router.run(_task(), route, Verdict)
     assert len(a.tasks) == 2  # skipped while the breaker is open
+    other = await router.run(_task(kind=TaskKind.TRIAGE), route, Verdict)
+    assert other.runtime == "a", "invalid answers pause only that kind of task"
 
 
 async def test_schema_flag_runtimes_get_the_schema_not_instructions() -> None:

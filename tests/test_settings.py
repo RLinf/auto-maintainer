@@ -92,6 +92,7 @@ def test_a_document_that_fits_has_no_problems() -> None:
     [
         ("agents: {claude-code: {provider: nowhere}}", "no provider named 'nowhere'"),
         ("default_agent: devin", "default_agent: there is no agent named 'devin'"),
+        ("agents: {codex: {effort: turbo}}", "agents.codex.effort: use one of"),
         (
             "default_agent: codex\nagents: {codex: {enabled: false}}",
             "default_agent: agent 'codex' is disabled",

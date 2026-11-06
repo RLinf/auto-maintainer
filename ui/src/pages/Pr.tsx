@@ -8,9 +8,10 @@ import { api, type Evaluation, type Me, type PrDetail, type ReviewStart, type Ro
 import { useAgent } from "../agent";
 import { agentName, AgentPicker, useAgentChoice } from "../agentPicker";
 import { Empty, ErrorBox, Labels, PageHead, Pre, prPath, Section, Status, Tier, timeOf, useAct, When } from "../components";
-import { REVIEW_STATES, usePrs } from "../data";
+import { evaluationToast, REVIEW_STATES, usePrs, useReevaluate } from "../data";
 import { useT } from "../i18n";
 import { Icon } from "../icons";
+import { Markdown } from "../markdown";
 import { DataTable, ListToolbar, useList, type Column } from "../list";
 import { FixButton } from "../proposal";
 import { ReproduceButton } from "../reproduce";
@@ -145,6 +146,7 @@ export default function PrPage({ me }: { me: Me }) {
                 {claimedBy ? t("Take over") : t("Claim")}
               </button>
             )}
+            <RefreshButton base={base} />
             <a className="button" href={pr.url} target="_blank" rel="noreferrer">
               GitHub <Icon name="external" size={13} />
             </a>
@@ -170,7 +172,7 @@ export default function PrPage({ me }: { me: Me }) {
                         {r.kind} {t("at")} <code>{r.sha.slice(0, 7)}</code> · <When at={r.created_at} />
                       </summary>
                       <div style={{ marginTop: 8 }}>
-                        <Pre text={String(r.result.body ?? JSON.stringify(r.result, null, 2))} />
+                        {typeof r.result.body === "string" ? <Markdown text={r.result.body} className="posted" /> : <Pre text={JSON.stringify(r.result, null, 2)} />}
                       </div>
                     </details>
                   ))}
@@ -208,7 +210,7 @@ export default function PrPage({ me }: { me: Me }) {
         </div>
 
         <aside className="side">
-          <EvaluationCard base={base} evaluation={d.evaluation} />
+          <EvaluationCard base={base} repo={full} number={pr.number} evaluation={d.evaluation} />
           <Section
             title={t("Merge")}
             aside={
@@ -308,7 +310,7 @@ function Overview({ d }: { d: PrDetail }) {
       )}
       <Section title={t("Description")}>
         {d.pr.body?.trim() ? (
-          <div style={{ whiteSpace: "pre-wrap", wordBreak: "break-word", fontSize: 13.5, maxHeight: 520, overflow: "auto" }}>{d.pr.body}</div>
+          <Markdown text={d.pr.body} className="pr-body" />
         ) : (
           <span className="muted small">{t("No description.")}</span>
         )}
@@ -506,9 +508,33 @@ function ScoreBar({ name, value }: { name: string; value: number }) {
   );
 }
 
-function EvaluationCard({ base, evaluation }: { base: string; evaluation: Evaluation | null }) {
+/** Read this PR from GitHub now instead of waiting for the next poll. */
+function RefreshButton({ base }: { base: string }) {
   const t = useT();
   const toast = useToast();
+  const refresh = useAct(() => api.post<{ changes: string[] }>(`${base}/refresh`), [["pr"], ["prs"]]);
+  return (
+    <button
+      className="icon"
+      title={t("Read this PR from GitHub now")}
+      aria-label={t("Read this PR from GitHub now")}
+      disabled={refresh.isPending}
+      onClick={() =>
+        refresh.mutate(undefined, {
+          onSuccess: (r) => toast({ title: r.changes.length ? t("Updated from GitHub") : t("Already up to date"), icon: "refresh" }),
+          onError: (e) => toast({ title: t("Could not read it from GitHub"), body: e instanceof Error ? e.message : String(e), icon: "x" }),
+        })
+      }
+    >
+      <Icon name="refresh" size={15} />
+    </button>
+  );
+}
+
+function EvaluationCard({ base, repo, number, evaluation }: { base: string; repo: string; number: number; evaluation: Evaluation | null }) {
+  const t = useT();
+  const toast = useToast();
+  const again = useReevaluate();
   const [open, setOpen] = useState(false);
   const [scores, setScores] = useState<Record<string, string>>({});
   const [boost, setBoost] = useState("");
@@ -563,10 +589,21 @@ function EvaluationCard({ base, evaluation }: { base: string; evaluation: Evalua
         <span className="small muted">{t("Not evaluated yet.")}</span>
       )}
       {!open ? (
-        <button className="ghost sm" style={{ marginTop: 10 }} onClick={() => setOpen(true)}>
-          <Icon name="refresh" size={14} />
-          {t("Adjust priority")}
-        </button>
+        <div className="row" style={{ marginTop: 10, gap: 6 }}>
+          <button className="ghost sm" onClick={() => setOpen(true)}>
+            <Icon name="settings" size={14} />
+            {t("Adjust priority")}
+          </button>
+          <button
+            className="ghost sm"
+            disabled={again.isPending}
+            title={t("An agent scores every dimension again, with the repository's lessons as they are now")}
+            onClick={() => again.mutate([{ repo, number }], { onSuccess: (out) => toast(evaluationToast(out, t)) })}
+          >
+            <Icon name="sparkles" size={14} />
+            {again.isPending ? t("Starting…") : t("Score again")}
+          </button>
+        </div>
       ) : (
         <form
           className="stack"
@@ -615,6 +652,7 @@ function EvaluationCard({ base, evaluation }: { base: string; evaluation: Evalua
           <ErrorBox error={override.error} />
         </form>
       )}
+      <ErrorBox error={again.error} />
     </Section>
   );
 }

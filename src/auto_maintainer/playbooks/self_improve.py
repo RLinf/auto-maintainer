@@ -36,7 +36,7 @@ from ..domain.agents import AgentTask, TaskKind
 from ..domain.events import Event, EventKind
 from ..domain.profile import RepoProfile
 from ..domain.records import ChatMessage
-from .base import Playbook, PlaybookContext, PlaybookResult
+from .base import Playbook, PlaybookContext, PlaybookResult, may_succeed_later
 from .prompts import schema_hint
 
 TESTS = [
@@ -52,10 +52,9 @@ TESTS = [
 LINT = ["uv", "run", "--frozen", "ruff", "check", "."]
 
 
-class ImproveResult(BaseModel):
-    done: bool = Field(
-        description="True when the worktree now implements the request; false if you could not do it."
-    )
+class ImproveSummary(BaseModel):
+    """How the change reads on its PR, written from the diff after the work is done."""
+
     title: str = Field(
         description=(
             "PR title: `<type>(<scope>): <description>`, imperative; the description at most "
@@ -65,14 +64,22 @@ class ImproveResult(BaseModel):
     summary: str = Field(
         description="What changed and why, for the PR description: the behavior, the files, the design sections touched."
     )
-    tests: str = Field(description="The commands you ran and their results.")
     notes: str = Field(
         default="",
         description="Anything a maintainer should check before approving: risks, follow-ups, open questions.",
     )
 
 
+MAX_DIFF_FOR_SUMMARY = 60_000
+"""Characters of the diff the summarizing agent reads."""
+
+
 class SelfImprove(Playbook):
+    """Runs only when a maintainer of the service's repository approved the request
+    (the chat's request card). The agent edits a worktree and does not need to answer
+    in a fixed format: the diff says what it did, and a short second task describes
+    the diff for the PR."""
+
     name = "self_improve"
     triggers: ClassVar = (EventKind.DASHBOARD_COMMAND,)
     pool = "agent"
@@ -95,51 +102,78 @@ class SelfImprove(Playbook):
                 thread_id,
                 "This service has no code repository configured (`code_repo` in local.yaml), so it cannot change its own code.",
             )
-            return PlaybookResult(result={"skipped": "no code repo"})
+            return PlaybookResult(failed="no code repository is configured")
         request = str(event.payload["request"]).strip()
         by = event.payload.get("by")
+        approved_by = event.payload.get("approved_by")
         base = await ctx.forge.default_branch_sha(code_repo)
         path = await ctx.workspace.prepare(
             code_repo, None, base, ctx.service.code_branch
         )
         try:
-            result = await ctx.ask(
+            work = await ctx.ask(
                 AgentTask(
                     kind=TaskKind.SELF_IMPROVE,
                     prompt=_prompt(request, by, event.payload.get("context") or ""),
                     workdir=path,
                     mode="workspace_write",
                     repo=code_repo,
-                ),
-                ImproveResult,
-            )
-            if not result.ok or result.structured is None:
-                await _tell(
-                    ctx, thread_id, f"I could not work on the change: {result.error}"
                 )
-                return PlaybookResult(result={"error": result.error})
-            answer = ImproveResult.model_validate(result.structured)
+            )
+            if not work.ok:
+                if may_succeed_later(work):
+                    await _tell(
+                        ctx,
+                        thread_id,
+                        f"I could not work on the change yet ({work.error}); I will try again.",
+                    )
+                    raise RuntimeError(f"self-improvement agent failed: {work.error}")
+                await _tell(
+                    ctx, thread_id, f"I could not work on the change: {work.error}"
+                )
+                return PlaybookResult(failed=work.error or "the agent failed")
+            account = work.text.strip()
             changes = await ctx.workspace.changes(path)
-            if not answer.done or not changes.patch.strip():
+            if not changes.patch.strip():
                 await _tell(
                     ctx,
                     thread_id,
-                    "I did not change any code. " + (answer.summary or answer.notes),
+                    "I did not change any code."
+                    + (f" {account[-1500:]}" if account else ""),
                 )
                 return PlaybookResult(result={"done": False})
             tests = await ctx.sandbox.run(TESTS, cwd=path, timeout=1800)
             lint = await ctx.sandbox.run(LINT, cwd=path, timeout=300)
+            described = await ctx.ask(
+                AgentTask(
+                    kind=TaskKind.SELF_IMPROVE,
+                    prompt=_summary_prompt(request, changes.patch, account),
+                    workdir=path,
+                    mode="read_only",
+                    repo=code_repo,
+                ),
+                ImproveSummary,
+            )
         finally:
             await ctx.workspace.release(path)
 
-        title = _title(answer.title)
+        if described.ok and described.structured is not None:
+            summary = ImproveSummary.model_validate(described.structured)
+        else:  # the PR still says what was asked and shows the diff
+            summary = ImproveSummary(
+                title=request.splitlines()[0],
+                summary=account[-3000:] or "See the diff.",
+            )
+        title = _title(summary.title)
         branch = f"am/self/{_slug(title)}-{event.id[-6:]}"
         body = "\n\n".join(
             part
             for part in [
-                f"Requested by {by} in chat:" if by else "Requested in chat:",
+                (f"Requested by {by} in chat" if by else "Requested in chat")
+                + (f", approved to start by {approved_by}" if approved_by else "")
+                + ":",
                 "> " + request.replace("\n", "\n> "),
-                "## What changed\n" + answer.summary,
+                "## What changed\n" + summary.summary,
                 "## Checks\n"
                 + _check(
                     "tests",
@@ -151,10 +185,10 @@ class SelfImprove(Playbook):
                 + _check(
                     "lint", " ".join(LINT), lint.exit_code, lint.stdout + lint.stderr
                 ),
-                "## The agent's own test run\n" + answer.tests,
-                "## Notes for the reviewer\n" + answer.notes if answer.notes else "",
+                "## The agent's account\n" + account[-3000:] if account else "",
+                "## Notes for the reviewer\n" + summary.notes if summary.notes else "",
                 f"Files: {', '.join(changes.files[:40])}",
-                f"Drafted by auto-maintainer with {result.runtime}. A maintainer of this "
+                f"Drafted by auto-maintainer with {work.runtime}. A maintainer of this "
                 "repository must approve the merge, and then the deploy, before the service "
                 "runs this code.",
             ]
@@ -201,10 +235,33 @@ def _prompt(request: str, by: Any, context: str) -> str:
         "update AGENTS.md and docs/design.md where the behavior they describe changes. Run "
         "`uv run ruff format .`, `uv run ruff check .`, and `uv run pytest -q` and fix what fails. "
         "Do not commit, push, or open a PR: the service does that, and a maintainer approves it. "
-        "If the request cannot or should not be done, change nothing and say why."
+        "If the request cannot or should not be done, change nothing and say why. When you "
+        "are done, end with a short message: what you changed, and the commands you ran "
+        "with their results."
     )
-    parts.append(schema_hint(ImproveResult.model_json_schema()))
     return "\n\n".join(parts)
+
+
+def _summary_prompt(request: str, patch: str, account: str) -> str:
+    diff = (
+        patch
+        if len(patch) <= MAX_DIFF_FOR_SUMMARY
+        else patch[:MAX_DIFF_FOR_SUMMARY] + "\n…"
+    )
+    return "\n\n".join(
+        [
+            "Describe this change to auto-maintainer's own code for its pull request. Read "
+            "the diff; do not change any file.",
+            f"What a reviewer asked for:\n\n{request}",
+            *(
+                [f"What the agent that made it said:\n\n{account[-4000:]}"]
+                if account
+                else []
+            ),
+            f"The diff:\n\n```diff\n{diff}\n```",
+            schema_hint(ImproveSummary.model_json_schema()),
+        ]
+    )
 
 
 def _title(title: str) -> str:

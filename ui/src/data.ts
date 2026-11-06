@@ -1,7 +1,8 @@
 // Queries shared by several pages, so the header, the home page, the palette and the
 // pages read one cache entry each and the live event stream refreshes them all.
 
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { openJob } from "./openJob";
 import {
   api,
   type AgentQuestion,
@@ -81,4 +82,45 @@ export const TIER_ORDER = ["P0", "P1", "P2", "P3"];
 
 export function prKey(p: { repo: string; number: number }) {
   return `${p.repo}#${p.number}`;
+}
+
+export interface EvaluationStart {
+  repo: string;
+  number: number;
+  run: "evaluate" | "joined" | "skip";
+  event?: string;
+  reason?: string;
+}
+
+/** Score PRs' priority again, every dimension, with the repository's lessons as they are now. */
+export function useReevaluate() {
+  return useMutation({
+    mutationFn: (prs: { repo: string; number: number }[]) => api.post<EvaluationStart[]>("/api/evaluations", { prs }),
+  });
+}
+
+/** Read PRs from GitHub now: every repository the user sees, or the ones given. */
+export function useSyncPrs() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (repos: string[] = []) => api.post<{ started: string[]; running: string[] }>("/api/prs/refresh", { repos }),
+    onSuccess: () => {
+      // The polls run in the background; look again once the first ones are likely done.
+      window.setTimeout(() => void client.invalidateQueries({ queryKey: ["prs"] }), 8000);
+    },
+  });
+}
+
+/** What to tell the person after asking for PRs to be scored again. */
+export function evaluationToast(out: EvaluationStart[], t: (s: string) => string) {
+  const started = out.filter((o) => o.run === "evaluate");
+  const joined = out.filter((o) => o.run === "joined");
+  const first = started[0] ?? joined[0];
+  if (!first) return { title: t("Priority is off for these repositories"), icon: "check" as const };
+  return {
+    title: out.length === 1 ? (started.length ? t("Scoring again") : t("Already being scored again")) : `${t("Scoring again")}: ${started.length + joined.length}`,
+    body: t("The new priority appears as each agent finishes."),
+    icon: "sparkles" as const,
+    action: first.event ? { label: t("Watch"), onClick: () => openJob(first.event as string) } : undefined,
+  };
 }

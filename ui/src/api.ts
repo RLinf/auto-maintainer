@@ -409,6 +409,18 @@ export interface AgentHealth {
   structured_output: boolean | null;
   latency_seconds: number | null;
   detail: string;
+  /** Its models and reasoning levels, when it is installed. */
+  choices?: AgentChoices | null;
+}
+
+export interface AgentChoices {
+  /** Empty when the CLI cannot list them; any name it accepts still works. */
+  models: { id: string; name: string }[];
+  default_model: string | null;
+  efforts: string[];
+  default_effort: string | null;
+  /** ``cli``: the CLI reported them itself; ``known``: what the adapter knows it accepts. */
+  source: "cli" | "known";
 }
 
 export interface AgentRun {
@@ -456,9 +468,31 @@ export interface ChatMessage {
   changes?: string[];
   /** Jobs the answer started, by the id of their request. */
   jobs?: string[];
+  /** What the answer asks to do once a person approves its card. */
+  requests?: ChatRequest[];
   /** The agent run that wrote an answer; its steps stay readable. */
   run_id?: string | null;
   created_at: string;
+}
+
+export interface ChatRequest {
+  id: string;
+  /** ``improve``: change the service's own code; ``add_repo``: onboard a repository. */
+  kind: "improve" | "add_repo";
+  text: string;
+  state: "pending" | "approved" | "declined";
+  decided_by: string | null;
+  job: string | null;
+}
+
+export interface PendingRequest {
+  thread_id: string;
+  message_id: string;
+  asked_by: string;
+  created_at: string;
+  /** Whether the viewer may approve it (else it is their own, waiting for someone who may). */
+  can_decide: boolean;
+  request: ChatRequest;
 }
 
 export interface ChatSteps {
@@ -494,6 +528,9 @@ export interface SettingsAgent {
   adapter: string;
   enabled: boolean;
   model: string | null;
+  effort: string | null;
+  /** Whether its CLI is on this host; ``null`` while it is turned off. */
+  installed: boolean | null;
   provider: string | null;
   budget: { daily_usd: number | null; daily_runs: number | null };
   allow_bypass: boolean;
@@ -527,6 +564,8 @@ export interface SettingsRoute {
   timeout_seconds: number;
   permissions: string;
   from_settings: boolean;
+  /** The agent the task runs on now: the first in its order that is installed. */
+  runs_on: string | null;
 }
 
 export interface SettingsView {

@@ -28,7 +28,8 @@ const INVALIDATES: Record<string, string[][]> = {
 /** Keys refreshed after a burst of events, at most once per ``SLOW_MS``: lists that are
  * costly to reload and change with a job's status rather than with each step. */
 const SLOW: Record<string, string[][]> = {
-  "job.progress": [["prs"]],
+  // A finished job may have changed a PR's priority or review state.
+  "job.progress": [["prs"], ["pr"]],
 };
 const SLOW_MS = 3000;
 

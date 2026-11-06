@@ -681,15 +681,32 @@ class Service:
         if paths & {SETTINGS_PATH, LEGACY_RUNTIMES_PATH, "remote"}:
             await self.reload_settings()
         if event.repo and lock_path(event.repo) in paths:
-            self._poll_now(event.repo)
+            self.poll_now(event.repo)
 
-    def _poll_now(self, repo: str) -> None:
-        """Read ``repo``'s PRs now instead of at the next scheduled poll: its approved
-        profile just changed, and a first approval is what makes it active. The poll
-        runs off the event dispatcher, since a first poll reads every open PR."""
+    def agent_ready(self, name: str) -> bool:
+        """Whether agent ``name`` is enabled and installed on this host; ``True`` for
+        runners that cannot tell (the test fakes)."""
+        ready = getattr(self.a.agents, "ready", None)
+        return bool(ready(name)) if callable(ready) else True
+
+    def runs_on(self, route: Route | None) -> str | None:
+        """The agent ``route`` runs on now: its first agent that is ready, else its
+        primary."""
+        if route is None:
+            return None
+        runs_on = getattr(self.a.agents, "runs_on", None)
+        return (runs_on(route) if callable(runs_on) else None) or route.primary
+
+    def poll_now(self, repo: str) -> bool:
+        """Read ``repo``'s PRs now instead of at the next scheduled poll, in the
+        background (a first poll reads every open PR): after its approved profile
+        changed, which a first approval makes active, or when a maintainer asks.
+
+        Returns whether a poll started; ``False`` when one is already running.
+        """
         running = self._polls.get(repo)
         if not self.serves(repo) or (running is not None and not running.done()):
-            return
+            return False
 
         async def poll() -> None:
             record = await self.store.get_repo(repo)
@@ -701,6 +718,7 @@ class Service:
                 log.exception("polling %s after its profile changed failed", repo)
 
         self._polls[repo] = asyncio.create_task(poll(), name=f"poll {repo}")
+        return True
 
     # -- operations used by the dashboard and the CLI ----------------------------------
 

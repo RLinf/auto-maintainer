@@ -285,24 +285,7 @@ class ActionPipeline:
         assert record is not None, f"proposal {proposal_id} points at a missing action"
         action = record.action
         if edited_payload is not None:
-            typed = PAYLOADS[action.kind].model_validate(edited_payload)
-            new_payload = typed.model_dump(mode="json")
-            if new_payload != action.payload:
-                await self.store.add_signal(
-                    Signal(
-                        kind=SignalKind.DRAFT_EDITED,
-                        repo=action.repo,
-                        number=action.number,
-                        source=login,
-                        payload={
-                            "action_kind": action.kind,
-                            "diff": _payload_diff(action.payload, new_payload),
-                        },
-                    )
-                )
-                action.payload = new_payload
-                record.action = action
-                proposal.edited = True
+            await self._apply_edits(proposal, record, login, edited_payload)
         if post_as is not None:
             if post_as != login or action.kind not in (
                 ActionKind.REVIEW_POST,
@@ -333,6 +316,60 @@ class ActionPipeline:
             )
         )
         return proposal
+
+    async def save_edits(
+        self, proposal_id: str, login: str, edited_payload: dict[str, Any]
+    ) -> Proposal:
+        """Keep a person's edits to a pending draft without deciding it, so they can
+        come back to it; approving later posts what was saved."""
+        proposal = await self.store.get_proposal(proposal_id)
+        if proposal is None:
+            raise ApprovalError(f"proposal {proposal_id} does not exist")
+        if proposal.state != ProposalState.PENDING:
+            raise ApprovalError(
+                f"proposal {proposal_id} is {proposal.state}, not pending"
+            )
+        record = await self.store.get_action(proposal.action_id)
+        assert record is not None, f"proposal {proposal_id} points at a missing action"
+        if await self._apply_edits(proposal, record, login, edited_payload):
+            # The leak check reads the text as it now is.
+            proposal.warnings = await self._warnings(
+                record.action, await self._profile_for(record.action)
+            )
+            await self.store.save_action(record)
+            await self.store.save_proposal(proposal)
+        return proposal
+
+    async def _apply_edits(
+        self,
+        proposal: Proposal,
+        record: ActionRecord,
+        login: str,
+        edited_payload: dict[str, Any],
+    ) -> bool:
+        """Validate ``edited_payload`` against the action's payload model and put it
+        in place; returns whether it changed anything."""
+        action = record.action
+        typed = PAYLOADS[action.kind].model_validate(edited_payload)
+        new_payload = typed.model_dump(mode="json")
+        if new_payload == action.payload:
+            return False
+        await self.store.add_signal(
+            Signal(
+                kind=SignalKind.DRAFT_EDITED,
+                repo=action.repo,
+                number=action.number,
+                source=login,
+                payload={
+                    "action_kind": action.kind,
+                    "diff": _payload_diff(action.payload, new_payload),
+                },
+            )
+        )
+        action.payload = new_payload
+        record.action = action
+        proposal.edited = True
+        return True
 
     async def _redecide(self, record: ActionRecord, login: str) -> None:
         action = record.action
