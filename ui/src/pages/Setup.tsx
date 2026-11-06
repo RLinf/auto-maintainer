@@ -296,44 +296,60 @@ export function GhWebLogin({
   body?: string;
 }) {
   const t = useT();
-  const [code, setCode] = useState<{ code: string; url: string; flow_id?: string } | null>(null);
+  // The sign-in in progress outlives this component: going to GitHub in the same tab,
+  // a reload, or the page being drawn again brings back the code and keeps waiting.
+  const [code, setCode] = useState<GhFlow | null>(() => loadFlow(pollPath));
   const [error, setError] = useState<unknown>(null);
   const [copied, setCopied] = useState(false);
+  const resumed = useRef(code !== null);
   const timer = useRef<number | null>(null);
-  useEffect(
-    () => () => {
-      if (timer.current) window.clearTimeout(timer.current);
-    },
-    [],
-  );
+  const reset = () => {
+    saveFlow(pollPath, null);
+    setCode(null);
+  };
   const poll = (flowId?: string) => {
     timer.current = window.setTimeout(async () => {
       try {
         const r = await api.post<{ state?: string; pending?: boolean; error?: string; login?: string }>(pollPath, flowId ? { flow_id: flowId } : {});
         if (r.state === "pending" || r.pending) return poll(flowId);
-        if (r.state === "done" || r.login) {
-          setCode(null);
-          onDone();
-          return;
-        }
-        setCode(null);
+        reset();
+        if (r.state === "done" || r.login) return onDone();
+        // "idle": the server no longer knows this sign-in (it restarted); start again.
+        if (r.state === "idle" && resumed.current) return;
         setError(new Error(r.error || t("The sign-in did not finish; try again.")));
       } catch (e) {
         if (e instanceof ApiError && e.status === 202) return poll(flowId);
-        setError(e);
-        setCode(null);
+        reset();
+        if (!(e instanceof ApiError && e.status === 404 && resumed.current)) setError(e);
       }
     }, 2000);
   };
+  useEffect(() => {
+    if (code) poll(code.flow_id);
+    return () => {
+      if (timer.current) window.clearTimeout(timer.current);
+    };
+    // Resume once, for a sign-in that was already waiting when the page was drawn.
+  }, []);
   const start = async () => {
     setError(null);
     try {
       const r = await api.post<{ code: string; url: string; flow_id?: string }>(startPath);
-      setCode(r);
+      const flow = { ...r, exp: Date.now() + FLOW_MS };
+      saveFlow(pollPath, flow);
+      resumed.current = false;
+      setCode(flow);
       poll(r.flow_id);
     } catch (e) {
       setError(e);
     }
+  };
+  const copy = () => {
+    if (!code) return;
+    void navigator.clipboard?.writeText(code.code).then(
+      () => setCopied(true),
+      () => undefined,
+    );
   };
   return (
     <Choice
@@ -351,18 +367,12 @@ export function GhWebLogin({
                 <span className="code" style={{ fontSize: 22 }}>
                   {code.code}
                 </span>
-                <button
-                  className="ghost sm"
-                  onClick={() => {
-                    void navigator.clipboard?.writeText(code.code);
-                    setCopied(true);
-                  }}
-                >
+                <button className="ghost sm" onClick={copy}>
                   {copied ? t("Copied") : t("Copy")}
                 </button>
               </div>
-              <a className="button primary" href={code.url} target="_blank" rel="noreferrer">
-                {t("Enter it on GitHub")} <Icon name="external" size={12} />
+              <a className="button primary" href={code.url} target="_blank" rel="noopener noreferrer" onClick={copy}>
+                {t("Copy the code and open GitHub")} <Icon name="external" size={12} />
               </a>
               <span className="small muted row" style={{ gap: 6 }}>
                 <span className="typing" aria-hidden>
@@ -370,8 +380,11 @@ export function GhWebLogin({
                   <span />
                   <span />
                 </span>
-                {t("Waiting for you to authorize on GitHub…")}
+                {t("Waiting for you to authorize on GitHub. Paste the code there; this page keeps it, and finishes by itself once you authorize, even if you come back to it later.")}
               </span>
+              <button className="ghost sm" style={{ alignSelf: "flex-start" }} onClick={() => void start()}>
+                {t("Get a new code")}
+              </button>
             </>
           ) : (
             <button className="primary sm" onClick={() => void start()}>
@@ -383,6 +396,34 @@ export function GhWebLogin({
       }
     />
   );
+}
+
+/** How long a sign-in code is worth showing again: GitHub's device codes last 15 minutes. */
+const FLOW_MS = 14 * 60 * 1000;
+
+interface GhFlow {
+  code: string;
+  url: string;
+  flow_id?: string;
+  exp: number;
+}
+
+function loadFlow(pollPath: string): GhFlow | null {
+  try {
+    const flow = JSON.parse(sessionStorage.getItem(`am.gh-login:${pollPath}`) ?? "null") as GhFlow | null;
+    return flow && flow.exp > Date.now() ? flow : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveFlow(pollPath: string, flow: GhFlow | null) {
+  try {
+    if (flow) sessionStorage.setItem(`am.gh-login:${pollPath}`, JSON.stringify(flow));
+    else sessionStorage.removeItem(`am.gh-login:${pollPath}`);
+  } catch {
+    // Without storage the sign-in still works while the page stays open.
+  }
 }
 
 function Step({ n, title, hint, done, optional, children }: { n: number; title: string; hint?: string; done: boolean; optional?: boolean; children: ReactNode }) {

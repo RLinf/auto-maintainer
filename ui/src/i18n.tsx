@@ -361,7 +361,6 @@ const zh: Record<string, string> = {
     "没有设置命令前缀的智能体以本机服务用户的身份运行，能读取该用户的文件，包括审阅者登录时留下的令牌。在共享主机上，请为它们加上隔离。",
   "Confine the agents so they cannot read the service's files: ": "隔离这些智能体，使它们无法读取服务的文件：",
   "Ask how": "问问怎么做",
-  "Enter it on GitHub": "到 GitHub 输入",
   "Error": "错误",
   "Every agent run: which CLI, which task, how it went, and what it cost.": "每次智能体运行：用了哪个 CLI、做什么任务、结果如何、花费多少。",
   "Every decision and change": "每个决策和变更",
@@ -596,7 +595,6 @@ const zh: Record<string, string> = {
   "View only: changing them needs": "只读：修改需要",
   "View only: configuration needs": "只读：修改配置需要",
   "Waiting for a profile": "等待配置",
-  "Waiting for you to authorize on GitHub…": "等待你在 GitHub 上授权…",
   "Warnings": "警告",
   "What are the risks in this change?": "这个改动有什么风险？",
   "What can you do?": "你能做什么？",
@@ -741,6 +739,10 @@ const zh: Record<string, string> = {
   "You enter a one-time code on github.com, and the service acts as the account you authorize. For a team, authorize an account made for the service, so what it posts is not under your name.":
     "在 github.com 上输入一次性验证码，服务就以你授权的账号工作。团队使用时，建议授权一个专为服务创建的账号，这样它发布的内容不会署你的名字。",
   "Install the GitHub CLI": "安装 GitHub CLI",
+  "Copy the code and open GitHub": "复制验证码并打开 GitHub",
+  "Waiting for you to authorize on GitHub. Paste the code there; this page keeps it, and finishes by itself once you authorize, even if you come back to it later.":
+    "正在等待你在 GitHub 上授权。在那里粘贴验证码即可；本页会保留验证码，你授权后会自动完成登录，稍后再回到本页也一样。",
+  "Get a new code": "获取新的验证码",
   "The service reaches GitHub, and people sign in, through the GitHub CLI (gh), which this host does not have yet. Installing downloads GitHub's own release into the service's data folder and checks it against the release's checksums; nothing else on the host changes.":
     "服务访问 GitHub、大家登录，都要经过 GitHub CLI（gh），而这台主机还没有安装。安装会把 GitHub 官方发布的版本下载到服务的数据目录，并按发布附带的校验和核对；主机上的其他东西都不会改动。",
   "Installing…": "正在安装…",

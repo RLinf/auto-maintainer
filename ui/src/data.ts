@@ -15,7 +15,13 @@ import {
 } from "./api";
 
 export function useMe() {
-  return useQuery({ queryKey: ["me"], queryFn: () => api.get<Me>("/api/me") });
+  return useQuery({
+    queryKey: ["me"],
+    queryFn: () => api.get<Me>("/api/me"),
+    // Signed out, or the host is not set up: checking again when the tab regains focus
+    // would redraw the sign-in or setup page from scratch, losing a code in progress.
+    refetchOnWindowFocus: (query) => query.state.data !== undefined,
+  });
 }
 
 export function useProposals(enabled = true) {
