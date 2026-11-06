@@ -12,48 +12,47 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Host setup in the browser (design 7.3): the service's GitHub account, sign-in, the
-memory repository, and the address, written to ``local.yaml`` and ``secrets.env`` so
-nobody edits a file or types a command.
+"""Host setup in the browser (design 7.3): the GitHub CLI login the service acts as,
+the memory repository, and the address, written to ``local.yaml`` so nobody edits a
+file or types a command. The service acts on GitHub only through the GitHub CLI; when
+the host has none, the page installs it (``ghcli.install``).
 
 Who may set up a new host is decided by GitHub, like every other configuration
 change: the person must show that they maintain the service's own repository (the
-checkout's ``origin``), by signing in through the GitHub App the page has GitHub
-create, or with the token they paste. Until someone has, anyone who reaches the page
-may start, and the first such maintainer owns the setup. The one-time code that
-``am serve`` prints also proves ownership, for a checkout without a GitHub remote and
-for using the GitHub CLI's login on the host. After setup, the same steps run from the
-dashboard behind the service gate.
+checkout's ``origin``) by authorizing the GitHub CLI login on github.com. Until
+someone has, anyone who reaches the page may start, and the first such maintainer
+owns the setup. The one-time code that ``am serve`` prints also proves ownership, for
+a checkout without a GitHub remote and for using the GitHub CLI's login already on
+the host. After setup, the same steps run from the dashboard behind the service gate.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
 import os
 import re
 import secrets
 import shutil
 import signal
 import socket
-import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlencode
 
 import httpx
-import jwt
 
-from . import subproc
+from . import ghcli, subproc
 from .config import (
     CONFIG_DIR,
+    LEGACY_SECRETS,
     HostConfig,
     is_configured,
+    legacy_github,
     load_host_config,
+    remove_host_secret,
     save_host_config,
-    set_host_secret,
     write_private_file,
 )
 
@@ -64,17 +63,6 @@ AGENT_BINARIES = {
     "opencode": "opencode",
     "gemini": "gemini",
 }
-
-APP_PERMISSIONS = {
-    "contents": "write",
-    "pull_requests": "write",
-    "issues": "write",
-    "checks": "read",
-    "statuses": "read",
-    "actions": "write",
-    "metadata": "read",
-}
-"""What the service needs on the repositories it maintains and on its memory repo."""
 
 LEVELS = ["pull", "triage", "push", "maintain", "admin"]
 """GitHub's repository permission names, lowest first, as ``GET /repos`` reports them."""
@@ -253,16 +241,12 @@ class HostSetup:
         """The service's GitHub account once chosen: login, name, avatar, kind."""
         self.claimer: dict[str, Any] | None = None
         """The maintainer who proved ownership and owns this setup."""
-        self.app: dict[str, Any] | None = None
-        """The GitHub App GitHub created for this setup: slug, owner, purpose."""
-        self.signin: Literal["gh", "app"] = (
-            "app" if self.cfg.github.oauth_client_id else "gh"
+        self.reconnect = (
+            legacy_github(config_dir) if is_configured(config_dir) else None
         )
-        """How people sign in: through a GitHub App, or by authorizing the GitHub CLI."""
-        self._secrets: dict[str, str] = {}
-        self._pem: str | None = None
+        """How the host acted on GitHub before only the GitHub CLI remained (``"a
+        GitHub App"``, ``"a token"``); such a host must connect the GitHub CLI."""
         self._token: str | None = None
-        self._manifest_state: dict[str, str] = {}
         self._checkout_repo: str | None | Literal[False] = False
         self._claimer_token: str | None = None
         self.gh_login = GhLogin(config_dir / "gh", self.cfg.github.web_url)
@@ -360,6 +344,14 @@ class HostSetup:
             "hostname": socket.gethostname(),
         }
 
+    async def install_gh(self) -> dict[str, Any]:
+        """Install the GitHub CLI into the data folder (``ghcli.install``)."""
+        try:
+            path = await ghcli.install(self.cfg.data_path, transport=self.transport)
+        except ghcli.InstallError as e:
+            raise SetupError(str(e)) from e
+        return {"installed": True, "path": path}
+
     # -- ownership -------------------------------------------------------------------------
 
     async def claim(self, token: str) -> dict[str, Any]:
@@ -405,22 +397,9 @@ class HostSetup:
         if not token:
             raise SetupError("the GitHub CLI on this host is not logged in")
         user = await self._user(token)
-        self.cfg.github.auth = "gh"
         self.cfg.github.gh_config_dir = None
         self._token = token
         self.identity = {**user, "kind": "gh", "warning": self._warning(user)}
-        return self.identity
-
-    async def use_token(self, token: str, *, claim: bool) -> dict[str, Any]:
-        """Act as the token's account. On a new host the token also proves its owner."""
-        token = token.strip()
-        if not token:
-            raise SetupError("paste a token")
-        user = await (self.claim(token) if claim else self._user(token))
-        self.cfg.github.auth = "token"
-        self._token = token
-        self._secrets[self.cfg.github.token_env] = token
-        self.identity = {**user, "kind": "token", "warning": self._warning(user)}
         return self.identity
 
     async def gh_web_start(self) -> dict[str, str]:
@@ -447,114 +426,10 @@ class HostSetup:
             shutil.rmtree(self.gh_login.config_dir, ignore_errors=True)
             self.gh_login.proc = None
             return {"state": "failed", "error": str(e)}
-        self.cfg.github.auth = "gh"
         self.cfg.github.gh_config_dir = str(self.gh_login.config_dir)
         self._token = token
         self.identity = {**user, "kind": "gh", "warning": self._warning(user)}
         return {"state": "done", "identity": self.identity}
-
-    def token_url(self) -> str:
-        """GitHub's page for a new classic token with the scopes the service needs."""
-        q = urlencode({"scopes": "repo,read:org", "description": "auto-maintainer"})
-        return f"{self.cfg.github.web_url}/settings/tokens/new?{q}"
-
-    def app_manifest(
-        self, base_url: str, purpose: Literal["identity", "signin"], org: str | None
-    ) -> dict[str, Any]:
-        """A GitHub App manifest and where to post it; GitHub sends the browser back to
-        ``/setup/app/callback`` with a code that ``complete_app`` exchanges."""
-        base = base_url.rstrip("/")
-        self.cfg.base_url = base
-        state = secrets.token_urlsafe(16)
-        self._manifest_state[state] = purpose
-        name = f"auto-maintainer {socket.gethostname()}"[:34]
-        manifest: dict[str, Any] = {
-            "name": name if purpose == "identity" else f"{name} sign-in"[:34],
-            "url": base,
-            "redirect_url": f"{base}/setup/app/callback",
-            "callback_urls": [f"{base}/auth/callback", f"{base}/setup/signin/callback"],
-            "public": False,
-            "hook_attributes": {"url": f"{base}/webhooks/github", "active": False},
-            # A sign-in app still needs to post reviews: people may post the drafts
-            # they approve as themselves through it.
-            "default_permissions": APP_PERMISSIONS
-            if purpose == "identity"
-            else {"pull_requests": "write", "metadata": "read"},
-            "default_events": [],
-        }
-        owner = f"organizations/{org}/" if org else ""
-        return {
-            "url": f"{self.cfg.github.web_url}/{owner}settings/apps/new?state={state}",
-            "manifest": json.dumps(manifest),
-        }
-
-    async def complete_app(self, code: str, state: str) -> dict[str, Any]:
-        purpose = self._manifest_state.pop(state, None)
-        if purpose is None:
-            raise SetupError("this GitHub App answer does not belong to this setup")
-        async with self._client() as client:
-            r = await client.post(f"/app-manifests/{code}/conversions")
-        if r.status_code not in (200, 201):
-            raise SetupError(f"GitHub did not create the app ({r.status_code})")
-        app = r.json()
-        gh = self.cfg.github
-        gh.oauth_client_id = app["client_id"]
-        self._secrets[gh.oauth_client_secret_env] = app["client_secret"]
-        if app.get("webhook_secret"):
-            self._secrets[gh.webhook_secret_env] = app["webhook_secret"]
-        self.signin = "app"
-        slug = app.get("slug")
-        self.app = {
-            "slug": slug,
-            "owner": (app.get("owner") or {}).get("login"),
-            "install_url": f"{gh.web_url}/apps/{slug}/installations/new",
-            "purpose": purpose,
-        }
-        if purpose == "identity":
-            gh.auth = "app"
-            gh.app_id = int(app["id"])
-            gh.app_slug = slug
-            self._pem = app["pem"]
-            self.identity = {
-                "login": f"{slug}[bot]",
-                "name": app.get("name") or slug,
-                "avatar_url": "",
-                "kind": "app",
-                "warning": "",
-            }
-        return self.app
-
-    def signin_url(self, redirect_uri: str, state: str) -> str:
-        """GitHub's authorize page for the app this setup created."""
-        client_id = self.cfg.github.oauth_client_id
-        if not client_id:
-            raise SetupError("create the GitHub App first")
-        q = urlencode(
-            {"client_id": client_id, "redirect_uri": redirect_uri, "state": state}
-        )
-        return f"{self.cfg.github.web_url}/login/oauth/authorize?{q}"
-
-    async def signin_token(self, code: str, redirect_uri: str) -> str:
-        """Exchange the code GitHub sent back for the person's token."""
-        gh = self.cfg.github
-        secret = self._secrets.get(gh.oauth_client_secret_env)
-        if not gh.oauth_client_id or not secret:
-            raise SetupError("create the GitHub App first")
-        async with self._client(gh.web_url) as client:
-            r = await client.post(
-                "/login/oauth/access_token",
-                data={
-                    "client_id": gh.oauth_client_id,
-                    "client_secret": secret,
-                    "code": code,
-                    "redirect_uri": redirect_uri,
-                },
-                headers={"Accept": "application/json"},
-            )
-        token = r.json().get("access_token") if r.status_code == 200 else None
-        if not token:
-            raise SetupError("GitHub did not sign you in; try again")
-        return str(token)
 
     # -- memory --------------------------------------------------------------------------
 
@@ -570,44 +445,15 @@ class HostSetup:
         )
         return f"{self.cfg.github.web_url}/new?{q}"
 
-    async def _app_token(self, repo: str) -> str | None:
-        """An installation token for ``repo`` from the app this setup created, or
-        ``None`` when the app is not installed there."""
-        gh = self.cfg.github
-        if self._pem is None or gh.app_id is None:
-            return None
-        now = int(time.time())
-        assertion = jwt.encode(
-            {"iat": now - 60, "exp": now + 540, "iss": str(gh.app_id)},
-            self._pem,
-            algorithm="RS256",
-        )
-        auth = {"Authorization": f"Bearer {assertion}"}
-        async with self._client() as client:
-            r = await client.get(f"/repos/{repo}/installation", headers=auth)
-            if r.status_code != 200:
-                return None
-            t = await client.post(
-                f"/app/installations/{r.json()['id']}/access_tokens", headers=auth
-            )
-        return t.json().get("token") if t.status_code == 201 else None
-
-    async def _service_token(self, repo: str) -> str | None:
-        """The credential the service itself will use for ``repo``: an installation
-        token of its GitHub App, its token, or its GitHub CLI login (the one made in the
-        browser, else the host's)."""
-        gh = self.cfg.github
-        if gh.auth == "app":
-            if self._pem is None and gh.private_key_path:
-                key = Path(gh.private_key_path).expanduser()
-                if key.is_file():
-                    self._pem = key.read_text(encoding="utf-8")
-            return await self._app_token(repo)
+    async def _service_token(self) -> str | None:
+        """The credential the service itself will use: the GitHub CLI login chosen in
+        this setup, else the one made in the browser earlier, else the host's own.
+        ``None`` for a host that must connect again, whose old account is gone."""
         if self._token:
             return self._token
-        if gh.auth == "token":
-            return os.environ.get(gh.token_env) or None
-        if gh.gh_config_dir or self.gh_login.state() != "none":
+        if self.reconnect:
+            return None
+        if self.cfg.github.gh_config_dir:
             token = await self.gh_login.token()
             if token:
                 return token
@@ -621,11 +467,9 @@ class HostSetup:
 
         The repository is looked up with each credential at hand in turn (the
         signed-in maintainer's, the service's own, the host's GitHub CLI), because a
-        private repository is invisible to a credential not given access to it: a
-        GitHub App's sign-in sees only repositories the app is installed on, and a
-        fine-grained token only those chosen for it. It is created with the
-        maintainer's account. The service's own account must then reach it, since it
-        keeps the memory there; that is checked last.
+        private repository is invisible to an account not given access to it. It is
+        created with the maintainer's account. The service's own account must then
+        reach it, since it keeps the memory there; that is checked last.
         """
         if not repo:
             self.cfg.memory.remote = None
@@ -633,7 +477,7 @@ class HostSetup:
         if not re.fullmatch(r"[\w.-]+/[\w.-]+", repo):
             raise SetupError("name the repository as owner/name")
         person = person_token or self._claimer_token
-        service = await self._service_token(repo)
+        service = await self._service_token()
         host = await self.gh_token()
         candidates = [t for t in dict.fromkeys([person, service, host]) if t]
         if not candidates:
@@ -676,28 +520,12 @@ class HostSetup:
                 created = True
             else:
                 accounts = ", ".join(dict.fromkeys(tried)) or "no account"
-                install = (
-                    f" Install the app on it: {self._install_url()}"
-                    if self.cfg.github.auth == "app"
-                    else ""
-                )
                 raise SetupError(
                     f"{repo} does not exist, or none of these can see it: {accounts}. "
-                    "A private repository is visible only to accounts given access; "
-                    "a GitHub App's sign-in sees only repositories the app is installed "
-                    "on, and a fine-grained token only the repositories chosen for it."
-                    + install
+                    "A private repository is visible only to accounts given access "
+                    "to it."
                 )
-            if self.cfg.github.auth == "app":
-                if await self._app_token(repo) is None:
-                    self.cfg.memory.remote = repo
-                    return {
-                        "repo": repo,
-                        "created": created,
-                        "install": self._install_url(),
-                        "warning": f"install the app on {repo} so the service can write there",
-                    }
-            elif (
+            if (
                 service is not None
                 and (
                     await client.get(
@@ -721,37 +549,33 @@ class HostSetup:
 
     async def _login_of(self, client: httpx.AsyncClient, auth: dict[str, str]) -> str:
         """The account a credential belongs to, for messages; ``?`` when GitHub will
-        not say (an installation token has no user)."""
+        not say."""
         r = await client.get("/user", headers=auth)
         if r.status_code == 200:
             return str(r.json().get("login") or "?")
-        return "the service's GitHub App" if self.cfg.github.auth == "app" else "?"
-
-    def _install_url(self) -> str:
-        return f"{self.cfg.github.web_url}/apps/{self.cfg.github.app_slug}/installations/new"
+        return "?"
 
     # -- finishing -----------------------------------------------------------------------
 
     def summary(self) -> dict[str, Any]:
-        gh = self.cfg.github
         return {
             "configured": is_configured(self.config_dir),
             "base_url": self.cfg.base_url,
             "identity": self.identity,
             "claimer": self.claimer,
-            "app": self.app,
-            "auth": gh.auth,
-            "signin": self.signin,
+            "reconnect": self.reconnect,
             "memory": self.cfg.memory.remote,
             "code_repo": self.cfg.code_repo,
             "approve_permission": self.cfg.self_update.approve_permission,
-            "token_url": self.token_url(),
         }
 
     def finish(self, base_url: str, code_repo: str | None) -> HostConfig:
-        """Write ``local.yaml``, ``secrets.env``, and the app key; the setup code expires."""
-        if self.identity is None and not is_configured(self.config_dir):
-            raise SetupError("choose the service's GitHub account first")
+        """Write ``local.yaml``; the setup code expires. A host that must connect again
+        loses what its GitHub App or token setup kept: their secrets and the app's key."""
+        if self.identity is None and (
+            self.reconnect or not is_configured(self.config_dir)
+        ):
+            raise SetupError("connect the service's GitHub account first")
         if not re.match(r"^https?://[^\s/]+(:\d+)?/?$", base_url.strip()):
             raise SetupError("the address must look like http://host:7777")
         if code_repo and not re.fullmatch(r"[\w.-]+/[\w.-]+", code_repo):
@@ -759,16 +583,15 @@ class HostSetup:
         self.cfg.base_url = base_url.strip().rstrip("/")
         self.cfg.code_repo = code_repo or None
         for person in (self.claimer, self.identity):
-            login = person["login"] if person and person.get("kind") != "app" else None
+            login = person["login"] if person else None
             if login and login not in self.cfg.operators:
                 self.cfg.operators.append(login)
-        if self._pem is not None:
-            key = self.config_dir / "github-app.pem"
-            write_private_file(key, self._pem)
-            self.cfg.github.private_key_path = str(key)
-        for name, value in self._secrets.items():
-            set_host_secret(name, value, self.config_dir)
         save_host_config(self.cfg, self.config_dir)
+        if self.reconnect:
+            for name in LEGACY_SECRETS:
+                remove_host_secret(name, self.config_dir)
+            (self.config_dir / "github-app.pem").unlink(missing_ok=True)
+            self.reconnect = None
         self.code_path.unlink(missing_ok=True)
         if self.gh_login.state() == "pending":
             self.gh_login.cancel()

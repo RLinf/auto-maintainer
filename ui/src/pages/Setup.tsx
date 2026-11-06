@@ -1,9 +1,10 @@
-// Host setup in the browser: the address, the GitHub account the service acts as, how
-// people sign in, the memory repository, and the service's own repository. On a new
-// host, whoever proves through GitHub that they maintain the service's repository owns
-// the setup; later, maintainers reach this page from Settings.
+// Host setup in the browser: the address, the GitHub CLI login the service acts as, the
+// memory repository, and the service's own repository. The service reaches GitHub only
+// through the GitHub CLI; when the host has none, the page installs it. On a new host,
+// whoever proves through GitHub that they maintain the service's repository owns the
+// setup; later, maintainers reach this page from Settings.
 
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { api, ApiError } from "../api";
 import { ErrorBox, Status, useAct } from "../components";
@@ -16,7 +17,7 @@ interface Person {
   login: string;
   name: string;
   avatar_url: string;
-  kind?: "gh" | "token" | "app";
+  kind?: "gh";
   warning?: string;
 }
 
@@ -29,13 +30,11 @@ interface SetupStatus {
   base_url: string;
   identity: Person | null;
   claimer: Person | null;
-  app: { slug: string; owner: string; install_url: string; purpose: string } | null;
-  auth: "gh" | "token" | "app";
-  signin: "gh" | "app";
+  /** How the host reached GitHub before only the GitHub CLI remained, if it must connect again. */
+  reconnect: string | null;
   memory: string | null;
   code_repo: string | null;
   approve_permission: string;
-  token_url: string;
   detected: {
     gh: { installed: boolean; user?: Person; error?: string };
     agents: Record<string, boolean>;
@@ -52,19 +51,6 @@ const AGENT_NAMES: Record<string, string> = {
   gemini: "Gemini CLI",
 };
 
-function postToGitHub(url: string, manifest: string) {
-  const form = document.createElement("form");
-  form.method = "post";
-  form.action = url;
-  const input = document.createElement("input");
-  input.type = "hidden";
-  input.name = "manifest";
-  input.value = manifest;
-  form.appendChild(input);
-  document.body.appendChild(form);
-  form.submit();
-}
-
 export default function SetupPage({ firstRun = false }: { firstRun?: boolean }) {
   const t = useT();
   const client = useQueryClient();
@@ -73,10 +59,7 @@ export default function SetupPage({ firstRun = false }: { firstRun?: boolean }) 
     queryFn: () => api.get<SetupStatus>("/api/setup/status"),
     retry: false,
   });
-  const params = new URLSearchParams(window.location.search);
   const [baseUrl, setBaseUrl] = useState("");
-  const [token, setToken] = useState("");
-  const [org, setOrg] = useState("");
   const [memoryRepo, setMemoryRepo] = useState("");
   const [codeRepo, setCodeRepo] = useState("");
   const [showOther, setShowOther] = useState(false);
@@ -85,15 +68,11 @@ export default function SetupPage({ firstRun = false }: { firstRun?: boolean }) 
     if (!s || s.busy) return;
     setBaseUrl((v) => v || (s.configured ? s.base_url : window.location.origin));
     setCodeRepo((v) => v || s.code_repo || s.detected.checkout_repo || "");
-    const login = s.claimer?.login ?? (s.identity?.kind !== "app" ? s.identity?.login : undefined);
+    const login = s.claimer?.login ?? s.identity?.login;
     setMemoryRepo((v) => v || s.memory || (login ? `${login}/auto-maintainer-memory` : ""));
   }, [s]);
   const refresh = () => client.invalidateQueries({ queryKey: ["setup"] });
-  const useToken = useAct((body: { mode: "gh" | "token"; token?: string }) => api.post<Person>("/api/setup/github", body), [["setup"]]);
-  const app = useAct(
-    (purpose: "identity" | "signin") => api.post<{ url: string; manifest: string }>("/api/setup/app", { purpose, base_url: baseUrl, org: org || null }),
-    [],
-  );
+  const hostLogin = useAct(() => api.post<Person>("/api/setup/github"), [["setup"]]);
   const memory = useAct((body: { repo: string | null; create: boolean }) => api.post<{ repo: string | null; created?: boolean }>("/api/setup/memory", body), [["setup"]]);
   const finish = useAct(() => api.post<{ redirect: string }>("/api/setup/finish", { base_url: baseUrl, code_repo: codeRepo || null }), []);
 
@@ -136,21 +115,16 @@ export default function SetupPage({ firstRun = false }: { firstRun?: boolean }) 
   const proven = !s.first_run || s.code || !!owner;
   const ghUser = s.detected.gh.user;
   const repo = s.detected.checkout_repo;
-  const appPending = s.app?.purpose === "identity" && !owner && s.first_run;
 
   return shell(
     <>
-      {params.get("app") === "identity" && (
+      {s.reconnect && (
         <div className="notice">
-          <Icon name="check" size={14} /> {t("GitHub created the app. Install it on your repositories, then sign in with it below.")}
+          <Icon name="shield" size={14} />{" "}
+          {t("This host reached GitHub through")} {s.reconnect === "a GitHub App" ? t("a GitHub App") : t("a token")}
+          {t(", which is no longer supported. Connect the GitHub CLI below; your other answers are kept.")}
         </div>
       )}
-      {params.get("app") === "signin" && (
-        <div className="notice">
-          <Icon name="check" size={14} /> {t("GitHub created the sign-in app. Everyone can now sign in with GitHub.")}
-        </div>
-      )}
-      {params.get("app_error") && <div className="error">{params.get("app_error")}</div>}
       {owner && (
         <div className="strip dev">
           {owner.avatar_url ? <img className="avatar" src={owner.avatar_url} alt="" /> : <Icon name="shield" />}
@@ -174,18 +148,21 @@ export default function SetupPage({ firstRun = false }: { firstRun?: boolean }) 
         </div>
       )}
 
-      <Step n={1} title={t("Address")} done={!!baseUrl} hint={t("What browsers use to reach this service. GitHub sends you back here.")}>
+      <Step n={1} title={t("Address")} done={!!baseUrl} hint={t("What browsers use to reach this service; links in alerts point here.")}>
         <input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="http://your-host:7777" style={{ width: "100%" }} />
       </Step>
 
-      <Step n={2} title={t("Connect GitHub")} done={!!id && proven} hint={t("The account the service acts as: it reads pull requests and CI, and posts what maintainers approve.")}>
+      <Step
+        n={2}
+        title={t("Connect GitHub")}
+        done={!!id && proven}
+        hint={t("The account the service acts as, through the GitHub CLI: it reads pull requests and CI, and posts what maintainers approve. Everyone signs in the same way, with a one-time code on github.com.")}
+      >
         {id && (
           <div className="row">
             {id.avatar_url ? <img className="avatar" src={id.avatar_url} alt="" /> : <Icon name="cpu" />}
             <strong>{id.login}</strong>
-            <span className="muted small">
-              {id.kind === "gh" ? t("through the GitHub CLI") : id.kind === "token" ? t("with a token") : t("a GitHub App")}
-            </span>
+            <span className="muted small">{t("through the GitHub CLI")}</span>
             {id.warning && <span className="small" style={{ color: "var(--warn)" }}>{id.warning}</span>}
             {!showOther && (
               <button className="ghost sm right" onClick={() => setShowOther(true)}>
@@ -194,65 +171,13 @@ export default function SetupPage({ firstRun = false }: { firstRun?: boolean }) 
             )}
           </div>
         )}
-        {appPending && (
-          <div className="choice">
-            <strong>
-              {t("App created:")} {s.app?.slug}
-            </strong>
-            <span className="small muted">{t("Install it on the repositories it should maintain, then sign in through it to prove you are a maintainer.")}</span>
-            <div className="row">
-              <a className="button" href={s.app?.install_url} target="_blank" rel="noreferrer">
-                {t("Install the app")} <Icon name="external" size={12} />
-              </a>
-              <a className="button primary" href="/setup/signin">
-                {t("Sign in with GitHub")}
-              </a>
-            </div>
-          </div>
-        )}
-        {(!id || showOther) && !appPending && (
+        {(!id || showOther) && (
           <div className="choices">
-            {s.detected.gh.installed && <GhWebLogin onDone={() => (setShowOther(false), void refresh())} />}
-            <Choice
-              icon="merge"
-              title={t("Create a GitHub App")}
-              recommended={!s.detected.gh.installed}
-              body={t("Best for a team: the service gets its own bot account, and everyone signs in with GitHub. GitHub creates it in one click.")}
-              action={
-                <div className="row">
-                  <input value={org} onChange={(e) => setOrg(e.target.value)} placeholder={t("organization (empty: your account)")} style={{ flex: 1, minWidth: 160 }} />
-                  <button className="sm" disabled={!baseUrl || app.isPending} onClick={() => app.mutate("identity", { onSuccess: (r) => postToGitHub(r.url, r.manifest) })}>
-                    {t("Create on GitHub")} <Icon name="external" size={12} />
-                  </button>
-                </div>
-              }
-            />
-            <Choice
-              icon="key"
-              title={t("Use a token")}
-              body={
-                <>
-                  {t("Create a token on GitHub with the repo scope and paste it here.")}{" "}
-                  <a href={s.token_url} target="_blank" rel="noreferrer">
-                    {t("Create a token")} <Icon name="external" size={11} />
-                  </a>
-                </>
-              }
-              action={
-                <form
-                  className="row"
-                  onSubmit={(e) => {
-                    e.preventDefault();
-                    useToken.mutate({ mode: "token", token }, { onSuccess: () => (setToken(""), setShowOther(false)) });
-                  }}
-                >
-                  <input type="password" autoComplete="off" value={token} onChange={(e) => setToken(e.target.value)} placeholder="ghp_… / github_pat_…" style={{ flex: 1, minWidth: 160 }} />
-                  <button className="sm" disabled={!token.trim() || useToken.isPending}>
-                    {t("Use token")}
-                  </button>
-                </form>
-              }
-            />
+            {s.detected.gh.installed ? (
+              <GhWebLogin onDone={() => (setShowOther(false), void refresh())} />
+            ) : (
+              <GhInstall path="/api/setup/gh/install" onDone={() => void refresh()} />
+            )}
             {s.code && ghUser && (
               <Choice
                 icon="cpu"
@@ -263,7 +188,7 @@ export default function SetupPage({ firstRun = false }: { firstRun?: boolean }) 
                   </>
                 }
                 action={
-                  <button className="sm" disabled={useToken.isPending} onClick={() => useToken.mutate({ mode: "gh" }, { onSuccess: () => setShowOther(false) })}>
+                  <button className="sm" disabled={hostLogin.isPending} onClick={() => hostLogin.mutate(undefined, { onSuccess: () => setShowOther(false) })}>
                     {t("Use")} {ghUser.login}
                   </button>
                 }
@@ -271,53 +196,20 @@ export default function SetupPage({ firstRun = false }: { firstRun?: boolean }) 
             )}
           </div>
         )}
-        <ErrorBox error={useToken.error || app.error} />
+        <ErrorBox error={hostLogin.error} />
       </Step>
 
-      <Step n={3} title={t("Who can sign in")} done={!!id} hint={t("Anyone who signs in can only do what their GitHub permission on each repository allows.")}>
-        {s.signin === "app" || s.auth === "app" ? (
-          <span className="row small">
-            <Status value="executed" label={t("GitHub sign-in")} />
-            {t("Everyone signs in with their GitHub account through the app.")}
-          </span>
-        ) : (
-          <div className="stack" style={{ gap: 8 }}>
-            <span className="row small">
-              <Status value="executed" label={t("GitHub sign-in")} />
-              {t("Everyone signs in by entering a one-time code on github.com.")}
-            </span>
-            <span className="small muted row">
-              {t("For a team, a sign-in app makes it one click:")}
-              <button className="sm" disabled={!baseUrl || app.isPending || !proven} onClick={() => app.mutate("signin", { onSuccess: (r) => postToGitHub(r.url, r.manifest) })}>
-                {t("Create a sign-in app")} <Icon name="external" size={12} />
-              </button>
-            </span>
-          </div>
-        )}
-      </Step>
-
-      <Step n={4} title={t("Memory repository")} done={!!s.memory || memory.data?.repo === null} hint={t("A private repository where the service keeps profiles, settings, and what it learns, as reviewable commits.")}>
+      <Step n={3} title={t("Memory repository")} done={!!s.memory || memory.data?.repo === null} hint={t("A private repository where the service keeps profiles, settings, and what it learns, as reviewable commits.")}>
         {s.memory && <Status value="executed" label={s.memory} />}
         <div className="row">
           <input value={memoryRepo} onChange={(e) => setMemoryRepo(e.target.value)} placeholder="owner/auto-maintainer-memory" style={{ flex: 1, minWidth: 220 }} />
-          {s.auth === "app" && memoryRepo.includes("/") && (
-            <a
-              className="button"
-              href={`https://github.com/new?owner=${encodeURIComponent(memoryRepo.split("/")[0])}&name=${encodeURIComponent(memoryRepo.split("/")[1])}&visibility=private`}
-              target="_blank"
-              rel="noreferrer"
-            >
-              {t("Create it on GitHub")} <Icon name="external" size={12} />
-            </a>
-          )}
           <button className="primary sm" disabled={!memoryRepo || memory.isPending || !proven || !id} onClick={() => memory.mutate({ repo: memoryRepo, create: true })}>
-            {s.auth === "app" ? t("Use it") : t("Create or use")}
+            {t("Create or use")}
           </button>
           <button className="ghost sm" disabled={memory.isPending || !proven} onClick={() => memory.mutate({ repo: null, create: false })}>
             {t("Keep it on this host")}
           </button>
         </div>
-        {s.auth === "app" && <span className="small muted">{t("Then install the app on it too, so the service can write there.")}</span>}
         {memory.data && (
           <span className="small muted">
             {memory.data.repo ? (memory.data.created ? t("Created a private repository.") : t("Using the private repository.")) : t("Memory stays on this host.")}
@@ -326,7 +218,7 @@ export default function SetupPage({ firstRun = false }: { firstRun?: boolean }) 
         <ErrorBox error={memory.error} />
       </Step>
 
-      <Step n={5} title={t("The service's own repository")} done={!!codeRepo} optional hint={t("Its maintainers own the service settings and approve the changes the service makes to itself.")}>
+      <Step n={4} title={t("The service's own repository")} done={!!codeRepo} optional hint={t("Its maintainers own the service settings and approve the changes the service makes to itself.")}>
         <input value={codeRepo} onChange={(e) => setCodeRepo(e.target.value)} placeholder="owner/auto-maintainer" style={{ width: "100%" }} />
       </Step>
 
@@ -347,7 +239,7 @@ export default function SetupPage({ firstRun = false }: { firstRun?: boolean }) 
         <button
           className="primary"
           style={{ height: 40, padding: "0 18px" }}
-          disabled={!baseUrl || !(id || (s.configured && !s.first_run)) || !proven || finish.isPending}
+          disabled={!baseUrl || !(id || (s.configured && !s.first_run && !s.reconnect)) || !proven || finish.isPending}
           onClick={() =>
             finish.mutate(undefined, {
               onSuccess: (r) => {
@@ -360,6 +252,31 @@ export default function SetupPage({ firstRun = false }: { firstRun?: boolean }) 
         </button>
       </div>
     </>,
+  );
+}
+
+/** Install the GitHub CLI on a host that has none: the service downloads GitHub's own
+ * release into its data folder and checks it against the release's checksums. */
+export function GhInstall({ path, onDone }: { path: string; onDone: () => void }) {
+  const t = useT();
+  const install = useMutation({ mutationFn: () => api.post<{ installed: boolean }>(path), onSuccess: onDone });
+  return (
+    <Choice
+      icon="download"
+      title={t("Install the GitHub CLI")}
+      body={t(
+        "The service reaches GitHub, and people sign in, through the GitHub CLI (gh), which this host does not have yet. Installing downloads GitHub's own release into the service's data folder and checks it against the release's checksums; nothing else on the host changes.",
+      )}
+      action={
+        <div className="stack" style={{ gap: 8 }}>
+          <button className="primary sm" disabled={install.isPending} onClick={() => install.mutate()}>
+            <Icon name="download" size={14} />
+            {install.isPending ? t("Installing…") : t("Install the GitHub CLI")}
+          </button>
+          <ErrorBox error={install.error} />
+        </div>
+      }
+    />
   );
 }
 
@@ -422,8 +339,10 @@ export function GhWebLogin({
     <Choice
       icon="globe"
       title={title ?? t("Sign in with GitHub")}
-      recommended
-      body={body ?? t("You enter a one-time code on github.com and the service works as your account. Simplest for one maintainer.")}
+      body={
+        body ??
+        t("You enter a one-time code on github.com, and the service acts as the account you authorize. For a team, authorize an account made for the service, so what it posts is not under your name.")
+      }
       action={
         <div className="stack" style={{ gap: 8 }}>
           {code ? (

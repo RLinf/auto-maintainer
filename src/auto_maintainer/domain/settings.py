@@ -487,6 +487,9 @@ class UserToken(BaseModel):
 
     token: str = Field(repr=False)
     refresh_token: str | None = Field(default=None, repr=False)
+    """Only on tokens kept from the removed GitHub App sign-in, which expire."""
     expires_at: datetime | None = None
-    source: Literal["oauth", "device", "gh", "token"] = "oauth"
+    source: Literal["oauth", "device", "gh", "token"] = "gh"
+    """How the person signed in: ``gh``; the others name removed sign-ins whose
+    tokens may still be in ``user-tokens.json``."""
     updated_at: datetime | None = None

@@ -36,11 +36,7 @@ def create_app(
     service: Service,
     *,
     data_dir: Path,
-    base_url: str = "http://127.0.0.1:7777",
-    web_url: str = "https://github.com",
     api_url: str = "https://api.github.com",
-    oauth_client_id: str | None = None,
-    oauth_secret_env: str = "AM_OAUTH_CLIENT_SECRET",
     webhook_secret_env: str = "AM_WEBHOOK_SECRET",
     cookie_secure: bool = False,
     verify_webhook: Callable[[bytes, bytes, str | None], bool] | None = None,
@@ -61,8 +57,8 @@ def create_app(
 
     ``links_path`` enables sign-in with one-time links from ``am login``;
     ``gh_signin`` (a factory of ``hostsetup.GhLogin`` by flow id) enables signing in
-    on the web by authorizing the GitHub CLI, offered beside an OAuth client's sign-in
-    when there is one, and while ``gh`` is on the server's ``PATH``.
+    on the web by authorizing the GitHub CLI, the only way to sign in with GitHub;
+    while ``gh`` is not on the server's ``PATH``, the sign-in page offers to install it.
     ``setup_steps`` and ``on_host_change`` let maintainers of the service's repository
     change the host setup from the dashboard (``web/setup.py``).
     """
@@ -78,18 +74,7 @@ def create_app(
 
     install_csrf(app)
 
-    app.include_router(
-        auth.router(
-            web_url,
-            api_url,
-            oauth_client_id,
-            oauth_secret_env,
-            base_url,
-            allow_dev_login,
-            links_path,
-            gh_signin,
-        )
-    )
+    app.include_router(auth.router(api_url, allow_dev_login, links_path, gh_signin))
     app.include_router(api.build_router())
     app.include_router(chat.build_router())
     app.include_router(settings.build_router())

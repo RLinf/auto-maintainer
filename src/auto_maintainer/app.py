@@ -17,7 +17,6 @@
 from __future__ import annotations
 
 import logging
-import os
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -32,11 +31,7 @@ from .domain.profile import Route
 from .domain.records import AgentRunRecord
 from .domain.settings import ProviderBinding, RuntimeConfig, UserToken
 from .github import GitHubActionsCi, GitHubClient, GitHubReader, GitHubWriter
-from .github.auth import (
-    GitHubAppTokenProvider,
-    StaticTokenProvider,
-    refresh_user_token,
-)
+from .github.auth import StaticTokenProvider
 from .labs.executor import GpuThresholds, LabExecutor
 from .labs.hosts import LocalLabHost, SshLabHost
 from .memory.git_store import GitMemoryStore
@@ -60,20 +55,9 @@ async def build_service(cfg: HostConfig, dev: bool = False) -> Service:
     data = cfg.data_path
     data.mkdir(parents=True, exist_ok=True)
 
-    if cfg.github.auth == "app":
-        if not (cfg.github.app_id and cfg.github.private_key_path):
-            raise ValueError(
-                "github.auth=app needs github.app_id and github.private_key_path"
-            )
-        pem = Path(cfg.github.private_key_path).expanduser().read_text(encoding="utf-8")
-        tokens: Any = GitHubAppTokenProvider(
-            cfg.github.app_id, pem, api_url=cfg.github.api_url
-        )
-    else:
-        tokens = StaticTokenProvider(
-            None if cfg.github.auth == "gh" else cfg.github.token_env,
-            gh_config_dir=cfg.github.gh_config_dir,
-        )
+    # The service acts as the GitHub CLI login made on the setup page, or, without
+    # one, the account the host user's own GitHub CLI is logged in to.
+    tokens = StaticTokenProvider(None, gh_config_dir=cfg.github.gh_config_dir)
     client = GitHubClient(tokens, api_url=cfg.github.api_url)
     reader = GitHubReader(client)
     fresh_reader = GitHubReader(client, snapshot_cache_seconds=0)
@@ -131,22 +115,12 @@ async def build_service(cfg: HostConfig, dev: bool = False) -> Service:
     user_tokens = FileUserTokens(data / "user-tokens.json")
 
     async def writer_for_user(login: str, token: UserToken) -> Any:
-        """A writer acting as ``login``; an expired GitHub App token is refreshed once."""
+        """A writer acting as ``login``; ``None`` once their token has expired (a
+        GitHub CLI token does not; one kept from an older sign-in may), which also
+        forgets it, so they sign in again."""
         if token.expires_at and token.expires_at <= clock.now():
-            secret = os.environ.get(cfg.github.oauth_client_secret_env)
-            if not (token.refresh_token and cfg.github.oauth_client_id and secret):
-                return None
-            fresh = await refresh_user_token(
-                cfg.github.web_url,
-                cfg.github.oauth_client_id,
-                secret,
-                token.refresh_token,
-            )
-            if fresh is None:
-                await user_tokens.delete(login)
-                return None
-            token = token.model_copy(update=fresh)
-            await user_tokens.set(login, token)
+            await user_tokens.delete(login)
+            return None
         return GitHubWriter(
             GitHubClient(
                 StaticTokenProvider(token=token.token), api_url=cfg.github.api_url

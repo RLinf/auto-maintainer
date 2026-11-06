@@ -124,6 +124,7 @@ const PATHS: Record<string, ReactElement> = {
     </>
   ),
   upload: <path d="M12 16V4m0 0-4.5 4.5M12 4l4.5 4.5M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3" />,
+  download: <path d="M12 4v12m0 0-4.5-4.5M12 16l4.5-4.5M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3" />,
   settings: (
     <>
       <circle cx="12" cy="12" r="3" />

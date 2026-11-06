@@ -353,14 +353,8 @@ class GitHubReader:
     async def service_login(self) -> str:
         if self._login:
             return self._login
-        tokens = self._client.tokens
-        if tokens.mode == "app":
-            app_jwt = tokens.app_jwt()  # type: ignore[attr-defined]
-            data = await self._client.get("/app", token=app_jwt)
-            self._login = f"{data['slug']}[bot]"
-        else:
-            data = await self._client.get("/user")
-            self._login = data["login"]
+        data = await self._client.get("/user")
+        self._login = data["login"]
         return self._login
 
     # ------------------------------------------------------------------ repository

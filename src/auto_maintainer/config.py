@@ -41,23 +41,26 @@ class _Cfg(BaseModel):
 class GitHubConfig(_Cfg):
     api_url: str = "https://api.github.com"
     web_url: str = "https://github.com"
-    auth: Literal["gh", "token", "app"] = "token"
-    """``gh``: act as the account the GitHub CLI on this host is logged in to, reading
-    its token with ``gh auth token``. ``token``: a token in ``token_env``. ``app``: a
-    GitHub App (``app_id``, ``private_key_path``), which also gives sign-in."""
-    token_env: str = "GITHUB_TOKEN"
     gh_config_dir: str | None = None
-    """With ``auth: gh``, the GitHub CLI configuration the service logged in to from
-    the setup page; unset, the host user's own GitHub CLI login is used."""
-    app_id: int | None = None
-    app_slug: str | None = None
-    """The GitHub App's URL name, for its installation page."""
-    private_key_path: str | None = None
-    oauth_client_id: str | None = None
-    """The OAuth or GitHub App client that lets people sign in with GitHub; without
-    one, sign-in uses one-time links from ``am login`` on the host."""
-    oauth_client_secret_env: str = "AM_OAUTH_CLIENT_SECRET"
+    """The GitHub CLI login the service acts as, made on the setup page; unset, the
+    host user's own GitHub CLI login is used."""
     webhook_secret_env: str = "AM_WEBHOOK_SECRET"
+
+
+LEGACY_GITHUB_KEYS = (
+    "auth",
+    "token_env",
+    "app_id",
+    "app_slug",
+    "private_key_path",
+    "oauth_client_id",
+    "oauth_client_secret_env",
+)
+"""``github`` keys of the GitHub App and token setups, which no longer exist. The
+loader drops them; ``legacy_github`` says whether the host must connect again."""
+
+LEGACY_SECRETS = ("GITHUB_TOKEN", "AM_OAUTH_CLIENT_SECRET")
+"""What those setups kept in ``secrets.env``; a new setup removes them."""
 
 
 class MemoryConfig(_Cfg):
@@ -97,9 +100,9 @@ class HostConfig(_Cfg):
     """Address the dashboard and API listen on; ``0.0.0.0`` is every interface."""
     port: int = 7777
     base_url: str = "http://127.0.0.1:7777"
-    """The URL browsers use to reach the dashboard. It builds the GitHub sign-in
-    callback (``<base_url>/auth/callback``) and the links in alerts, so set it to the
-    host's reachable name or address when people connect from other machines."""
+    """The URL browsers use to reach the dashboard. It builds the links in alerts and
+    sign-in links, so set it to the host's reachable name or address when people
+    connect from other machines."""
     data_dir: str = os.environ.get(
         "AM_DATA_DIR", str(Path.home() / ".local" / "share" / "auto-maintainer")
     )
@@ -150,12 +153,53 @@ def load_secrets(path: Path) -> None:
         os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
 
 
-def load_host_config(config_dir: Path | None = None) -> HostConfig:
-    root = config_dir or CONFIG_DIR
-    load_secrets(root / "secrets.env")
+def _read(root: Path) -> dict[str, Any]:
     path = root / "local.yaml"
     data = yaml.safe_load(path.read_text(encoding="utf-8")) if path.is_file() else {}
-    return HostConfig.model_validate(data or {})
+    return data or {}
+
+
+def load_host_config(config_dir: Path | None = None) -> HostConfig:
+    """``local.yaml`` as a ``HostConfig``, without the keys of the removed GitHub App
+    and token setups (``legacy_github`` says whether they mattered)."""
+    root = config_dir or CONFIG_DIR
+    load_secrets(root / "secrets.env")
+    data = _read(root)
+    github = data.get("github")
+    if isinstance(github, dict):
+        data["github"] = {
+            k: v for k, v in github.items() if k not in LEGACY_GITHUB_KEYS
+        }
+    return HostConfig.model_validate(data)
+
+
+def legacy_github(config_dir: Path | None = None) -> str | None:
+    """How the host acted on GitHub before the GitHub CLI became the only way, when
+    that was not the GitHub CLI: ``"a GitHub App"`` or ``"a token"``; else ``None``.
+
+    Such a host must connect the GitHub CLI on the setup page before the service
+    starts, so that it never switches silently to whatever account the host's own
+    GitHub CLI is logged in to. A host that named no way and kept no token in
+    ``secrets.env`` was already reading the GitHub CLI's token.
+    """
+    root = config_dir or CONFIG_DIR
+    github = _read(root).get("github") or {}
+    auth = github.get("auth")
+    if auth == "app" or github.get("app_id"):
+        return "a GitHub App"
+    if auth == "gh":
+        return None
+    token_env = github.get("token_env") or "GITHUB_TOKEN"
+    secrets = root / "secrets.env"
+    kept = {
+        line.partition("=")[0].strip()
+        for line in (
+            secrets.read_text(encoding="utf-8").splitlines()
+            if secrets.is_file()
+            else []
+        )
+    }
+    return "a token" if auth == "token" or token_env in kept else None
 
 
 def is_configured(config_dir: Path | None = None) -> bool:
@@ -199,20 +243,30 @@ def set_host_secret(name: str, value: str, config_dir: Path | None = None) -> No
     os.environ[name] = value
 
 
+def remove_host_secret(name: str, config_dir: Path | None = None) -> None:
+    """Remove ``name`` from ``secrets.env`` and from this process's environment."""
+    root = config_dir or CONFIG_DIR
+    path = root / "secrets.env"
+    if path.is_file():
+        lines = path.read_text(encoding="utf-8").splitlines()
+        kept = [ln for ln in lines if ln.partition("=")[0].strip() != name]
+        if kept != lines:
+            _write_private(path, "\n".join(kept) + ("\n" if kept else ""))
+    os.environ.pop(name, None)
+
+
 def write_private_file(path: Path, text: str) -> None:
-    """Write a credential file (a GitHub App's key) readable only by its owner."""
+    """Write a file only its owner can read, such as the setup code."""
     _write_private(path, text)
 
 
 EXAMPLE = """# ~/.config/auto-maintainer/local.yaml
 port: 7777
 host: 0.0.0.0                           # listen on every interface
-base_url: http://your-host:7777         # what browsers open; GitHub sign-in calls back here
+base_url: http://your-host:7777         # what browsers open; links in alerts point here
 operators: [your-login]
 github:
-  auth: token            # or app, with app_id and private_key_path
-  token_env: GITHUB_TOKEN
-  oauth_client_id: Iv1.xxxxx
+  gh_config_dir: ~/.config/auto-maintainer/gh   # the GitHub CLI login the service acts as
 memory:
   remote: your-org/auto-maintainer-memory
 code_repo: your-org/auto-maintainer     # the service's own code; reviewers' requests become PRs here

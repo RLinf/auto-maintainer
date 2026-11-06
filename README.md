@@ -89,7 +89,7 @@ There are no configuration files to write. Start the service, open the link it p
 
 - Python 3.11+ with [uv](https://docs.astral.sh/uv/), Node 20+, and git.
 - At least one agent CLI, signed in: [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex](https://github.com/openai/codex), [OpenCode](https://opencode.ai), [Gemini CLI](https://github.com/google-gemini/gemini-cli), or Antigravity.
-- A GitHub account for the service to act as. The simplest is the [GitHub CLI](https://cli.github.com) logged in on the host (`gh auth login`). The setup page can also take a token, or create a GitHub App for you.
+- A GitHub account for the service to act as, through the [GitHub CLI](https://cli.github.com). The setup page logs it in with a one-time code on github.com, and installs the GitHub CLI into the service's data folder when the host has none.
 
 ### 2. Start it and set it up in the browser
 
@@ -106,22 +106,23 @@ uv run am stop            # stop it; running jobs get 20 s to finish
 Open the service's address in a browser (for example `http://192.168.1.20:7777`). Until it is set up, every page is the setup page, and it asks:
 
 1. **The address** people use to reach the service.
-2. **Connect GitHub**, the account the service acts as. Sign in with GitHub (you enter a one-time code on github.com and the service works as your account), have GitHub create a GitHub App, which gives the service its own bot account and lets your team sign in with GitHub, or paste a token. Whichever you choose also proves that you maintain the service's repository (the one your checkout came from): only its maintainers can set the host up.
-3. **Who can sign in.** Everyone signs in with GitHub; a sign-in app makes it one click.
-4. **The memory repository**, a private repository created or chosen with your GitHub account, or memory kept on the host.
-5. **The service's own repository**, filled in from your checkout.
+2. **Connect GitHub**, the account the service acts as. You enter a one-time code on github.com to authorize the GitHub CLI, and the service works as the account you authorize; for a team, authorize an account made for the service, so what it posts is not under your name. If the host has no GitHub CLI, an **Install the GitHub CLI** button downloads GitHub's own release into the service's data folder first. Authorizing also proves that you maintain the service's repository (the one your checkout came from): only its maintainers can set the host up.
+3. **The memory repository**, a private repository created or chosen with your GitHub account, or memory kept on the host.
+4. **The service's own repository**, filled in from your checkout.
 
 The terminal also prints a one-time setup link (`uv run am setup` prints it again). Opening it proves you are at the host instead, and also offers the GitHub CLI login already on the host.
 
 ![First-run setup](docs/images/setup.png)
 
-**Finish** saves everything and starts the service without a restart. When the service acts as your own GitHub account, it also signs you in; with a GitHub App, you sign in with GitHub. The answers are kept in `~/.config/auto-maintainer/` (`local.yaml`, and `secrets.env` with mode 600), which you never need to open. To change them later, go to **Settings → System → Change host setup**.
+**Finish** saves everything and starts the service without a restart, and signs you in. The answers are kept in `~/.config/auto-maintainer/` (`local.yaml`, and the service's GitHub CLI login in `gh/`), which you never need to open. To change them later, go to **Settings → System → Change host setup**.
+
+A host set up earlier with a GitHub App or a pasted token opens the setup page on its next start, with its other answers kept: connect the GitHub CLI there, and the service acts as that account from then on. Comments the old App's bot posted count as the service's own only if you list the bot in the repository profile's `people.review_identities`.
 
 `am start` runs `am supervise` in the background, which runs `am serve` and keeps it running; closing the terminal does not stop it. Its log is `service.log` in the data folder (`~/.local/share/auto-maintainer/logs/` by default), rotated at 20 MB with five old files kept, and maintainers of the service's repository can read it on the Service page. Run `am supervise` instead to keep it in the foreground, or `am serve` directly when you develop; press <kbd>Ctrl</kbd>+<kbd>C</kbd> once to stop either. To try it against GitHub without touching real repositories, run `uv run am serve --dev`: it holds every repository action in shadow.
 
 ### 3. Sign in
 
-With GitHub sign-in set up, everyone signs in with GitHub. Without it, run this on the host and open the link it prints:
+Everyone signs in by entering a one-time code on github.com, which authorizes the GitHub CLI for them. On the host itself, this prints a link that signs you in once:
 
 ```bash
 uv run am login           # a one-time link, valid for 10 minutes, as the GitHub account logged in on the host
@@ -135,8 +136,8 @@ On the dashboard, open **Repositories → Add repository**, or run `uv run am re
 
 The service needs two things from GitHub, and they are different:
 
-- **An account to act as.** It polls pull requests and posts what maintainers approve, around the clock, whether or not anyone is signed in. Usually that is the GitHub CLI's login on the host, or a GitHub App's bot account.
-- **To know who you are when you sign in.** Every approval and configuration change is checked against the signer's GitHub permission on that repository. When the host has the GitHub CLI, each person signs in by entering a one-time code on github.com; that token reaches every repository the person can, so posting a review or opening a fix PR as yourself works wherever you have access. Each sign-in uses a folder of its own, never the host's `gh` login, and the service keeps the token on the host under your login only, for what you approve as yourself, until you sign out. A GitHub App's sign-in, if the setup page created one, is offered too, but its token stops at the repositories the app is installed on. Agents run as the same system user as the service and could read those tokens; on a shared host, give each agent a `command_prefix` that confines it (Settings → Agents, design 5.7).
+- **An account to act as.** It polls pull requests and posts what maintainers approve, around the clock, whether or not anyone is signed in. That is the GitHub CLI login made on the setup page.
+- **To know who you are when you sign in.** Every approval and configuration change is checked against the signer's GitHub permission on that repository. Each person signs in by entering a one-time code on github.com; that token reaches every repository the person can, so posting a review or opening a fix PR as yourself works wherever you have access. Each sign-in uses a folder of its own, never the host's `gh` login, and the service keeps the token on the host under your login only, for what you approve as yourself, until you sign out. Agents run as the same system user as the service and could read those tokens; on a shared host, give each agent a `command_prefix` that confines it (Settings → Agents, design 5.7).
 
 ## Configure it
 

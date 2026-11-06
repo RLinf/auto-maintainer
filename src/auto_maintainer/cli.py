@@ -55,7 +55,12 @@ def _setup_logging(verbose: bool) -> None:
 
 
 def _cfg() -> HostConfig:
-    return load_host_config()
+    """The host config; a GitHub CLI the service installed is put on ``PATH``."""
+    from .ghcli import add_to_path
+
+    cfg = load_host_config()
+    add_to_path(cfg.data_path)
+    return cfg
 
 
 @contextlib.asynccontextmanager
@@ -117,17 +122,18 @@ def _print_setup_link(port: int, code: str) -> None:
 @app.command()
 def setup(port: int | None = None) -> None:
     """Print the link to the setup page, where the host is set up on the web."""
-    from .config import is_configured
+    from .config import is_configured, legacy_github
     from .hostsetup import HostSetup
 
-    if is_configured():
+    if is_configured() and not legacy_github():
         cfg = _cfg()
         typer.echo(
             f"already set up. Change it on the dashboard: {cfg.base_url}/setup "
             "(needs maintain on the service's repository)."
         )
         return
-    _print_setup_link(port or HostConfig().port, HostSetup().code())
+    port = port or (_cfg().port if is_configured() else HostConfig().port)
+    _print_setup_link(port, HostSetup().code())
 
 
 @app.command(hidden=True)
@@ -222,11 +228,7 @@ class _Host:
         web = create_app(
             new,
             data_dir=cfg.data_path,
-            base_url=cfg.base_url,
-            web_url=cfg.github.web_url,
             api_url=cfg.github.api_url,
-            oauth_client_id=cfg.github.oauth_client_id,
-            oauth_secret_env=cfg.github.oauth_client_secret_env,
             webhook_secret_env=cfg.github.webhook_secret_env,
             cookie_secure=cfg.cookie_secure,
             verify_webhook=verify_signature,
@@ -362,10 +364,12 @@ def serve(
         asyncio.run(demo_main())
         return
 
-    from .config import is_configured
+    from .config import is_configured, legacy_github
+    from .ghcli import add_to_path
 
     dev = dev or os.environ.get("AM_ENV") == "dev"
     defaults = _cfg() if is_configured() else HostConfig()
+    add_to_path(defaults.data_path)
     if dev:
         typer.echo(
             f"dev mode: serving only {defaults.sandbox_repo}"
@@ -377,7 +381,15 @@ def serve(
         from .web.setup import create_setup_app
 
         runner = _Host(dev)
-        if is_configured():
+        legacy = legacy_github() if is_configured() else None
+        if legacy:
+            typer.echo(
+                f"this host acted on GitHub through {legacy}, which is no longer "
+                "supported: connect the GitHub CLI on the setup page (the other "
+                "answers are kept)",
+                err=True,
+            )
+        elif is_configured():
             try:
                 await runner.start_service(_cfg())
             except Exception as e:  # the GitHub account or memory repo does not work

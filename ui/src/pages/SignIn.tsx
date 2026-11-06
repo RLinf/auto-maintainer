@@ -1,19 +1,16 @@
-// Sign-in: authorizing the GitHub CLI with a one-time code when the host has it (its token
-// reaches every repository the person can), else or besides the GitHub App's OAuth web flow
-// and device flow (its token stops at the repositories the app is installed on).
+// Sign-in: authorizing the GitHub CLI with a one-time code on github.com, the only way to
+// sign in. Its token reaches every repository the person can. When the host has no
+// GitHub CLI, the page installs it first.
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef, useState } from "react";
-import { ErrorBox } from "../components";
 import { useT } from "../i18n";
 import { Logo } from "../logo";
-import { GhWebLogin } from "./Setup";
+import { GhInstall, GhWebLogin } from "./Setup";
 
-interface DeviceStart {
-  flow_id: string;
-  user_code: string;
-  verification_uri: string;
-  interval: number;
+interface AuthConfig {
+  gh?: boolean;
+  gh_missing?: boolean;
+  dev_login?: boolean;
 }
 
 export default function SignIn() {
@@ -21,59 +18,9 @@ export default function SignIn() {
   const client = useQueryClient();
   const config = useQuery({
     queryKey: ["auth-config"],
-    queryFn: async () =>
-      (await fetch("/auth/config", { credentials: "same-origin" })).json() as Promise<{ oauth?: boolean; links?: boolean; gh?: boolean; gh_missing?: boolean }>,
+    queryFn: async () => (await fetch("/auth/config", { credentials: "same-origin" })).json() as Promise<AuthConfig>,
   });
   const expired = new URLSearchParams(window.location.search).get("signin") === "expired";
-  const [device, setDevice] = useState<DeviceStart | null>(null);
-  const [error, setError] = useState<unknown>(null);
-  const timer = useRef<number | null>(null);
-
-  useEffect(
-    () => () => {
-      if (timer.current) window.clearTimeout(timer.current);
-    },
-    [],
-  );
-
-  const start = async () => {
-    setError(null);
-    try {
-      const res = await fetch("/auth/device/start", { method: "POST", credentials: "same-origin" });
-      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail ?? res.statusText);
-      const data = (await res.json()) as DeviceStart;
-      setDevice(data);
-      poll(data, data.interval);
-    } catch (e) {
-      setError(e);
-    }
-  };
-
-  const poll = (flow: DeviceStart, interval: number) => {
-    timer.current = window.setTimeout(async () => {
-      try {
-        const res = await fetch("/auth/device/poll", {
-          method: "POST",
-          credentials: "same-origin",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ flow_id: flow.flow_id }),
-        });
-        if (res.status === 200) {
-          await client.invalidateQueries();
-          return;
-        }
-        if (res.status === 202) {
-          const body = await res.json().catch(() => ({}));
-          poll(flow, body.error === "slow_down" ? interval + 5 : interval);
-          return;
-        }
-        throw new Error((await res.json().catch(() => ({}))).detail ?? res.statusText);
-      } catch (e) {
-        setError(e);
-        setDevice(null);
-      }
-    }, Math.max(interval, 3) * 1000);
-  };
 
   return (
     <div className="signin card" style={{ padding: 28 }}>
@@ -95,52 +42,7 @@ export default function SignIn() {
           onDone={() => void client.invalidateQueries()}
         />
       )}
-      {config.data?.gh_missing && (
-        <div className="stack" style={{ gap: 4 }}>
-          <strong className="small">{t("Signing in through the GitHub CLI is not available")}</strong>
-          <span className="small muted">
-            {t(
-              "That sign-in works on every repository your account can reach, and it needs the GitHub CLI (gh) on the host where auto-maintainer runs. Install gh there, on the PATH of the service, and reload this page.",
-            )}
-          </span>
-        </div>
-      )}
-      {config.data?.links && !config.data.oauth && !config.data.gh && (
-        <div className="stack" style={{ gap: 6 }}>
-          <strong className="small">{t("Sign in from the host")}</strong>
-          <span className="small muted">{t("This host has neither a GitHub App nor the GitHub CLI for signing in. Run this where auto-maintainer runs, then open the link it prints.")}</span>
-          <pre className="pre">uv run am login</pre>
-        </div>
-      )}
-      {config.data?.oauth && config.data.gh && (
-        <div className="stack" style={{ gap: 4 }}>
-          <span className="small muted">{t("Or sign in through the service's GitHub App. Its token acts only on repositories the app is installed on, so posting as yourself and private repositories elsewhere may fail.")}</span>
-        </div>
-      )}
-      {config.data?.oauth && (
-        <a className={`button ${config.data.gh ? "" : "primary"}`} href="/auth/login" style={{ height: 40, textDecoration: "none" }}>
-          {config.data.gh ? t("Sign in through the GitHub App") : t("Sign in with GitHub")}
-        </a>
-      )}
-      {config.data?.oauth &&
-        (device ? (
-          <div className="stack" style={{ alignItems: "center", textAlign: "center" }}>
-            <span>
-              {t("Open")}{" "}
-              <a href={device.verification_uri} target="_blank" rel="noreferrer">
-                {device.verification_uri}
-              </a>{" "}
-              {t("and enter")}:
-            </span>
-            <span className="code">{device.user_code}</span>
-            <span className="muted small">{t("Waiting for GitHub…")}</span>
-          </div>
-        ) : (
-          <button className="ghost" onClick={start}>
-            {t("Sign in with a device code")}
-          </button>
-        ))}
-      <ErrorBox error={error} />
+      {config.data?.gh_missing && <GhInstall path="/auth/gh/install" onDone={() => void client.invalidateQueries({ queryKey: ["auth-config"] })} />}
     </div>
   );
 }

@@ -31,9 +31,10 @@ import httpx
 import pytest
 import yaml
 
-from auto_maintainer import cli
+from auto_maintainer import cli, ghcli
 from auto_maintainer.config import (
     HostConfig,
+    legacy_github,
     load_host_config,
     save_host_config,
     set_host_secret,
@@ -67,15 +68,12 @@ def _restore_environment():
 
 
 def _github(repos: dict[str, dict[str, Any]] | None = None) -> httpx.MockTransport:
-    """A fake GitHub: two users, the repositories given, the service's repository,
-    manifest conversions, and the OAuth code exchange."""
+    """A fake GitHub: two users, the repositories given, and the service's repository."""
     repos = dict(repos or {})
 
     def handle(request: httpx.Request) -> httpx.Response:
         token = request.headers.get("authorization", "").removeprefix("Bearer ")
         path = request.url.path
-        if path == "/login/oauth/access_token":
-            return httpx.Response(200, json={"access_token": TOKEN})
         if path == "/user":
             if token not in USERS:
                 return httpx.Response(401, json={"message": "Bad credentials"})
@@ -84,20 +82,6 @@ def _github(repos: dict[str, dict[str, Any]] | None = None) -> httpx.MockTranspo
                 200,
                 json={"login": login, "name": login.title(), "avatar_url": ""},
                 headers={"x-oauth-scopes": "repo, read:org"},
-            )
-        if path.startswith("/app-manifests/"):
-            return httpx.Response(
-                201,
-                json={
-                    "id": 42,
-                    "slug": "auto-maintainer-box",
-                    "name": "auto-maintainer box",
-                    "client_id": "Iv1.abc",
-                    "client_secret": "s3cret",
-                    "webhook_secret": "hook",
-                    "pem": "-----BEGIN RSA PRIVATE KEY-----\nKEY\n-----END RSA PRIVATE KEY-----\n",
-                    "owner": {"login": "hao"},
-                },
             )
         if path == "/user/repos" and request.method == "POST":
             body = json.loads(request.content)
@@ -134,6 +118,15 @@ async def _gh_logged_out(args: list[str]) -> tuple[int, str]:
     return 1, ""
 
 
+def _gh_as(token: str):
+    """The host's GitHub CLI, logged in with ``token``."""
+
+    async def run(args: list[str]) -> tuple[int, str]:
+        return (0, token) if args == ["auth", "token"] else (1, "")
+
+    return run
+
+
 def _setup(tmp_path: Path, **kw: Any) -> HostSetup:
     s = HostSetup(
         tmp_path / "config",
@@ -150,21 +143,84 @@ def _setup(tmp_path: Path, **kw: Any) -> HostSetup:
 
 def test_the_service_writes_its_config_and_secrets(tmp_path: Path) -> None:
     cfg = HostConfig(base_url="http://box:7777", code_repo=SERVICE_REPO)
-    cfg.github.auth = "gh"
+    cfg.github.gh_config_dir = "/svc/gh"
     path = save_host_config(cfg, tmp_path)
     text = path.read_text()
     assert text.startswith("# Written by auto-maintainer")
     assert yaml.safe_load(text) == {
         "base_url": "http://box:7777",
-        "github": {"auth": "gh"},
+        "github": {"gh_config_dir": "/svc/gh"},
         "code_repo": SERVICE_REPO,
     }
-    set_host_secret("AM_OAUTH_CLIENT_SECRET", "one", tmp_path)
-    set_host_secret("AM_OAUTH_CLIENT_SECRET", "two", tmp_path)
+    set_host_secret("AM_WEBHOOK_SECRET", "one", tmp_path)
+    set_host_secret("AM_WEBHOOK_SECRET", "two", tmp_path)
     secrets = tmp_path / "secrets.env"
-    assert secrets.read_text() == "AM_OAUTH_CLIENT_SECRET=two\n"
+    assert secrets.read_text() == "AM_WEBHOOK_SECRET=two\n"
     assert stat.S_IMODE(secrets.stat().st_mode) == 0o600
-    assert load_host_config(tmp_path).github.auth == "gh"
+    assert load_host_config(tmp_path).github.gh_config_dir == "/svc/gh"
+    assert legacy_github(tmp_path) is None
+
+
+def _old_setup(config: Path, github: dict[str, Any], secrets: str = "") -> None:
+    """A ``local.yaml`` (and ``secrets.env``) from before the GitHub CLI was the only
+    way to reach GitHub."""
+    config.mkdir(parents=True, exist_ok=True)
+    (config / "local.yaml").write_text(
+        yaml.safe_dump({"base_url": "http://box:7777", "github": github})
+    )
+    if secrets:
+        (config / "secrets.env").write_text(secrets)
+        (config / "secrets.env").chmod(0o600)
+
+
+def test_hosts_set_up_with_an_app_or_a_token_must_connect_again(
+    tmp_path: Path,
+) -> None:
+    app = tmp_path / "app"
+    _old_setup(
+        app,
+        {"auth": "app", "app_id": 42, "oauth_client_id": "Iv1.abc"},
+        "AM_OAUTH_CLIENT_SECRET=s3cret\n",
+    )
+    assert legacy_github(app) == "a GitHub App"
+    assert load_host_config(app).base_url == "http://box:7777"
+    pasted = tmp_path / "pasted"
+    _old_setup(pasted, {}, "GITHUB_TOKEN=" + TOKEN + "\n")
+    assert legacy_github(pasted) == "a token"
+    named = tmp_path / "named"
+    _old_setup(named, {"auth": "token", "token_env": "MY_TOKEN"})
+    assert legacy_github(named) == "a token"
+    # Without a token kept for it, the old default already read the GitHub CLI's.
+    _old_setup(tmp_path / "cli", {"auth": "gh"})
+    _old_setup(tmp_path / "default", {})
+    assert legacy_github(tmp_path / "cli") is None
+    assert legacy_github(tmp_path / "default") is None
+
+
+async def test_connecting_the_github_cli_clears_what_an_app_left(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "config"
+    _old_setup(
+        config,
+        {
+            "auth": "app",
+            "app_id": 42,
+            "private_key_path": str(config / "github-app.pem"),
+        },
+        "AM_OAUTH_CLIENT_SECRET=s3cret\nAM_WEBHOOK_SECRET=hook\n",
+    )
+    (config / "github-app.pem").write_text("KEY")
+    s = _setup(tmp_path)
+    assert s.summary()["reconnect"] == "a GitHub App"
+    with pytest.raises(SetupError, match="connect"):
+        s.finish("http://box:7777", None)
+    await s.use_gh()
+    s.finish("http://box:7777", None)
+    assert legacy_github(config) is None and s.summary()["reconnect"] is None
+    assert (config / "secrets.env").read_text() == "AM_WEBHOOK_SECRET=hook\n"
+    assert not (config / "github-app.pem").exists()
+    assert "app_id" not in (config / "local.yaml").read_text()
 
 
 def test_a_remote_url_never_leaks_its_credentials() -> None:
@@ -178,18 +234,17 @@ def test_a_remote_url_never_leaks_its_credentials() -> None:
 # -- who owns a new host's setup ---------------------------------------------------------
 
 
-async def test_a_maintainers_token_claims_the_setup_and_a_strangers_does_not(
+async def test_a_maintainers_login_claims_the_setup_and_a_strangers_does_not(
     tmp_path: Path,
 ) -> None:
     s = _setup(tmp_path)
     with pytest.raises(SetupError, match="eve does not have maintain"):
-        await s.use_token(STRANGER, claim=True)
+        await s.claim(STRANGER)
     assert s.claimer is None
-    identity = await s.use_token(TOKEN, claim=True)
-    assert identity["kind"] == "token" and s.claimer and s.claimer["login"] == "hao"
+    assert (await s.claim(TOKEN))["login"] == "hao"
+    await s.use_gh()
     cfg = s.finish("http://box:7777/", SERVICE_REPO)
-    assert cfg.github.auth == "token" and cfg.operators == ["hao"]
-    assert "GITHUB_TOKEN=" + TOKEN in (tmp_path / "config" / "secrets.env").read_text()
+    assert cfg.operators == ["hao"] and cfg.github.gh_config_dir is None
 
 
 async def test_without_a_github_remote_only_the_code_proves_ownership(
@@ -197,47 +252,13 @@ async def test_without_a_github_remote_only_the_code_proves_ownership(
 ) -> None:
     s = _setup(tmp_path, checkout_repo=None)
     with pytest.raises(SetupError, match="setup link"):
-        await s.use_token(TOKEN, claim=True)
-
-
-async def test_a_github_app_from_a_manifest_needs_nothing_copied(
-    tmp_path: Path,
-) -> None:
-    s = _setup(tmp_path)
-    m = s.app_manifest("http://box:7777", "identity", org="acme")
-    assert m["url"].startswith(
-        "https://github.com/organizations/acme/settings/apps/new?state="
-    )
-    manifest = json.loads(m["manifest"])
-    assert manifest["redirect_url"] == "http://box:7777/setup/app/callback"
-    assert "http://box:7777/setup/signin/callback" in manifest["callback_urls"]
-    state = m["url"].split("state=")[1]
-    with pytest.raises(SetupError):
-        await s.complete_app("code", "forged-state")
-    result = await s.complete_app("code", state)
-    assert result["install_url"].endswith("/apps/auto-maintainer-box/installations/new")
-    assert "client_id=Iv1.abc" in s.signin_url(
-        "http://box:7777/setup/signin/callback", "st"
-    )
-    token = await s.signin_token("code", "http://box:7777/setup/signin/callback")
-    await s.claim(token)
-    cfg = s.finish("http://box:7777", None)
-    config = tmp_path / "config"
-    assert cfg.github.auth == "app" and cfg.github.app_id == 42
-    assert cfg.github.oauth_client_id == "Iv1.abc" and cfg.operators == ["hao"]
-    key = Path(cfg.github.private_key_path or "")
-    assert stat.S_IMODE(key.stat().st_mode) == 0o600
-    secrets = (config / "secrets.env").read_text()
-    assert (
-        "AM_OAUTH_CLIENT_SECRET=s3cret" in secrets
-        and "AM_WEBHOOK_SECRET=hook" in secrets
-    )
-    assert "s3cret" not in (config / "local.yaml").read_text()
+        await s.claim(TOKEN)
 
 
 async def test_the_memory_repository_must_be_private(tmp_path: Path) -> None:
     s = _setup(tmp_path, transport=_github({"hao/open": {"private": False}}))
-    await s.use_token(TOKEN, claim=True)
+    await s.claim(TOKEN)
+    await s.use_gh()
     with pytest.raises(SetupError, match="public"):
         await s.memory("hao/open", create=False)
     with pytest.raises(SetupError, match="does not exist"):
@@ -306,7 +327,7 @@ async def test_the_github_cli_login_runs_in_the_browser(
     own = tmp_path / "config" / "gh"
     assert (own / "git-config-was").read_text().strip() == str(own / "gitconfig")
     cfg = s.finish("http://box:7777", None)
-    assert cfg.github.auth == "gh" and cfg.github.gh_config_dir == str(own)
+    assert cfg.github.gh_config_dir == str(own)
 
 
 # -- the first-run page ---------------------------------------------------------------------
@@ -323,7 +344,7 @@ async def _client(app: Any) -> AsyncIterator[httpx.AsyncClient]:
 
 
 async def test_first_run_is_owned_by_the_maintainer_who_proves_it(
-    tmp_path: Path,
+    tmp_path: Path, fake_gh
 ) -> None:
     s = _setup(tmp_path)
     finished: list[HostConfig] = []
@@ -336,21 +357,18 @@ async def test_first_run_is_owned_by_the_maintainer_who_proves_it(
         assert (await eve.get("/api/me")).status_code == 503
         status = (await eve.get("/api/setup/status")).json()
         assert status["first_run"] and "user" not in status["detected"]["gh"]
-        denied = await eve.post(
-            "/api/setup/github", json={"mode": "token", "token": STRANGER}
-        )
-        assert denied.status_code == 422 and "maintain" in denied.json()["detail"]
-        gh = await eve.post("/api/setup/github", json={"mode": "gh"})
+        gh = await eve.post("/api/setup/github")
         assert gh.status_code == 403  # the host's own login needs the terminal code
         early = await eve.post(
             "/api/setup/finish", json={"base_url": "http://box:7777"}
         )
         assert early.status_code == 401
     async with _client(app) as hao:
-        claimed = await hao.post(
-            "/api/setup/github", json={"mode": "token", "token": TOKEN}
-        )
-        assert claimed.status_code == 200 and claimed.json()["login"] == "hao"
+        started = (await hao.post("/api/setup/gh/start")).json()
+        assert started["code"] == "ABCD-1234"
+        await _approved(s.gh_login)
+        claimed = (await hao.post("/api/setup/gh/poll")).json()
+        assert claimed["state"] == "done" and claimed["identity"]["login"] == "hao"
         assert (
             await hao.post("/api/setup/memory", json={"repo": None})
         ).status_code == 200
@@ -366,34 +384,7 @@ async def test_first_run_is_owned_by_the_maintainer_who_proves_it(
         assert done.status_code == 200 and "am_session" in done.headers.get(
             "set-cookie", ""
         )
-    assert [c.github.auth for c in finished] == ["token"]
-
-
-async def test_signing_in_through_the_new_app_claims_the_setup(tmp_path: Path) -> None:
-    s = _setup(tmp_path)
-    app = create_setup_app(
-        s, data_dir=tmp_path / "data", on_finish=lambda cfg: asyncio.sleep(0)
-    )
-    async with _client(app) as hao:
-        made = (
-            await hao.post(
-                "/api/setup/app", json={"purpose": "identity", "base_url": "http://box"}
-            )
-        ).json()
-        state = made["url"].split("state=")[1]
-        back = await hao.get(f"/setup/app/callback?code=c&state={state}")
-        assert back.headers["location"] == "/setup?app=identity"
-        go = await hao.get("/setup/signin")
-        assert go.headers["location"].startswith(
-            "https://github.com/login/oauth/authorize"
-        )
-        oauth_state = go.headers["location"].split("state=")[1]
-        signed = await hao.get(f"/setup/signin/callback?code=c&state={oauth_state}")
-        assert signed.headers["location"] == "/setup?signed_in=1"
-        status = (await hao.get("/api/setup/status")).json()
-        assert (
-            status["claimer"]["login"] == "hao" and status["identity"]["kind"] == "app"
-        )
+    assert [c.github.gh_config_dir for c in finished] == [str(s.gh_login.config_dir)]
 
 
 # -- after setup ---------------------------------------------------------------------------
@@ -498,15 +489,13 @@ async def test_signing_in_on_the_web_through_the_github_cli_keeps_nothing(
         return auth.User(login="maria", name="Maria")
 
     monkeypatch.setattr(auth, "_github_user", who)
-    # Offered beside a GitHub App's sign-in, whose token reaches fewer repositories.
-    app = create_app(
-        h.service, data_dir=tmp_path, gh_signin=tracked, oauth_client_id="Iv1.app"
-    )
+    app = create_app(h.service, data_dir=tmp_path, gh_signin=tracked)
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://box"
     ) as client:
         offered = (await client.get("/auth/config")).json()
-        assert offered["gh"] is True and offered["oauth"] is True
+        assert offered["gh"] is True and "oauth" not in offered
+        assert (await client.get("/auth/login")).status_code == 404
         started = (await client.post("/auth/gh/start")).json()
         assert started["code"] == "ABCD-1234"
         folder = logins[0].config_dir
@@ -534,9 +523,14 @@ async def test_without_gh_on_the_host_the_sign_in_page_says_what_is_missing(
 ) -> None:
     h = await build_demo(tmp_path)
     factory = cli._gh_signin(HostConfig(data_dir=str(tmp_path / "data")))
-    app = create_app(
-        h.service, data_dir=tmp_path, gh_signin=factory, oauth_client_id="Iv1.app"
-    )
+    app = create_app(h.service, data_dir=tmp_path, gh_signin=factory)
+    installed: list[Path] = []
+
+    async def install(data: Path) -> str:
+        installed.append(data)
+        return str(data / "bin" / "gh")
+
+    monkeypatch.setattr(ghcli, "install", install)
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://box"
     ) as client:
@@ -544,6 +538,8 @@ async def test_without_gh_on_the_host_the_sign_in_page_says_what_is_missing(
         offered = (await client.get("/auth/config")).json()
         assert offered["gh"] is False and offered["gh_missing"] is True
         assert (await client.post("/auth/gh/start")).status_code == 404
+        done = (await client.post("/auth/gh/install")).json()
+        assert done["installed"] is True and installed == [tmp_path]
         # Installing gh needs no restart: the next look finds it.
         monkeypatch.setattr(auth.shutil, "which", lambda name: "/usr/bin/gh")
         offered = (await client.get("/auth/config")).json()
@@ -571,14 +567,14 @@ async def test_every_restart_serves_the_new_dashboard(
 
 # -- a private memory repository not every credential can see ----------------------------
 
-APP_USER = "ghu_" + "a" * 36
-"""A GitHub App's sign-in token for maria: it sees only where that app is installed."""
+NARROW = "github_pat_" + "a" * 36
+"""A token of maria's that was not given access to the memory repository."""
 MEMORY = "RLinf/rlinf-am-mem"
 
 
 def _private_github(visible_to: set[str]) -> httpx.MockTransport:
     """A fake GitHub whose memory repository only ``visible_to`` logins can see."""
-    users = {**USERS, APP_USER: "maria"}
+    users = {**USERS, NARROW: "maria"}
 
     def handle(request: httpx.Request) -> httpx.Response:
         token = request.headers.get("authorization", "").removeprefix("Bearer ")
@@ -588,7 +584,7 @@ def _private_github(visible_to: set[str]) -> httpx.MockTransport:
                 return httpx.Response(401, json={"message": "Bad credentials"})
             return httpx.Response(200, json={"login": login, "name": login.title()})
         if request.url.path == f"/repos/{MEMORY}":
-            if login in visible_to and token != APP_USER:
+            if login in visible_to and token != NARROW:
                 return httpx.Response(200, json={"private": True})
             return httpx.Response(404, json={"message": "Not Found"})
         return httpx.Response(404)
@@ -600,7 +596,7 @@ async def test_a_memory_repo_a_sign_in_cannot_see_is_found_with_another_credenti
     tmp_path: Path,
 ) -> None:
     s = _setup(tmp_path, transport=_private_github({"hao", "maria"}))
-    out = await s.memory(MEMORY, create=False, person_token=APP_USER)
+    out = await s.memory(MEMORY, create=False, person_token=NARROW)
     assert out == {"repo": MEMORY, "created": False}
     assert s.cfg.memory.remote == MEMORY
 
@@ -610,16 +606,15 @@ async def test_a_memory_repo_nobody_can_see_names_the_accounts_tried(
 ) -> None:
     s = _setup(tmp_path, transport=_private_github(set()))
     with pytest.raises(SetupError) as e:
-        await s.memory(MEMORY, create=False, person_token=APP_USER)
+        await s.memory(MEMORY, create=False, person_token=NARROW)
     message = str(e.value)
-    assert "maria" in message and "hao" in message
-    assert "installed" in message and "fine-grained" in message
+    assert "maria" in message and "hao" in message and "given access" in message
 
 
 async def test_the_services_own_account_must_see_the_memory_repo(
     tmp_path: Path,
 ) -> None:
-    s = _setup(tmp_path, transport=_private_github({"hao"}), run_gh=_gh_logged_out)
-    await s.use_token(STRANGER, claim=False)
+    s = _setup(tmp_path, transport=_private_github({"hao"}), run_gh=_gh_as(STRANGER))
+    await s.use_gh()
     with pytest.raises(SetupError, match="service's account eve cannot see it"):
         await s.memory(MEMORY, create=False, person_token=TOKEN)

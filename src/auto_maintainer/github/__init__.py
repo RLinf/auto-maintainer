@@ -14,7 +14,7 @@
 
 """The GitHub forge adapter: ``ForgeReader``, ``ForgeWriter``, and ``CiProvider``."""
 
-from .auth import AuthError, GitHubAppTokenProvider, StaticTokenProvider, TokenProvider
+from .auth import AuthError, StaticTokenProvider, TokenProvider
 from .ci import GitHubActionsCi
 from .client import GitHubClient, GitHubError, GraphQLError, RateLimited
 from .reader import GitHubReader, snapshot_from_graphql
@@ -24,7 +24,6 @@ from .writer import GitHubWriter
 __all__ = [
     "AuthError",
     "GitHubActionsCi",
-    "GitHubAppTokenProvider",
     "GitHubClient",
     "GitHubError",
     "GitHubReader",

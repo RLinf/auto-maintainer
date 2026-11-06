@@ -12,11 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""GitHub credentials: a static token, or GitHub App installation tokens.
+"""GitHub credentials: the token of the GitHub CLI login the service acts as.
 
 The service writes with the token from ``token``. Agents get only the token from
-``readonly_token``, which is ``None`` in static-token mode because a personal
-token cannot be down-scoped.
+``readonly_token``, which is ``None`` because a GitHub CLI token cannot be
+down-scoped; agents work from checkouts the service makes instead.
 """
 
 from __future__ import annotations
@@ -24,29 +24,11 @@ from __future__ import annotations
 import asyncio
 import os
 import shutil
-import time
-from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
-from typing import Literal, Protocol
-
-import httpx
-import jwt
+from typing import Protocol
 
 API_URL = "https://api.github.com"
 API_VERSION = "2022-11-28"
 USER_AGENT = "auto-maintainer"
-
-READONLY_PERMISSIONS = {
-    "metadata": "read",
-    "contents": "read",
-    "pull_requests": "read",
-    "issues": "read",
-    "checks": "read",
-    "actions": "read",
-}
-
-_REFRESH_MARGIN = 300.0
-"""Seconds before expiry at which a cached installation token is replaced."""
 
 
 class AuthError(RuntimeError):
@@ -55,8 +37,6 @@ class AuthError(RuntimeError):
 
 class TokenProvider(Protocol):
     """Supplies bearer tokens for GitHub API calls."""
-
-    mode: Literal["token", "app"]
 
     async def token(self, repo: str | None) -> str:
         """A token that can act on ``repo`` (``owner/repo``, or an owner)."""
@@ -78,8 +58,6 @@ class StaticTokenProvider:
         token: An explicit token; takes precedence over the environment.
         gh_binary: The GitHub CLI used as a last resort.
     """
-
-    mode: Literal["token", "app"] = "token"
 
     def __init__(
         self,
@@ -130,153 +108,3 @@ class StaticTokenProvider:
         )
         out, _ = await proc.communicate()
         return out.decode().strip() if proc.returncode == 0 else ""
-
-
-class GitHubAppTokenProvider:
-    """Installation tokens for a GitHub App.
-
-    Installation IDs are cached per account and tokens per installation (and, for
-    read-only tokens, per repository) until five minutes before they expire.
-
-    Args:
-        app_id: The App's ID.
-        private_key_pem: The App's private key in PEM form.
-        api_url: The REST API root.
-        http: An HTTP client to use; one is created when omitted.
-        clock: Returns the current Unix time; for tests.
-    """
-
-    mode: Literal["token", "app"] = "app"
-
-    def __init__(
-        self,
-        app_id: str | int,
-        private_key_pem: str | bytes,
-        api_url: str = API_URL,
-        *,
-        http: httpx.AsyncClient | None = None,
-        clock: Callable[[], float] = time.time,
-    ) -> None:
-        self._app_id = str(app_id)
-        self._key = private_key_pem
-        self._api = api_url.rstrip("/")
-        self._http = http or httpx.AsyncClient(trust_env=True, timeout=30.0)
-        self._clock = clock
-        self._jwt: tuple[str, float] | None = None
-        self._installations: dict[str, int] = {}
-        self._tokens: dict[tuple[int, str | None], tuple[str, float]] = {}
-        self._lock = asyncio.Lock()
-
-    def app_jwt(self) -> str:
-        """A JWT that authenticates as the App itself, valid for about nine minutes."""
-        now = self._clock()
-        if self._jwt and self._jwt[1] - 60 > now:
-            return self._jwt[0]
-        exp = now + 540
-        token = jwt.encode(
-            {"iat": int(now) - 60, "exp": int(exp), "iss": self._app_id},
-            self._key,
-            algorithm="RS256",
-        )
-        self._jwt = (token, exp)
-        return token
-
-    async def token(self, repo: str | None) -> str:
-        return await self._installation_token(repo, readonly=False)
-
-    async def readonly_token(self, repo: str | None) -> str | None:
-        return await self._installation_token(repo, readonly=True)
-
-    async def aclose(self) -> None:
-        await self._http.aclose()
-
-    def _headers(self) -> dict[str, str]:
-        return {
-            "Authorization": f"Bearer {self.app_jwt()}",
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": API_VERSION,
-            "User-Agent": USER_AGENT,
-        }
-
-    async def _installation_id(self, target: str) -> int:
-        owner = target.split("/", 1)[0]
-        if owner in self._installations:
-            return self._installations[owner]
-        paths = (
-            [f"/repos/{target}/installation"]
-            if "/" in target
-            else [
-                f"/orgs/{owner}/installation",
-                f"/users/{owner}/installation",
-            ]
-        )
-        for path in paths:
-            resp = await self._http.get(self._api + path, headers=self._headers())
-            if resp.status_code == 200:
-                self._installations[owner] = int(resp.json()["id"])
-                return self._installations[owner]
-            if resp.status_code != 404:
-                raise AuthError(
-                    f"GitHub App installation lookup for {target} failed: HTTP {resp.status_code}"
-                )
-        raise AuthError(f"the GitHub App is not installed on {target}")
-
-    async def _installation_token(self, repo: str | None, *, readonly: bool) -> str:
-        if not repo:
-            raise AuthError("GitHub App tokens need a repository or owner")
-        async with self._lock:
-            installation = await self._installation_id(repo)
-            scope = repo if readonly else None
-            key = (installation, f"ro:{scope}" if readonly else None)
-            cached = self._tokens.get(key)
-            if cached and cached[1] - _REFRESH_MARGIN > self._clock():
-                return cached[0]
-            body: dict[str, object] = {}
-            if readonly:
-                body["permissions"] = READONLY_PERMISSIONS
-                if scope and "/" in scope:
-                    body["repositories"] = [scope.split("/", 1)[1]]
-            resp = await self._http.post(
-                f"{self._api}/app/installations/{installation}/access_tokens",
-                headers=self._headers(),
-                json=body or None,
-            )
-            if resp.status_code != 201:
-                raise AuthError(
-                    f"creating an installation token for {repo} failed: HTTP {resp.status_code}"
-                )
-            data = resp.json()
-            expires = datetime.fromisoformat(
-                data["expires_at"].replace("Z", "+00:00")
-            ).timestamp()
-            self._tokens[key] = (data["token"], expires)
-            return data["token"]
-
-
-async def refresh_user_token(
-    web_url: str, client_id: str, client_secret: str, refresh_token: str
-) -> dict[str, object] | None:
-    """Exchange a GitHub App user refresh token for a new access token; ``None`` when
-    GitHub refuses (the person must sign in again)."""
-    async with httpx.AsyncClient(timeout=15, trust_env=True) as client:
-        r = await client.post(
-            f"{web_url}/login/oauth/access_token",
-            data={
-                "client_id": client_id,
-                "client_secret": client_secret,
-                "grant_type": "refresh_token",
-                "refresh_token": refresh_token,
-            },
-            headers={"Accept": "application/json"},
-        )
-    data = r.json() if r.status_code == 200 else {}
-    if not data.get("access_token"):
-        return None
-    expires = data.get("expires_in")
-    return {
-        "token": data["access_token"],
-        "refresh_token": data.get("refresh_token") or refresh_token,
-        "expires_at": datetime.now(UTC) + timedelta(seconds=int(expires))
-        if expires
-        else None,
-    }

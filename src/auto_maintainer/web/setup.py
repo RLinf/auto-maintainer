@@ -14,12 +14,12 @@
 
 """The setup page's API (design 7.3), in two modes.
 
-First run: the service has no ``local.yaml`` and serves only this. Anyone who reaches
-the page may begin, but the setup belongs to the first person who proves through
-GitHub that they maintain the service's own repository: by authorizing the GitHub CLI
-login, by signing in through the GitHub App the page created, or with the token they
-paste. From then on only that person's browser continues. The one-time code from the
-terminal is a fallback that also proves ownership. Later: the same steps change the
+First run: the service has no ``local.yaml`` (or one from a GitHub App or token
+setup, which must connect the GitHub CLI instead) and serves only this. Anyone who
+reaches the page may begin, but the setup belongs to the first person who proves
+through GitHub that they maintain the service's own repository, by authorizing the
+GitHub CLI login. From then on only that person's browser continues. The one-time
+code from the terminal is a fallback that also proves ownership. Later: the same steps change the
 host setup from the dashboard, and every call needs a maintainer of the service's
 repository (``Service.service_gate``). The steps live in ``hostsetup.HostSetup``.
 """
@@ -30,8 +30,7 @@ import secrets
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any, Literal
-from urllib.parse import quote
+from typing import Any
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
@@ -44,17 +43,6 @@ SETUP_HOURS = 12
 
 Authorize = Callable[[Request], Awaitable[dict[str, Any]]]
 """Returns what is known about the caller, or raises ``HTTPException``."""
-
-
-class GitHubBody(BaseModel):
-    mode: Literal["gh", "token"]
-    token: str = ""
-
-
-class AppBody(BaseModel):
-    purpose: Literal["identity", "signin"]
-    base_url: str
-    org: str | None = None
 
 
 class MemoryBody(BaseModel):
@@ -115,26 +103,30 @@ def build_router(
         }
 
     @r.post("/api/setup/github")
-    async def github(request: Request, body: GitHubBody) -> Any:
+    async def github(request: Request) -> Any:
+        """Act as the GitHub CLI login already on the host."""
         who = await may_begin(request)
         s = steps()
+        if first_run and not who.get("code"):
+            raise HTTPException(
+                403,
+                "using the host's existing GitHub CLI login needs the setup link "
+                "from the terminal; sign in with GitHub instead",
+            )
         try:
-            if body.mode == "gh":
-                if first_run and not who.get("code"):
-                    raise HTTPException(
-                        403,
-                        "using the host's existing GitHub CLI login needs the setup link "
-                        "from the terminal; sign in with GitHub instead",
-                    )
-                identity = await s.use_gh()
-            else:
-                identity = await s.use_token(body.token, claim=first_run)
+            identity = await s.use_gh()
         except errors as e:
             raise _error(e) from e
-        response = JSONResponse(identity)
-        if first_run and s.claimer:
-            claimed(request, response, s.claimer)
-        return response
+        return JSONResponse(identity)
+
+    @r.post("/api/setup/gh/install")
+    async def gh_install(request: Request) -> dict[str, Any]:
+        """Install the GitHub CLI into the service's data folder."""
+        await may_begin(request)
+        try:
+            return await steps().install_gh()
+        except errors as e:
+            raise _error(e) from e
 
     @r.post("/api/setup/gh/start")
     async def gh_start(request: Request) -> dict[str, Any]:
@@ -153,60 +145,6 @@ def build_router(
         response = JSONResponse(result)
         if first_run and result.get("state") == "done" and s.claimer:
             claimed(request, response, s.claimer)
-        return response
-
-    @r.post("/api/setup/app")
-    async def app(request: Request, body: AppBody) -> dict[str, Any]:
-        """The manifest the browser posts to GitHub to create a GitHub App."""
-        await may_begin(request)
-        return steps().app_manifest(body.base_url, body.purpose, body.org or None)
-
-    @r.get("/setup/app/callback")
-    async def app_callback(request: Request, code: str, state: str) -> Any:
-        await may_begin(request)
-        try:
-            result = await steps().complete_app(code, state)
-        except errors as e:
-            return RedirectResponse(
-                f"/setup?app_error={quote(str(e))}", status_code=303
-            )
-        return RedirectResponse(f"/setup?app={result['purpose']}", status_code=303)
-
-    @r.get("/setup/signin")
-    async def signin(request: Request) -> Any:
-        """Sign in through the app this setup created, to prove who you are."""
-        await may_begin(request)
-        state = secrets.token_urlsafe(16)
-        redirect = f"{steps().cfg.base_url}/setup/signin/callback"
-        try:
-            url = steps().signin_url(redirect, state)
-        except errors as e:
-            return RedirectResponse(
-                f"/setup?app_error={quote(str(e))}", status_code=303
-            )
-        response = RedirectResponse(url, status_code=303)
-        response.set_cookie(
-            "am_oauth_state", state, httponly=True, samesite="lax", max_age=600
-        )
-        return response
-
-    @r.get("/setup/signin/callback")
-    async def signin_callback(request: Request, code: str, state: str) -> Any:
-        await may_begin(request)
-        if not secrets.compare_digest(state, request.cookies.get("am_oauth_state", "")):
-            return RedirectResponse("/setup?app_error=try+again", status_code=303)
-        s = steps()
-        redirect = f"{s.cfg.base_url}/setup/signin/callback"
-        try:
-            token = await s.signin_token(code, redirect)
-            person = await (s.claim(token) if first_run else s._user(token))
-        except errors as e:
-            return RedirectResponse(
-                f"/setup?app_error={quote(str(e))}", status_code=303
-            )
-        response = RedirectResponse("/setup?signed_in=1", status_code=303)
-        if first_run:
-            claimed(request, response, person)
         return response
 
     @r.post("/api/setup/memory")
@@ -228,11 +166,7 @@ def build_router(
         except errors as e:
             raise _error(e) from e
         response = JSONResponse({"redirect": "/"})
-        person = s.claimer or (
-            s.identity
-            if s.identity and s.identity.get("kind") in ("gh", "token")
-            else None
-        )
+        person = s.claimer or s.identity
         if first_run and person:
             # The owner proved who they are through GitHub (or held the code at the
             # host while the host acts as this account): sign them in.
