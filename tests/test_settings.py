@@ -172,13 +172,25 @@ async def test_anyone_else_only_proposes_even_an_operator(demo, login: str) -> N
     assert h.service.scheduler.poll_seconds == 600
 
 
-async def test_the_service_cannot_approve_its_own_settings(demo) -> None:
+async def test_the_service_account_approves_only_when_a_person_signed_in_as_it(
+    demo,
+) -> None:
+    """With the GitHub CLI's login as the service's account (gh mode), its owner still
+    configures the service from the dashboard; the service itself never approves."""
     h, _ = demo
-    h.forge.set_permission(
-        "acme/auto-maintainer", h.service.settings.login, Permission.ADMIN
-    )
-    decision = await h.service.service_gate(h.service.settings.login)
-    assert decision.allowed is False and "its own" in decision.reason
+    login = h.service.settings.login
+    h.forge.set_permission("acme/auto-maintainer", login, Permission.ADMIN)
+    h.forge.set_permission("acme/widget", login, Permission.ADMIN)
+    gate = h.service.gate
+    need = Permission.MAINTAIN
+    refused = await gate.check_service("acme/auto-maintainer", login, need)
+    assert refused.allowed is False and "its own" in refused.reason
+    assert (await h.service.service_gate(login)).allowed is True
+    current = await h.service.profiles.active("acme/widget")
+    assert (await gate.check("acme/widget", login, current)).allowed is False
+    assert (
+        await gate.check("acme/widget", login, current, person=True)
+    ).allowed is True
 
 
 async def test_a_document_that_does_not_check_is_refused(demo) -> None:

@@ -1,10 +1,11 @@
 // Sign-in: GitHub OAuth web flow, or the device flow when the browser cannot reach the callback.
 
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { ErrorBox } from "../components";
 import { useT } from "../i18n";
 import { Logo } from "../logo";
+import { GhWebLogin } from "./Setup";
 
 interface DeviceStart {
   flow_id: string;
@@ -16,6 +17,11 @@ interface DeviceStart {
 export default function SignIn() {
   const t = useT();
   const client = useQueryClient();
+  const config = useQuery({
+    queryKey: ["auth-config"],
+    queryFn: async () => (await fetch("/auth/config", { credentials: "same-origin" })).json() as Promise<{ oauth?: boolean; links?: boolean; gh?: boolean }>,
+  });
+  const expired = new URLSearchParams(window.location.search).get("signin") === "expired";
   const [device, setDevice] = useState<DeviceStart | null>(null);
   const [error, setError] = useState<unknown>(null);
   const timer = useRef<number | null>(null);
@@ -75,10 +81,28 @@ export default function SignIn() {
       <p className="muted" style={{ margin: 0 }}>
         {t("Sign in with a GitHub account that has write access to a repository this service maintains.")}
       </p>
+      {expired && <div className="error">{t("That sign-in link has expired or was used. Run `am login` again for a new one.")}</div>}
+      {config.data?.gh && (
+        <GhWebLogin
+          start="/auth/gh/start"
+          poll="/auth/gh/poll"
+          body={t("Enter a one-time code on github.com. The service only reads who you are.")}
+          onDone={() => void client.invalidateQueries()}
+        />
+      )}
+      {config.data?.links && !config.data.oauth && !config.data.gh && (
+        <div className="stack" style={{ gap: 6 }}>
+          <strong className="small">{t("Sign in from the host")}</strong>
+          <span className="small muted">{t("This host has neither a GitHub App nor the GitHub CLI for signing in. Run this where auto-maintainer runs, then open the link it prints.")}</span>
+          <pre className="pre">uv run am login</pre>
+        </div>
+      )}
+      {config.data?.oauth === false ? null : (
       <a className="button primary" href="/auth/login" style={{ height: 40, textDecoration: "none" }}>
         {t("Sign in with GitHub")}
       </a>
-      {device ? (
+      )}
+      {config.data?.oauth === false ? null : device ? (
         <div className="stack" style={{ alignItems: "center", textAlign: "center" }}>
           <span>
             {t("Open")}{" "}

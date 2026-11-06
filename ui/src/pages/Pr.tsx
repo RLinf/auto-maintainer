@@ -4,13 +4,15 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { api, type Evaluation, type Me, type PrDetail } from "../api";
+import { api, type Evaluation, type Me, type PrDetail, type ReviewStart } from "../api";
 import { useAgent } from "../agent";
+import { agentName, AgentPicker } from "../agentPicker";
 import { Empty, ErrorBox, Labels, PageHead, Pre, Section, Status, Tier, timeOf, useAct, When } from "../components";
 import { REVIEW_STATES, usePrs } from "../data";
 import { useT } from "../i18n";
 import { Icon } from "../icons";
 import { DataTable, ListToolbar, useList, type Column } from "../list";
+import { FixButton } from "../proposal";
 import { Skeleton, Tabs, useTab, useToast } from "../ui";
 
 const TIERS = ["P0", "P1", "P2", "P3"];
@@ -29,7 +31,8 @@ export default function PrPage({ me }: { me: Me }) {
   const keys = [["pr"], ["prs"]];
   const claim = useAct(() => api.post(`${base}/claim`), keys);
   const unclaim = useAct(() => api.del(`${base}/claim`), keys);
-  const review = useAct(() => api.post(`${base}/review`), keys);
+  const [reviewer, setReviewer] = useState("");
+  const review = useAct(() => api.post<ReviewStart>(`${base}/review`, { agent: reviewer || null }), [...keys, ["proposals"]]);
   const arm = useAct(() => api.post(`${base}/merge`), keys);
   const disarm = useAct(() => api.del(`${base}/merge`), keys);
   const d = detail.data;
@@ -54,6 +57,18 @@ export default function PrPage({ me }: { me: Me }) {
   const pr = d.pr;
   const claimedBy = row?.claimed_by ?? null;
   const mutationError = claim.error || unclaim.error || review.error || arm.error || disarm.error;
+  const job = row?.review_activity.job;
+  const reviewing = !!job && ["queued", "running", "waiting"].includes(job.status);
+  const reviewingText = reviewing
+    ? `${t("reviewing…")} ${agentName(job?.agent)}${job?.by ? ` · ${job.by === me.login ? t("you") : job.by}` : ""}`
+    : "";
+  // The fix endpoint works from a review action, drafted or posted, that has findings.
+  const withFindings = d.actions.filter(
+    (a) => a.action.kind === "review.post" && ((a.action.payload.result as { findings?: unknown[] } | undefined)?.findings?.length ?? 0) > 0,
+  );
+  const latestReview = withFindings.length
+    ? withFindings.reduce((a, b) => ((timeOf(a.action.created_at) ?? 0) >= (timeOf(b.action.created_at) ?? 0) ? a : b)).action.id
+    : null;
   const adds = pr.files.reduce((n, f) => n + f.additions, 0);
   const dels = pr.files.reduce((n, f) => n + f.deletions, 0);
 
@@ -85,18 +100,32 @@ export default function PrPage({ me }: { me: Me }) {
               <Icon name="sparkles" />
               {t("Ask agent")}
             </button>
+            <AgentPicker value={reviewer} onChange={setReviewer} />
             <button
               className="primary"
-              disabled={review.isPending}
+              disabled={review.isPending || reviewing}
+              title={reviewing ? reviewingText : undefined}
               onClick={() =>
                 review.mutate(undefined, {
-                  onSuccess: () => toast({ title: t("Review requested"), body: t("The draft will appear in your proposals."), icon: "pr" }),
+                  onSuccess: (o) =>
+                    toast(
+                      o.run === "review" || o.run === "followup"
+                        ? { title: t("Review requested"), body: t("The draft will appear in your proposals."), icon: "pr" }
+                        : o.run === "skip"
+                          ? { title: t("Nothing to review"), body: o.reason, icon: "check" }
+                          : {
+                              title: o.run === "joined" ? t("Already being reviewed") : t("Already drafted"),
+                              body: `${o.by ?? "—"} · ${agentName(o.agent) || t("Default agent")}`,
+                              icon: "pr",
+                            },
+                    ),
                 })
               }
             >
               <Icon name="pr" size={15} />
-              {d.review_state.reviewed_sha ? t("Follow up") : t("Review")}
+              {reviewing ? t("Reviewing…") : d.review_state.reviewed_sha ? t("Follow up") : t("Review")}
             </button>
+            {latestReview && <FixButton repo={full} number={pr.number} review={latestReview} align="right" />}
             {claimedBy === me.login ? (
               <button onClick={() => unclaim.mutate(undefined)}>{t("Unclaim")}</button>
             ) : (

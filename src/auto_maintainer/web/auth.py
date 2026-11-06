@@ -27,6 +27,7 @@ import json
 import os
 import secrets
 import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
@@ -93,14 +94,10 @@ def current_user(request: Request) -> User:
     )
 
 
-def _login_response(request: Request, user: User, redirect: str | None = "/") -> Any:
+def set_session(request: Request, response: Any, user: User) -> Any:
+    """Sign ``user`` in on ``response``: the session cookie and a fresh CSRF token."""
     sessions: Sessions = request.app.state.sessions
     secure = request.app.state.cookie_secure
-    response: Any = (
-        RedirectResponse(redirect, status_code=303)
-        if redirect
-        else JSONResponse({"login": user.login})
-    )
     response.set_cookie(
         SESSION_COOKIE,
         sessions.session_for(user),
@@ -117,6 +114,87 @@ def _login_response(request: Request, user: User, redirect: str | None = "/") ->
         secure=secure,
     )
     return response
+
+
+async def remember_token(
+    request: Request,
+    login: str,
+    token: str,
+    source: str,
+    refresh_token: str | None = None,
+    expires_in: int | None = None,
+) -> None:
+    """Keep the person's GitHub token on the host, so reviews they approve can be
+    posted as them. Signing out deletes it."""
+    service = getattr(request.app.state, "service", None)
+    store = getattr(getattr(service, "a", None), "user_tokens", None)
+    if store is None:
+        return
+    from ..domain.settings import UserToken
+
+    now = datetime.now(UTC)
+    await store.set(
+        login,
+        UserToken(
+            token=token,
+            refresh_token=refresh_token,
+            expires_at=now + timedelta(seconds=expires_in) if expires_in else None,
+            source=source,
+            updated_at=now,
+        ),
+    )
+
+
+def _login_response(request: Request, user: User, redirect: str | None = "/") -> Any:
+    response: Any = (
+        RedirectResponse(redirect, status_code=303)
+        if redirect
+        else JSONResponse({"login": user.login})
+    )
+    return set_session(request, response, user)
+
+
+LINK_MINUTES = 10
+
+
+def create_link(path: Path, login: str, base_url: str) -> str:
+    """A one-time sign-in link for ``login``, valid for ``LINK_MINUTES`` (``am login``).
+
+    The link is stored in ``path`` (mode 0600) on the host; whoever runs this on the
+    host vouches for the login.
+    """
+    token = secrets.token_urlsafe(32)
+    links = _read_links(path)
+    now = time.time()
+    links = {k: v for k, v in links.items() if v["exp"] > now}
+    links[hashlib.sha256(token.encode()).hexdigest()] = {
+        "login": login,
+        "exp": now + LINK_MINUTES * 60,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(links, f)
+    os.replace(tmp, path)
+    return f"{base_url.rstrip('/')}/auth/link?token={token}"
+
+
+def _read_links(path: Path) -> dict[str, dict[str, Any]]:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def use_link(path: Path, token: str) -> str | None:
+    """The login a link signs in, once; ``None`` for an unknown, used, or old link."""
+    links = _read_links(path)
+    entry = links.pop(hashlib.sha256(token.encode()).hexdigest(), None)
+    if entry is None:
+        return None
+    path.write_text(json.dumps(links), encoding="utf-8")
+    return entry["login"] if entry["exp"] > time.time() else None
 
 
 async def _github_user(api_url: str, token: str) -> User:
@@ -144,8 +222,62 @@ def router(
     client_secret_env: str,
     base_url: str,
     dev: bool,
+    links_path: Path | None = None,
+    gh_signin: Any = None,
 ) -> APIRouter:
     r = APIRouter()
+    gh_flows: dict[str, dict[str, Any]] = {}
+
+    @r.post("/auth/gh/start")
+    async def gh_start() -> dict[str, Any]:
+        """Sign in by authorizing the GitHub CLI on github.com with a one-time code.
+        The service keeps the token on the host to post the reviews you approve as
+        you, deletes the CLI's files, and forgets the token when you sign out."""
+        if gh_signin is None or client_id:
+            raise HTTPException(404, "this instance signs in with GitHub directly")
+        now = time.time()
+        for fid, flow in list(gh_flows.items()):
+            if flow["exp"] < now:
+                flow["login"].discard()
+                gh_flows.pop(fid, None)
+        if len(gh_flows) >= 10:
+            raise HTTPException(429, "too many sign-ins in progress; try again shortly")
+        flow_id = secrets.token_urlsafe(12)
+        login = gh_signin(flow_id)
+        try:
+            started = await login.start()
+        except ValueError as e:
+            login.discard()
+            raise HTTPException(503, str(e)) from e
+        gh_flows[flow_id] = {"login": login, "exp": now + 900}
+        return {"flow_id": flow_id, **started}
+
+    @r.post("/auth/gh/poll")
+    async def gh_poll(request: Request, body: dict[str, str]) -> Any:
+        flow = gh_flows.get(body.get("flow_id", ""))
+        if flow is None:
+            raise HTTPException(404, "unknown or expired sign-in")
+        login = flow["login"]
+        state = login.state()
+        if state == "pending":
+            return JSONResponse({"pending": True}, status_code=202)
+        token = await login.token() if state == "done" else None
+        login.discard()
+        gh_flows.pop(body.get("flow_id", ""), None)
+        if not token:
+            raise HTTPException(401, "GitHub did not complete the sign-in; try again")
+        user = await _github_user(api_url, token)
+        await remember_token(request, user.login, token, "gh")
+        return _login_response(request, user, redirect=None)
+
+    @r.get("/auth/link")
+    async def link(request: Request, token: str) -> Any:
+        """Sign in with a one-time link from ``am login`` on the host."""
+        login = use_link(links_path, token) if links_path else None
+        if login is None:
+            return RedirectResponse("/?signin=expired", status_code=303)
+        return _login_response(request, User(login=login, name=login))
+
     device_flows: dict[str, dict[str, Any]] = {}
 
     @r.get("/auth/login")
@@ -187,10 +319,20 @@ def router(
                 },
                 headers={"Accept": "application/json"},
             )
-            token = resp.json().get("access_token")
+            data = resp.json()
+            token = data.get("access_token")
         if not token:
             raise HTTPException(401, "GitHub did not return a token")
-        return _login_response(request, await _github_user(api_url, token))
+        user = await _github_user(api_url, token)
+        await remember_token(
+            request,
+            user.login,
+            token,
+            "oauth",
+            data.get("refresh_token"),
+            int(data["expires_in"]) if data.get("expires_in") else None,
+        )
+        return _login_response(request, user)
 
     @r.post("/auth/device/start")
     async def device_start() -> dict[str, Any]:
@@ -236,9 +378,16 @@ def router(
                 {"pending": True, "error": data.get("error")}, status_code=202
             )
         device_flows.pop(body["flow_id"], None)
-        return _login_response(
-            request, await _github_user(api_url, data["access_token"]), redirect=None
+        user = await _github_user(api_url, data["access_token"])
+        await remember_token(
+            request,
+            user.login,
+            data["access_token"],
+            "device",
+            data.get("refresh_token"),
+            int(data["expires_in"]) if data.get("expires_in") else None,
         )
+        return _login_response(request, user, redirect=None)
 
     @r.get("/auth/config")
     async def auth_config() -> dict[str, bool]:
@@ -247,10 +396,18 @@ def router(
             "oauth": bool(client_id),
             "device_flow": bool(client_id),
             "dev_login": dev,
+            "links": links_path is not None,
+            "gh": gh_signin is not None and not client_id,
         }
 
     @r.post("/auth/logout")
-    async def logout() -> Any:
+    async def logout(request: Request) -> Any:
+        """Sign out and forget the GitHub token kept for posting as this person."""
+        data = request.app.state.sessions.verify(request.cookies.get(SESSION_COOKIE))
+        service = getattr(request.app.state, "service", None)
+        store = getattr(getattr(service, "a", None), "user_tokens", None)
+        if data and store is not None:
+            await store.delete(data["login"])
         response = JSONResponse({"ok": True})
         response.delete_cookie(SESSION_COOKIE)
         response.delete_cookie(CSRF_COOKIE)

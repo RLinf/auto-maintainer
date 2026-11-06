@@ -19,7 +19,7 @@ from __future__ import annotations
 import hmac
 import json
 import os
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -28,7 +28,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from ..service import Service
-from . import api, auth, chat, settings
+from . import api, auth, chat, settings, setup
 from .dashboard import STATIC, missing_page
 
 
@@ -47,12 +47,22 @@ def create_app(
     webhook_target: Callable[[str, dict[str, Any]], tuple[str, int | None] | None]
     | None = None,
     allow_dev_login: bool = False,
+    links_path: Path | None = None,
+    gh_signin: Callable[[str], Any] | None = None,
+    setup_steps: Callable[[], Any] | None = None,
+    on_host_change: Callable[[Any], Awaitable[None]] | None = None,
 ) -> FastAPI:
     """Build the app. ``verify_webhook`` and ``webhook_target`` come from the forge adapter.
 
     ``allow_dev_login`` enables ``/auth/dev``, which signs anyone in as any login
     without a password. Only the demo, which runs on fakes, turns it on; an instance
     that talks to a real forge, including one in dev mode, never does.
+
+    ``links_path`` enables sign-in with one-time links from ``am login``;
+    ``gh_signin`` (a factory of ``hostsetup.GhLogin`` by flow id) enables signing in
+    on the web by authorizing the GitHub CLI, for instances without an OAuth client.
+    ``setup_steps`` and ``on_host_change`` let maintainers of the service's repository
+    change the host setup from the dashboard (``web/setup.py``).
     """
     app = FastAPI(
         title="auto-maintainer", docs_url="/api/docs", openapi_url="/api/openapi.json"
@@ -61,20 +71,7 @@ def create_app(
     app.state.sessions = auth.Sessions(data_dir / ".session_secret")
     app.state.cookie_secure = cookie_secure
 
-    @app.middleware("http")
-    async def csrf(request: Request, call_next: Any) -> Response:
-        if request.method not in (
-            "GET",
-            "HEAD",
-            "OPTIONS",
-        ) and request.url.path.startswith("/api/"):
-            cookie = request.cookies.get(auth.CSRF_COOKIE, "")
-            header = request.headers.get("x-am-csrf", "")
-            if not cookie or not hmac.compare_digest(cookie, header):
-                return JSONResponse(
-                    {"detail": "missing or wrong CSRF token"}, status_code=403
-                )
-        return await call_next(request)
+    install_csrf(app)
 
     app.include_router(
         auth.router(
@@ -84,11 +81,38 @@ def create_app(
             oauth_secret_env,
             base_url,
             allow_dev_login,
+            links_path,
+            gh_signin,
         )
     )
     app.include_router(api.build_router())
     app.include_router(chat.build_router())
     app.include_router(settings.build_router())
+    if setup_steps is not None and on_host_change is not None:
+
+        async def maintainer(request: Request) -> dict[str, Any]:
+            user = auth.current_user(request)
+            decision = await service.service_gate(user.login)
+            if not decision.allowed:
+                raise HTTPException(403, decision.reason)
+            return {"by": user.login}
+
+        async def own_token(request: Request) -> str | None:
+            user = auth.current_user(request)
+            tokens = service.a.user_tokens
+            kept = await tokens.get(user.login) if tokens is not None else None
+            return kept.token if kept else None
+
+        app.include_router(
+            setup.build_router(
+                setup_steps,
+                maintainer,
+                maintainer,
+                on_host_change,
+                first_run=False,
+                person_token=own_token,
+            )
+        )
 
     @app.get("/healthz")
     async def healthz() -> dict[str, Any]:
@@ -120,6 +144,31 @@ def create_app(
         events = await service.poller.poll_repo(repo)
         return {"events": len(events)}
 
+    install_spa(app)
+    return app
+
+
+def install_csrf(app: FastAPI) -> None:
+    """Every state-changing ``/api`` call must echo the ``am_csrf`` cookie in a header."""
+
+    @app.middleware("http")
+    async def csrf(request: Request, call_next: Any) -> Response:
+        if request.method not in (
+            "GET",
+            "HEAD",
+            "OPTIONS",
+        ) and request.url.path.startswith("/api/"):
+            cookie = request.cookies.get(auth.CSRF_COOKIE, "")
+            header = request.headers.get("x-am-csrf", "")
+            if not cookie or not hmac.compare_digest(cookie, header):
+                return JSONResponse(
+                    {"detail": "missing or wrong CSRF token"}, status_code=403
+                )
+        return await call_next(request)
+
+
+def install_spa(app: FastAPI) -> None:
+    """Serve the built dashboard: its files, and ``index.html`` for every page route."""
     if (STATIC / "assets").is_dir():
         app.mount("/assets", StaticFiles(directory=STATIC / "assets"), name="assets")
 
@@ -133,5 +182,3 @@ def create_app(
         if path and candidate.is_file() and STATIC in candidate.resolve().parents:
             return FileResponse(candidate)
         return FileResponse(STATIC / "index.html")
-
-    return app

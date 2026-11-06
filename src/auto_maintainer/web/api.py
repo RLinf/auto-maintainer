@@ -23,8 +23,9 @@ are answered by its maintainers; questions outside any repository by operators.
 from __future__ import annotations
 
 import json
+import re
 from datetime import timedelta
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
@@ -46,6 +47,7 @@ from ..domain.memory import (
     MemoryChangeState,
     Signal,
     SignalKind,
+    profile_path,
     repo_dir,
     repos_of_path,
 )
@@ -120,6 +122,8 @@ class OverrideBody(BaseModel):
 
 class ApproveBody(BaseModel):
     payload: dict[str, Any] | None = None
+    as_me: bool = False
+    """Post this review draft with the approver's own GitHub account."""
 
 
 class RejectBody(BaseModel):
@@ -174,7 +178,7 @@ async def code_maintainer(service: Service, user: User) -> tuple[bool, str]:
     if not repo:
         return False, "no code repo is configured"
     need = Permission(service.settings.code_approver)
-    decision = await service.gate.check_service(repo, user.login, need)
+    decision = await service.gate.check_service(repo, user.login, need, person=True)
     if decision.allowed:
         return True, ""
     return (
@@ -188,8 +192,51 @@ class PrTarget(BaseModel):
     number: int
 
 
+class AutomationBody(BaseModel):
+    trigger: Literal["manual", "scan", "events"]
+    every_hours: int = Field(default=6, ge=1, le=168)
+    max_prs: int = Field(default=5, ge=1, le=50)
+    followups: bool = True
+
+
+def cron_every(hours: int) -> str:
+    """A cron schedule (UTC) for every ``hours`` hours; daily and weekly at 02:00."""
+    if hours >= 168:
+        return "0 2 * * 1"
+    if hours >= 24:
+        return "0 2 * * *"
+    return f"0 */{hours} * * *" if hours > 1 else "0 * * * *"
+
+
+def hours_of(cron: str) -> int | None:
+    """The interval ``cron_every`` would turn into ``cron``, if it is one of those."""
+    if cron == "0 2 * * 1":
+        return 168
+    if cron == "0 2 * * *":
+        return 24
+    if cron == "0 * * * *":
+        return 1
+    m = re.fullmatch(r"0 \*/(\d+) \* \* \*", cron)
+    return int(m.group(1)) if m else None
+
+
 class ReviewsBody(BaseModel):
     prs: list[PrTarget]
+    agent: str | None = None
+    """The runtime to review with; empty follows each repository's route."""
+
+
+class ReviewBody(BaseModel):
+    agent: str | None = None
+
+
+class FixBody(BaseModel):
+    review: str | None = None
+    """The review action whose findings to fix; the PR's latest review by default."""
+    findings: list[str] = Field(default_factory=list)
+    """Finding ids to fix; all of them when empty."""
+    agent: str | None = None
+    note: str = Field(default="", max_length=2000)
 
 
 def build_router() -> APIRouter:
@@ -206,6 +253,7 @@ def build_router() -> APIRouter:
             "repos": await visible_repos(service, user),
             "dev_mode": service.settings.dev_mode,
             "paused": bool(await service.store.get_state("paused")),
+            "can_post_as_me": await service.can_post_as(user.login),
             "pending_questions": len(
                 [
                     q
@@ -250,7 +298,7 @@ def build_router() -> APIRouter:
         service = service_of(request)
         repo = check_repo(body.repo)
         decision = await service.gate.check(
-            repo, user.login, await service.profiles.active(repo)
+            repo, user.login, await service.profiles.active(repo), person=True
         )
         if not decision.allowed:
             raise HTTPException(403, decision.reason)
@@ -271,7 +319,7 @@ def build_router() -> APIRouter:
         state = await service.profiles.refresh(repo)
         layers = await service.loader.layers(repo)
         current = await service.profiles.active(repo)
-        can = await service.gate.check(repo, user.login, current)
+        can = await service.gate.check(repo, user.login, current, person=True)
         return {
             "lock": lock.model_dump(mode="json", by_alias=True) if lock else None,
             "candidate": state.model_dump(mode="json"),
@@ -357,7 +405,9 @@ def build_router() -> APIRouter:
         except ProfileError as e:
             raise HTTPException(422, str(e)) from e
         current = await service.profiles.active(repo)
-        decision = await service.gate.check(repo, user.login, current, merged.profile)
+        decision = await service.gate.check(
+            repo, user.login, current, merged.profile, person=True
+        )
         if decision.allowed:
             change.approvals = {repo: [user.login]}
         await service.store.save_memory_change(change)
@@ -400,6 +450,83 @@ def build_router() -> APIRouter:
             ],
         }
 
+    @r.get("/repos/{owner}/{name}/review-automation")
+    async def review_automation(
+        request: Request, owner: str, name: str, user: User = Depends(current_user)
+    ) -> dict[str, Any]:
+        """When reviews start on their own: only on request, periodically, or on every
+        update; and whether updated PRs are re-reviewed."""
+        service = service_of(request)
+        repo = _repo(owner, name)
+        await require_view(service, user, repo)
+        profile = await service.profiles.active(repo)
+        if profile is None:
+            raise HTTPException(409, f"{repo} has no approved profile yet")
+        gate = await service.gate.check(repo, user.login, profile, person=True)
+        review = profile.review
+        return {
+            "repo": repo,
+            "trigger": review.trigger,
+            "schedule": review.scan.schedule,
+            "every_hours": hours_of(review.scan.schedule),
+            "max_prs": review.scan.max_prs,
+            "followups": review.scan.followups,
+            "can_configure": gate.allowed,
+            "reason": gate.reason,
+        }
+
+    @r.put("/repos/{owner}/{name}/review-automation")
+    async def set_review_automation(
+        request: Request,
+        owner: str,
+        name: str,
+        body: AutomationBody,
+        user: User = Depends(current_user),
+    ) -> dict[str, Any]:
+        """Change it through the repository's settings layer; a maintainer applies it
+        by making it, anyone else proposes it."""
+        service = service_of(request)
+        repo = _repo(owner, name)
+        await require_view(service, user, repo)
+        current = await service.profiles.active(repo)
+        layer = parse_yaml(
+            await service.a.memory.read_text(profile_path(repo)) or "", "settings"
+        )
+        review = dict(layer.get("review") or {})
+        review["trigger"] = body.trigger
+        review["scan"] = {
+            **dict(review.get("scan") or {}),
+            "schedule": cron_every(body.every_hours),
+            "max_prs": body.max_prs,
+            "followups": body.followups,
+        }
+        layer["review"] = review
+        what = {
+            "manual": "review only on request",
+            "scan": f"review every {body.every_hours}h",
+            "events": "review every update",
+        }[body.trigger]
+        try:
+            merged, change = await service.profiles.propose_memory_layer(
+                repo, layer, user.login, f"review: {what}"
+            )
+        except ProfileError as e:
+            raise HTTPException(422, str(e)) from e
+        decision = await service.gate.check(
+            repo, user.login, current, merged.profile, person=True
+        )
+        if decision.allowed:
+            change.approvals = {repo: [user.login]}
+        change.requested_by = user.login
+        await service.store.save_memory_change(change)
+        await service.submit_memory_change(change)
+        stored = await service.store.get_memory_change(change.id)
+        return {
+            "applied": bool(stored and stored.state == "merged"),
+            "change": stored.model_dump(mode="json") if stored else None,
+            "reason": decision.reason,
+        }
+
     @r.post("/repos/{owner}/{name}/pause")
     async def pause_repo(
         request: Request,
@@ -421,7 +548,7 @@ def build_router() -> APIRouter:
         service = service_of(request)
         repo = _repo(owner, name)
         decision = await service.gate.check(
-            repo, user.login, await service.profiles.active(repo)
+            repo, user.login, await service.profiles.active(repo), person=True
         )
         if not decision.allowed:
             raise HTTPException(403, decision.reason)
@@ -460,12 +587,14 @@ def build_router() -> APIRouter:
                 continue
             ids = service.info.identities | set(profile.people.review_identities)
             activity = await review_activity(service, name)
+            own = await service.posted_as_people(name)
             for pr in await service.store.list_snapshots(name):
                 cls = classify_review_state(
                     pr,
                     ids,
                     profile.comments.legacy_markers,
                     profile.scope.include_drafts,
+                    own_actions=own,
                 )
                 ev = await service.store.get_evaluation(name, pr.number)
                 claim = claims.get(f"{name}#{pr.number}")
@@ -513,7 +642,11 @@ def build_router() -> APIRouter:
         out = []
         for target in body.prs[:50]:
             await require_view(service, user, target.repo)
-            out.append(await _request_review(service, user, target.repo, target.number))
+            out.append(
+                await _request_review(
+                    service, user, target.repo, target.number, body.agent
+                )
+            )
         return out
 
     @r.get("/prs/{owner}/{name}/{number}")
@@ -559,6 +692,7 @@ def build_router() -> APIRouter:
             service.info.identities
             | set(profile.people.review_identities if profile else []),
             profile.comments.legacy_markers if profile else [],
+            own_actions=await service.posted_as_people(repo),
         )
         ev = await service.store.get_evaluation(repo, number)
         return {
@@ -628,7 +762,10 @@ def build_router() -> APIRouter:
             update["tier_override"] = body.tier or None
         goals = await service.knowledge.stage_goals(repo, profile)
         state = classify_review_state(
-            pr, service.info.identities, profile.comments.legacy_markers
+            pr,
+            service.info.identities,
+            profile.comments.legacy_markers,
+            own_actions=await service.posted_as_people(repo),
         ).state
         after = recompute(
             before.model_copy(update=update),
@@ -770,12 +907,59 @@ def build_router() -> APIRouter:
         owner: str,
         name: str,
         number: int,
+        body: ReviewBody | None = None,
         user: User = Depends(current_user),
     ) -> dict[str, Any]:
         service = service_of(request)
         repo = _repo(owner, name)
         await require_view(service, user, repo)
-        return await _request_review(service, user, repo, number)
+        return await _request_review(
+            service, user, repo, number, body.agent if body else None
+        )
+
+    @r.post("/prs/{owner}/{name}/{number}/fix")
+    async def request_fix(
+        request: Request,
+        owner: str,
+        name: str,
+        number: int,
+        body: FixBody,
+        user: User = Depends(current_user),
+    ) -> dict[str, Any]:
+        """Have an agent fix the review's findings; the result is a diff that the
+        maintainer opens as a PR into this PR's branch, as themselves."""
+        service = service_of(request)
+        repo = _repo(owner, name)
+        await require_view(service, user, repo)
+        review = body.review
+        if review is None:
+            latest = await service.store.list_actions(
+                repo=repo, kinds=[ActionKind.REVIEW_POST], limit=500
+            )
+            mine = [
+                r
+                for r in latest
+                if r.action.number == number and r.action.payload.get("result")
+            ]
+            if not mine:
+                raise HTTPException(409, "this PR has no review to fix yet")
+            review = max(mine, key=lambda r: r.action.created_at).action.id
+        event = Event(
+            kind=EventKind.DASHBOARD_COMMAND,
+            repo=repo,
+            number=number,
+            payload={
+                "command": "fix",
+                "by": user.login,
+                "review": review,
+                "findings": body.findings,
+                **({"agent": body.agent} if body.agent else {}),
+                **({"note": body.note} if body.note else {}),
+            },
+            source="dashboard",
+        )
+        await service.bus.publish(event)
+        return {"repo": repo, "number": number, "event": event.id, "review": review}
 
     @r.post("/prs/{owner}/{name}/{number}/lab")
     async def lab(
@@ -841,9 +1025,16 @@ def build_router() -> APIRouter:
         if proposal is None:
             raise HTTPException(404, "unknown proposal")
         await require_view(service, user, proposal.repo)
+        if body.as_me and not await service.can_post_as(user.login):
+            raise HTTPException(
+                409, "sign in again with GitHub so the service can post as you"
+            )
         try:
             proposal = await service.pipeline.approve(
-                proposal_id, user.login, body.payload
+                proposal_id,
+                user.login,
+                body.payload,
+                post_as=user.login if body.as_me else None,
             )
         except ValueError as e:
             raise HTTPException(409, str(e)) from e
@@ -1251,6 +1442,7 @@ def build_router() -> APIRouter:
                     event.repo is not None or user.login in service.settings.operators
                 ):
                     data["title"] = event.payload.get("title")
+                    data["asked_for"] = event.payload.get("asked_for")
                 yield f"event: {event.kind}\ndata: {json.dumps(data)}\n\n"
 
         return StreamingResponse(stream(), media_type="text/event-stream")
@@ -1303,48 +1495,92 @@ async def agreement_scores(service: Service, repo: str) -> dict[str, Any]:
 
 
 async def _request_review(
-    service: Service, user: User, repo: str, number: int
+    service: Service, user: User, repo: str, number: int, agent: str | None = None
 ) -> dict[str, Any]:
-    """Publish a review request for one PR and say what it will run."""
+    """Publish a review request for one PR and say what it will run.
+
+    One review per PR, head commit, and agent: when the same agent is already
+    reviewing this commit, or left a draft for it, the request joins that review
+    instead of starting another, whoever asked first. A different agent may review
+    the same commit.
+    """
     pr = await service.store.get_snapshot(repo, number)
     profile = await service.profiles.active(repo)
+    out: dict[str, Any] = {"repo": repo, "number": number}
     if pr is None or profile is None:
         return {
-            "repo": repo,
-            "number": number,
+            **out,
             "run": "skip",
             "reason": "unknown PR or repository without a profile",
         }
     ids = service.info.identities | set(profile.people.review_identities)
     state = classify_review_state(
-        pr, ids, profile.comments.legacy_markers, include_drafts=True
+        pr,
+        ids,
+        profile.comments.legacy_markers,
+        include_drafts=True,
+        own_actions=await service.posted_as_people(repo),
     ).state
     if state == "UP_TO_DATE":
-        return {
-            "repo": repo,
-            "number": number,
-            "run": "skip",
-            "reason": "already reviewed at the current head",
-        }
+        return {**out, "run": "skip", "reason": "already reviewed at the current head"}
     run = (
         "followup" if state in ("FOLLOWUP_REVIEW", "APPROVED_NEW_COMMITS") else "review"
     )
+    route = profile.route(run, service.settings.routing)
+    default_agent = route.primary if route else None
+    chosen = agent or default_agent
+    known = getattr(service.a.agents, "runtimes", None)
+    if agent and known is not None and agent not in known:
+        return {**out, "run": "skip", "reason": f"no enabled agent named {agent!r}"}
+    head = pr.head_sha[:12]
+    active = [JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.WAITING]
+    for job in await service.store.list_jobs(active, repo=repo):
+        if job.playbook not in ("review", "followup") or job.number != number:
+            continue
+        last = job.events[-1] if job.events else {}
+        payload = last.get("payload") or {}
+        if (last.get("sha") or "")[:12] == head and (
+            payload.get("agent") or default_agent
+        ) == chosen:
+            return {
+                **out,
+                "run": "joined",
+                "by": payload.get("by"),
+                "agent": chosen,
+                "state": state,
+            }
+    for proposal in await service.store.list_proposals(ProposalState.PENDING, repo):
+        record = await service.store.get_action(proposal.action_id)
+        if (
+            record is not None
+            and record.action.kind == ActionKind.REVIEW_POST
+            and record.action.number == number
+            and (record.action.head_sha or "")[:12] == head
+            and record.action.payload.get("runtime") == chosen
+        ):
+            return {
+                **out,
+                "run": "drafted",
+                "by": proposal.requested_by,
+                "agent": chosen,
+                "proposal": proposal.id,
+                "state": state,
+            }
     event = Event(
         kind=EventKind.DASHBOARD_COMMAND,
         repo=repo,
         number=number,
         sha=pr.head_sha,
-        payload={"command": "review", "by": user.login, "source": "dashboard"},
+        payload={
+            "command": "review",
+            "by": user.login,
+            "source": "dashboard",
+            **({"agent": agent} if agent else {}),
+        },
         source="dashboard",
     )
     await service.bus.publish(event)
-    return {
-        "repo": repo,
-        "number": number,
-        "run": run,
-        "event": event.id,
-        "state": state,
-    }
+    return {**out, "run": run, "event": event.id, "state": state, "agent": chosen}
 
 
 async def review_activity(service: Service, repo: str) -> dict[int, dict[str, Any]]:
@@ -1355,12 +1591,15 @@ async def review_activity(service: Service, repo: str) -> dict[int, dict[str, An
             continue
         row = out.setdefault(job.number, {})
         if "job" not in row:
+            payload = (job.events[-1].get("payload") if job.events else None) or {}
             row["job"] = {
                 "playbook": job.playbook,
                 "status": job.status,
                 "updated_at": job.updated_at.isoformat(),
                 "result": job.result,
                 "error": job.error,
+                "by": payload.get("by"),
+                "agent": payload.get("agent"),
             }
     for proposal in await service.store.list_proposals(ProposalState.PENDING, repo):
         record = await service.store.get_action(proposal.action_id)

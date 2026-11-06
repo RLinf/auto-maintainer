@@ -42,7 +42,13 @@ from ..domain.ports import (
     WorkChanges,
 )
 from ..domain.profile import Route
-from ..domain.settings import SECRET_NAME, ProviderBinding, RuntimeConfig, SecretInfo
+from ..domain.settings import (
+    SECRET_NAME,
+    ProviderBinding,
+    RuntimeConfig,
+    SecretInfo,
+    UserToken,
+)
 from ..domain.snapshot import (
     CommentRef,
     IssueComment,
@@ -368,6 +374,22 @@ class FakeForge:
         )
         return CommentRef(id=n)
 
+    async def create_pr(
+        self, repo: str, head: str, base: str, title: PublicText, body: PublicText
+    ) -> CommentRef:
+        n = next(self._ids)
+        self._record(
+            "create_pr",
+            repo=repo,
+            head=head,
+            base=base,
+            title=self._text(title),
+            body=self._text(body),
+            number=n,
+            author=self.login,
+        )
+        return CommentRef(id=n)
+
     async def create_service_pr(
         self, repo: str, head: str, base: str, title: str, body: str
     ) -> CommentRef:
@@ -461,6 +483,8 @@ class ScriptedRunner:
         self.answers: dict[str, list[Any]] = {}
         self.handlers: dict[str, Callable[[AgentTask], Any]] = {}
         self.tasks: list[AgentTask] = []
+        self.routes: list[Route] = []
+        """The route each task ran on, in order."""
 
     def queue(
         self, kind: str, answer: dict[str, Any] | BaseModel | AgentResult
@@ -474,6 +498,7 @@ class ScriptedRunner:
         self, task: AgentTask, route: Route, output_model: type[BaseModel] | None = None
     ) -> AgentResult:
         self.tasks.append(task)
+        self.routes.append(route)
         kind = str(task.kind)
         if kind in self.handlers:
             answer = self.handlers[kind](task)
@@ -494,7 +519,7 @@ class ScriptedRunner:
         if output_model is not None:
             data = output_model.model_validate(data).model_dump(mode="json")
         return AgentResult(
-            runtime="scripted", ok=True, text=json.dumps(data), structured=data
+            runtime=route.primary, ok=True, text=json.dumps(data), structured=data
         )
 
     async def health(self) -> list[RuntimeHealth]:
@@ -547,10 +572,16 @@ class FakePublisher:
     """Implements ``BranchPublisher``; records what would have been pushed."""
 
     def __init__(self) -> None:
-        self.published: list[dict[str, str]] = []
+        self.published: list[dict[str, Any]] = []
 
     async def publish(
-        self, repo: str, base_sha: str, patch: str, branch: str, message: str
+        self,
+        repo: str,
+        base_sha: str,
+        patch: str,
+        branch: str,
+        message: str,
+        author: tuple[str, str] | None = None,
     ) -> str:
         self.published.append(
             {
@@ -559,6 +590,7 @@ class FakePublisher:
                 "patch": patch,
                 "branch": branch,
                 "message": message,
+                "author": author,
             }
         )
         return "c" * 40
@@ -621,6 +653,44 @@ class FakeSecrets:
 
     async def delete(self, name: str) -> None:
         self.values.pop(name, None)
+
+
+class ActingAs:
+    """A ``FakeForge`` writer acting as a person: what it posts is authored by them."""
+
+    def __init__(self, forge: FakeForge, login: str) -> None:
+        self._forge = forge
+        self._login = login
+
+    def __getattr__(self, name: str) -> Any:
+        attr = getattr(self._forge, name)
+        if not callable(attr):
+            return attr
+
+        async def call(*args: Any, **kwargs: Any) -> Any:
+            saved, self._forge.login = self._forge.login, self._login
+            try:
+                return await attr(*args, **kwargs)
+            finally:
+                self._forge.login = saved
+
+        return call
+
+
+class FakeUserTokens:
+    """Implements ``UserTokens`` in memory."""
+
+    def __init__(self) -> None:
+        self.tokens: dict[str, UserToken] = {}
+
+    async def get(self, login: str) -> UserToken | None:
+        return self.tokens.get(login.lower())
+
+    async def set(self, login: str, token: UserToken) -> None:
+        self.tokens[login.lower()] = token
+
+    async def delete(self, login: str) -> None:
+        self.tokens.pop(login.lower(), None)
 
 
 class Reconfigured:

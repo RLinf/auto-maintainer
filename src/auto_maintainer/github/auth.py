@@ -26,7 +26,7 @@ import os
 import shutil
 import time
 from collections.abc import Callable
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Literal, Protocol
 
 import httpx
@@ -71,10 +71,10 @@ class StaticTokenProvider:
     """A single personal or OAuth token.
 
     The token comes from ``token``, then the ``env_var`` environment variable, then
-    ``gh auth token``.
+    ``gh auth token``. With ``env_var`` set to ``None`` only the GitHub CLI is asked.
 
     Args:
-        env_var: Environment variable that holds the token.
+        env_var: Environment variable that holds the token, or ``None`` for gh only.
         token: An explicit token; takes precedence over the environment.
         gh_binary: The GitHub CLI used as a last resort.
     """
@@ -83,14 +83,18 @@ class StaticTokenProvider:
 
     def __init__(
         self,
-        env_var: str = "GITHUB_TOKEN",
+        env_var: str | None = "GITHUB_TOKEN",
         *,
         token: str | None = None,
         gh_binary: str = "gh",
+        gh_config_dir: str | None = None,
     ) -> None:
         self._env_var = env_var
         self._token = token
         self._gh = gh_binary
+        self._gh_env = (
+            {**os.environ, "GH_CONFIG_DIR": gh_config_dir} if gh_config_dir else None
+        )
         self._lock = asyncio.Lock()
 
     async def token(self, repo: str | None = None) -> str:
@@ -99,10 +103,12 @@ class StaticTokenProvider:
         async with self._lock:
             if self._token:
                 return self._token
-            value = os.environ.get(self._env_var, "").strip() or await self._from_gh()
+            from_env = os.environ.get(self._env_var, "") if self._env_var else ""
+            value = from_env.strip() or await self._from_gh()
             if not value:
                 raise AuthError(
-                    f"no GitHub token: set {self._env_var} or log in with `gh auth login`"
+                    "no GitHub token: log in with `gh auth login` on the host"
+                    + (f" or set {self._env_var}" if self._env_var else "")
                 )
             self._token = value
             return value
@@ -120,6 +126,7 @@ class StaticTokenProvider:
             "token",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
+            env=self._gh_env,
         )
         out, _ = await proc.communicate()
         return out.decode().strip() if proc.returncode == 0 else ""
@@ -244,3 +251,32 @@ class GitHubAppTokenProvider:
             ).timestamp()
             self._tokens[key] = (data["token"], expires)
             return data["token"]
+
+
+async def refresh_user_token(
+    web_url: str, client_id: str, client_secret: str, refresh_token: str
+) -> dict[str, object] | None:
+    """Exchange a GitHub App user refresh token for a new access token; ``None`` when
+    GitHub refuses (the person must sign in again)."""
+    async with httpx.AsyncClient(timeout=15, trust_env=True) as client:
+        r = await client.post(
+            f"{web_url}/login/oauth/access_token",
+            data={
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+            },
+            headers={"Accept": "application/json"},
+        )
+    data = r.json() if r.status_code == 200 else {}
+    if not data.get("access_token"):
+        return None
+    expires = data.get("expires_in")
+    return {
+        "token": data["access_token"],
+        "refresh_token": data.get("refresh_token") or refresh_token,
+        "expires_at": datetime.now(UTC) + timedelta(seconds=int(expires))
+        if expires
+        else None,
+    }

@@ -30,6 +30,7 @@ from ..domain.actions import (
     PAYLOADS,
     PUBLIC_TEXT_FIELDS,
     Action,
+    ActionKind,
     ActionStatus,
     Decision,
     DecisionKind,
@@ -264,8 +265,15 @@ class ActionPipeline:
     # -- proposals ---------------------------------------------------------------------
 
     async def approve(
-        self, proposal_id: str, login: str, edited_payload: dict[str, Any] | None = None
+        self,
+        proposal_id: str,
+        login: str,
+        edited_payload: dict[str, Any] | None = None,
+        *,
+        post_as: str | None = None,
     ) -> Proposal:
+        """Approve a proposal. ``post_as`` (the approver's own login) posts a review
+        draft with their GitHub account instead of the service's."""
         proposal = await self.store.get_proposal(proposal_id)
         if proposal is None:
             raise ApprovalError(f"proposal {proposal_id} does not exist")
@@ -295,6 +303,17 @@ class ActionPipeline:
                 action.payload = new_payload
                 record.action = action
                 proposal.edited = True
+        if post_as is not None:
+            if post_as != login or action.kind not in (
+                ActionKind.REVIEW_POST,
+                ActionKind.PR_FIX,
+            ):
+                raise ApprovalError(
+                    "only a review draft or a fix can be posted as its approver"
+                )
+            record.post_as = post_as
+        elif action.kind == ActionKind.PR_FIX:
+            raise ApprovalError("a fix PR is opened as the maintainer who approves it")
         proposal.state = ProposalState.APPROVED
         proposal.decided_by = login
         proposal.decided_at = self.clock.now()

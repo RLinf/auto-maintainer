@@ -12,7 +12,8 @@ const client = new QueryClient({
     queries: {
       staleTime: 15_000,
       refetchOnWindowFocus: true,
-      retry: (count, error) => !(error instanceof ApiError && error.status < 500) && count < 2,
+      // A 4xx will not change on retry, and 503 means the host is not set up yet.
+      retry: (count, error) => !(error instanceof ApiError && (error.status < 500 || error.status === 503)) && count < 2,
     },
   },
 });

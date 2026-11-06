@@ -39,6 +39,7 @@ class TaskKind(StrEnum):
     CHAT = "chat"
     LEARN = "learn"
     SELF_IMPROVE = "self_improve"
+    FIX = "fix"
     PROBE = "probe"
 
 
@@ -98,6 +99,8 @@ class AgentTask(BaseModel):
     pr: int | None = None
     """The PR the task is about, shown to reviewers next to the agent's questions."""
     job_id: str | None = None
+    requested_by: str | None = None
+    """The maintainer who asked for this work; the agent's questions go to them first."""
     id: str = Field(default_factory=lambda: new_id("run"))
 
 
@@ -168,6 +171,9 @@ class AgentQuestion(BaseModel):
     repo: str | None = None
     pr: int | None = None
     job_id: str | None = None
+    asked_for: str | None = None
+    """The maintainer who requested the work, whom the question is for; anyone who may
+    answer for the repository still can."""
     untrusted_input: bool = True
     state: QuestionState = QuestionState.PENDING
     created_at: datetime | None = None

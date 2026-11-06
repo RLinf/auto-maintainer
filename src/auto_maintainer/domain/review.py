@@ -55,12 +55,15 @@ def classify_review_state(
     identities: set[str],
     legacy_markers: list[str] | None = None,
     include_drafts: bool = False,
+    own_actions: frozenset[str] = frozenset(),
 ) -> ReviewClassification:
     """Classify where ``pr`` stands relative to the service's own reviews.
 
     ``identities`` are the logins whose reviews count as the service's (lowercase
     or not). Only reviews and comments carrying a review marker count; a dismissed
-    review with no body does not.
+    review with no body does not. A review by anyone else counts too when its marker
+    names one of ``own_actions``: a draft of this service that a maintainer posted
+    as themselves. A marker alone never does, so nobody can fake a review.
     """
     if pr.state != PrState.OPEN:
         return ReviewClassification(state=ReviewState.CLOSED)
@@ -71,8 +74,16 @@ def classify_review_state(
         return ReviewClassification(state=ReviewState.SELF_PR)
 
     events: list[tuple[datetime, str, str | None, int | None, int | None]] = []
+
+    def ours(author: str, body: str) -> bool:
+        if author.lower() in ids:
+            return True
+        return bool(own_actions) and any(
+            m.action in own_actions for m in parse_markers(body)
+        )
+
     for r in pr.reviews:
-        if r.author.lower() not in ids or r.state == ReviewEventState.PENDING:
+        if not ours(r.author, r.body) or r.state == ReviewEventState.PENDING:
             continue
         if r.state == ReviewEventState.DISMISSED and not r.body.strip():
             continue
@@ -82,7 +93,7 @@ def classify_review_state(
                 sha = marker.sha
         events.append((r.submitted_at or _EPOCH, r.state.value, sha, r.id, None))
     for c in pr.comments:
-        if c.author.lower() not in ids:
+        if not ours(c.author, c.body):
             continue
         markers = [
             m for m in parse_markers(c.body, legacy_markers) if m.kind in REVIEW_KINDS

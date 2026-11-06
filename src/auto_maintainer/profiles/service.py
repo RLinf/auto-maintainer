@@ -183,10 +183,13 @@ class ProfileService:
     async def approve_candidate(
         self, repo: str, login: str, expected_hash: str, source: str = "dashboard"
     ) -> tuple[GateDecision, MemoryChange | None]:
-        """Approve the pending candidate if ``login`` passes the gate and it is unchanged."""
+        """Approve the pending candidate if ``login``, a person on the dashboard or the
+        CLI, passes the gate and it is unchanged."""
         lock, current, _ = await self._load(repo)
         merged = await self.loader.candidate(repo)
-        decision = await self.gate.check(repo, login, current, merged.profile)
+        decision = await self.gate.check(
+            repo, login, current, merged.profile, person=True
+        )
         if not decision.allowed:
             return decision, None
         if merged.hash != expected_hash:

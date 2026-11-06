@@ -54,12 +54,20 @@ class ConfigGate:
         login: str,
         current: RepoProfile | None,
         candidate: RepoProfile | None = None,
+        *,
+        person: bool = False,
     ) -> GateDecision:
         """Whether ``login`` may change ``repo``'s configuration.
 
         The bar is the approved profile's ``access.configure``; for a repository
         without one, the candidate's. A change that lowers the bar still needs the
         current bar.
+
+        ``person`` says that ``login`` is someone who signed in to the dashboard or
+        ran the CLI as themselves. Only then may it be the service's own account, as
+        when the service acts as its maintainer's GitHub CLI login. A login the forge
+        reports (who landed a file) or one the service supplies never may: the service
+        cannot approve its own changes.
         """
         bars = [p.access.configure for p in (current, candidate) if p is not None]
         required = (
@@ -67,7 +75,7 @@ class ConfigGate:
             if current
             else (bars[0] if bars else Permission.MAINTAIN)
         )
-        if login.lower() in self._service:
+        if login.lower() in self._service and not person:
             return GateDecision(
                 allowed=False,
                 repo=repo,
@@ -93,14 +101,20 @@ class ConfigGate:
         )
 
     async def check_service(
-        self, repo: str | None, login: str, required: Permission
+        self,
+        repo: str | None,
+        login: str,
+        required: Permission,
+        *,
+        person: bool = False,
     ) -> GateDecision:
         """Whether ``login`` may change the service's own settings (agents, providers,
         default routes, system values, secrets).
 
         Those belong to the maintainers of the service's repository on the forge,
         checked live, like a repository's configuration. Being an operator of the host
-        grants nothing here, and the service never approves its own changes.
+        grants nothing here, and the service never approves its own changes; ``person``
+        means what it means for ``check``.
         """
         if not repo:
             return GateDecision(
@@ -114,7 +128,7 @@ class ConfigGate:
                     "memory remote) in local.yaml so its maintainers can change them"
                 ),
             )
-        if login.lower() in self._service:
+        if login.lower() in self._service and not person:
             return GateDecision(
                 allowed=False,
                 repo=repo,

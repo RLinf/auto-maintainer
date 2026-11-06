@@ -27,7 +27,9 @@ const INVALIDATES: Record<string, string[][]> = {
 /** Called for every ``question.asked`` event, to alert reviewers. */
 export const QUESTION_EVENT = "am-question";
 
-export function useLiveEvents(enabled: boolean) {
+/** Keeps the dashboard's queries current; alerts ``login`` to questions meant for them
+ * (or for any reviewer). */
+export function useLiveEvents(enabled: boolean, login?: string) {
   const client = useQueryClient();
   useEffect(() => {
     if (!enabled || typeof EventSource === "undefined") return;
@@ -35,17 +37,19 @@ export function useLiveEvents(enabled: boolean) {
     const handler = (e: MessageEvent) => {
       const keys = INVALIDATES[e.type];
       if (keys) keys.forEach((queryKey) => client.invalidateQueries({ queryKey }));
-      if (e.type === "question.asked") alertReviewer(e.data);
+      if (e.type === "question.asked") alertReviewer(e.data, login);
     };
     Object.keys(INVALIDATES).forEach((kind) => source.addEventListener(kind, handler as EventListener));
     return () => source.close();
-  }, [enabled, client]);
+  }, [enabled, client, login]);
 }
 
-function alertReviewer(raw: string) {
+function alertReviewer(raw: string, login?: string) {
   let title = "An agent is waiting for an answer";
   try {
-    const event = JSON.parse(raw) as { title?: string | null; repo?: string | null };
+    const event = JSON.parse(raw) as { title?: string | null; repo?: string | null; asked_for?: string | null };
+    // A question for the person who asked for the job alerts only them.
+    if (event.asked_for && login && event.asked_for.toLowerCase() !== login.toLowerCase()) return;
     if (event.title) title = `${event.repo ?? "auto-maintainer"}: ${event.title}`;
   } catch {
     // keep the generic title

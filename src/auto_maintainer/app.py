@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -29,9 +30,13 @@ from .config import CONFIG_DIR, HostConfig
 from .domain.clock import SystemClock
 from .domain.profile import Route
 from .domain.records import AgentRunRecord
-from .domain.settings import ProviderBinding, RuntimeConfig
+from .domain.settings import ProviderBinding, RuntimeConfig, UserToken
 from .github import GitHubActionsCi, GitHubClient, GitHubReader, GitHubWriter
-from .github.auth import GitHubAppTokenProvider, StaticTokenProvider
+from .github.auth import (
+    GitHubAppTokenProvider,
+    StaticTokenProvider,
+    refresh_user_token,
+)
 from .labs.executor import GpuThresholds, LabExecutor
 from .labs.hosts import LocalLabHost, SshLabHost
 from .memory.git_store import GitMemoryStore
@@ -39,7 +44,7 @@ from .notify.webhook import ChannelConfig, WebhookNotifier
 from .resources import data_dir, defaults_dir
 from .selfupdate import GitServiceUpdater
 from .service import Adapters, Service, ServiceSettings
-from .store.secrets import FileSecretStore
+from .store.secrets import FileSecretStore, FileUserTokens
 from .store.sqlite import SqliteStore
 from .workspace.git import GitWorkspace, LocalSandbox
 
@@ -65,7 +70,10 @@ async def build_service(cfg: HostConfig, dev: bool = False) -> Service:
             cfg.github.app_id, pem, api_url=cfg.github.api_url
         )
     else:
-        tokens = StaticTokenProvider(cfg.github.token_env)
+        tokens = StaticTokenProvider(
+            None if cfg.github.auth == "gh" else cfg.github.token_env,
+            gh_config_dir=cfg.github.gh_config_dir,
+        )
     client = GitHubClient(tokens, api_url=cfg.github.api_url)
     reader = GitHubReader(client)
     fresh_reader = GitHubReader(client, snapshot_cache_seconds=0)
@@ -119,6 +127,42 @@ async def build_service(cfg: HostConfig, dev: bool = False) -> Service:
             build_runtimes(agents, runs_dir=data / "runs", providers=providers),
             budgets_of(agents),
         )
+
+    user_tokens = FileUserTokens(data / "user-tokens.json")
+
+    async def writer_for_user(login: str, token: UserToken) -> Any:
+        """A writer acting as ``login``; an expired GitHub App token is refreshed once."""
+        if token.expires_at and token.expires_at <= clock.now():
+            secret = os.environ.get(cfg.github.oauth_client_secret_env)
+            if not (token.refresh_token and cfg.github.oauth_client_id and secret):
+                return None
+            fresh = await refresh_user_token(
+                cfg.github.web_url,
+                cfg.github.oauth_client_id,
+                secret,
+                token.refresh_token,
+            )
+            if fresh is None:
+                await user_tokens.delete(login)
+                return None
+            token = token.model_copy(update=fresh)
+            await user_tokens.set(login, token)
+        return GitHubWriter(
+            GitHubClient(
+                StaticTokenProvider(token=token.token), api_url=cfg.github.api_url
+            )
+        )
+
+    async def publisher_for_user(login: str, token: UserToken) -> Any:
+        """Pushes branches as ``login``; ``None`` when their token no longer works."""
+        if await writer_for_user(login, token) is None:
+            return None
+        fresh = await user_tokens.get(login) or token
+
+        async def user_token(repo: str) -> str | None:
+            return fresh.token
+
+        return GitWorkspace(data, token=user_token, forge_url=cfg.github.web_url)
 
     labs: dict[str, Any] = {}
     for name, lab in cfg.labs.items():
@@ -191,6 +235,9 @@ async def build_service(cfg: HostConfig, dev: bool = False) -> Service:
         updater=updater,
         secrets=FileSecretStore(CONFIG_DIR / "provider-keys.json"),
         reconfigure=reconfigure,
+        user_tokens=user_tokens,
+        writer_for_user=writer_for_user,
+        publisher_for_user=publisher_for_user,
     )
     settings = ServiceSettings(
         login=login,

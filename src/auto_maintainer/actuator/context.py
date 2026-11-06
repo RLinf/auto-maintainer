@@ -16,7 +16,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -87,6 +87,11 @@ class ExecContext:
     updater: ServiceUpdater | None = None
     """Moves the service's own checkout to a new commit."""
     request_restart: Callable[[], None] | None = None
+    writer_as: Callable[[str], Awaitable[ForgeWriter | None]] | None = None
+    """A forge writer acting as a signed-in maintainer, for review drafts they chose
+    to post as themselves; ``None`` when their sign-in no longer works."""
+    publisher_as: Callable[[str], Awaitable[BranchPublisher | None]] | None = None
+    """A branch publisher pushing as a signed-in maintainer, for fix PRs."""
     """Asks ``am serve`` to exit for its supervisor to start the new code."""
 
     async def public(

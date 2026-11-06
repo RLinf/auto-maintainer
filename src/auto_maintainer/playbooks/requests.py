@@ -37,6 +37,8 @@ class ReviewRequest:
     """``dashboard``, ``comment``, ``chat``, or ``scan``."""
     by: str | None = None
     """The reviewer who asked; their drafts become proposals for them. ``None`` for scans."""
+    agent: str | None = None
+    """The runtime the reviewer chose; ``None`` follows the route."""
 
     @property
     def manual(self) -> bool:
@@ -53,7 +55,14 @@ def review_request(event: Event) -> ReviewRequest | None:
         if source == "scan":
             return ReviewRequest(source="scan")
         by = event.payload.get("by")
-        return ReviewRequest(source=source, by=str(by)) if by else None
+        agent = event.payload.get("agent")
+        return (
+            ReviewRequest(
+                source=source, by=str(by), agent=str(agent) if agent else None
+            )
+            if by
+            else None
+        )
     if event.kind == EventKind.PR_COMMENT and any(
         c.get("name") == "review" for c in event.payload.get("commands", [])
     ):

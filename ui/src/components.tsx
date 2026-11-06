@@ -6,7 +6,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { ApiError } from "./api";
 import { REVIEW_STATES } from "./data";
-import { useT } from "./i18n";
+import { currentLang, useLang, useT, type Lang } from "./i18n";
 import { Icon, type IconName } from "./icons";
 import { Skeleton } from "./ui";
 
@@ -113,12 +113,13 @@ const STATUS_CLASS: Record<string, string> = {
 };
 
 export function Status({ value, label }: { value: string | null | undefined; label?: string }) {
+  const t = useT();
   if (!value) return null;
   const cls = STATUS_CLASS[value.toLowerCase()] ?? "info";
   return (
     <span className={`pill status-${cls}`}>
       <span className="dot" aria-hidden="true" />
-      {label ?? value.replace(/_/g, " ")}
+      {label ?? t(value.replace(/_/g, " "))}
     </span>
   );
 }
@@ -237,21 +238,25 @@ function useMinute() {
   }, []);
 }
 
-export function relative(at: string | Date, now = Date.now()): string {
+export function relative(at: string | Date, now = Date.now(), lang: Lang = currentLang()): string {
   const d = typeof at === "string" ? new Date(at) : at;
   const diff = (now - d.getTime()) / 1000;
   const future = diff < 0;
   const s = Math.abs(diff);
-  const fmt = (n: number, unit: string) => (future ? `in ${n}${unit}` : `${n}${unit} ago`);
-  if (s < 45) return future ? "in a moment" : "just now";
+  const zh = lang === "zh";
+  const units: Record<string, string> = zh ? { m: " 分钟", h: " 小时", d: " 天" } : { m: "m", h: "h", d: "d" };
+  const fmt = (n: number, unit: string) =>
+    zh ? `${n}${units[unit]}${future ? "后" : "前"}` : future ? `in ${n}${unit}` : `${n}${unit} ago`;
+  if (s < 45) return zh ? (future ? "马上" : "刚刚") : future ? "in a moment" : "just now";
   if (s < 3600) return fmt(Math.round(s / 60), "m");
   if (s < 86400) return fmt(Math.round(s / 3600), "h");
   if (s < 86400 * 30) return fmt(Math.round(s / 86400), "d");
-  return d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+  return d.toLocaleDateString(zh ? "zh-CN" : undefined, { month: "short", day: "numeric", year: "numeric" });
 }
 
 export function When({ at, absolute }: { at: string | null | undefined; absolute?: boolean }) {
   useMinute();
+  useLang();
   if (!at) return <span className="muted">—</span>;
   const d = new Date(at);
   if (Number.isNaN(d.getTime())) return <span>{at}</span>;

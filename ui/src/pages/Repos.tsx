@@ -4,7 +4,7 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { api, type Agreement, type GateDecision, type MemoryChange, type ProfileResponse, type RepoRow } from "../api";
 import { useAgent } from "../agent";
 import { Diff, Empty, ErrorBox, PageHead, Section, Status, timeOf, useAct, When } from "../components";
@@ -31,7 +31,15 @@ export function ReposPage() {
   const navigate = useNavigate();
   const agent = useAgent();
   const repos = useRepos();
-  const [adding, setAdding] = useState(false);
+  const [params, setParams] = useSearchParams();
+  const [adding, setAddingState] = useState(params.get("add") === "1");
+  const setAdding = (open: boolean) => {
+    setAddingState(open);
+    if (!open && params.has("add")) {
+      params.delete("add");
+      setParams(params, { replace: true });
+    }
+  };
   const list = useList<RepoRow>({
     rows: repos.data ?? [],
     key: (r) => r.repo,

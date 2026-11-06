@@ -3,15 +3,15 @@
 // the queue and the service at a glance, and the PRs worth reviewing next.
 
 import { useMemo, type ReactNode } from "react";
-import { Link, useNavigate } from "react-router-dom";
-import { api, type Me, type PrRow, type ReviewStart, type ServiceView } from "../api";
-import { AskButton, useAgent } from "../agent";
-import { CaughtUp, ErrorBox, prPath, Section, Tier, timeOf, useAct, When } from "../components";
-import { prKey, useMemoryChanges, useProposals, usePrs, useQuestions, useRepos, useService } from "../data";
+import { Link } from "react-router-dom";
+import { api, type Me, type ServiceView } from "../api";
+import { CaughtUp, ErrorBox, Section, Tier, timeOf, useAct } from "../components";
+import { useMemoryChanges, useProposals, usePrs, useQuestions, useRepos, useService } from "../data";
 import { useT } from "../i18n";
 import { Icon, type IconName } from "../icons";
 import { ProposalCard } from "../proposal";
-import { Skeleton, useTab, useToast } from "../ui";
+import { Skeleton, useTab } from "../ui";
+import { AutomationCard, GettingStarted, QuickActions, ReviewCard, useAutomations } from "./homeParts";
 import { ChangeCard } from "./Memory";
 import { QuestionCard } from "./Questions";
 
@@ -24,6 +24,7 @@ interface FeedItem {
   kind: Kind;
   at: string | null;
   node: ReactNode;
+  mine?: boolean;
 }
 
 const KIND_LABEL: Record<Kind, string> = {
@@ -53,15 +54,16 @@ export default function HomePage({ me }: { me: Me }) {
   const repoRows = repos.data ?? [];
   const sv = service.data;
   const updates = serviceUpdates(sv);
+  const automations = useAutomations(repoRows);
 
   const items = useMemo<FeedItem[]>(() => {
     const out: FeedItem[] = [];
-    for (const q of questions.data ?? []) out.push({ id: q.id, kind: "question", at: q.created_at, node: <QuestionCard question={q} compact /> });
+    for (const q of questions.data ?? []) out.push({ id: q.id, kind: "question", at: q.created_at, node: <QuestionCard question={q} compact />, mine: q.asked_for === me.login });
     for (const p of proposals.data ?? []) out.push({ id: p.id, kind: "proposal", at: p.created_at, node: <ProposalCard proposal={p} compact /> });
     for (const c of memory.data ?? []) out.push({ id: c.id, kind: "memory", at: c.created_at, node: <ChangeCard change={c} compact /> });
     for (const u of updates) out.push(u);
     return out;
-  }, [questions.data, proposals.data, memory.data, updates]);
+  }, [questions.data, proposals.data, memory.data, updates, me.login]);
 
   const counts: Record<Kind, number> = { question: 0, proposal: 0, memory: 0, update: 0 };
   for (const i of items) counts[i.kind] += 1;
@@ -84,6 +86,7 @@ export default function HomePage({ me }: { me: Me }) {
   const feed = items
     .filter((i) => show === "all" || i.kind === show)
     .sort((a, b) => {
+      if (!!a.mine !== !!b.mine) return a.mine ? -1 : 1;
       if ((a.kind === "question") !== (b.kind === "question")) return a.kind === "question" ? -1 : 1;
       const d = (timeOf(b.at) ?? 0) - (timeOf(a.at) ?? 0);
       return order === "old" ? -d : d;
@@ -101,17 +104,13 @@ export default function HomePage({ me }: { me: Me }) {
           <p>
             {items.length
               ? `${items.length} ${t(items.length === 1 ? "decision waits for you" : "decisions wait for you")} · ${needs.length} ${t("PRs need review")}`
-              : `${t("Nothing waits for your decision.")} ${needs.length} ${t("PRs need review")}.`}
+              : `${t("Nothing waits for your decision.")} ${needs.length} ${t("PRs need review")}`}
           </p>
         </div>
-        <div className="row">
-          <Link to="/prs?tab=review" className="button">
-            <Icon name="pr" />
-            {t("Review queue")}
-          </Link>
-          <AskButton />
-        </div>
       </div>
+
+      <QuickActions />
+      <GettingStarted repos={repoRows} prs={rows} automations={automations} />
 
       <div className="tiles">
         <Tile
@@ -182,6 +181,8 @@ export default function HomePage({ me }: { me: Me }) {
       </div>
 
       <div className="split">
+        <div className="stack" style={{ gap: 18, minWidth: 0 }}>
+        <ReviewCard rows={needs} loading={prs.isLoading} me={me} />
         <section id="decisions" className="stack" style={{ gap: 12, minWidth: 0 }}>
           <div className="row">
             <h2 style={{ fontSize: 17 }}>{t("Needs your decision")}</h2>
@@ -214,6 +215,7 @@ export default function HomePage({ me }: { me: Me }) {
                 <div key={i.id} className={`feed-item kind-${i.kind}`}>
                   <div className="head">
                     <span className="kind-chip">{t(KIND_LABEL[i.kind])}</span>
+                    {i.mine && <span className="pill status-warn">{t("asks you")}</span>}
                   </div>
                   {i.node}
                 </div>
@@ -227,9 +229,10 @@ export default function HomePage({ me }: { me: Me }) {
             </div>
           )}
         </section>
+        </div>
 
         <aside className="side">
-          <NextUp rows={needs} loading={prs.isLoading} me={me} />
+          <AutomationCard automations={automations} loading={repos.isLoading} />
           <Section title={t("Repositories")} aside={<Link to="/repos" className="small">{t("Manage")}</Link>}>
             {repos.isLoading ? (
               <Skeleton rows={3} />
@@ -295,71 +298,6 @@ function Tile({
     <a href={href} className="tile">
       {inner}
     </a>
-  );
-}
-
-function NextUp({ rows, loading, me }: { rows: PrRow[]; loading: boolean; me: Me }) {
-  const t = useT();
-  const toast = useToast();
-  const agent = useAgent();
-  const navigate = useNavigate();
-  const top = [...rows].sort((a, b) => (b.total ?? -1) - (a.total ?? -1)).slice(0, 6);
-  const review = useAct((p: PrRow) => api.post<ReviewStart[]>("/api/reviews", { prs: [{ repo: p.repo, number: p.number }] }), [["prs"]]);
-  return (
-    <Section title={t("Review next")} aside={<Link to="/prs?tab=review" className="small">{t("All")} ({rows.length})</Link>}>
-      {loading ? (
-        <Skeleton rows={4} />
-      ) : !top.length ? (
-        <span className="muted small">{t("No PR needs a review.")}</span>
-      ) : (
-        <div className="list">
-          {top.map((p) => {
-            const busy = p.review_activity.job && ["queued", "running"].includes(p.review_activity.job.status);
-            return (
-              <div key={prKey(p)} className="list-row">
-                <Tier tier={p.tier} />
-                <Link to={prPath(p.repo, p.number)} className="main" style={{ textDecoration: "none" }}>
-                  <span className="t wrap">{p.title}</span>
-                  <span className="meta">
-                    {p.repo}#{p.number} · {p.author} · <When at={p.updated_at} />
-                    {p.claimed_by ? ` · ${p.claimed_by === me.login ? t("claimed by you") : `${t("claimed by")} ${p.claimed_by}`}` : ""}
-                  </span>
-                </Link>
-                <span className="row-actions">
-                  <button
-                    className="sm"
-                    disabled={!!busy || review.isPending}
-                    title={t("Draft a review into your proposals")}
-                    onClick={() =>
-                      review.mutate(p, {
-                        onSuccess: (out) =>
-                          toast({
-                            title: out[0]?.run === "skip" ? t("Nothing to review") : t("Review started"),
-                            body: out[0]?.run === "skip" ? out[0].reason : `${p.repo}#${p.number}: ${t("the draft will appear in your proposals")}`,
-                            icon: "pr",
-                            action: { label: t("Open"), onClick: () => navigate(prPath(p.repo, p.number)) },
-                          }),
-                      })
-                    }
-                  >
-                    {busy ? t("Reviewing…") : t("Review")}
-                  </button>
-                  <button
-                    className="ghost icon sm"
-                    aria-label={t("Ask agent")}
-                    title={t("Ask agent")}
-                    onClick={() => agent.open({ context: { page: "pr", repo: p.repo, number: p.number, label: `${p.repo}#${p.number}` } })}
-                  >
-                    <Icon name="sparkles" size={14} />
-                  </button>
-                </span>
-              </div>
-            );
-          })}
-        </div>
-      )}
-      <ErrorBox error={review.error} />
-    </Section>
   );
 }
 

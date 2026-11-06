@@ -25,6 +25,7 @@ goes to a reviewer.
 from __future__ import annotations
 
 import os
+import re
 import shlex
 from pathlib import Path
 
@@ -49,6 +50,39 @@ GIT_WRITE = frozenset(
 TEST_COMMANDS = frozenset({"pytest", "ruff"})
 _FIND_ACTIONS = frozenset({"-exec", "-execdir", "-delete", "-ok", "-okdir", "-fprint"})
 _SHELL_META = ("$(", "`", ">", "<", "&", ";", "\n", "\\")
+
+
+POSTING_ANSWER = (
+    "Do not post, comment, push, or publish anything, and do not ask whether to: "
+    "return your result. The service shows it to the maintainer, who edits it and "
+    "decides what to post."
+)
+
+_POSTING_COMMAND = re.compile(
+    r"\bgh\s+(?:pr|issue)\s+(?:comment|review|edit|close|merge|create|ready|reopen)\b"
+    r"|\bgh\s+api\b.*(?:-X|--method)\s*(?:POST|PATCH|PUT|DELETE)"
+    r"|\bgit\s+push\b"
+    r"|\bcurl\b.*api\.github\.com.*(?:-X|--request)\s*(?:POST|PATCH|PUT|DELETE)",
+    re.IGNORECASE | re.DOTALL,
+)
+_POSTING_WORDS = re.compile(
+    r"\b(?:post|publish|submit|leave|add|send|write)\w*\b[^.?!\n]{0,60}"
+    r"\b(?:comments?|reviews?|replies|reply|feedback|findings)\b"
+    r"|\b(?:comment|reply)\s+on\s+(?:the\s+)?(?:pr|pull request|github)\b"
+    r"|发布|发表|提交评审|评论到",
+    re.IGNORECASE,
+)
+
+
+def posting_request(question: AgentQuestion) -> bool:
+    """Whether ``question`` asks to post to GitHub, or whether to: agents never post,
+    so such a question is answered without bothering anyone (``POSTING_ANSWER``)."""
+    if question.kind == QuestionKind.PERMISSION:
+        return bool(question.detail and _POSTING_COMMAND.search(question.detail))
+    texts = [question.title, question.detail]
+    for q in question.inputs:
+        texts += [q.header, q.question]
+    return any(_POSTING_WORDS.search(t or "") for t in texts)
 
 
 def auto_answer(task: AgentTask, question: AgentQuestion) -> AgentAnswer | None:

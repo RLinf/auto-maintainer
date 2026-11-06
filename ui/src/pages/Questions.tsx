@@ -6,7 +6,7 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 import { api, type AgentQuestion, type InputQuestion, type QuestionOption } from "../api";
 import { CaughtUp, ErrorBox, PageHead, Pre, prPath, relative, Status, timeOf, useAct, When } from "../components";
-import { useQuestions } from "../data";
+import { useMe, useQuestions } from "../data";
 import { useT } from "../i18n";
 import { Icon } from "../icons";
 import { DataTable, ListToolbar, useList, type Column } from "../list";
@@ -135,6 +135,7 @@ function Where({ q }: { q: AgentQuestion }) {
 
 export function QuestionCard({ question: q, compact = false }: { question: AgentQuestion; compact?: boolean }) {
   const t = useT();
+  const me = useMe().data;
   const [message, setMessage] = useState("");
   const [showDetail, setShowDetail] = useState(!compact);
   const [answers, setAnswers] = useState<Record<string, string>>({});
@@ -163,6 +164,11 @@ export function QuestionCard({ question: q, compact = false }: { question: Agent
       <div className="row">
         <Icon name={q.kind === "input" ? "question" : "shield"} />
         <strong style={{ fontSize: 14.5 }}>{q.title}</strong>
+        {q.asked_for && (
+          <span className={`pill ${me && q.asked_for.toLowerCase() === me.login.toLowerCase() ? "status-warn" : ""}`}>
+            {me && q.asked_for.toLowerCase() === me.login.toLowerCase() ? t("asks you") : `${t("for")} ${q.asked_for}`}
+          </span>
+        )}
         <span className="muted small right row" style={{ gap: 6 }}>
           <span className="mono">{q.runtime}</span> · {q.task_kind} · <Where q={q} />
         </span>

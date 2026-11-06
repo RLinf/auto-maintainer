@@ -21,6 +21,7 @@ from .calibrate import Calibrate
 from .ci_doctor import CiDoctor
 from .commands import Commands
 from .evaluate import EvaluatePlaybook
+from .fix import FixPlaybook
 from .followup import Followup
 from .housekeeping import Journal, LabTest, Stale
 from .hygiene import Hygiene
@@ -50,6 +51,7 @@ def all_playbooks() -> list[Playbook]:
         LabTest(),
         Journal(),
         SelfImprove(),
+        FixPlaybook(),
     ]
 
 

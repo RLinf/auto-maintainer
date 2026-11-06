@@ -41,9 +41,10 @@ from ..domain.snapshot import PrState
 from .base import PR_EVENTS, Playbook, PlaybookContext, PlaybookResult, in_scope
 from .prompts import (
     headless,
+    interactive,
     pr_block,
+    review_skill_block,
     schema_hint,
-    skill_instruction,
     template_block,
     untrusted,
 )
@@ -75,6 +76,9 @@ class ReviewPlaybook(Playbook):
         profile = ctx.require_profile()
         assert event.repo and event.number
         request = review_request(event)
+        if request is not None and request.manual:
+            ctx.requested_by = request.by
+            ctx.agent = request.agent
         manual = request is not None and request.manual
         pr = await ctx.forge.get_pr(event.repo, event.number)
         if pr is None or pr.state != PrState.OPEN:
@@ -95,6 +99,7 @@ class ReviewPlaybook(Playbook):
             ctx.identities(),
             profile.comments.legacy_markers,
             profile.scope.include_drafts or manual,
+            own_actions=ctx.own_reviews,
         ).state
         if state in FOLLOWUP_STATES:
             return PlaybookResult(
@@ -128,8 +133,10 @@ class ReviewPlaybook(Playbook):
             lessons = await ctx.knowledge.review_lessons(pr.repo, profile)
             prompt = "\n\n".join(
                 [
-                    headless(profile),
-                    skill_instruction(profile, ctx.service.skills_dir),
+                    interactive(profile, ctx.requested_by)
+                    if ctx.requested_by
+                    else headless(profile),
+                    review_skill_block(profile, ctx.service.skills_dir, workdir),
                     template_block(profile),
                     f"Review lessons from this repository's maintainers:\n{lessons}"
                     if lessons

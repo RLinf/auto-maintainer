@@ -233,6 +233,16 @@ class GitHubWriter:
         )
         return CommentRef(id=int(data["number"]), url=data.get("html_url") or "")
 
+    async def create_pr(
+        self, repo: str, head: str, base: str, title: PublicText, body: PublicText
+    ) -> CommentRef:
+        data = await self._client.post(
+            f"/repos/{repo}/pulls",
+            repo=repo,
+            json={"title": str(title), "head": head, "base": base, "body": str(body)},
+        )
+        return CommentRef(id=int(data["number"]), url=data.get("html_url") or "")
+
     async def merge_service_pr(
         self, repo: str, number: int, method: str = "merge"
     ) -> str:

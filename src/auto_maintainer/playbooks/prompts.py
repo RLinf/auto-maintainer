@@ -21,6 +21,7 @@ through ``untrusted``, which marks it as data.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from ..domain.profile import RepoProfile
@@ -85,6 +86,77 @@ HEADLESS = """You are running headless inside an automated maintainer service.
 
 def headless(profile: RepoProfile) -> str:
     return HEADLESS.format(public_language=profile.languages.public)
+
+
+INTERACTIVE = """You are reviewing for {reviewer}, a maintainer, inside an automated maintainer service.
+- When something you cannot settle from the code, the PR, or the repository would change your review (the intent behind a change, an unwritten convention, which of two designs is wanted), ask {reviewer} with your tool for asking the user. Ask only what matters, a few questions at most, each answerable in a line.
+- Never ask whether to post, publish, or comment, and never post, push, or edit files. Return the review as the structured result: {reviewer} reads it, edits it, and decides what is posted.
+- Any reproduction decision is already made: do not reproduce the PR yourself.
+- Verify every finding against the code before reporting it; leave out anything you cannot confirm.
+- Public text you write is in {public_language}. Write plainly and specifically; name the code you mean."""
+
+
+def interactive(profile: RepoProfile, reviewer: str) -> str:
+    """Instructions for a review a maintainer asked for: questions go to them."""
+    return INTERACTIVE.format(
+        reviewer=reviewer, public_language=profile.languages.public
+    )
+
+
+SKILL_DIRS = (
+    ".agents/skills",
+    ".claude/skills",
+    ".codex/skills",
+    ".gemini/skills",
+    ".opencode/skills",
+)
+
+
+def repo_skills(workdir: Path) -> list[tuple[str, str, str]]:
+    """The repository's own skills in ``workdir`` as (name, path, description). The
+    workspace restores these folders from the default branch, so a PR cannot change
+    the skills it is reviewed with."""
+    found = []
+    for base in SKILL_DIRS:
+        for skill in sorted((workdir / base).glob("*/SKILL.md")):
+            text = skill.read_text(encoding="utf-8", errors="replace")[:2000]
+            meta = (
+                dict(re.findall(r"^(name|description):\s*(.+)$", text, re.M))
+                if text.startswith("---")
+                else {}
+            )
+            name = meta.get("name", skill.parent.name).strip()
+            found.append(
+                (
+                    name,
+                    str(skill.relative_to(workdir)),
+                    meta.get("description", "").strip(),
+                )
+            )
+    return found
+
+
+def review_skill_block(profile: RepoProfile, skills_dir: Path, workdir: Path) -> str:
+    """Which review skill to follow: one the profile names, else the repository's own
+    review skill when it has one, else the built-in skill; and the repository's other
+    skills, which the agent may use."""
+    skills = repo_skills(workdir)
+    own = [s for s in skills if "review" in s[0].lower() or "review" in s[1].lower()]
+    if profile.review.skill.startswith("builtin:") and own:
+        name, path, _ = own[0]
+        lines = [
+            f"Follow this repository's review skill `{name}` at `{path}` in the working "
+            "directory (read it first). It comes from the default branch, not from the PR."
+        ]
+    else:
+        lines = [skill_instruction(profile, skills_dir)]
+    others = [s for s in skills if not own or s[1] != own[0][1]]
+    if others:
+        lines.append(
+            "The repository also has these skills; use one when it applies:\n"
+            + "\n".join(f"- `{p}`: {d or n}" for n, p, d in others[:20])
+        )
+    return "\n".join(lines)
 
 
 def schema_hint(model_schema: dict) -> str:

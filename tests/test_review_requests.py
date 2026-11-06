@@ -1,0 +1,284 @@
+# Copyright 2026 The RLinf Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Reviews a maintainer asks for: the repository's own skills, questions for the
+person who asked (never about posting), one review per commit and agent, posting the
+draft as yourself, and when reviews start on their own."""
+
+from __future__ import annotations
+
+import contextlib
+from collections.abc import AsyncIterator
+from pathlib import Path
+from typing import Any
+
+import httpx
+import pytest
+
+from auto_maintainer.agents.approver import posting_request
+from auto_maintainer.domain.agents import (
+    AgentQuestion,
+    InputQuestion,
+    QuestionKind,
+    TaskKind,
+)
+from auto_maintainer.domain.permissions import Permission
+from auto_maintainer.domain.records import Job, JobStatus
+from auto_maintainer.domain.settings import UserToken
+from auto_maintainer.testing.demo import build_demo
+from auto_maintainer.web.app import create_app
+
+REPO = "acme/widget"
+
+
+@pytest.fixture
+async def demo(tmp_path: Path):
+    h = await build_demo(tmp_path)
+    h.forge.set_permission(REPO, "walt", Permission.WRITE)
+    app = create_app(h.service, data_dir=tmp_path, allow_dev_login=True)
+    yield h, app
+    await h.close()
+
+
+@contextlib.asynccontextmanager
+async def _as(app: Any, login: str) -> AsyncIterator[httpx.AsyncClient]:
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        await client.get(f"/auth/dev?login={login}")
+        client.headers["x-am-csrf"] = client.cookies.get("am_csrf") or ""
+        yield client
+
+
+def _skill(h: Any, number: int, sha: str) -> None:
+    """A review skill in the repository, where the workspace checks the PR out."""
+    root = h.service.a.workspace.root / f"{REPO.replace('/', '__')}-{number}-{sha[:7]}"
+    skill = root / ".agents" / "skills" / "code-review" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text(
+        "---\nname: code-review\ndescription: How this project reviews PRs\n---\nRead it.\n"
+    )
+
+
+# -- what agents may ask ---------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("kind", "text", "posting"),
+    [
+        ("permission", "gh pr comment 42 --body 'nice'", True),
+        ("permission", "gh api repos/a/b/pulls/1/reviews -X POST -f body=x", True),
+        ("permission", "git push origin HEAD", True),
+        ("permission", "gh pr view 42 --json files", False),
+        ("input", "Should I post these review comments to the PR?", True),
+        ("input", "要把评审发布到 GitHub 吗？", True),
+        ("input", "Is the retry loop meant to be unbounded?", False),
+    ],
+)
+def test_questions_about_posting_never_reach_anyone(
+    kind: str, text: str, posting: bool
+) -> None:
+    if kind == "permission":
+        q = AgentQuestion(
+            kind=QuestionKind.PERMISSION,
+            title="Run a command",
+            tool="execute",
+            detail=text,
+        )
+    else:
+        q = AgentQuestion(
+            kind=QuestionKind.INPUT,
+            title="Question",
+            inputs=[InputQuestion(id="q", question=text, header="", options=[])],
+        )
+    assert posting_request(q) is posting
+
+
+# -- requested reviews ---------------------------------------------------------------------
+
+
+async def _review(app: Any, login: str, number: int, agent: str | None = None) -> dict:
+    async with _as(app, login) as client:
+        r = await client.post(
+            "/api/reviews",
+            json={"prs": [{"repo": REPO, "number": number}], "agent": agent},
+        )
+        assert r.status_code == 200, r.text
+        return r.json()[0]
+
+
+async def test_a_requested_review_follows_the_repos_skill_and_asks_the_requester(
+    demo,
+) -> None:
+    h, app = demo
+    pr = h.forge.prs[(REPO, 42)]
+    _skill(h, 42, pr.head_sha)
+    started = await _review(app, "maria", 42, agent="codex")
+    assert started["run"] == "review" and started["agent"] == "codex"
+    await h.settle()
+    [i] = [i for i, t in enumerate(h.runner.tasks) if t.kind == TaskKind.REVIEW]
+    task, route = h.runner.tasks[i], h.runner.routes[i]
+    assert ".agents/skills/code-review/SKILL.md" in task.prompt
+    assert (
+        "reviewing for maria" in task.prompt
+        and "Do not ask questions" not in task.prompt
+    )
+    assert task.requested_by == "maria"
+    assert route.primary == "codex" and route.fallback == []
+
+
+async def test_one_review_per_commit_and_agent(demo) -> None:
+    h, app = demo
+    await _review(app, "maria", 42, agent="codex")
+    await h.settle()
+    again = await _review(app, "walt", 42, agent="codex")
+    assert again["run"] == "drafted" and again["by"] == "maria"
+    other = await _review(app, "walt", 42, agent="claude-code")
+    assert other["run"] == "review" and other["agent"] == "claude-code"
+
+    pr = h.forge.prs[(REPO, 43)]
+    await h.store.upsert_job(
+        Job(
+            playbook="review",
+            key="review:acme/widget#43:req:x",
+            repo=REPO,
+            number=43,
+            pool="agent",
+            status=JobStatus.RUNNING,
+            events=[{"sha": pr.head_sha, "payload": {"by": "maria", "agent": "codex"}}],
+        )
+    )
+    joined = await _review(app, "walt", 43, agent="codex")
+    assert joined["run"] == "joined" and joined["by"] == "maria"
+
+
+async def test_a_draft_posted_as_yourself_still_counts_as_the_services_review(
+    demo,
+) -> None:
+    h, app = demo
+    await _review(app, "maria", 42)
+    await h.settle()
+    async with _as(app, "maria") as maria:
+        [draft] = [
+            p
+            for p in (await maria.get("/api/proposals")).json()
+            if p["action"]["action"]["kind"] == "review.post"
+        ]
+        assert (await maria.get("/api/me")).json()["can_post_as_me"] is False
+        refused = await maria.post(
+            f"/api/proposals/{draft['id']}/approve", json={"as_me": True}
+        )
+        assert refused.status_code == 409
+        await h.service.a.user_tokens.set("maria", UserToken(token="t"))
+        assert (await maria.get("/api/me")).json()["can_post_as_me"] is True
+        ok = await maria.post(
+            f"/api/proposals/{draft['id']}/approve", json={"as_me": True}
+        )
+        assert ok.status_code == 200
+        await h.settle()
+        [review] = h.forge.prs[(REPO, 42)].reviews
+        assert review.author == "maria"
+        await h.poll()
+        [row] = [r for r in (await maria.get("/api/prs")).json() if r["number"] == 42]
+        assert row["review_state"] == "UP_TO_DATE"
+    again = await _review(app, "walt", 42)
+    assert again["run"] == "skip"
+
+
+# -- when reviews start on their own -------------------------------------------------------
+
+
+async def test_maintainers_set_when_reviews_start_on_their_own(demo) -> None:
+    h, app = demo
+    body = {"trigger": "scan", "every_hours": 3, "max_prs": 4, "followups": False}
+    async with _as(app, "walt") as walt:
+        current = (await walt.get(f"/api/repos/{REPO}/review-automation")).json()
+        assert current["trigger"] == "manual" and current["can_configure"] is False
+        proposed = (
+            await walt.put(f"/api/repos/{REPO}/review-automation", json=body)
+        ).json()
+        assert proposed["applied"] is False
+    async with _as(app, "maria") as maria:
+        applied = (
+            await maria.put(f"/api/repos/{REPO}/review-automation", json=body)
+        ).json()
+        assert applied["applied"] is True
+        now = (await maria.get(f"/api/repos/{REPO}/review-automation")).json()
+    assert now["trigger"] == "scan" and now["every_hours"] == 3
+    assert now["max_prs"] == 4 and now["followups"] is False
+    profile = await h.service.profiles.active(REPO)
+    assert profile is not None and profile.review.scan.schedule == "0 */3 * * *"
+
+
+# -- fixing what a review found --------------------------------------------------------------
+
+
+async def test_a_fix_is_drafted_for_the_reviewer_and_opened_as_them(demo) -> None:
+    h, app = demo
+    await _review(app, "maria", 42)
+    await h.settle()
+
+    def fix(task: Any) -> dict:
+        assert (
+            "reviewing" not in task.prompt
+            and "fixing a pull request for maria" in task.prompt
+        )
+        assert task.requested_by == "maria" and task.mode == "workspace_write"
+        (Path(task.workdir) / "tests").mkdir(exist_ok=True)
+        (Path(task.workdir) / "tests" / "test_one.py").write_text(
+            "def test_one(): ...\n"
+        )
+        return {
+            "title": "test(loader): cover a batch of one",
+            "summary": "Adds the missing boundary test.",
+            "fixed": [{"id": "F1", "change": "added a test for one item"}],
+        }
+
+    h.runner.on("fix", fix)
+    async with _as(app, "maria") as maria:
+        started = await maria.post(f"/api/prs/{REPO}/42/fix", json={"agent": "codex"})
+        assert started.status_code == 200, started.text
+        await h.settle()
+        [i] = [i for i, t in enumerate(h.runner.tasks) if t.kind == TaskKind.FIX]
+        assert h.runner.routes[i].primary == "codex"
+        [draft] = [
+            p
+            for p in (await maria.get("/api/proposals")).json()
+            if p["action"]["action"]["kind"] == "pr.fix"
+        ]
+        payload = draft["action"]["action"]["payload"]
+        assert payload["files"] == ["tests/test_one.py"] and payload["findings"] == [
+            "F1"
+        ]
+        assert draft["requested_by"] == "maria"
+        refused = await maria.post(f"/api/proposals/{draft['id']}/approve", json={})
+        assert refused.status_code == 409
+        await h.service.a.user_tokens.set("maria", UserToken(token="t"))
+        ok = await maria.post(
+            f"/api/proposals/{draft['id']}/approve", json={"as_me": True}
+        )
+        assert ok.status_code == 200, ok.text
+        await h.settle()
+    pr = h.forge.prs[(REPO, 42)]
+    publisher = h.service.a.publisher
+    assert publisher is not None
+    [pushed] = [p for p in publisher.published if p["branch"].startswith("am/fix-42-")]
+    assert pushed["author"] == ("maria", "maria@users.noreply.github.com")
+    assert pushed["base"] == pr.head_sha and "Signed-off-by: maria" in pushed["message"]
+    [opened] = h.forge.writes_of("create_pr")
+    assert opened["base"] == pr.head_ref and opened["head"] == pushed["branch"]
+    assert (
+        opened["author"] == "maria"
+        and opened["title"] == "test(loader): cover a batch of one"
+    )

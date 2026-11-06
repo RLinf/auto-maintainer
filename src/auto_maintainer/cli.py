@@ -21,6 +21,7 @@ import contextlib
 import json
 import logging
 import os
+import shutil
 import tempfile
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -28,7 +29,7 @@ from typing import Any
 
 import typer
 
-from .config import CONFIG_DIR, EXAMPLE, HostConfig, load_host_config
+from .config import HostConfig, load_host_config
 
 app = typer.Typer(
     help="auto-maintainer: a maintainer service for GitHub repositories.",
@@ -84,79 +85,216 @@ async def _whoami() -> str:
         return r.json()["login"]
 
 
+LINKS_FILE = "sign-in-links.json"
+"""One-time sign-in links from ``am login``, in the data directory."""
+
+
+def _lan_ip() -> str | None:
+    import socket
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("10.255.255.255", 1))
+            return str(sock.getsockname()[0])
+    except OSError:
+        return None
+
+
+def _print_setup_link(port: int, code: str) -> None:
+    hosts = ["127.0.0.1", *([ip] if (ip := _lan_ip()) else [])]
+    typer.echo(
+        "auto-maintainer is not set up yet. Open this in a browser to set it up:"
+    )
+    for h in hosts:
+        typer.echo(f"  http://{h}:{port}/setup/start?code={code}")
+    typer.echo(
+        "The code proves you are at this host; it stops working once setup is done."
+    )
+
+
 @app.command()
-def init() -> None:
-    """Write an example local.yaml if none exists."""
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    path = CONFIG_DIR / "local.yaml"
-    if path.exists():
-        typer.echo(f"{path} exists; not overwriting")
-        raise typer.Exit(1)
-    path.write_text(EXAMPLE, encoding="utf-8")
-    secrets = CONFIG_DIR / "secrets.env"
-    if not secrets.exists():
-        secrets.write_text(
-            "# GITHUB_TOKEN=...\n# AM_OAUTH_CLIENT_SECRET=...\n", encoding="utf-8"
+def setup(port: int | None = None) -> None:
+    """Print the link to the setup page, where the host is set up on the web."""
+    from .config import is_configured
+    from .hostsetup import HostSetup
+
+    if is_configured():
+        cfg = _cfg()
+        typer.echo(
+            f"already set up. Change it on the dashboard: {cfg.base_url}/setup "
+            "(needs maintain on the service's repository)."
         )
-        os.chmod(secrets, 0o600)
-    typer.echo(f"wrote {path} and {secrets}")
+        return
+    _print_setup_link(port or HostConfig().port, HostSetup().code())
+
+
+@app.command(hidden=True)
+def init() -> None:
+    """Older name of ``am setup``."""
+    setup()
+
+
+@app.command()
+def login() -> None:
+    """Print a one-time link that signs you in to the dashboard as the GitHub account
+    logged in on this host (``gh``)."""
+    from .web.auth import LINK_MINUTES, create_link
+
+    cfg = _cfg()
+    who = asyncio.run(_whoami())
+    url = create_link(cfg.data_path / LINKS_FILE, who, cfg.base_url)
+    typer.echo(
+        f"Open this to sign in as {who}; it works once, for {LINK_MINUTES} minutes:"
+    )
+    typer.echo(f"  {url}")
 
 
 STOP_SECONDS = 15.0
 """How long the service may take to stop after the web server has."""
 
 
-async def _serve_until_stopped(service: Any, web: Any, host: str, port: int) -> None:
-    """Serve ``web`` until Ctrl+C, SIGTERM, or a deploy asks for a restart, then stop
-    the service and close its store.
+def _gh_signin(cfg: HostConfig) -> Any:
+    """GitHub CLI logins for signing in on the web, each in its own throwaway folder."""
+    from .hostsetup import GhLogin
+
+    root = cfg.data_path / "sign-in"
+    return lambda flow_id: GhLogin(root / flow_id, cfg.github.web_url)
+
+
+class _Switch:
+    """An ASGI app that forwards to the current one: the setup page until the host is
+    set up, then the running service's dashboard and API."""
+
+    def __init__(self) -> None:
+        self.app: Any = None
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        await self.app(scope, receive, send)
+
+
+class _Host:
+    """The web server and the service behind it. Setting the host up, or changing the
+    setup from the dashboard, starts a new service without stopping the server.
 
     Shutdown never waits on an idle browser: the dashboard's live streams end as soon
     as it begins, other connections get five seconds, and the service gets
     ``STOP_SECONDS``. A second Ctrl+C skips the wait for connections.
     """
-    import uvicorn
 
-    loop = asyncio.get_running_loop()
+    def __init__(self, dev: bool = False) -> None:
+        self.dev = dev
+        self.service: Any = None
+        self.switch = _Switch()
+        self.restart = False
+        self._steps: Any = None
+        self._server: Any = None
+        self._watch: asyncio.Task[None] | None = None
 
-    def begin_closing() -> None:
-        loop.call_soon_threadsafe(service.closing.set)
+    def steps(self) -> Any:
+        """The host setup in progress (``hostsetup.HostSetup``)."""
+        from .hostsetup import HostSetup
 
-    class Server(uvicorn.Server):
-        def handle_exit(self, sig: int, frame: Any) -> None:
-            begin_closing()
-            super().handle_exit(sig, frame)
-            # uvicorn raises the captured signals again when serve() returns, which
-            # would cancel the service's shutdown below halfway; that shutdown is
-            # bounded instead.
-            self._captured_signals.clear()
+        if self._steps is None:
+            self._steps = HostSetup()
+        return self._steps
 
-    server = Server(
-        uvicorn.Config(
-            web, host=host, port=port, log_level="info", timeout_graceful_shutdown=5
+    def adopt(self, service: Any, web: Any) -> None:
+        self.service = service
+        self.switch.app = web
+        self._watch_service(service)
+
+    async def start_service(self, cfg: HostConfig) -> None:
+        """Build the service for ``cfg`` and put it in place of the current one. If
+        building fails, the current one keeps running and the error goes to the caller."""
+        from .app import build_service
+        from .github.webhooks import hint, verify_signature
+        from .web.app import create_app
+
+        new = await build_service(cfg, dev=self.dev)
+        web = create_app(
+            new,
+            data_dir=cfg.data_path,
+            base_url=cfg.base_url,
+            web_url=cfg.github.web_url,
+            api_url=cfg.github.api_url,
+            oauth_client_id=cfg.github.oauth_client_id,
+            oauth_secret_env=cfg.github.oauth_client_secret_env,
+            webhook_secret_env=cfg.github.webhook_secret_env,
+            cookie_secure=cfg.cookie_secure,
+            verify_webhook=verify_signature,
+            webhook_target=hint,
+            links_path=cfg.data_path / LINKS_FILE,
+            gh_signin=_gh_signin(cfg) if shutil.which("gh") else None,
+            setup_steps=self.steps,
+            on_host_change=self.start_service,
         )
-    )
+        old = self.service
+        if old is not None:
+            await self._stop(old)
+        await new.start()
+        self._steps = None
+        self.adopt(new, web)
 
-    async def restart_when_deployed() -> None:
-        await service.restart_requested.wait()
-        typer.echo("a maintainer deployed new code; restarting")
-        begin_closing()
-        server.should_exit = True
+    def _watch_service(self, service: Any) -> None:
+        if self._watch is not None:
+            self._watch.cancel()
 
-    watcher = asyncio.create_task(restart_when_deployed())
-    try:
-        await server.serve()
-    finally:
-        watcher.cancel()
+        async def restart_when_deployed() -> None:
+            await service.restart_requested.wait()
+            typer.echo("a maintainer deployed new code; restarting")
+            self.restart = True
+            service.closing.set()
+            if self._server is not None:
+                self._server.should_exit = True
+
+        self._watch = asyncio.create_task(restart_when_deployed())
+
+    async def _stop(self, service: Any) -> None:
         try:
             await asyncio.wait_for(service.stop(), STOP_SECONDS)
         except TimeoutError:
             typer.echo(
-                f"the service did not stop within {STOP_SECONDS:.0f} s; exiting anyway",
+                f"the service did not stop within {STOP_SECONDS:.0f} s; going on",
                 err=True,
             )
         close = getattr(service.store, "close", None)
         if close is not None:
             await close()
+
+    async def serve(self, host: str, port: int) -> None:
+        import uvicorn
+
+        loop = asyncio.get_running_loop()
+        runner = self
+
+        class Server(uvicorn.Server):
+            def handle_exit(self, sig: int, frame: Any) -> None:
+                if runner.service is not None:
+                    loop.call_soon_threadsafe(runner.service.closing.set)
+                super().handle_exit(sig, frame)
+                # uvicorn raises the captured signals again when serve() returns,
+                # which would cancel the service's shutdown below halfway; that
+                # shutdown is bounded instead.
+                self._captured_signals.clear()
+
+        self._server = Server(
+            uvicorn.Config(
+                self.switch,
+                host=host,
+                port=port,
+                log_level="info",
+                timeout_graceful_shutdown=5,
+            )
+        )
+        try:
+            await self._server.serve()
+        finally:
+            if self._steps is not None:
+                self._steps.gh_login.cancel()
+            if self._watch is not None:
+                self._watch.cancel()
+            if self.service is not None:
+                await self._stop(self.service)
 
 
 @app.command()
@@ -179,6 +317,7 @@ def serve(
     ensure_built(echo=typer.echo)
 
     if demo:
+        from .domain.settings import UserToken
         from .testing.demo import DEMO_USER, build_demo
 
         root = Path(tempfile.mkdtemp(prefix="am-demo-"))
@@ -189,6 +328,9 @@ def serve(
             harness = await build_demo(root)
             service = harness.service
             service.settings.operators.add(DEMO_USER)
+            # The demo's forge is a fake, so its maintainer can post and open fix
+            # PRs "as themselves" without a GitHub token.
+            await service.a.user_tokens.set(DEMO_USER, UserToken(token="demo"))
             web = create_app(service, data_dir=root, allow_dev_login=True)
             await service.start()
             bind = host or "0.0.0.0"
@@ -196,41 +338,44 @@ def serve(
             typer.echo(
                 f"demo data in {root}; sign in at {url}/auth/dev?login={DEMO_USER}"
             )
-            await _serve_until_stopped(service, web, bind, port or 7777)
+            runner = _Host()
+            runner.adopt(service, web)
+            await runner.serve(bind, port or 7777)
 
         asyncio.run(demo_main())
         return
 
-    cfg = _cfg()
+    from .config import is_configured
+
     dev = dev or os.environ.get("AM_ENV") == "dev"
+    defaults = _cfg() if is_configured() else HostConfig()
     if dev:
         typer.echo(
-            f"dev mode: serving only {cfg.sandbox_repo}"
-            if cfg.sandbox_repo
+            f"dev mode: serving only {defaults.sandbox_repo}"
+            if defaults.sandbox_repo
             else "dev mode: every repository action is held at shadow"
         )
 
-    async def main() -> None:
-        from .app import build_service
-        from .github.webhooks import hint, verify_signature
+    async def main() -> bool:
+        from .web.setup import create_setup_app
 
-        service = await build_service(cfg, dev=dev)
-        web = create_app(
-            service,
-            data_dir=cfg.data_path,
-            base_url=cfg.base_url,
-            web_url=cfg.github.web_url,
-            api_url=cfg.github.api_url,
-            oauth_client_id=cfg.github.oauth_client_id,
-            oauth_secret_env=cfg.github.oauth_client_secret_env,
-            webhook_secret_env=cfg.github.webhook_secret_env,
-            cookie_secure=cfg.cookie_secure,
-            verify_webhook=verify_signature,
-            webhook_target=hint,
-        )
-        await service.start()
-        await _serve_until_stopped(service, web, host or cfg.host, port or cfg.port)
-        return service.restart_requested.is_set()
+        runner = _Host(dev)
+        if is_configured():
+            try:
+                await runner.start_service(_cfg())
+            except Exception as e:  # the GitHub account or memory repo does not work
+                typer.echo(f"could not start with the current setup: {e}", err=True)
+        if runner.service is None:
+            steps = runner.steps()
+            runner.switch.app = create_setup_app(
+                steps,
+                data_dir=defaults.data_path,
+                on_finish=runner.start_service,
+                cookie_secure=defaults.cookie_secure,
+            )
+            _print_setup_link(port or defaults.port, steps.code())
+        await runner.serve(host or defaults.host, port or defaults.port)
+        return runner.restart
 
     if asyncio.run(main()):
         from .selfupdate import RESTART_EXIT_CODE
@@ -315,7 +460,7 @@ def repo_add(repo: str) -> None:
         login = await _whoami()
         async with _service() as service:
             decision = await service.gate.check(
-                repo, login, await service.profiles.active(repo)
+                repo, login, await service.profiles.active(repo), person=True
             )
             if not decision.allowed:
                 typer.echo(decision.reason)
@@ -466,7 +611,7 @@ def resume(repo: str | None = None) -> None:
             if repo:
                 actor = await _whoami()
                 decision = await service.gate.check(
-                    repo, actor, await service.profiles.active(repo)
+                    repo, actor, await service.profiles.active(repo), person=True
                 )
                 if not decision.allowed:
                     typer.echo(decision.reason)

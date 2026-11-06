@@ -27,6 +27,7 @@ import QueuePage from "./pages/Queue";
 import { RepoDetailPage, ReposPage } from "./pages/Repos";
 import ServicePage from "./pages/Service";
 import SettingsPage from "./pages/Settings";
+import SetupPage from "./pages/Setup";
 import SignIn from "./pages/SignIn";
 import { MenuItem, Popover, Skeleton, ToastProvider, useHotkey, useTheme, useToast } from "./ui";
 
@@ -42,6 +43,7 @@ export default function App() {
     );
   }
   if (me.error instanceof ApiError && me.error.status === 401) return <SignIn />;
+  if (me.error instanceof ApiError && me.error.status === 503 && me.error.message.includes("setup")) return <SetupPage firstRun />;
   if (me.error) {
     return (
       <div className="content">
@@ -70,7 +72,7 @@ function Shell({ me }: { me: Me }) {
   const agent = useAgent();
   const toast = useToast();
   const client = useQueryClient();
-  useLiveEvents(true);
+  useLiveEvents(true, me.login);
   const proposals = useProposals();
   const memory = useMemoryChanges();
   const [palette, setPalette] = useState(false);
@@ -355,6 +357,7 @@ function Shell({ me }: { me: Me }) {
           <Route path="/ci" element={<CiPage />} />
           <Route path="/agents" element={<AgentsPage />} />
           <Route path="/settings" element={<SettingsPage />} />
+          <Route path="/setup" element={<SetupPage />} />
           <Route path="/service" element={<ServicePage />} />
           <Route path="/audit" element={<AuditPage />} />
           <Route path="/chat" element={<ChatPage />} />

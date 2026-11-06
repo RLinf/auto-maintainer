@@ -24,7 +24,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from ..domain.settings import SECRET_NAME, SecretInfo
+from ..domain.settings import SECRET_NAME, SecretInfo, UserToken
 
 
 class FileSecretStore:
@@ -109,3 +109,29 @@ class FileSecretStore:
             data = await asyncio.to_thread(self._read)
             if data.pop(name, None) is not None:
                 await asyncio.to_thread(self._write, data)
+
+
+class FileUserTokens:
+    """``UserTokens`` in a JSON file with mode 0600, written atomically."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._lock = asyncio.Lock()
+        self._files = FileSecretStore(path)
+
+    async def get(self, login: str) -> UserToken | None:
+        data = await asyncio.to_thread(self._files._read)
+        entry = data.get(login.lower())
+        return UserToken.model_validate(entry) if entry else None
+
+    async def set(self, login: str, token: UserToken) -> None:
+        async with self._lock:
+            data = await asyncio.to_thread(self._files._read)
+            data[login.lower()] = token.model_dump(mode="json")
+            await asyncio.to_thread(self._files._write, data)
+
+    async def delete(self, login: str) -> None:
+        async with self._lock:
+            data = await asyncio.to_thread(self._files._read)
+            if data.pop(login.lower(), None) is not None:
+                await asyncio.to_thread(self._files._write, data)

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import logging
 
 from ..domain.actions import ActionKind, ActionStatus, ProposalState
@@ -33,6 +34,9 @@ from .handlers import HANDLERS, Noop, Stale
 from .memory_gate import try_merge_memory
 
 log = logging.getLogger(__name__)
+
+AS_PERSON = frozenset({ActionKind.REVIEW_POST, ActionKind.PR_FIX})
+"""Action kinds a maintainer may run with their own GitHub account."""
 
 _COMMENT_KINDS = {
     ActionKind.REVIEW_POST,
@@ -126,7 +130,31 @@ class Actuator:
             record.status = ActionStatus.INTENT
             record.approver = approver or record.approver
             await self.x.store.save_action(record)
-            ref = await spec.run(self.x, action, profile, pr, record.approver)
+            x = self.x
+            if action.kind == ActionKind.PR_FIX and not record.post_as:
+                raise RuntimeError(
+                    "a fix PR is pushed and opened only as the maintainer who approves it"
+                )
+            if record.post_as and action.kind in AS_PERSON:
+                writer = await x.writer_as(record.post_as) if x.writer_as else None
+                if writer is None:
+                    raise RuntimeError(
+                        f"{record.post_as}'s GitHub sign-in cannot post here any more; "
+                        "sign in again"
+                    )
+                x = dataclasses.replace(x, writer=writer)
+                if action.kind == ActionKind.PR_FIX:
+                    publisher = (
+                        await x.publisher_as(record.post_as) if x.publisher_as else None
+                    )
+                    if publisher is None:
+                        raise RuntimeError(
+                            f"{record.post_as}'s GitHub sign-in cannot push here; sign in again"
+                        )
+                    x = dataclasses.replace(x, publisher=publisher)
+            ref = await spec.run(x, action, profile, pr, record.approver)
+            if record.post_as:
+                ref = {**ref, "posted_as": record.post_as}
         except Noop as e:
             return await self._finish(record, ActionStatus.NOOP, error=str(e))
         except Stale as e:

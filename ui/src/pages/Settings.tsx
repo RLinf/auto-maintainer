@@ -543,7 +543,18 @@ function SystemTab({ v, ask }: { v: SettingsView; ask: (p: string, send?: boolea
           />
         </div>
       </Section>
-      <Section title={t("This service")} hint={t("set on the host")}>
+      <Section
+        title={t("This service")}
+        hint={t("the host setup")}
+        aside={
+          v.access.allowed ? (
+            <Link className="button" to="/setup" style={{ height: 30, fontSize: 12.5 }}>
+              <Icon name="settings" size={13} />
+              {t("Change host setup")}
+            </Link>
+          ) : null
+        }
+      >
         <dl className="props">
           <dt>{t("Settings owned by")}</dt>
           <dd>{v.repo ? <code>{v.repo}</code> : <span className="muted">{t("no repository")}</span>}</dd>

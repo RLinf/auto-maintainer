@@ -103,6 +103,7 @@ class QuestionDesk:
                 repo=question.repo,
                 number=question.pr,
                 payload={
+                    "asked_for": question.asked_for,
                     "id": question.id,
                     "kind": question.kind.value,
                     "title": question.title,

@@ -2,6 +2,7 @@
 // views, search, filters, sorting, grouping, and review in bulk. The view lives in the URL.
 
 import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api, type Me, type PrRow, type ReviewActivity, type ReviewStart } from "../api";
 import { useAgent } from "../agent";
@@ -9,6 +10,7 @@ import { ErrorBox, Labels, PageHead, prPath, ReviewState, Tier, timeOf, useAct, 
 import { prKey, REVIEW_ORDER, REVIEW_STATES, TIER_ORDER, usePrs } from "../data";
 import { useT } from "../i18n";
 import { Icon } from "../icons";
+import { agentName, AgentPicker, reviewToast } from "../agentPicker";
 import { BulkBar, DataTable, ListToolbar, useList, type Column } from "../list";
 import { MenuItem, Popover, Skeleton, Tabs, useTab, useToast } from "../ui";
 
@@ -73,29 +75,16 @@ export default function QueuePage({ me }: { me: Me }) {
     pageSize: 50,
   });
 
+  const [reviewer, setReviewer] = useState("");
   const review = useAct(
-    (prs: PrRow[]) => api.post<ReviewStart[]>("/api/reviews", { prs: prs.map((r) => ({ repo: r.repo, number: r.number })) }),
-    [["prs"]],
+    (prs: PrRow[]) => api.post<ReviewStart[]>("/api/reviews", { prs: prs.map((r) => ({ repo: r.repo, number: r.number })), agent: reviewer || null }),
+    [["prs"], ["proposals"]],
   );
   const startReview = (prs: PrRow[]) =>
     review.mutate(prs, {
       onSuccess: (out) => {
         list.clearSelection();
-        const started = out.filter((s) => s.run !== "skip");
-        const skipped = out.filter((s) => s.run === "skip");
-        toast({
-          title: started.length
-            ? `${started.length} ${t(started.length === 1 ? "review started" : "reviews started")}`
-            : t("Nothing to review"),
-          body: [
-            started.length ? t("Drafts appear in your proposals to edit and post.") : "",
-            skipped.length ? `${t("Skipped")}: ${skipped.map((s) => `#${s.number} (${s.reason})`).join(", ")}` : "",
-          ]
-            .filter(Boolean)
-            .join(" "),
-          icon: "pr",
-          action: started.length ? { label: t("Proposals"), onClick: () => navigate("/inbox") } : undefined,
-        });
+        toast(reviewToast(out, t, () => navigate("/inbox")));
       },
     });
 
@@ -225,6 +214,7 @@ export default function QueuePage({ me }: { me: Me }) {
         />
       )}
       <BulkBar count={selected.length} onClear={list.clearSelection}>
+        <AgentPicker value={reviewer} onChange={setReviewer} compact />
         <button className="primary sm" disabled={review.isPending} onClick={() => startReview(selected)}>
           {review.isPending ? t("Starting…") : `${t("Review")} ${selected.length}`}
         </button>
@@ -248,18 +238,19 @@ export default function QueuePage({ me }: { me: Me }) {
 function Activity({ a, me }: { a: ReviewActivity; me: string }) {
   const t = useT();
   const job = a.job;
-  if (job && (job.status === "queued" || job.status === "running")) {
+  if (job && (job.status === "queued" || job.status === "running" || job.status === "waiting")) {
     return (
-      <span className="small" style={{ color: "var(--info)" }}>
+      <span className="small" style={{ color: "var(--info)" }} title={job.by ? `${t("asked by")} ${job.by}` : undefined}>
         <Icon name="clock" size={12} /> {job.playbook === "followup" ? t("following up…") : t("reviewing…")}
+        {job.agent ? ` ${agentName(job.agent)}` : ""}
+        {job.by ? ` · ${job.by === me ? t("you") : job.by}` : ""}
       </span>
     );
   }
   if (a.draft) {
     return (
       <Link to="/inbox" className="small">
-        {t("draft")}
-        {a.draft.for ? ` ${t("for")} ${a.draft.for === me ? t("you") : a.draft.for}` : ""} →
+        {!a.draft.for ? t("draft") : a.draft.for === me ? t("draft for you") : `${t("draft for")} ${a.draft.for}`} →
       </Link>
     );
   }

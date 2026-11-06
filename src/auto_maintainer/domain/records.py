@@ -89,6 +89,9 @@ class ActionRecord(BaseModel):
     external_ref: dict[str, Any] = Field(default_factory=dict)
     error: str | None = None
     approver: str | None = None
+    post_as: str | None = None
+    """The maintainer whose own GitHub account posts this action, when they chose to
+    post a review draft as themselves; ``None`` posts as the service."""
     updated_at: datetime = Field(default_factory=utc_now)
 
 
@@ -158,6 +161,11 @@ class ChatThread(BaseModel):
     owner: str
     title: str = ""
     repo: str | None = None
+    number: int | None = None
+    """The PR the conversation started on, if any."""
+    workdir: str | None = None
+    """The checkout of ``repo`` (at the PR's head, or its default branch) the agent
+    works in for the whole conversation, so its session can resume there."""
     session: str | None = None
     runtime: str | None = None
     id: str = Field(default_factory=lambda: new_id("chat"))

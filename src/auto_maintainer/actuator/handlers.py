@@ -27,6 +27,7 @@ from ..domain.actions import (
     CodeMergePayload,
     CodePrPayload,
     CommentUpsertPayload,
+    FixPrPayload,
     IssueCommentPayload,
     IssueLabelPayload,
     LabelPayload,
@@ -471,6 +472,48 @@ async def _memory_change(
     return {"change_id": change.id, "state": change.state, "branch": change.branch}
 
 
+async def _pr_fix(
+    x: ExecContext,
+    action: Action,
+    profile: RepoProfile | None,
+    pr: PrSnapshot | None,
+    approver: str | None,
+) -> dict[str, Any]:
+    """Push the fix to a branch and open a PR into the reviewed PR's branch, both as
+    the approving maintainer (the executor gives this handler their writer and
+    publisher; the service's own account never runs it)."""
+    assert profile is not None and pr is not None and approver
+    p = FixPrPayload.model_validate(action.payload)
+    if x.publisher is None:
+        raise RuntimeError("this service cannot push branches")
+    owner = action.repo.split("/", 1)[0]
+    branch = f"am/fix-{pr.number}-{action.id[-6:]}"
+    email = f"{approver}@users.noreply.github.com"
+    message = (
+        f"{p.title}\n\n{p.body}\n\n"
+        f"Drafted by an agent in auto-maintainer; reviewed and pushed by {approver}.\n\n"
+        f"Signed-off-by: {approver} <{email}>"
+    )
+    sha = await x.publisher.publish(
+        action.repo, p.base_sha, p.patch, branch, message, author=(approver, email)
+    )
+    body = await x.public(
+        action, profile, p.body, marker_kind="fix", pr=pr, runtime=p.runtime
+    )
+    title = await x.public(
+        action, profile, p.title, marker_kind="fix", pr=pr, bare=True
+    )
+    same_repo = pr.head_repo in (None, "", action.repo)
+    ref = await x.writer.create_pr(
+        action.repo if same_repo else str(pr.head_repo),
+        branch if same_repo else f"{owner}:{branch}",
+        pr.head_ref,
+        title,
+        body,
+    )
+    return {"branch": branch, "sha": sha, "pr": ref.id, "url": ref.url}
+
+
 async def _code_pr(
     x: ExecContext,
     action: Action,
@@ -600,6 +643,7 @@ HANDLERS: dict[ActionKind, HandlerSpec] = {
     ActionKind.LAB_RUN: HandlerSpec(_lab_run, needs_pr=True, needs_current_head=True),
     ActionKind.MEMORY_COMMIT: HandlerSpec(_memory_commit),
     ActionKind.MEMORY_CHANGE: HandlerSpec(_memory_change),
+    ActionKind.PR_FIX: HandlerSpec(_pr_fix, needs_pr=True, needs_current_head=True),
     ActionKind.CODE_PR: HandlerSpec(_code_pr),
     ActionKind.CODE_MERGE: HandlerSpec(_code_merge),
     ActionKind.SERVICE_DEPLOY: HandlerSpec(_service_deploy),

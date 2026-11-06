@@ -180,6 +180,18 @@ def _answer(task: AgentTask) -> dict[str, Any]:
             "reply": "Two PRs wait for a first review; #42 is the top of your queue.",
             "proposals": [],
         }
+    if kind == "fix":
+        test = Path(task.workdir) / "tests" / "test_loader_one.py"
+        test.parent.mkdir(parents=True, exist_ok=True)
+        test.write_text(
+            "from loader import load\n\n\ndef test_a_batch_of_one():\n"
+            "    assert load([1]) == [1]\n"
+        )
+        return {
+            "title": "test(loader): cover a batch of one item",
+            "summary": "Adds the boundary test the review asked for.",
+            "fixed": [{"id": "F1", "change": "added a test for a batch of one item"}],
+        }
     if kind == "onboard":
         return {
             "profile": {"extends": ["conventional-commits"]},
@@ -209,6 +221,7 @@ async def build_demo(root: Path) -> Harness:
         "chat",
         "onboard",
         "hygiene",
+        "fix",
     ):
         h.runner.on(kind, _answer)
     h.forge.put_file(DEMO_REPO, ".github/CODEOWNERS", "* @maria\n/docs/ @bob\n")

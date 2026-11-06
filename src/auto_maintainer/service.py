@@ -30,7 +30,7 @@ from typing import Any
 from .actuator.context import ExecContext, LabRunner
 from .actuator.executor import Actuator
 from .actuator.pipeline import ActionPipeline
-from .domain.actions import ActionKind, MemoryChangePayload, make_action
+from .domain.actions import ActionKind, ActionStatus, MemoryChangePayload, make_action
 from .domain.clock import Clock
 from .domain.events import Event, EventKind
 from .domain.memory import MemoryChange, MemoryChangeState, Tier
@@ -48,6 +48,7 @@ from .domain.ports import (
     SecretStore,
     ServiceUpdater,
     Store,
+    UserTokens,
     Workspace,
 )
 from .domain.profile import Route
@@ -61,6 +62,7 @@ from .domain.settings import (
     ServiceConfig,
     SettingsError,
     SettingsStatus,
+    UserToken,
     check_settings,
     effective_agents,
     effective_routing,
@@ -120,6 +122,17 @@ class Adapters:
         | None
     ) = None
     """Rebuilds the agent runtimes for new settings; supplied by the composition root."""
+    user_tokens: UserTokens | None = None
+    """Signed-in maintainers' own GitHub tokens, for posting reviews as them."""
+    writer_for_user: (
+        Callable[[str, UserToken], Awaitable[ForgeWriter | None]] | None
+    ) = None
+    """A forge writer acting as a person with their token (refreshing it when it
+    expired and can be refreshed), or ``None`` when the token no longer works."""
+    publisher_for_user: (
+        Callable[[str, UserToken], Awaitable[BranchPublisher | None]] | None
+    ) = None
+    """A branch publisher pushing as a person with their token, for fix PRs."""
 
 
 @dataclass
@@ -228,6 +241,8 @@ class Service:
             publisher=adapters.publisher,
             updater=adapters.updater,
             request_restart=self.request_restart,
+            writer_as=self.user_writer,
+            publisher_as=self.user_publisher,
         )
         self.actuator = Actuator(self.exec)
         self.pipeline = ActionPipeline(
@@ -328,6 +343,49 @@ class Service:
             labs=LabStatus(self.a.labs),
             clock=self.a.clock,
             service=info,
+            own_reviews=await self.posted_as_people(job.repo)
+            if job.repo
+            else frozenset(),
+        )
+
+    async def user_writer(self, login: str) -> ForgeWriter | None:
+        """A forge writer acting as ``login`` with their own sign-in, if it still works."""
+        if self.a.user_tokens is None or self.a.writer_for_user is None:
+            return None
+        token = await self.a.user_tokens.get(login)
+        if token is None:
+            return None
+        return await self.a.writer_for_user(login, token)
+
+    async def user_publisher(self, login: str) -> BranchPublisher | None:
+        """A branch publisher pushing as ``login`` with their own sign-in, if it works."""
+        if self.a.user_tokens is None or self.a.publisher_for_user is None:
+            return None
+        token = await self.a.user_tokens.get(login)
+        if token is None:
+            return None
+        return await self.a.publisher_for_user(login, token)
+
+    async def can_post_as(self, login: str) -> bool:
+        """Whether ``login`` signed in in a way that lets the service post as them."""
+        return (
+            self.a.user_tokens is not None
+            and self.a.writer_for_user is not None
+            and await self.a.user_tokens.get(login) is not None
+        )
+
+    async def posted_as_people(self, repo: str) -> frozenset[str]:
+        """Review actions of this service that a maintainer posted as themselves; their
+        markers count as the service's reviews whoever's account posted them."""
+        return frozenset(
+            record.action.id
+            for record in await self.store.list_actions(
+                repo=repo,
+                kinds=[ActionKind.REVIEW_POST],
+                statuses=[ActionStatus.EXECUTED],
+                limit=1000,
+            )
+            if record.post_as
         )
 
     # -- lifecycle -------------------------------------------------------------------
@@ -407,9 +465,13 @@ class Service:
         return self.settings.code_repo or self.a.memory.remote_repo()
 
     async def service_gate(self, login: str) -> GateDecision:
-        """Whether ``login`` may change the service's settings (live, on the forge)."""
+        """Whether ``login``, a person signed in to the dashboard or using the CLI, may
+        change the service's settings (live, on the forge)."""
         return await self.gate.check_service(
-            self.settings_repo(), login, Permission(self.settings.code_approver)
+            self.settings_repo(),
+            login,
+            Permission(self.settings.code_approver),
+            person=True,
         )
 
     async def settings_text(self) -> tuple[str, dict[str, Any]]:
@@ -621,7 +683,7 @@ class Service:
                 change.approvals.setdefault(decision.repo, []).append(login)
         for repo in change.repos:
             current = await self.profiles.active(repo)
-            decision = await self.gate.check(repo, login, current)
+            decision = await self.gate.check(repo, login, current, person=True)
             decisions.append(decision)
             if decision.allowed and login not in change.approvals.get(repo, []):
                 change.approvals.setdefault(repo, []).append(login)
@@ -654,7 +716,7 @@ class Service:
                 raise PermissionError(decision.reason)
         for repo in change.repos:
             decision = await self.gate.check(
-                repo, login, await self.profiles.active(repo)
+                repo, login, await self.profiles.active(repo), person=True
             )
             if not decision.allowed:
                 raise PermissionError(decision.reason)

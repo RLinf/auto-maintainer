@@ -26,6 +26,8 @@ is merged and deployed (design 5.12).
 
 from __future__ import annotations
 
+import logging
+from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -64,6 +66,8 @@ from ..playbooks.prompts import schema_hint, untrusted
 from ..profiles.layers import ProfileError, parse_yaml
 from .api import require_view, service_of, visible_repos
 from .auth import User, current_user
+
+log = logging.getLogger(__name__)
 
 
 class ProposedAction(BaseModel):
@@ -155,7 +159,14 @@ def build_router() -> APIRouter:
         repo = body.repo or (body.context.repo if body.context else None)
         if repo:
             await require_view(service, user, repo)
-        thread = ChatThread(owner=user.login, title=body.text[:80], repo=repo)
+        number = (
+            body.context.number
+            if body.context and body.context.repo == repo and repo
+            else None
+        )
+        thread = ChatThread(
+            owner=user.login, title=body.text[:80], repo=repo, number=number
+        )
         await service.store.save_thread(thread)
         return thread.model_dump(mode="json")
 
@@ -216,8 +227,7 @@ def build_router() -> APIRouter:
                 schema_hint(ChatAnswer.model_json_schema()),
             ]
         )
-        workdir = service.settings.scratch_dir / f"chat-{thread_id}"
-        workdir.mkdir(parents=True, exist_ok=True)
+        workdir = await _workdir(service, thread)
         route = service.settings.routing.get("chat")
         if route is None:
             raise HTTPException(500, "no chat route is configured")
@@ -270,6 +280,41 @@ def build_router() -> APIRouter:
         return message.model_dump(mode="json")
 
     return r
+
+
+async def _workdir(service: Any, thread: ChatThread) -> Path:
+    """Where the agent works for this conversation: a checkout of its repository (at
+    the PR's head when it started on a PR), kept for the whole conversation; without
+    a repository, a scratch folder."""
+    if thread.workdir and Path(thread.workdir).is_dir():
+        return Path(thread.workdir)
+    path: Path | None = None
+    if thread.repo:
+        try:
+            info = await service.a.forge.get_repo(thread.repo)
+            pr = (
+                await service.a.forge.get_pr(thread.repo, thread.number)
+                if thread.number
+                else None
+            )
+            sha = pr.head_sha if pr else info.default_branch_sha
+            if sha:
+                path = await service.a.workspace.prepare(
+                    thread.repo,
+                    pr.number if pr else None,
+                    sha,
+                    info.default_branch,
+                )
+        except Exception as e:  # the conversation still works without the code
+            log.warning("no checkout of %s for chat: %s", thread.repo, e)
+    if path is None:
+        path = service.settings.scratch_dir / f"chat-{thread.id}"
+        path.mkdir(parents=True, exist_ok=True)
+    if thread.workdir and thread.workdir != str(path):
+        thread.session = None  # the old checkout is gone; its session cannot resume
+    thread.workdir = str(path)
+    await service.store.save_thread(thread)
+    return path
 
 
 async def _page_block(
@@ -496,7 +541,7 @@ async def _propose(service: Any, user: User, p: ProposedAction) -> list[str]:
             created_at=service.clock.now(),
         )
         decision = await service.gate.check(
-            p.repo, user.login, await service.profiles.active(p.repo)
+            p.repo, user.login, await service.profiles.active(p.repo), person=True
         )
         if decision.allowed:
             change.approvals = {p.repo: [user.login]}

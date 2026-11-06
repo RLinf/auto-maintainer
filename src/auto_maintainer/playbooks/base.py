@@ -155,6 +155,12 @@ class PlaybookContext:
     """Whether the input of this job comes from the repository's team; agent tasks
     may run in bypass mode only for trusted input (unless the route says otherwise),
     and reviewers see it next to the agent's questions."""
+    requested_by: str | None = None
+    """The maintainer who asked for this job; set by the playbook once it knows."""
+    agent: str | None = None
+    """A runtime the requester chose; the job's main task runs on it with no fallback."""
+    own_reviews: frozenset[str] = frozenset()
+    """This service's review actions that maintainers posted as themselves."""
     _codeowners: list[OwnerRule] | None = None
 
     def require_profile(self) -> RepoProfile:
@@ -176,6 +182,7 @@ class PlaybookContext:
             self.identities(),
             profile.comments.legacy_markers,
             profile.scope.include_drafts,
+            own_actions=self.own_reviews,
         )
 
     def route(self, kind: TaskKind) -> Route:
@@ -201,9 +208,19 @@ class PlaybookContext:
                 "repo": task.repo or self.repo,
                 "pr": task.pr if task.pr is not None else self.job.number,
                 "job_id": task.job_id or self.job.id,
+                "requested_by": task.requested_by or self.requested_by,
             }
         )
-        return await self.agents.run(task, self.route(kind or task.kind), output_model)
+        task_kind = kind or task.kind
+        route = self.route(task_kind)
+        if self.agent and task_kind in (
+            TaskKind.REVIEW,
+            TaskKind.FOLLOWUP,
+            TaskKind.FIX,
+        ):
+            # The requester chose the agent; verification keeps its own route.
+            route = route.model_copy(update={"primary": self.agent, "fallback": []})
+        return await self.agents.run(task, route, output_model)
 
     async def codeowners(self) -> list[OwnerRule]:
         if self._codeowners is None:

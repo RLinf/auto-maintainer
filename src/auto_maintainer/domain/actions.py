@@ -46,6 +46,7 @@ class ActionKind(StrEnum):
     PR_NUDGE = "pr.nudge"
     PR_CONVERT_TO_DRAFT = "pr.convert_to_draft"
     PR_CLOSE = "pr.close"
+    PR_FIX = "pr.fix"
     ISSUE_LABEL = "issue.label"
     ISSUE_COMMENT = "issue.comment"
     LAB_RUN = "lab.run"
@@ -315,6 +316,22 @@ class MemoryChangePayload(_Payload):
     change_id: str
 
 
+class FixPrPayload(_Payload):
+    """Changes an agent made for review findings, opened as a PR into the reviewed
+    PR's branch by the maintainer who approves it, with their own account."""
+
+    title: str
+    body: str
+    patch: str
+    """``git diff --binary`` of the change, on the reviewed PR's head commit."""
+    base_sha: str
+    files: list[str] = Field(default_factory=list)
+    findings: list[str] = Field(default_factory=list)
+    """The review findings this addresses, by id."""
+    runtime: str | None = None
+    requested_by: str | None = None
+
+
 class CodePrPayload(_Payload):
     """A change to the service's own code: the patch goes on ``branch`` from ``base_sha``."""
 
@@ -370,6 +387,7 @@ PAYLOADS: dict[ActionKind, type[BaseModel]] = {
     ActionKind.MEMORY_COMMIT: MemoryCommitPayload,
     ActionKind.MEMORY_CHANGE: MemoryChangePayload,
     ActionKind.CODE_PR: CodePrPayload,
+    ActionKind.PR_FIX: FixPrPayload,
     ActionKind.CODE_MERGE: CodeMergePayload,
     ActionKind.SERVICE_DEPLOY: ServiceDeployPayload,
     ActionKind.NOTIFY: NotifyPayload,
@@ -385,6 +403,7 @@ PUBLIC_TEXT_FIELDS: dict[ActionKind, tuple[str, ...]] = {
     ActionKind.PR_CONVERT_TO_DRAFT: ("body",),
     ActionKind.PR_CLOSE: ("body",),
     ActionKind.ISSUE_COMMENT: ("body",),
+    ActionKind.PR_FIX: ("title", "body"),
 }
 """Payload fields that become public text and must pass the leak guard."""
 

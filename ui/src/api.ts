@@ -73,6 +73,7 @@ export interface Me {
   dev_mode: boolean;
   paused: boolean;
   pending_questions: number;
+  can_post_as_me?: boolean;
 }
 
 export interface ServiceView {
@@ -130,6 +131,7 @@ export interface AgentQuestion {
   task_kind: string;
   repo: string | null;
   pr: number | null;
+  asked_for?: string | null;
   state: "pending" | "answered" | "expired" | "cancelled";
   created_at: string | null;
   expires_at: string | null;
@@ -158,7 +160,15 @@ export interface PrRow {
 }
 
 export interface ReviewActivity {
-  job?: { playbook: string; status: string; updated_at: string; result: Record<string, unknown> | null; error: string | null };
+  job?: {
+    playbook: string;
+    status: string;
+    updated_at: string;
+    result: Record<string, unknown> | null;
+    error: string | null;
+    by?: string | null;
+    agent?: string | null;
+  };
   draft?: { proposal: string; for: string | null; sha: string };
   posted?: { sha: string; by: string | null };
 }
@@ -166,8 +176,10 @@ export interface ReviewActivity {
 export interface ReviewStart {
   repo: string;
   number: number;
-  run: "review" | "followup" | "skip";
+  run: "review" | "followup" | "skip" | "joined" | "drafted";
   reason?: string;
+  by?: string | null;
+  agent?: string | null;
   state?: string;
   event?: string;
 }
@@ -505,4 +517,15 @@ export interface SettingsCheck {
   ok: boolean;
   problems: string[];
   diff: string;
+}
+
+export interface Automation {
+  repo: string;
+  trigger: "manual" | "scan" | "events";
+  schedule: string;
+  every_hours: number | null;
+  max_prs: number;
+  followups: boolean;
+  can_configure: boolean;
+  reason: string;
 }

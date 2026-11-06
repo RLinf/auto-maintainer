@@ -15,7 +15,9 @@
 """Host configuration: ``local.yaml`` and ``secrets.env`` (design 7.3).
 
 Host configuration says where things are and which credentials to use. It never
-decides how the service behaves on a repository; repository profiles do.
+decides how the service behaves on a repository; repository profiles do. The setup
+page writes both files (``save_host_config``, ``set_host_secret``); nobody needs to
+edit them by hand.
 """
 
 from __future__ import annotations
@@ -39,11 +41,21 @@ class _Cfg(BaseModel):
 class GitHubConfig(_Cfg):
     api_url: str = "https://api.github.com"
     web_url: str = "https://github.com"
-    auth: Literal["token", "app"] = "token"
+    auth: Literal["gh", "token", "app"] = "token"
+    """``gh``: act as the account the GitHub CLI on this host is logged in to, reading
+    its token with ``gh auth token``. ``token``: a token in ``token_env``. ``app``: a
+    GitHub App (``app_id``, ``private_key_path``), which also gives sign-in."""
     token_env: str = "GITHUB_TOKEN"
+    gh_config_dir: str | None = None
+    """With ``auth: gh``, the GitHub CLI configuration the service logged in to from
+    the setup page; unset, the host user's own GitHub CLI login is used."""
     app_id: int | None = None
+    app_slug: str | None = None
+    """The GitHub App's URL name, for its installation page."""
     private_key_path: str | None = None
     oauth_client_id: str | None = None
+    """The OAuth or GitHub App client that lets people sign in with GitHub; without
+    one, sign-in uses one-time links from ``am login`` on the host."""
     oauth_client_secret_env: str = "AM_OAUTH_CLIENT_SECRET"
     webhook_secret_env: str = "AM_WEBHOOK_SECRET"
 
@@ -88,7 +100,9 @@ class HostConfig(_Cfg):
     """The URL browsers use to reach the dashboard. It builds the GitHub sign-in
     callback (``<base_url>/auth/callback``) and the links in alerts, so set it to the
     host's reachable name or address when people connect from other machines."""
-    data_dir: str = str(Path.home() / ".local" / "share" / "auto-maintainer")
+    data_dir: str = os.environ.get(
+        "AM_DATA_DIR", str(Path.home() / ".local" / "share" / "auto-maintainer")
+    )
     operators: list[str] = Field(default_factory=list)
     github: GitHubConfig = Field(default_factory=GitHubConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
@@ -142,6 +156,52 @@ def load_host_config(config_dir: Path | None = None) -> HostConfig:
     path = root / "local.yaml"
     data = yaml.safe_load(path.read_text(encoding="utf-8")) if path.is_file() else {}
     return HostConfig.model_validate(data or {})
+
+
+def is_configured(config_dir: Path | None = None) -> bool:
+    """Whether setup has written ``local.yaml``; without it ``am serve`` runs setup."""
+    return ((config_dir or CONFIG_DIR) / "local.yaml").is_file()
+
+
+HEADER = (
+    "# Written by auto-maintainer. Change these on the dashboard (Settings, then\n"
+    "# System) rather than here; the service rewrites this file.\n"
+)
+
+
+def _write_private(path: Path, text: str, mode: int = 0o600) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(text)
+    os.replace(tmp, path)
+
+
+def save_host_config(cfg: HostConfig, config_dir: Path | None = None) -> Path:
+    """Write ``local.yaml`` atomically, keeping only what differs from the defaults."""
+    root = config_dir or CONFIG_DIR
+    data = cfg.model_dump(mode="json", exclude_defaults=True)
+    path = root / "local.yaml"
+    _write_private(
+        path, HEADER + yaml.safe_dump(data, sort_keys=False, allow_unicode=True), 0o644
+    )
+    return path
+
+
+def set_host_secret(name: str, value: str, config_dir: Path | None = None) -> None:
+    """Set ``name`` in ``secrets.env`` (mode 0600) and in this process's environment."""
+    root = config_dir or CONFIG_DIR
+    path = root / "secrets.env"
+    lines = path.read_text(encoding="utf-8").splitlines() if path.is_file() else []
+    kept = [ln for ln in lines if ln.partition("=")[0].strip() != name]
+    _write_private(path, "\n".join([*kept, f"{name}={value}"]) + "\n")
+    os.environ[name] = value
+
+
+def write_private_file(path: Path, text: str) -> None:
+    """Write a credential file (a GitHub App's key) readable only by its owner."""
+    _write_private(path, text)
 
 
 EXAMPLE = """# ~/.config/auto-maintainer/local.yaml

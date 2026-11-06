@@ -131,6 +131,11 @@ class GitWorkspace:
     def mirror(self, repo: str) -> Path:
         return self.root / "mirrors" / f"{repo.replace('/', '__')}.git"
 
+    def repo_dir(self, repo: str) -> Path:
+        """The repository's own folder: every checkout an agent works in for it."""
+        owner, name = repo.split("/", 1)
+        return self.root / "repos" / owner / name
+
     async def _ensure_mirror(self, repo: str) -> Path:
         path = self.mirror(repo)
         if not path.exists():
@@ -167,11 +172,8 @@ class GitWorkspace:
             have = await run(["git", "cat-file", "-e", f"{sha}^{{commit}}"], cwd=mirror)
             if not have.ok:
                 await self._git(repo, "fetch", "-q", "origin", sha, cwd=mirror)
-            path = (
-                self.root
-                / "worktrees"
-                / f"{repo.replace('/', '__')}-{sha[:12]}-{uuid.uuid4().hex[:6]}"
-            )
+            what = f"pr-{number}" if number is not None else default_branch
+            path = self.repo_dir(repo) / f"{what}-{sha[:12]}-{uuid.uuid4().hex[:6]}"
             path.parent.mkdir(parents=True, exist_ok=True)
             await self._git(
                 repo, "worktree", "add", "-q", "--detach", str(path), sha, cwd=mirror
@@ -263,9 +265,16 @@ class GitWorkspace:
         return WorkChanges(base_sha=base, patch=patch, files=names.split())
 
     async def publish(
-        self, repo: str, base_sha: str, patch: str, branch: str, message: str
+        self,
+        repo: str,
+        base_sha: str,
+        patch: str,
+        branch: str,
+        message: str,
+        author: tuple[str, str] | None = None,
     ) -> str:
-        """Apply ``patch`` on ``base_sha`` in a fresh worktree, commit, and push ``branch``."""
+        """Apply ``patch`` on ``base_sha`` in a fresh worktree, commit (as ``author``,
+        else the service), and push ``branch``."""
         lock = self._locks.setdefault(repo, asyncio.Lock())
         async with lock:
             mirror = await self._ensure_mirror(repo)
@@ -274,7 +283,7 @@ class GitWorkspace:
             )
             if not have.ok:
                 await self._git(repo, "fetch", "-q", "origin", base_sha, cwd=mirror)
-            path = self.root / "worktrees" / f"publish-{uuid.uuid4().hex[:8]}"
+            path = self.repo_dir(repo) / f"publish-{uuid.uuid4().hex[:8]}"
             path.parent.mkdir(parents=True, exist_ok=True)
             await self._git(
                 repo,
@@ -294,7 +303,7 @@ class GitWorkspace:
                 timeout=300,
                 check=True,
             )
-            name, email = self.author
+            name, email = author or self.author
             await run(
                 [
                     "git",

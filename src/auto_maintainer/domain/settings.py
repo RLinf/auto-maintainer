@@ -400,3 +400,14 @@ def settings_diff(before: str | None, after: str | None) -> str:
             tofile=f"b/{SETTINGS_PATH}",
         )
     )
+
+
+class UserToken(BaseModel):
+    """A maintainer's own GitHub token, kept on the host so the reviews they approve
+    can be posted as them. Never shown, logged, or put in a prompt."""
+
+    token: str = Field(repr=False)
+    refresh_token: str | None = Field(default=None, repr=False)
+    expires_at: datetime | None = None
+    source: Literal["oauth", "device", "gh", "token"] = "oauth"
+    updated_at: datetime | None = None

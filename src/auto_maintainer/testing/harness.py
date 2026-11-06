@@ -37,16 +37,33 @@ from ..resources import data_dir, defaults_dir
 from ..service import Adapters, Service, ServiceSettings
 from ..store.sqlite import SqliteStore
 from .fakes import (
+    ActingAs,
     FakeForge,
     FakeMemory,
     FakePublisher,
     FakeSecrets,
     FakeUpdater,
+    FakeUserTokens,
     FakeWorkspace,
     Reconfigured,
     RecordingNotifier,
     ScriptedRunner,
 )
+
+
+def _acting_as(forge: FakeForge) -> Any:
+    async def writer(login: str, token: Any) -> ActingAs:
+        return ActingAs(forge, login)
+
+    return writer
+
+
+def _pushing_as(publisher: FakePublisher) -> Any:
+    async def push(login: str, token: Any) -> FakePublisher:
+        return publisher
+
+    return push
+
 
 DEFAULT_LABELS = [
     "bug",
@@ -140,6 +157,7 @@ class Harness:
         sandbox = FakeSandbox()
         notifier = RecordingNotifier()
         defaults, routing, schedules = load_defaults()
+        publisher = FakePublisher()
         adapters = Adapters(
             forge=forge,
             actuator_reader=forge,
@@ -152,10 +170,13 @@ class Harness:
             sandbox=sandbox,
             notifier=notifier,
             clock=clock,
-            publisher=FakePublisher() if code_repo else None,
+            publisher=publisher if code_repo else None,
             updater=FakeUpdater() if code_repo else None,
             secrets=FakeSecrets(),
             reconfigure=Reconfigured(),
+            user_tokens=FakeUserTokens(),
+            writer_for_user=_acting_as(forge),
+            publisher_for_user=_pushing_as(publisher),
         )
         settings = ServiceSettings(
             login=forge.login,

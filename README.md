@@ -30,7 +30,8 @@
 
 ## What it does
 
-- **Reviews pull requests.** Agents draft the review, a second agent verifies the findings, and the draft waits for a maintainer to edit and post it. Follow-ups after new commits check what was fixed.
+- **Reviews pull requests.** Select PRs on Home, pick an agent, and press Review. The agent follows the repository's own review skill when it has one and may ask you questions; a second agent verifies the findings; the draft waits for you to edit and post, as the service or as yourself. Two people never run the same agent on the same commit. Reviews can also run every few hours or on every update, and re-review PRs that get new commits.
+- **Fixes what a review found.** One click hands the findings to an agent, which changes the PR's code. You read the diff, and the fix opens as your PR into the PR's branch, signed off by you.
 - **Ranks the queue.** Every open PR gets an internal priority from a rubric your maintainers own. Scores never appear on GitHub. Overrides teach the rubric.
 - **Keeps CI moving.** Failed jobs are diagnosed as flaky, infrastructure, or caused by the PR; flaky ones are rerun.
 - **Merges what is ready.** A maintainer arms a merge; the service merges once every check, approval, and rule in the repository's profile passes.
@@ -57,7 +58,7 @@ It adapts to each repository through a profile its maintainers approve, and it s
 <table>
   <tr>
     <td width="50%"><img src="docs/images/palette.png" alt="Command palette"><br><b>Go anywhere.</b> <kbd>Ctrl</kbd>/<kbd>⌘</kbd>+<kbd>K</kbd> finds pages, repositories, and PRs, runs commands, or hands your text to the agent.</td>
-    <td width="50%"><img src="docs/images/pr-dark.png" alt="Dark theme"><br><b>Light or dark.</b> It follows your system, or pick one; English and 中文.</td>
+    <td width="50%"><img src="docs/images/pr-dark.png" alt="Dark theme"><br><b>Light or dark, 中文 or English.</b> It follows your system's theme, or pick one. The dashboard starts in Chinese; the globe button in the top bar switches to English.</td>
   </tr>
 </table>
 
@@ -76,56 +77,57 @@ Open <http://127.0.0.1:7777/auth/dev?login=maria> to sign in as a sample maintai
 
 ## Run it on your repositories
 
+There are no configuration files to write. Start the service, open the link it prints, and answer a few questions in the browser.
+
 ### 1. What you need
 
 - Python 3.11+ with [uv](https://docs.astral.sh/uv/), Node 20+, and git.
 - At least one agent CLI, signed in: [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex](https://github.com/openai/codex), [OpenCode](https://opencode.ai), [Gemini CLI](https://github.com/google-gemini/gemini-cli), or Antigravity.
-- A GitHub identity for the service: a GitHub App (recommended) or a token, plus an OAuth app for dashboard sign-in. Its callback URL is `<base_url>/auth/callback`.
-- A private repository for the service's memory, such as `your-org/auto-maintainer-memory`.
+- A GitHub account for the service to act as. The simplest is the [GitHub CLI](https://cli.github.com) logged in on the host (`gh auth login`). The setup page can also take a token, or create a GitHub App for you.
 
-### 2. Configure the host
-
-```bash
-uv run am init            # writes ~/.config/auto-maintainer/local.yaml and secrets.env
-```
-
-Edit `~/.config/auto-maintainer/local.yaml`:
-
-```yaml
-port: 7777
-host: 0.0.0.0                           # listen on every interface
-base_url: http://your-host:7777         # what browsers open; GitHub sign-in calls back here
-operators: [your-login]
-github:
-  auth: token                           # or app, with app_id and private_key_path
-  token_env: GITHUB_TOKEN
-  oauth_client_id: Iv1.xxxxx
-memory:
-  remote: your-org/auto-maintainer-memory
-code_repo: your-org/auto-maintainer     # the service's own code; its maintainers own the service settings
-```
-
-Put the secrets in `~/.config/auto-maintainer/secrets.env` (mode 600):
+### 2. Start it and set it up in the browser
 
 ```bash
-GITHUB_TOKEN=...
-AM_OAUTH_CLIENT_SECRET=...
-```
-
-### 3. Check and start
-
-```bash
-uv run am doctor --live   # forge access, memory repo, and a tiny task on each agent CLI
+git clone https://github.com/RLinf/auto-maintainer.git
+cd auto-maintainer
+uv sync
 uv run am supervise       # serves on :7777, restarts after deploys, rolls back a bad one
 ```
 
-`am supervise` runs `am serve` and keeps it running. Use `am serve` directly when you develop. Press <kbd>Ctrl</kbd>+<kbd>C</kbd> once to stop either.
+Open the service's address in a browser (for example `http://192.168.1.20:7777`). Until it is set up, every page is the setup page, and it asks:
 
-To try it against GitHub without touching real repositories, run `uv run am serve --dev`. It holds every repository action in shadow, or acts only on `sandbox_repo` when you set one in `local.yaml`.
+1. **The address** people use to reach the service.
+2. **Connect GitHub**, the account the service acts as. Sign in with GitHub (you enter a one-time code on github.com and the service works as your account), have GitHub create a GitHub App, which gives the service its own bot account and lets your team sign in with GitHub, or paste a token. Whichever you choose also proves that you maintain the service's repository (the one your checkout came from): only its maintainers can set the host up.
+3. **Who can sign in.** Everyone signs in with GitHub; a sign-in app makes it one click.
+4. **The memory repository**, a private repository created or chosen with your GitHub account, or memory kept on the host.
+5. **The service's own repository**, filled in from your checkout.
+
+The terminal also prints a one-time setup link (`uv run am setup` prints it again). Opening it proves you are at the host instead, and also offers the GitHub CLI login already on the host.
+
+![First-run setup](docs/images/setup.png)
+
+**Finish** saves everything and starts the service without a restart. When the service acts as your own GitHub account, it also signs you in; with a GitHub App, you sign in with GitHub. The answers are kept in `~/.config/auto-maintainer/` (`local.yaml`, and `secrets.env` with mode 600), which you never need to open. To change them later, go to **Settings → System → Change host setup**.
+
+`am supervise` runs `am serve` and keeps it running. Use `am serve` directly when you develop. Press <kbd>Ctrl</kbd>+<kbd>C</kbd> once to stop either. To try it against GitHub without touching real repositories, run `uv run am serve --dev`: it holds every repository action in shadow.
+
+### 3. Sign in
+
+With GitHub sign-in set up, everyone signs in with GitHub. Without it, run this on the host and open the link it prints:
+
+```bash
+uv run am login           # a one-time link, valid for 10 minutes, as the GitHub account logged in on the host
+```
 
 ### 4. Add a repository
 
 On the dashboard, open **Repositories → Add repository**, or run `uv run am repo add your-org/your-repo`. An agent reads the repository and drafts its profile; a maintainer of that repository approves it. From then on the service works in shadow. Raise actions to `propose` (you approve each one) or `auto` when the agreement scores on the repository page say it is ready.
+
+### Why GitHub is involved twice
+
+The service needs two things from GitHub, and they are different:
+
+- **An account to act as.** It polls pull requests and posts what maintainers approve, around the clock, whether or not anyone is signed in. Usually that is the GitHub CLI's login on the host, or a GitHub App's bot account.
+- **To know who you are when you sign in.** Every approval and configuration change is checked against the signer's GitHub permission on that repository. On a one-person host, `am login` links are enough. For a team, the setup page has GitHub create a sign-in app. Signing in with GitHub also lets you post a review or open a fix PR as yourself; the service keeps that token on the host until you sign out.
 
 ## Configure it
 
@@ -135,7 +137,7 @@ There are three kinds of configuration, and each belongs to the people it affect
 |---|---|---|
 | **Service settings**: which agents run, model providers and their keys, budgets, the default agent per task, polling and write limits | **Settings** page, by asking the agent or editing `config/service.yaml` | Maintainers of the service's repository (`code_repo`) |
 | **Repository profile**: scope, labels, checks, review template, rubric, merge rules, autonomy per action, routing | Each repository's page, by asking the agent or editing its settings layer; public conventions can live in `.github/auto-maintainer.yml` in the repository | Maintainers of that repository |
-| **Host**: port, data directory, GitHub credentials, lab hosts, operators | `local.yaml` and `secrets.env` | Whoever runs the host |
+| **Host**: address, the service's GitHub account, sign-in, memory repository | The setup page; later **Settings → System → Change host setup** | Whoever holds the setup code on the first run; then maintainers of the service's repository |
 
 Every change is checked against the user's GitHub permission at the moment it is made (`maintain` by default). Others can propose a change, and it waits for a maintainer. The service can never approve its own changes. Each change is a commit in the memory repository, so there is a history and a diff.
 
@@ -171,7 +173,7 @@ Playbooks (triage, review, follow-up, priority, CI diagnosis, hygiene, merge, on
 
 Some limits hold whatever the configuration says:
 
-- The service never approves PRs and never pushes to target repositories.
+- The service never approves PRs, and its own account never pushes to target repositories. A fix is pushed only when a maintainer opens it as themselves.
 - It posts at most one review per head commit.
 - It mentions only the PR's author and CODEOWNERS.
 - Internal priorities never reach public text.

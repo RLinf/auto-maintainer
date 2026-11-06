@@ -62,6 +62,7 @@ from ..domain.agents import (
 )
 from ..domain.ports import AgentQuestions
 from ..domain.settings import ProviderBinding
+from .approver import POSTING_ANSWER, posting_request
 from .sandbox import build_env, scrub
 from .structured import extract_json
 
@@ -380,8 +381,10 @@ class ExecRuntime:
     async def resolve(self, task: AgentTask, question: AgentQuestion) -> AgentAnswer:
         """Answer a question the CLI is blocked on.
 
-        The adapter's automatic rules come first. Then a ``restricted`` run, or a
-        runtime without a question desk, is denied; otherwise a reviewer decides.
+        A request to post to GitHub, or a question about whether to, is turned down
+        at once: agents never post. The adapter's automatic rules come next. Then a
+        ``restricted`` run, or a runtime without a question desk, is denied; otherwise
+        a reviewer decides, preferably the one who asked for the work.
         """
         question = question.model_copy(
             update={
@@ -391,9 +394,12 @@ class ExecRuntime:
                 "repo": task.repo,
                 "pr": task.pr,
                 "job_id": task.job_id,
+                "asked_for": task.requested_by,
                 "untrusted_input": task.untrusted_input,
             }
         )
+        if posting_request(question):
+            return denial(POSTING_ANSWER)
         automatic = self.auto_answer(task, question)
         if automatic is not None:
             return automatic

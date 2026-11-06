@@ -58,7 +58,7 @@ from .records import (
     ReviewRecord,
 )
 from .scoring import Evaluation
-from .settings import SecretInfo
+from .settings import SecretInfo, UserToken
 from .snapshot import (
     CommentRef,
     IssueSnapshot,
@@ -202,6 +202,13 @@ class ForgeWriter(Protocol):
         """Open a PR on a repository the service owns."""
         ...
 
+    async def create_pr(
+        self, repo: str, head: str, base: str, title: PublicText, body: PublicText
+    ) -> CommentRef:
+        """Open a PR on a repository the service maintains (``head`` may be
+        ``owner:branch`` from another repository in the same fork network)."""
+        ...
+
     async def merge_service_pr(
         self, repo: str, number: int, method: str = "merge"
     ) -> str: ...
@@ -343,9 +350,16 @@ class BranchPublisher(Protocol):
     """Puts a patch on a new branch of the service's own repository (actuator only)."""
 
     async def publish(
-        self, repo: str, base_sha: str, patch: str, branch: str, message: str
+        self,
+        repo: str,
+        base_sha: str,
+        patch: str,
+        branch: str,
+        message: str,
+        author: tuple[str, str] | None = None,
     ) -> str:
-        """Apply ``patch`` on ``base_sha``, commit it, push ``branch``; return the commit."""
+        """Apply ``patch`` on ``base_sha``, commit it (as ``author``: name and email,
+        else the service), push ``branch``; return the commit."""
         ...
 
 
@@ -475,6 +489,14 @@ class SecretStore(Protocol):
     async def describe(self, names: list[str]) -> list[SecretInfo]: ...
     async def set(self, name: str, value: str, by: str) -> None: ...
     async def delete(self, name: str) -> None: ...
+
+
+class UserTokens(Protocol):
+    """Signed-in maintainers' own GitHub tokens, on the host only (``UserToken``)."""
+
+    async def get(self, login: str) -> UserToken | None: ...
+    async def set(self, login: str, token: UserToken) -> None: ...
+    async def delete(self, login: str) -> None: ...
 
 
 class Store(Protocol):

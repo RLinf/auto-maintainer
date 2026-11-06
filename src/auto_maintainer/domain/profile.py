@@ -147,7 +147,8 @@ class ReviewScan(_Section):
     max_prs: int = 5
     """At most this many PRs per scan, highest priority first."""
     followups: bool = True
-    """Also follow up on reviewed PRs that received new commits."""
+    """Re-review reviewed PRs that received new commits, in scans and, with
+    ``review.trigger: events``, as the commits arrive."""
 
     @field_validator("schedule")
     @classmethod
