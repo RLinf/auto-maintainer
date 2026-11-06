@@ -337,6 +337,14 @@ class AcpConversation(Conversation):
                 self.current.append(str(text))
                 return [AgentEvent(type=AgentEventType.MESSAGE, text=str(text))]
             return []
+        if kind == "agent_thought_chunk":
+            content = update.get("content") or {}
+            text = content.get("text") if isinstance(content, dict) else None
+            return (
+                [AgentEvent(type=AgentEventType.THINKING, text=str(text))]
+                if text
+                else []
+            )
         if kind == "tool_call":
             self._flush()
             return [

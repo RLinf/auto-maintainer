@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
 from pathlib import Path
 
@@ -43,6 +44,7 @@ from auto_maintainer.profiles.loader import IN_REPO_PATH
 from auto_maintainer.profiles.lock import parse_lock
 from auto_maintainer.profiles.packs import PackLibrary
 from auto_maintainer.resources import data_dir
+from auto_maintainer.testing.fakes import make_pr
 from auto_maintainer.testing.harness import Harness, load_defaults
 
 REPO = "acme/widget"
@@ -349,5 +351,71 @@ async def test_adding_a_repo_again_drafts_a_profile_only_when_none_exists(
         await h.service.add_repo(REPO, "maria")
         await h.service.bus.drain()
         assert added == [REPO]
+    finally:
+        await h.close()
+
+
+async def test_a_repository_is_read_as_soon_as_its_first_profile_is_approved(
+    tmp_path: Path,
+) -> None:
+    h = await Harness.create(tmp_path, approve=False)
+    try:
+        h.forge.put_pr(make_pr(REPO, 7))
+        await h.service.add_repo(REPO, "maria")
+        assert not (await h.store.get_repo(REPO)).active
+        state = await h.service.profiles.refresh(REPO)
+        decision, change = await h.service.profiles.approve_candidate(
+            REPO, "maria", state.candidate_hash or ""
+        )
+        assert decision.allowed and change is not None
+        await h.store.save_memory_change(change)
+        await h.service.submit_memory_change(change)
+        await h.service.bus.drain()
+        await asyncio.gather(*h.service._polls.values())
+        assert [p.number for p in await h.store.list_snapshots(REPO)] == [7], (
+            "the PRs appear without waiting for the next scheduled poll"
+        )
+    finally:
+        await h.close()
+
+
+async def test_two_approvals_at_once_merge_a_change_once(tmp_path: Path) -> None:
+    """The action that saved a change and a click on its card can reach the memory
+    gate together; the second must see the change merged, not fail and call it a
+    conflict."""
+    from auto_maintainer.actuator.memory_gate import try_merge_memory
+    from auto_maintainer.domain.memory import (
+        MemoryChange,
+        MemoryChangeState,
+        Tier,
+        repo_dir,
+    )
+
+    h = await Harness.create(tmp_path)
+    try:
+        change = MemoryChange(
+            tier=Tier.T1,
+            title="lesson from maria",
+            files={f"{repo_dir(REPO)}/knowledge/review_lessons.md": "- a lesson\n"},
+            repos=[REPO],
+            approvals={REPO: ["maria"]},
+        )
+        await h.store.save_memory_change(change)
+        merged: list[str] = []
+        merge = h.memory.merge_change
+
+        async def merge_once(c: MemoryChange) -> str:
+            if c.id in merged:
+                raise RuntimeError("merge: am/mem/x - not something we can merge")
+            merged.append(c.id)
+            await asyncio.sleep(0)
+            return await merge(c)
+
+        h.memory.merge_change = merge_once
+        x = h.service.actuator.x
+        await asyncio.gather(try_merge_memory(x, change), try_merge_memory(x, change))
+        assert merged == [change.id]
+        stored = await h.store.get_memory_change(change.id)
+        assert stored is not None and stored.state == MemoryChangeState.MERGED
     finally:
         await h.close()

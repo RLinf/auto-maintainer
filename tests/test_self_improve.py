@@ -106,6 +106,35 @@ async def test_a_chat_request_becomes_a_pr(h: Harness, tmp_path: Path) -> None:
     assert any("I opened" in m["text"] for m in messages if m["role"] == "assistant")
 
 
+async def test_a_conversation_runs_one_code_change_at_a_time(
+    h: Harness, tmp_path: Path
+) -> None:
+    h.runner.on(
+        "chat",
+        lambda task: {
+            "reply": "Started.",
+            "proposals": [{"kind": "improve", "request": "Add a ping endpoint."}],
+        },
+    )
+    app = create_app(h.service, data_dir=tmp_path, allow_dev_login=True)
+    async with _client(app, "walt") as walt:
+        thread = (await walt.post("/api/chat/threads", json={"text": "ping"})).json()
+        url = f"/api/chat/threads/{thread['id']}/messages"
+        first = (await walt.post(url, json={"text": "Answer pings."})).json()
+        await h.service.bus.drain()
+        second = (await walt.post(url, json={"text": "I don't see it."})).json()
+        job = await walt.get(f"/api/jobs/{first['jobs'][0]}")
+        assert job.status_code == 200, job.text
+        job = job.json()
+    assert first["jobs"] and second["jobs"] == first["jobs"]
+    assert "did not start another" in second["text"]
+    assert job["playbook"] == "self_improve"
+    improves = [
+        j for j in await h.store.list_jobs(limit=1000) if j.playbook == "self_improve"
+    ]
+    assert len(improves) == 1
+
+
 async def test_no_change_means_no_pr(h: Harness, tmp_path: Path) -> None:
     from auto_maintainer.domain.events import Event, EventKind
 

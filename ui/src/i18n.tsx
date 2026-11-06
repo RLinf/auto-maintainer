@@ -1230,6 +1230,14 @@ const zh: Record<string, string> = {
   "set in the settings": "在设置中指定",
   "each task follows its own order below": "每个任务按下表各自的顺序",
   "Make this the default agent for every task: ": "把它设为所有任务的默认智能体：",
+  // the agent window's steps and the P0/P1 counts
+  "Thinking": "思考",
+  "This job is no longer kept.": "这个任务的记录已不再保留。",
+  "Starting the job…": "正在启动任务…",
+  "What the agent did": "智能体做了什么",
+  "Its steps are no longer kept.": "它的步骤记录已不再保留。",
+  "Open PRs at P0": "P0 级的未关闭 PR",
+  "Open PRs at P1": "P1 级的未关闭 PR",
 };
 
 const LangContext = createContext<{ lang: Lang; setLang: (l: Lang) => void }>({ lang: "zh", setLang: () => {} });

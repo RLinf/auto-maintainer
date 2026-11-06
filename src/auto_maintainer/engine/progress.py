@@ -32,6 +32,7 @@ from ..domain.clock import Clock
 from ..domain.events import Event, EventKind
 from ..domain.ports import Store
 from ..domain.progress import JobStep, step_from_event
+from ..domain.secrets import redact_secrets
 
 MAX_STEPS = 300
 """Steps kept per job; the first ones (how it started) and the newest are kept."""
@@ -43,6 +44,13 @@ _INDEX = "job-steps:index"
 
 def _key(job_id: str) -> str:
     return f"job-steps:{job_id}"
+
+
+def _joined(text: str, more: str, limit: int = 4000) -> str:
+    """``text`` followed by ``more``, redacted again (a credential can span chunks),
+    keeping the last ``limit`` characters."""
+    out, _ = redact_secrets(text + more)
+    return out if len(out) <= limit else "…" + out[-(limit - 1) :]
 
 
 class JobProgress:
@@ -71,7 +79,18 @@ class JobProgress:
             while len(self._live) > 50:
                 self._live.popitem(last=False)
         self._jobs[task.job_id] = (task.repo, task.pr)
-        steps.append(step)
+        last = steps[-1] if steps else None
+        if (
+            last is not None
+            and step.kind in ("message", "thinking")
+            and last.kind == step.kind
+            and last.runtime == step.runtime
+        ):
+            # CLIs that stream (ACP) send a message in many chunks: one step per message.
+            last.text = _joined(last.text, step.text)
+        else:
+            step.text = _joined("", step.text)
+            steps.append(step)
         if len(steps) > MAX_STEPS:
             del steps[10 : len(steps) - (MAX_STEPS - 10)]
         if event.type == AgentEventType.FINAL:

@@ -454,7 +454,17 @@ export interface ChatMessage {
   text: string;
   proposals: string[];
   changes?: string[];
+  /** Jobs the answer started, by the id of their request. */
+  jobs?: string[];
+  /** The agent run that wrote an answer; its steps stay readable. */
+  run_id?: string | null;
   created_at: string;
+}
+
+export interface ChatSteps {
+  run: string | null;
+  live: boolean;
+  steps: JobStep[];
 }
 
 export interface AgreementRow {
@@ -573,7 +583,7 @@ export interface MachineCheck {
 }
 
 export interface JobStep {
-  kind: "start" | "message" | "tool" | "result" | "question" | "error" | "done";
+  kind: "start" | "message" | "thinking" | "tool" | "result" | "question" | "error" | "done";
   text: string;
   detail: string;
   runtime: string;

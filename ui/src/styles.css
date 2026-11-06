@@ -617,6 +617,8 @@ textarea.mono-input { width: 100%; }
 .sdot { flex-shrink: 0; width: 10px; height: 10px; margin: 5px 0 0 3px; border-radius: 50%; background: var(--surface-3); border: 2px solid var(--surface); box-sizing: content-box; position: relative; z-index: 1; }
 .sdot.msg { background: var(--accent); }
 .sdot.tool { background: var(--text-2); }
+.sdot.think { background: var(--border-strong); }
+.step-think { white-space: pre-wrap; font-size: 12.5px; color: var(--text-2); max-height: 260px; overflow: auto; }
 .sdot.ask { background: var(--warn); }
 .sdot.ok { background: var(--ok); }
 .sdot.bad { background: var(--bad); }
@@ -667,3 +669,10 @@ details.pv-section[open] > summary { margin-bottom: 6px; }
 .pv-now { font-weight: 600; }
 .pv-toggle { align-self: flex-start; max-width: 100%; height: auto; min-height: 28px; white-space: normal; text-align: left; line-height: 1.4; padding-top: 4px; padding-bottom: 4px; }
 @media (max-width: 640px) { .pv-row { grid-template-columns: 1fr; gap: 2px; } }
+
+/* ---- the agent window: live steps and what an answer did ----------------------- */
+.agent-live { border: 1px solid var(--border); border-radius: var(--r); padding: 8px 10px; background: var(--surface-2); }
+.run-steps { margin: -4px 0 4px 4px; }
+.run-steps > summary { cursor: pointer; }
+.run-steps[open] > summary { margin-bottom: 6px; }
+.change-note { margin: 0; padding: 6px 10px; border-left: 3px solid var(--accent); background: var(--surface-2); border-radius: var(--r-sm); white-space: pre-wrap; }

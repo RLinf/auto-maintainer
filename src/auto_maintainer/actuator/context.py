@@ -16,8 +16,9 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from ..domain.actions import Action, LabReproducePayload, LabRunPayload
@@ -108,6 +109,9 @@ class ExecContext:
     to post as themselves; ``None`` when their sign-in no longer works."""
     publisher_as: Callable[[str], Awaitable[BranchPublisher | None]] | None = None
     """A branch publisher pushing as a signed-in maintainer, for fix PRs."""
+    memory_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    """Held while the memory gate stages or merges a change: an approval on the
+    dashboard and the action that saved the change can reach the gate at once."""
 
     async def public(
         self,

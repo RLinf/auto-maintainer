@@ -481,3 +481,24 @@ async def test_acp_failure_to_start_a_session_ends_the_run(
     _, result = await _run(rt, _task(tmp_path))
     assert not result.ok and result.error_kind == "auth"
     assert json.dumps(cli.argv())
+
+
+def test_acp_thoughts_are_thinking_events_and_stay_out_of_the_answer(
+    tmp_path: Path,
+) -> None:
+    from auto_maintainer.agents.acp import AcpConversation
+    from auto_maintainer.agents.adapters.antigravity import AntigravityRuntime
+    from auto_maintainer.domain.agents import AgentEventType, AgentTask
+
+    conversation = AcpConversation(
+        AntigravityRuntime(runs_dir=tmp_path),
+        AgentTask(kind="review", prompt="x", workdir=tmp_path),
+    )
+    [event] = conversation._update(
+        {
+            "sessionUpdate": "agent_thought_chunk",
+            "content": {"type": "text", "text": "Checking the diff"},
+        }
+    )
+    assert event.type == AgentEventType.THINKING and event.text == "Checking the diff"
+    assert conversation.current == []

@@ -19,8 +19,15 @@ export function ChangeById({ id }: { id: string }) {
   const t = useT();
   const settings = useSettings();
   const memory = useMemoryChanges();
-  const change = settings.data?.pending.find((c) => c.id === id) ?? memory.data?.find((c) => c.id === id);
-  if (settings.isLoading || memory.isLoading || (!change && (settings.isFetching || memory.isFetching))) return null;
+  // Read by id too, so the card stays after the change merges or is rejected, with
+  // its outcome, instead of vanishing from the lists of open changes.
+  const byId = useQuery({
+    queryKey: ["memory", "change", id],
+    queryFn: () => api.get<MemoryChange>(`/api/memory/changes/${id}`),
+    retry: false,
+  });
+  const change = byId.data ?? settings.data?.pending.find((c) => c.id === id) ?? memory.data?.find((c) => c.id === id);
+  if (!change && (byId.isLoading || settings.isLoading || memory.isLoading)) return null;
   if (!change) {
     return (
       <span className="small muted">
@@ -81,8 +88,9 @@ export function SettingsChangeCard({ change, compact = false }: { change: Memory
         )
       ) : (
         <>
+          {change.description && !change.profiles?.length && <blockquote className="change-note">{change.description}</blockquote>}
           <ChangeProfiles change={change} />
-          <details open={!compact && !change.profiles?.length}>
+          <details open={!compact && !change.profiles?.length && !change.description}>
             <summary className="small">
               {Object.keys(change.files).length} {t("files")}
             </summary>

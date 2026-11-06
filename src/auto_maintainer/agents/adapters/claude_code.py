@@ -231,6 +231,12 @@ class ClaudeCodeRuntime(ExecRuntime):
                     events.append(
                         AgentEvent(type=AgentEventType.MESSAGE, text=block["text"])
                     )
+                elif btype == "thinking" and block.get("thinking"):
+                    events.append(
+                        AgentEvent(
+                            type=AgentEventType.THINKING, text=str(block["thinking"])
+                        )
+                    )
                 elif btype == "tool_use":
                     events.append(
                         AgentEvent(

@@ -31,7 +31,9 @@ from .agents import AgentEvent, AgentEventType
 from .clock import utc_now
 from .secrets import redact_secrets
 
-StepKind = Literal["start", "message", "tool", "result", "question", "error", "done"]
+StepKind = Literal[
+    "start", "message", "thinking", "tool", "result", "question", "error", "done"
+]
 
 _INPUT_KEYS = (
     "command",
@@ -83,9 +85,10 @@ def step_from_event(event: AgentEvent, runtime: str, task_kind: str) -> JobStep 
     kind = event.type
     if kind == AgentEventType.STARTED:
         return JobStep(kind="start", **base)
-    if kind == AgentEventType.MESSAGE:
-        text = _clean(event.text, 4000)
-        return JobStep(kind="message", text=text, **base) if text else None
+    if kind in (AgentEventType.MESSAGE, AgentEventType.THINKING):
+        text, _ = redact_secrets(event.text)
+        step = "message" if kind == AgentEventType.MESSAGE else "thinking"
+        return JobStep(kind=step, text=text, **base) if text.strip() else None
     if kind == AgentEventType.TOOL_CALL:
         return JobStep(
             kind="tool",

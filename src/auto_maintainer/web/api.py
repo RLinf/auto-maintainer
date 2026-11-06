@@ -1584,6 +1584,27 @@ def build_router() -> APIRouter:
             if set(c.repos) <= visible and c.repos
         ]
 
+    @r.get("/memory/changes/{change_id}")
+    async def memory_change(
+        request: Request, change_id: str, user: User = Depends(current_user)
+    ) -> dict[str, Any]:
+        """One memory change in any state, for cards that outlive its approval."""
+        service = service_of(request)
+        change = await service.store.get_memory_change(change_id)
+        if change is None:
+            raise HTTPException(404, "no such memory change")
+        if change.service:
+            if not (await service.service_gate(user.login)).allowed:
+                raise HTTPException(404, "no such memory change")
+        elif not change.repos or not set(change.repos) <= set(
+            await visible_repos(service, user)
+        ):
+            raise HTTPException(404, "no such memory change")
+        return {
+            **change.model_dump(mode="json"),
+            "profiles": await _profile_changes(service, change),
+        }
+
     @r.post("/memory/changes/{change_id}/approve")
     async def approve_memory(
         request: Request, change_id: str, user: User = Depends(current_user)

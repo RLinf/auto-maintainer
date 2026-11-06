@@ -160,8 +160,13 @@ async def _job(service: Service, user: User, job_id: str) -> Job:
         raise HTTPException(404, "no such job yet")
     if job.repo:
         await require_view(service, user, job.repo)
-    elif user.login not in service.settings.operators:
-        raise HTTPException(403, "only operators see jobs outside repositories")
+    elif (
+        user.login not in service.settings.operators
+        and (_payload(job).get("by") or "").lower() != user.login.lower()
+    ):
+        raise HTTPException(
+            403, "only operators and whoever asked see jobs outside repositories"
+        )
     return job
 
 

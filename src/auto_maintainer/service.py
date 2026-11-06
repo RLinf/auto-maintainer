@@ -227,6 +227,8 @@ class Service:
         self.restart_requested = asyncio.Event()
         """Set after a deploy; ``am serve`` then exits for its supervisor to restart it."""
         self._confirming: asyncio.Task[None] | None = None
+        self._polls: dict[str, asyncio.Task[None]] = {}
+        """Polls started because a repository's approved profile changed, by repository."""
         self.questions = QuestionDesk(
             adapters.store,
             self.bus,
@@ -453,6 +455,8 @@ class Service:
         self.closing.set()
         if self._confirming is not None:
             self._confirming.cancel()
+        for task in self._polls.values():
+            task.cancel()
         await self.scheduler.stop()
         await self.engine.stop()
         await self.actuator.stop()
@@ -676,6 +680,27 @@ class Service:
         paths = set(event.payload.get("paths") or [])
         if paths & {SETTINGS_PATH, LEGACY_RUNTIMES_PATH, "remote"}:
             await self.reload_settings()
+        if event.repo and lock_path(event.repo) in paths:
+            self._poll_now(event.repo)
+
+    def _poll_now(self, repo: str) -> None:
+        """Read ``repo``'s PRs now instead of at the next scheduled poll: its approved
+        profile just changed, and a first approval is what makes it active. The poll
+        runs off the event dispatcher, since a first poll reads every open PR."""
+        running = self._polls.get(repo)
+        if not self.serves(repo) or (running is not None and not running.done()):
+            return
+
+        async def poll() -> None:
+            record = await self.store.get_repo(repo)
+            if record is None or not record.active:
+                return
+            try:
+                await self.poller.poll_repo(repo)
+            except Exception:
+                log.exception("polling %s after its profile changed failed", repo)
+
+        self._polls[repo] = asyncio.create_task(poll(), name=f"poll {repo}")
 
     # -- operations used by the dashboard and the CLI ----------------------------------
 

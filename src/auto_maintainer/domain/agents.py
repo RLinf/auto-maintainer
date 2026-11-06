@@ -194,6 +194,8 @@ class AgentEventType(StrEnum):
     STARTED = "started"
     """Reported by the router when an attempt begins; adapters never emit it."""
     MESSAGE = "message"
+    THINKING = "thinking"
+    """The agent's reasoning as the CLI reports it, for people watching; never parsed."""
     TOOL_CALL = "tool_call"
     TOOL_RESULT = "tool_result"
     USAGE = "usage"

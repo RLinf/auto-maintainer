@@ -64,6 +64,19 @@ export function needsMe(job: AgentJob, me: string): boolean {
   return job.questions_for_me > 0 || job.produced.some((p) => p.proposal && p.for === me);
 }
 
+/** A job started from somewhere else (a chat answer), as one line that opens its live view. */
+export function JobById({ id }: { id: string }) {
+  const t = useT();
+  const job = useJob(id);
+  const me = useMe();
+  if (job.data) return <WorkRow job={job.data} me={me.data?.login ?? ""} />;
+  return (
+    <button className="work-row" onClick={() => openJob(id)}>
+      <span className="small muted">{job.isError ? t("This job is no longer kept.") : t("Starting the job…")}</span>
+    </button>
+  );
+}
+
 function useJob(id: string | null) {
   return useQuery({
     queryKey: ["job", id],
@@ -133,6 +146,8 @@ function stepLine(step: JobStep, t: (s: string) => string): string {
       return `${agentName(step.runtime)} ${t("started")}`;
     case "message":
       return step.text.split("\n")[0].slice(0, 90);
+    case "thinking":
+      return `${t("Thinking")}: ${step.text.trim().split("\n").slice(-1)[0].slice(0, 80)}`;
     case "tool":
       return `${step.text}${step.detail ? `: ${step.detail.split("\n")[0].slice(0, 70)}` : ""}`;
     case "result":
@@ -295,7 +310,7 @@ function JobView({ id, onClose }: { id: string; onClose: () => void }) {
   );
 }
 
-function Steps({ steps, active }: { steps: JobStep[]; active: boolean }) {
+export function Steps({ steps, active }: { steps: JobStep[]; active: boolean }) {
   const t = useT();
   if (!steps.length)
     return <div className="small muted">{active ? t("The agent has not started yet.") : t("This job ran no agent, or its steps were not kept.")}</div>;
@@ -343,6 +358,20 @@ function Step({ step, result }: { step: JobStep; result: JobStep | null }) {
         <li className="step">
           <span className="sdot msg" />
           <Markdown text={step.text} className="step-msg" />
+        </li>
+      );
+    case "thinking":
+      return (
+        <li className="step">
+          <span className="sdot think" />
+          <div className="stack" style={{ gap: 4, minWidth: 0 }}>
+            <button className="step-tool" onClick={() => setOpen(!open)} aria-expanded={open}>
+              <Icon name={open ? "chevronDown" : "chevronRight"} size={12} />
+              <span className="muted">{t("Thinking")}</span>
+              {!open && <span className="ellipsis muted small">{step.text.trim().split("\n").slice(-1)[0]}</span>}
+            </button>
+            {open && <div className="step-think">{step.text.trim()}</div>}
+          </div>
         </li>
       );
     case "tool":

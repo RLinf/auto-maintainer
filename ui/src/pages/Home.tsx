@@ -98,7 +98,8 @@ export default function HomePage({ me }: { me: Me }) {
   const first = (me.name || me.login).split(" ")[0];
 
   const running = (work.data ?? []).filter((j) => ACTIVE.has(j.status)).length;
-  const top = byTier("P0") + byTier("P1");
+  const p0 = byTier("P0");
+  const p1 = byTier("P1");
   return (
     <div className="home">
       <div className="hero">
@@ -115,9 +116,14 @@ export default function HomePage({ me }: { me: Me }) {
               <Icon name="pr" size={14} />
               {prs.isLoading ? "…" : needs.length} {t("PRs need review")}
             </Link>
-            {top > 0 && (
-              <Link to="/prs?f.tier=P0,P1">
-                <Tier tier={byTier("P0") ? "P0" : "P1"} /> {top} {t("top priority")}
+            {p0 > 0 && (
+              <Link to="/prs?f.tier=P0" title={t("Open PRs at P0")}>
+                <Tier tier="P0" /> {p0}
+              </Link>
+            )}
+            {p1 > 0 && (
+              <Link to="/prs?f.tier=P1" title={t("Open PRs at P1")}>
+                <Tier tier="P1" /> {p1}
               </Link>
             )}
             {running > 0 && (

@@ -206,6 +206,8 @@ class ChatThread(BaseModel):
     works in for the whole conversation, so its session can resume there."""
     session: str | None = None
     runtime: str | None = None
+    live_run: str | None = None
+    """The run answering the newest message, while it runs; its steps are live."""
     id: str = Field(default_factory=lambda: new_id("chat"))
     created_at: datetime = Field(default_factory=utc_now)
 
@@ -218,7 +220,12 @@ class ChatMessage(BaseModel):
     proposals: list[str] = Field(default_factory=list)
     """Actions proposed in this message, by action id."""
     changes: list[str] = Field(default_factory=list)
-    """Configuration changes drafted in this message, by memory change id."""
+    """Memory changes this message made (configuration drafts, lessons), by id."""
+    jobs: list[str] = Field(default_factory=list)
+    """Jobs this message started (self-improvements), by the id of the request
+    event, which the jobs API resolves."""
+    run_id: str | None = None
+    """For an answer: the agent run that wrote it, whose steps stay readable."""
     id: str = Field(default_factory=lambda: new_id("msg"))
     created_at: datetime = Field(default_factory=utc_now)
 

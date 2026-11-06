@@ -29,7 +29,17 @@ log = logging.getLogger(__name__)
 
 
 async def try_merge_memory(x: ExecContext, change: MemoryChange) -> MemoryChange:
-    """Stage ``change`` if needed, and merge it when the memory gate allows."""
+    """Stage ``change`` if needed, and merge it when the memory gate allows.
+
+    One change at a time, read again once the lock is held, so a change another
+    caller just merged is returned as merged instead of failing to merge twice.
+    """
+    async with x.memory_lock:
+        fresh = await x.store.get_memory_change(change.id)
+        return await _try_merge(x, fresh or change)
+
+
+async def _try_merge(x: ExecContext, change: MemoryChange) -> MemoryChange:
     if change.state != MemoryChangeState.OPEN:
         return change
     if not change.branch:

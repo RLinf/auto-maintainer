@@ -160,6 +160,46 @@ async def test_saving_settings_reports_a_failed_memory_write(demo) -> None:
     assert (await h.service.profiles.active("acme/widget")).merge.enabled is True
 
 
+async def test_a_lesson_from_chat_stays_on_the_answer(demo) -> None:
+    from auto_maintainer.domain.agents import AgentEvent, AgentEventType
+
+    h, app = demo
+    h.runner.on(
+        "chat",
+        lambda task: {
+            "reply": "Saved.",
+            "proposals": [
+                {"kind": "lesson", "repo": "acme/widget", "lesson": "Docs PRs are P3."}
+            ],
+        },
+    )
+    h.runner.steps["chat"] = [
+        AgentEvent(type=AgentEventType.THINKING, text="Reading the "),
+        AgentEvent(type=AgentEventType.THINKING, text="priority rules."),
+        AgentEvent(type=AgentEventType.TOOL_CALL, text="Read file", data={"path": "x"}),
+    ]
+    async with _client(app, "maria") as maria:
+        thread = (await maria.post("/api/chat/threads", json={"text": "hi"})).json()
+        base = f"/api/chat/threads/{thread['id']}"
+        answer = (
+            await maria.post(f"{base}/messages", json={"text": "Docs: P3"})
+        ).json()
+        await h.service.actuator.drain()
+        [change_id] = answer["changes"]
+        change = (await maria.get(f"/api/memory/changes/{change_id}")).json()
+        steps = (
+            await maria.get(f"{base}/steps", params={"run": answer["run_id"]})
+        ).json()
+        live = (await maria.get(f"{base}/steps")).json()
+        other = await maria.get(f"{base}/steps", params={"run": "run_elsewhere"})
+    assert change["state"] == "merged" and change["description"] == "Docs PRs are P3."
+    kinds = [s["kind"] for s in steps["steps"]]
+    assert kinds == ["start", "thinking", "tool", "done"], kinds
+    assert steps["steps"][1]["text"] == "Reading the priority rules."
+    assert steps["live"] is False and live == {"run": None, "live": False, "steps": []}
+    assert other.status_code == 404
+
+
 async def test_approve_and_edit_a_proposal(demo) -> None:
     h, app = demo
     async with _client(app, "maria") as maria:

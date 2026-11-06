@@ -45,6 +45,7 @@ from ..domain.actions import (
 )
 from ..domain.agents import AgentTask, TaskKind
 from ..domain.events import Event, EventKind
+from ..domain.ids import new_id
 from ..domain.memory import (
     MemoryChange,
     Signal,
@@ -53,7 +54,7 @@ from ..domain.memory import (
     profile_path,
     repo_dir,
 )
-from ..domain.records import ChatMessage, ChatThread
+from ..domain.records import ChatMessage, ChatThread, JobStatus
 from ..domain.secrets import redact_secrets
 from ..domain.settings import (
     PROVIDER_PROTOCOLS,
@@ -183,6 +184,34 @@ def build_router() -> APIRouter:
             for m in await service.store.list_messages(thread_id)
         ]
 
+    @r.get("/threads/{thread_id}/steps")
+    async def steps(
+        request: Request,
+        thread_id: str,
+        run: str | None = None,
+        user: User = Depends(current_user),
+    ) -> dict[str, Any]:
+        """What the agent did for one answer (``run``), or is doing for the newest
+        message when ``run`` is omitted."""
+        service = service_of(request)
+        thread = await service.store.get_thread(thread_id)
+        if thread is None or thread.owner != user.login:
+            raise HTTPException(404, "unknown thread")
+        if run is None:
+            run = thread.live_run
+        elif run != thread.live_run and not any(
+            m.run_id == run for m in await service.store.list_messages(thread_id)
+        ):
+            raise HTTPException(404, "no such run in this conversation")
+        if run is None:
+            return {"run": None, "live": False, "steps": []}
+        found = await service.progress.steps(run)
+        return {
+            "run": run,
+            "live": run == thread.live_run,
+            "steps": [s.model_dump(mode="json") for s in found],
+        }
+
     @r.post("/threads/{thread_id}/messages")
     async def post(
         request: Request,
@@ -210,11 +239,17 @@ def build_router() -> APIRouter:
         prompt = "\n\n".join(
             [
                 f"You are the maintainers' assistant for {', '.join(repos) or 'no repositories yet'}. You are talking to {user.login}. "
-                "Answer from the data below. You cannot act directly: put any change you suggest in `proposals`; "
-                "the maintainer approves each one before it runs. Internal priorities are private: never put them in public text. "
-                "When the maintainer asks for something the service cannot do yet, or for a change in how it works that needs "
-                "code rather than a setting or a lesson, propose kind=improve with the request spelled out: the service then "
-                "changes its own code and opens a PR that a maintainer of its repository must approve before it is merged and deployed.",
+                "Answer from the data below. You cannot act directly: put any change you suggest in `proposals`. "
+                "Each proposal appears as a card under your answer, and they differ in what happens next: actions on a PR "
+                "(label, comment, rerun, ...) and configuration changes wait for the maintainer to approve the card; "
+                "a lesson is saved at once when this maintainer may configure the repository, and otherwise waits for one "
+                "who may; an improve request starts at once in the background. Say which of these happens; never ask the "
+                "maintainer to approve a lesson they may save or an improve request. Internal priorities are private: never "
+                "put them in public text. When the maintainer asks for something the service cannot do yet, or for a change "
+                "in how it works that needs code rather than a setting or a lesson, propose kind=improve with the request "
+                "spelled out: the service changes its own code in the background and opens a PR on its own repository, which "
+                "a maintainer of that repository reviews before it is merged and deployed. A conversation runs one such "
+                "request at a time: if the history shows one already started, do not propose it again.",
                 f"Memory index:\n{memory_index or '(empty)'}",
                 "Review queue (internal):\n" + ("\n".join(queue) or "(empty)"),
                 await _page_block(service, user, body.context, repos),
@@ -231,14 +266,22 @@ def build_router() -> APIRouter:
         route = service.settings.routing.get("chat")
         if route is None:
             raise HTTPException(500, "no chat route is configured")
+        run = new_id("run")
         task = AgentTask(
             kind=TaskKind.CHAT,
             prompt=prompt,
             workdir=workdir,
             output_schema=ChatAnswer.model_json_schema(),
             resume_session=thread.session,
+            job_id=run,
         )
-        result = await service.a.agents.run(task, route, ChatAnswer)
+        thread.live_run = run
+        await service.store.save_thread(thread)
+        try:
+            result = await service.a.agents.run(task, route, ChatAnswer)
+        finally:
+            thread.live_run = None
+            await service.store.save_thread(thread)
         if not result.ok or result.structured is None:
             raise HTTPException(502, f"the chat agent failed: {result.error}")
         answer = ChatAnswer.model_validate(result.structured)
@@ -247,6 +290,7 @@ def build_router() -> APIRouter:
         await service.store.save_thread(thread)
         created: list[str] = []
         changes: list[str] = []
+        jobs: list[str] = []
         notes: list[str] = []
         if removed:
             notes.append(
@@ -256,7 +300,13 @@ def build_router() -> APIRouter:
             )
         for p in answer.proposals:
             if p.kind == "improve":
-                await _improve(service, user, p, thread_id, history)
+                job, note = await _improve(service, user, p, thread_id, history)
+                jobs += [job] if job else []
+                notes += [note] if note else []
+                continue
+            if p.kind == "lesson":
+                if p.repo in repos and p.lesson.strip():
+                    changes.append(await _lesson(service, user, p))
                 continue
             if p.kind == "configure":
                 change_id, problem = await _configure(service, user, p, repos)
@@ -275,6 +325,8 @@ def build_router() -> APIRouter:
             text=reply,
             proposals=created,
             changes=changes,
+            jobs=jobs,
+            run_id=run,
         )
         await service.store.add_message(message)
         return message.model_dump(mode="json")
@@ -538,36 +590,91 @@ async def _configure(
     return change.id, None
 
 
+ACTIVE = [JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.WAITING]
+
+
 async def _improve(
     service: Any, user: User, p: ProposedAction, thread_id: str, history: list[Any]
-) -> None:
-    """Start the ``self_improve`` playbook for a maintainer's request."""
+) -> tuple[str | None, str | None]:
+    """Start the ``self_improve`` playbook for a maintainer's request.
+
+    Returns the id the jobs API opens the job by (its request event's id) and a note
+    for the answer. A conversation runs one request at a time: while one is queued
+    or running, asking again links it instead of starting another agent.
+    """
     if not p.request.strip():
-        return
+        return None, None
     if not service.settings.code_repo:
-        await service.store.add_message(
-            ChatMessage(
-                thread_id=thread_id,
-                role="assistant",
-                text="This service has no code repository configured, so it cannot change its own code.",
-            )
+        return None, (
+            "This service has no code repository configured, so it cannot change "
+            "its own code."
         )
-        return
+    for job in await service.store.list_jobs(ACTIVE, limit=1000):
+        if job.playbook == "self_improve" and job.key.startswith(
+            f"self_improve:{thread_id}:"
+        ):
+            first = job.events[0].get("id") if job.events else None
+            return first or job.id, (
+                "A change to the service's code from this conversation is still "
+                "running, so I did not start another one; it is linked below."
+            )
     context = "\n".join(f"{m.role}: {m.text}" for m in history[-10:])
-    await service.bus.publish(
-        Event(
-            kind=EventKind.DASHBOARD_COMMAND,
-            payload={
-                "command": "improve",
-                "request": p.request.strip(),
-                "by": user.login,
-                "thread_id": thread_id,
-                "context": context[-8000:],
-                "request_id": f"{thread_id}:{service.clock.now().timestamp()}",
-            },
-            source="chat",
+    event = Event(
+        kind=EventKind.DASHBOARD_COMMAND,
+        payload={
+            "command": "improve",
+            "request": p.request.strip(),
+            "by": user.login,
+            "thread_id": thread_id,
+            "context": context[-8000:],
+            "request_id": f"{thread_id}:{service.clock.now().timestamp()}",
+        },
+        source="chat",
+    )
+    await service.bus.publish(event)
+    return event.id, None
+
+
+async def _lesson(service: Any, user: User, p: ProposedAction) -> str:
+    """Save a review lesson for ``p.repo`` as a memory change and return its id. It
+    carries ``user``'s approval when they may configure the repository, so it merges
+    at once; otherwise it waits for a maintainer who may."""
+    path = f"{repo_dir(p.repo)}/knowledge/review_lessons.md"
+    current = await service.a.memory.read_text(path) or "# Review lessons\n"
+    lesson = p.lesson.strip()
+    item = "\n  ".join(line.rstrip() for line in lesson.splitlines())
+    change = MemoryChange(
+        tier=Tier.T1,
+        title=f"lesson from {user.login}",
+        description=lesson,
+        files={path: current.rstrip() + f"\n- {item}\n"},
+        repos=[p.repo],
+        requested_by=user.login,
+        created_at=service.clock.now(),
+    )
+    decision = await service.gate.check(
+        p.repo, user.login, await service.profiles.active(p.repo), person=True
+    )
+    if decision.allowed:
+        change.approvals = {p.repo: [user.login]}
+    await service.store.save_memory_change(change)
+    await service.store.add_signal(
+        Signal(
+            kind=SignalKind.CHAT_INSTRUCTION,
+            repo=p.repo,
+            source=user.login,
+            payload={"lesson": p.lesson},
         )
     )
+    await service.pipeline.submit(
+        make_action(
+            ActionKind.MEMORY_CHANGE,
+            p.repo,
+            MemoryChangePayload(change_id=change.id),
+            discriminator=change.id,
+        )
+    )
+    return change.id
 
 
 async def _propose(service: Any, user: User, p: ProposedAction) -> list[str]:
@@ -580,40 +687,6 @@ async def _propose(service: Any, user: User, p: ProposedAction) -> list[str]:
                 number=p.number,
                 payload={"command": "review", "by": user.login},
                 source="chat",
-            )
-        )
-        return []
-    if p.kind == "lesson" and p.lesson:
-        path = f"{repo_dir(p.repo)}/knowledge/review_lessons.md"
-        current = await service.a.memory.read_text(path) or "# Review lessons\n"
-        change = MemoryChange(
-            tier=Tier.T1,
-            title=f"lesson from {user.login}",
-            files={path: current.rstrip() + f"\n- {p.lesson.strip()}\n"},
-            repos=[p.repo],
-            requested_by=user.login,
-            created_at=service.clock.now(),
-        )
-        decision = await service.gate.check(
-            p.repo, user.login, await service.profiles.active(p.repo), person=True
-        )
-        if decision.allowed:
-            change.approvals = {p.repo: [user.login]}
-        await service.store.save_memory_change(change)
-        await service.store.add_signal(
-            Signal(
-                kind=SignalKind.CHAT_INSTRUCTION,
-                repo=p.repo,
-                source=user.login,
-                payload={"lesson": p.lesson},
-            )
-        )
-        await service.pipeline.submit(
-            make_action(
-                ActionKind.MEMORY_CHANGE,
-                p.repo,
-                MemoryChangePayload(change_id=change.id),
-                discriminator=change.id,
             )
         )
         return []

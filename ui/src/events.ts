@@ -22,7 +22,7 @@ const INVALIDATES: Record<string, string[][]> = {
   "priority.overridden": [["prs"], ["pr"]],
   "question.asked": [["questions"], ["me"]],
   "question.answered": [["questions"], ["me"], ["audit"], ["job"], ["work"]],
-  "job.progress": [["job"], ["work"]],
+  "job.progress": [["job"], ["work"], ["chat", "steps"]],
 };
 
 /** Keys refreshed after a burst of events, at most once per ``SLOW_MS``: lists that are

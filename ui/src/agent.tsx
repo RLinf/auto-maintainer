@@ -16,12 +16,13 @@ import {
   type ReactNode,
 } from "react";
 import { Link, matchPath, useLocation, useNavigate } from "react-router-dom";
-import { api, type ChatMessage, type ChatThread } from "./api";
+import { api, type ChatMessage, type ChatSteps, type ChatThread } from "./api";
 import { ErrorBox } from "./components";
 import { useProposals } from "./data";
 import { useT } from "./i18n";
 import { Markdown } from "./markdown";
 import { Icon, type IconName } from "./icons";
+import { JobById, Steps } from "./jobs";
 import { ProposalCard } from "./proposal";
 import { ChangeById } from "./settingsChange";
 import { useHotkey } from "./ui";
@@ -343,6 +344,14 @@ export function Conversation({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draft?.nonce]);
 
+  // What the agent is doing for the message being answered; the event stream refreshes
+  // it for operators, and a short poll covers everyone else.
+  const live = useQuery({
+    queryKey: ["chat", "steps", threadId, "live"],
+    queryFn: () => api.get<ChatSteps>(`/api/chat/threads/${threadId}/steps`),
+    enabled: !!threadId && send.isPending,
+    refetchInterval: send.isPending ? 1500 : false,
+  });
   const list = messages.data ?? [];
   const pendingText = send.isPending ? send.variables : null;
   const last = list[list.length - 1];
@@ -371,6 +380,10 @@ export function Conversation({
             <div className={`bubble ${m.role === "user" ? "user" : "assistant"}`}>
               {m.role === "user" ? m.text : <Rich text={m.text} />}
             </div>
+            {m.run_id && threadId && <RunSteps threadId={threadId} run={m.run_id} />}
+            {(m.jobs ?? []).map((id) => (
+              <JobById key={id} id={id} />
+            ))}
             {(m.changes ?? []).map((id) => (
               <ChangeById key={id} id={id} />
             ))}
@@ -387,15 +400,20 @@ export function Conversation({
           </Fragment>
         ))}
         {showPending && <div className="bubble user">{pendingText}</div>}
-        {send.isPending && (
-          <div className="bubble assistant thinking" aria-live="polite">
-            <span className="typing" aria-label={t("The agent is working")}>
-              <span />
-              <span />
-              <span />
-            </span>
-          </div>
-        )}
+        {send.isPending &&
+          (live.data?.steps.length ? (
+            <div className="agent-live" aria-live="polite">
+              <Steps steps={live.data.steps} active />
+            </div>
+          ) : (
+            <div className="bubble assistant thinking" aria-live="polite">
+              <span className="typing" aria-label={t("The agent is working")}>
+                <span />
+                <span />
+                <span />
+              </span>
+            </div>
+          ))}
         <ErrorBox error={send.error || messages.error} />
       </div>
       <div className="agent-foot">
@@ -473,5 +491,30 @@ export function AskButton({
       <Icon name="sparkles" size={size ? 14 : 16} />
       {!iconOnly && t(label)}
     </button>
+  );
+}
+
+/** What the agent did for one answer, read when the person opens it. */
+function RunSteps({ threadId, run }: { threadId: string; run: string }) {
+  const t = useT();
+  const [open, setOpen] = useState(false);
+  const steps = useQuery({
+    queryKey: ["chat", "steps", threadId, run],
+    queryFn: () => api.get<ChatSteps>(`/api/chat/threads/${threadId}/steps?run=${encodeURIComponent(run)}`),
+    enabled: open,
+  });
+  return (
+    <details className="run-steps" onToggle={(e) => setOpen((e.currentTarget as HTMLDetailsElement).open)}>
+      <summary className="small muted">{t("What the agent did")}</summary>
+      {steps.data ? (
+        steps.data.steps.length ? (
+          <Steps steps={steps.data.steps} active={false} />
+        ) : (
+          <span className="small muted">{t("Its steps are no longer kept.")}</span>
+        )
+      ) : (
+        <span className="small muted">…</span>
+      )}
+    </details>
   );
 }
