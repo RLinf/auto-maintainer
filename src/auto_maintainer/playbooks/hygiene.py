@@ -228,8 +228,7 @@ class Hygiene(Playbook):
     async def _agent(
         self, ctx: PlaybookContext, pr: PrSnapshot, spec: CheckSpec
     ) -> CheckResult:
-        workdir = ctx.service.scratch_dir / ctx.job.id
-        workdir.mkdir(parents=True, exist_ok=True)
+        workdir = ctx.scratch()
         prompt = "\n\n".join(
             [
                 "Judge one hygiene check for this pull request. Answer whether it passes, a one-line summary "

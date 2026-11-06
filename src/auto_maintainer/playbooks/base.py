@@ -280,6 +280,15 @@ class PlaybookContext:
     def skill_dirs(self) -> list[Path]:
         return [self.service.skills_dir, *self.service.pack_skill_dirs]
 
+    def scratch(self) -> Path:
+        """This job's own folder, for an agent that works without a checkout. It lies
+        in the folder of the job's repository (``scratch/<owner>/<name>/<job>``, or
+        ``scratch/service/<job>``), so a job's neighbors are its own repository's."""
+        parts = self.repo.split("/") if self.repo else ["service"]
+        path = self.service.scratch_dir.joinpath(*parts, self.job.id)
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
 
 class Playbook:
     """Base class. Subclasses set ``name``, ``triggers``, and ``pool``, and implement ``run``."""

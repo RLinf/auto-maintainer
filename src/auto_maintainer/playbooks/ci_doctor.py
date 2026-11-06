@@ -524,8 +524,7 @@ class CiDoctor(Playbook):
     async def _diagnose(
         self, ctx: PlaybookContext, pr: PrSnapshot, check: CheckRun, log: str
     ) -> Diagnosis | None:
-        workdir = ctx.service.scratch_dir / ctx.job.id
-        workdir.mkdir(parents=True, exist_ok=True)
+        workdir = ctx.scratch()
         prompt = "\n\n".join(
             [
                 "Classify a failed CI job. `flaky`: transient (network, timeouts, nondeterminism unrelated to the change). "

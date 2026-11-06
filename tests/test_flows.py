@@ -615,6 +615,10 @@ async def test_a_maintainer_refreshes_and_scores_prs_again_on_request(
         }
     ]
     assert len(prompts) == 1 and "Docs-only PRs are P3." in prompts[0]
+    evaluated = [t for t in harness.runner.tasks if str(t.kind) == "evaluate"]
+    assert all(Path(t.workdir).parts[-3:-1] == ("acme", "widget") for t in evaluated), (
+        "each job works in its own repository's folder"
+    )
     second = await harness.store.get_evaluation("acme/widget", 42)
     assert second is not None and second.scores["impact"] == 9
     assert polls["started"] + polls["running"] == ["acme/widget"]

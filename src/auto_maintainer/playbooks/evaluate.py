@@ -202,8 +202,7 @@ class EvaluatePlaybook(Playbook):
         rules = "\n".join(
             f"- {name} (weight {d.weight:.2f}): {d.rule}" for name, d in dims.items()
         )
-        workdir = ctx.service.scratch_dir / ctx.job.id
-        workdir.mkdir(parents=True, exist_ok=True)
+        workdir = ctx.scratch()
         lessons = await ctx.knowledge.review_lessons(pr.repo, profile)
         prompt = "\n\n".join(
             [

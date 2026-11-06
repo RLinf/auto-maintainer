@@ -125,8 +125,7 @@ class Onboard(Playbook):
                 schema_hint(OnboardAnswer.model_json_schema()),
             ]
         )
-        workdir = ctx.service.scratch_dir / ctx.job.id
-        workdir.mkdir(parents=True, exist_ok=True)
+        workdir = ctx.scratch()
         task = AgentTask(
             kind=TaskKind.ONBOARD,
             prompt=prompt,

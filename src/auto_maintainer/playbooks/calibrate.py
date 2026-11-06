@@ -90,8 +90,7 @@ class Calibrate(Playbook):
             for s in await ctx.store.list_signals(event.repo, unconsumed=False)
             if s.kind == SignalKind.PRIORITY_OVERRIDE
         ][-8:]
-        workdir = ctx.service.scratch_dir / ctx.job.id
-        workdir.mkdir(parents=True, exist_ok=True)
+        workdir = ctx.scratch()
         prompt = "\n\n".join(
             [
                 "A maintainer changed a PR's internal priority and gave a reason. Decide what kind of change this is:",

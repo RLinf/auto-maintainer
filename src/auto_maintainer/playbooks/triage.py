@@ -125,8 +125,7 @@ class Triage(Playbook):
     async def _ask(
         self, ctx: PlaybookContext, pr: PrSnapshot, taxonomy: list[str], language: str
     ) -> TriageAnswer | None:
-        workdir = ctx.service.scratch_dir / ctx.job.id
-        workdir.mkdir(parents=True, exist_ok=True)
+        workdir = ctx.scratch()
         prompt = "\n\n".join(
             [
                 "Summarize this pull request for the maintainers and pick labels.",

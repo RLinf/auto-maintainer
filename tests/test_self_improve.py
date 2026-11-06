@@ -260,3 +260,23 @@ async def test_the_agent_offers_to_add_a_repository_and_a_maintainer_approves(
     assert decided["requests"][0]["state"] == "approved"
     assert again.status_code == 409
     assert await h.store.get_repo("acme/gadget") is not None
+
+
+async def test_a_conversation_outside_any_repository_reads_the_services_own_code(
+    h: Harness, tmp_path: Path
+) -> None:
+    h.runner.on(
+        "chat", lambda task: {"reply": "It reads the settings file.", "proposals": []}
+    )
+    app = create_app(h.service, data_dir=tmp_path, allow_dev_login=True)
+    async with _client(app, "maria") as maria:
+        thread = (await maria.post("/api/chat/threads", json={"text": "hi"})).json()
+        await maria.post(
+            f"/api/chat/threads/{thread['id']}/messages",
+            json={"text": "How do you pick the agent for a review?"},
+        )
+    [task] = [t for t in h.runner.tasks if str(t.kind) == "chat"]
+    running = (await h.service.a.updater.status()).running_sha  # type: ignore[union-attr]
+    assert (CODE, None, running) in h.service.a.workspace.prepared  # type: ignore[attr-defined]
+    assert Path(task.workdir).name.startswith(CODE.replace("/", "__"))
+    assert "a checkout of the service's own code" in task.prompt

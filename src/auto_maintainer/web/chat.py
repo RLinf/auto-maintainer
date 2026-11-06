@@ -329,6 +329,7 @@ def build_router() -> APIRouter:
                     f"{name}#{ev.number} [{ev.tier} {ev.total}] {ev.title} — {ev.summary}"
                 )
         memory_index = await service.knowledge.memory_index(thread.repo)
+        workdir, where = await _workdir(service, thread)
         prompt = "\n\n".join(
             [
                 f"You are the maintainers' assistant for {', '.join(repos) or 'no repositories yet'}. You are talking to {user.login}. "
@@ -349,6 +350,7 @@ def build_router() -> APIRouter:
                 "PR on its own repository, which a maintainer reviews before it is merged and deployed. A conversation "
                 "runs one such change at a time: if the history shows one pending or running, do not propose it again.",
                 await _guide(service),
+                f"Your working directory is {where}.",
                 f"Memory index:\n{memory_index or '(empty)'}",
                 "Review queue (internal):\n" + ("\n".join(queue) or "(empty)"),
                 await _page_block(service, user, body.context, repos),
@@ -361,7 +363,6 @@ def build_router() -> APIRouter:
                 schema_hint(ChatAnswer.model_json_schema()),
             ]
         )
-        workdir = await _workdir(service, thread)
         route = service.settings.routing.get("chat")
         if route is None:
             raise HTTPException(500, "no chat route is configured")
@@ -457,39 +458,56 @@ def build_router() -> APIRouter:
     return r
 
 
-async def _workdir(service: Any, thread: ChatThread) -> Path:
-    """Where the agent works for this conversation: a checkout of its repository (at
-    the PR's head when it started on a PR), kept for the whole conversation; without
-    a repository, a scratch folder."""
+async def _workdir(service: Any, thread: ChatThread) -> tuple[Path, str]:
+    """Where the agent works for this conversation, and what that is, kept for the
+    whole conversation: a checkout of its repository (at the PR's head when it started
+    on a PR); without a repository, a checkout of the service's own code at the commit
+    it runs, so questions about the service are answered from its code; without
+    either, a scratch folder of its own."""
     if thread.workdir and Path(thread.workdir).is_dir():
-        return Path(thread.workdir)
+        return Path(thread.workdir), _where(service, thread)
     path: Path | None = None
-    if thread.repo:
+    target = thread.repo or service.settings.code_repo
+    if target:
         try:
-            info = await service.a.forge.get_repo(thread.repo)
+            info = await service.a.forge.get_repo(target)
             pr = (
-                await service.a.forge.get_pr(thread.repo, thread.number)
-                if thread.number
+                await service.a.forge.get_pr(target, thread.number)
+                if thread.repo and thread.number
                 else None
             )
             sha = pr.head_sha if pr else info.default_branch_sha
+            if not thread.repo and service.a.updater is not None:
+                # The code the service runs, which may lag its default branch.
+                sha = (await service.a.updater.status()).running_sha or sha
             if sha:
                 path = await service.a.workspace.prepare(
-                    thread.repo,
-                    pr.number if pr else None,
-                    sha,
-                    info.default_branch,
+                    target, pr.number if pr else None, sha, info.default_branch
                 )
         except Exception as e:  # the conversation still works without the code
-            log.warning("no checkout of %s for chat: %s", thread.repo, e)
+            log.warning("no checkout of %s for chat: %s", target, e)
     if path is None:
-        path = service.settings.scratch_dir / f"chat-{thread.id}"
+        path = service.settings.scratch_dir / "chat" / thread.id
         path.mkdir(parents=True, exist_ok=True)
     if thread.workdir and thread.workdir != str(path):
         thread.session = None  # the old checkout is gone; its session cannot resume
     thread.workdir = str(path)
     await service.store.save_thread(thread)
-    return path
+    return path, _where(service, thread)
+
+
+def _where(service: Any, thread: ChatThread) -> str:
+    """The conversation's working directory, in words for the agent."""
+    if thread.repo:
+        on = f" at the head of PR #{thread.number}" if thread.number else ""
+        return f"a checkout of {thread.repo}{on}"
+    if service.settings.code_repo:
+        return (
+            f"a checkout of the service's own code ({service.settings.code_repo}) at the "
+            "commit it runs: read it to answer questions about the service itself; "
+            "changing it changes nothing that runs"
+        )
+    return "an empty folder of this conversation's own"
 
 
 async def _page_block(

@@ -337,8 +337,7 @@ class ReproducePlaybook(Playbook):
                 schema_hint(ReproReport.model_json_schema()),
             ]
         )
-        scratch = ctx.service.scratch_dir / ctx.job.id
-        scratch.mkdir(parents=True, exist_ok=True)
+        scratch = ctx.scratch()
         answer = await ctx.ask(
             AgentTask(
                 kind=TaskKind.REPRODUCE,
