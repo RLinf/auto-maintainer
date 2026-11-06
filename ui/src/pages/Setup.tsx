@@ -7,6 +7,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { api, ApiError } from "../api";
+import { copyText } from "../clipboard";
 import { ErrorBox, Status, useAct } from "../components";
 import { useT } from "../i18n";
 import { Icon, type IconName } from "../icons";
@@ -344,12 +345,13 @@ export function GhWebLogin({
       setError(e);
     }
   };
+  const [copyFailed, setCopyFailed] = useState(false);
   const copy = () => {
     if (!code) return;
-    void navigator.clipboard?.writeText(code.code).then(
-      () => setCopied(true),
-      () => undefined,
-    );
+    void copyText(code.code).then((ok) => {
+      setCopied(ok);
+      setCopyFailed(!ok);
+    });
   };
   return (
     <Choice
@@ -364,13 +366,14 @@ export function GhWebLogin({
           {code ? (
             <>
               <div className="row" style={{ gap: 8 }}>
-                <span className="code" style={{ fontSize: 22 }}>
+                <span className="code" style={{ fontSize: 22, userSelect: "all" }} title={t("Click to select the code")}>
                   {code.code}
                 </span>
                 <button className="ghost sm" onClick={copy}>
                   {copied ? t("Copied") : t("Copy")}
                 </button>
               </div>
+              {copyFailed && <span className="small" style={{ color: "var(--warn)" }}>{t("This browser would not copy it. Click the code to select it, then press Ctrl+C (⌘C on a Mac).")}</span>}
               <a className="button primary" href={code.url} target="_blank" rel="noopener noreferrer" onClick={copy}>
                 {t("Copy the code and open GitHub")} <Icon name="external" size={12} />
               </a>

@@ -743,6 +743,8 @@ const zh: Record<string, string> = {
   "Waiting for you to authorize on GitHub. Paste the code there; this page keeps it, and finishes by itself once you authorize, even if you come back to it later.":
     "正在等待你在 GitHub 上授权。在那里粘贴验证码即可；本页会保留验证码，你授权后会自动完成登录，稍后再回到本页也一样。",
   "Get a new code": "获取新的验证码",
+  "Click to select the code": "点击选中验证码",
+  "This browser would not copy it. Click the code to select it, then press Ctrl+C (⌘C on a Mac).": "浏览器没有允许复制。请点击验证码将其选中，再按 Ctrl+C（Mac 上按 ⌘C）。",
   "The service reaches GitHub, and people sign in, through the GitHub CLI (gh), which this host does not have yet. Installing downloads GitHub's own release into the service's data folder and checks it against the release's checksums; nothing else on the host changes.":
     "服务访问 GitHub、大家登录，都要经过 GitHub CLI（gh），而这台主机还没有安装。安装会把 GitHub 官方发布的版本下载到服务的数据目录，并按发布附带的校验和核对；主机上的其他东西都不会改动。",
   "Installing…": "正在安装…",
