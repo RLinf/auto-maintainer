@@ -26,6 +26,7 @@ import hmac
 import json
 import os
 import secrets
+import shutil
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -228,6 +229,11 @@ def router(
     r = APIRouter()
     gh_flows: dict[str, dict[str, Any]] = {}
 
+    def gh_missing() -> bool:
+        """The GitHub CLI sign-in is set up, but ``gh`` is not on the server's
+        ``PATH``. Looked up on every call, so installing it needs no restart."""
+        return gh_signin is not None and shutil.which("gh") is None
+
     @r.post("/auth/gh/start")
     async def gh_start() -> dict[str, Any]:
         """Sign in by authorizing the GitHub CLI on github.com with a one-time code.
@@ -239,7 +245,7 @@ def router(
         configuration; the service keeps the token on the host, under the person's
         login only, to do what they approve as themselves, deletes the CLI's files,
         and forgets the token when they sign out."""
-        if gh_signin is None:
+        if gh_signin is None or gh_missing():
             raise HTTPException(404, "this host has no GitHub CLI for signing in")
         now = time.time()
         for fid, flow in list(gh_flows.items()):
@@ -403,7 +409,8 @@ def router(
             "device_flow": bool(client_id),
             "dev_login": dev,
             "links": links_path is not None,
-            "gh": gh_signin is not None,
+            "gh": gh_signin is not None and not gh_missing(),
+            "gh_missing": gh_missing(),
         }
 
     @r.post("/auth/logout")

@@ -43,6 +43,7 @@ from auto_maintainer.domain.settings import UserToken
 from auto_maintainer.github.auth import StaticTokenProvider
 from auto_maintainer.hostsetup import GhLogin, HostSetup, SetupError, repo_from_remote
 from auto_maintainer.testing.demo import build_demo
+from auto_maintainer.web import app as web_app
 from auto_maintainer.web import auth
 from auto_maintainer.web.app import create_app
 from auto_maintainer.web.auth import create_link
@@ -525,6 +526,46 @@ async def test_signing_in_on_the_web_through_the_github_cli_keeps_nothing(
         await client.post("/auth/logout")
         assert await h.service.a.user_tokens.get("maria") is None
     assert not logins[0].config_dir.exists()
+    await h.close()
+
+
+async def test_without_gh_on_the_host_the_sign_in_page_says_what_is_missing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    h = await build_demo(tmp_path)
+    factory = cli._gh_signin(HostConfig(data_dir=str(tmp_path / "data")))
+    app = create_app(
+        h.service, data_dir=tmp_path, gh_signin=factory, oauth_client_id="Iv1.app"
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://box"
+    ) as client:
+        monkeypatch.setattr(auth.shutil, "which", lambda name: None)
+        offered = (await client.get("/auth/config")).json()
+        assert offered["gh"] is False and offered["gh_missing"] is True
+        assert (await client.post("/auth/gh/start")).status_code == 404
+        # Installing gh needs no restart: the next look finds it.
+        monkeypatch.setattr(auth.shutil, "which", lambda name: "/usr/bin/gh")
+        offered = (await client.get("/auth/config")).json()
+        assert offered["gh"] is True and offered["gh_missing"] is False
+    await h.close()
+
+
+async def test_every_restart_serves_the_new_dashboard(
+    tmp_path: Path, monkeypatch
+) -> None:
+    static = tmp_path / "static"
+    static.mkdir()
+    (static / "index.html").write_text("<!doctype html>")
+    monkeypatch.setattr(web_app, "STATIC", static)
+    h = await build_demo(tmp_path)
+    app = create_app(h.service, data_dir=tmp_path)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://box"
+    ) as client:
+        page = await client.get("/prs")
+        assert page.status_code == 200
+        assert page.headers["cache-control"] == "no-cache"
     await h.close()
 
 

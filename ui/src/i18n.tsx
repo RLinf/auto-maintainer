@@ -369,6 +369,9 @@ const zh: Record<string, string> = {
   "Or sign in through the service's GitHub App. Its token acts only on repositories the app is installed on, so posting as yourself and private repositories elsewhere may fail.":
     "也可以通过服务的 GitHub App 登录。它的令牌只能作用于安装了该应用的仓库，因此以你的身份发布、以及访问其他私有仓库可能会失败。",
   "Sign in through the GitHub App": "通过 GitHub App 登录",
+  "Signing in through the GitHub CLI is not available": "无法通过 GitHub CLI 登录",
+  "That sign-in works on every repository your account can reach, and it needs the GitHub CLI (gh) on the host where auto-maintainer runs. Install gh there, on the PATH of the service, and reload this page.":
+    "这种登录方式适用于你的账号能访问的所有仓库，但需要运行 auto-maintainer 的主机上装有 GitHub CLI（gh）。请在该主机上安装 gh，确保它在服务的 PATH 中，然后刷新本页。",
   "Runs under a command prefix, not as the service's own user": "在命令前缀包装下运行，而不是以服务自身的用户运行",
   confined: "已隔离",
   "Agents without a command prefix run as this host's user, so they can read its files, including the tokens reviewers signed in with. On a shared host, confine them.":

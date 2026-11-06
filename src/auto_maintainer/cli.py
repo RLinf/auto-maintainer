@@ -232,7 +232,7 @@ class _Host:
             verify_webhook=verify_signature,
             webhook_target=hint,
             links_path=cfg.data_path / LINKS_FILE,
-            gh_signin=_gh_signin(cfg) if shutil.which("gh") else None,
+            gh_signin=_gh_signin(cfg),
             setup_steps=self.steps,
             on_host_change=self.start_service,
         )

@@ -21,7 +21,8 @@ export default function SignIn() {
   const client = useQueryClient();
   const config = useQuery({
     queryKey: ["auth-config"],
-    queryFn: async () => (await fetch("/auth/config", { credentials: "same-origin" })).json() as Promise<{ oauth?: boolean; links?: boolean; gh?: boolean }>,
+    queryFn: async () =>
+      (await fetch("/auth/config", { credentials: "same-origin" })).json() as Promise<{ oauth?: boolean; links?: boolean; gh?: boolean; gh_missing?: boolean }>,
   });
   const expired = new URLSearchParams(window.location.search).get("signin") === "expired";
   const [device, setDevice] = useState<DeviceStart | null>(null);
@@ -93,6 +94,16 @@ export default function SignIn() {
           )}
           onDone={() => void client.invalidateQueries()}
         />
+      )}
+      {config.data?.gh_missing && (
+        <div className="stack" style={{ gap: 4 }}>
+          <strong className="small">{t("Signing in through the GitHub CLI is not available")}</strong>
+          <span className="small muted">
+            {t(
+              "That sign-in works on every repository your account can reach, and it needs the GitHub CLI (gh) on the host where auto-maintainer runs. Install gh there, on the PATH of the service, and reload this page.",
+            )}
+          </span>
+        </div>
       )}
       {config.data?.links && !config.data.oauth && !config.data.gh && (
         <div className="stack" style={{ gap: 6 }}>

@@ -62,7 +62,7 @@ def create_app(
     ``links_path`` enables sign-in with one-time links from ``am login``;
     ``gh_signin`` (a factory of ``hostsetup.GhLogin`` by flow id) enables signing in
     on the web by authorizing the GitHub CLI, offered beside an OAuth client's sign-in
-    when there is one.
+    when there is one, and while ``gh`` is on the server's ``PATH``.
     ``setup_steps`` and ``on_host_change`` let maintainers of the service's repository
     change the host setup from the dashboard (``web/setup.py``).
     """
@@ -174,7 +174,12 @@ def install_csrf(app: FastAPI) -> None:
 
 
 def install_spa(app: FastAPI) -> None:
-    """Serve the built dashboard: its files, and ``index.html`` for every page route."""
+    """Serve the built dashboard: its files, and ``index.html`` for every page route.
+
+    ``index.html`` is sent with ``Cache-Control: no-cache``, so a browser asks again
+    after every restart or deploy and loads the new build; the files under
+    ``/assets`` carry a content hash in their names and may be cached.
+    """
     if (STATIC / "assets").is_dir():
         app.mount("/assets", StaticFiles(directory=STATIC / "assets"), name="assets")
 
@@ -187,4 +192,6 @@ def install_spa(app: FastAPI) -> None:
         candidate = STATIC / path
         if path and candidate.is_file() and STATIC in candidate.resolve().parents:
             return FileResponse(candidate)
-        return FileResponse(STATIC / "index.html")
+        return FileResponse(
+            STATIC / "index.html", headers={"Cache-Control": "no-cache"}
+        )
