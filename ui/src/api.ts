@@ -616,9 +616,14 @@ export interface SettingsView {
 
 export interface LabMachine {
   name: string;
+  /** Its environment and rules in plain language; the settings below are drafted from it. */
   description: string;
   transport: "ssh" | "local";
   host: string | null;
+  user?: string | null;
+  port?: number | null;
+  proxy_jump?: string | null;
+  identity_file?: string | null;
   workdir: string;
   setup: string;
   repos: string[];
@@ -626,6 +631,14 @@ export interface LabMachine {
   timeout_seconds: number;
   max_gpu_memory_mib: number;
   max_gpu_util_pct: number;
+}
+
+/** What the service would enforce on a machine, drafted from its description. */
+export interface MachineDraft {
+  machine: Omit<LabMachine, "name">;
+  left_to_agent: string[];
+  problems: string[];
+  diff: string;
 }
 
 export interface MachineCheck {

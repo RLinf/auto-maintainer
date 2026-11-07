@@ -102,12 +102,36 @@ class LocalLabHost(_Host):
 
 
 class SshLabHost(_Host):
-    """One shared SSH connection per host (ControlMaster), batch mode only."""
+    """One shared SSH connection per host (ControlMaster), batch mode only. ``user``,
+    ``port``, ``proxy_jump``, and ``identity_file`` are the machine's ``User``,
+    ``Port``, ``ProxyJump``, and ``IdentityFile``, checked by ``machine_problems``;
+    unset, the service user's SSH config decides."""
 
-    def __init__(self, name: str, host: str, control_dir: Path | None = None) -> None:
+    def __init__(
+        self,
+        name: str,
+        host: str,
+        control_dir: Path | None = None,
+        *,
+        user: str | None = None,
+        port: int | None = None,
+        proxy_jump: str | None = None,
+        identity_file: str | None = None,
+    ) -> None:
         self.name = name
         self.host = host
         self._control = str((control_dir or Path.home() / ".ssh") / "am-%r@%h:%p")
+        self._options: list[str] = []
+        for option, value in (
+            ("User", user),
+            ("Port", port),
+            ("ProxyJump", proxy_jump),
+            ("IdentityFile", identity_file),
+        ):
+            if value:
+                self._options += ["-o", f"{option}={value}"]
+        if identity_file:
+            self._options += ["-o", "IdentitiesOnly=yes"]
 
     async def _shell(
         self, script: str, timeout: float, stdin: str | None = None
@@ -124,6 +148,7 @@ class SshLabHost(_Host):
             "ControlPersist=10m",
             "-o",
             "ServerAliveInterval=30",
+            *self._options,
             "--",
             self.host,
             script,

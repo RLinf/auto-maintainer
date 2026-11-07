@@ -23,6 +23,7 @@ carries one.
 
 from __future__ import annotations
 
+import json
 from typing import Any, Literal
 
 import httpx
@@ -30,6 +31,8 @@ import yaml
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from ..domain.agents import AgentTask, TaskKind
+from ..domain.ids import new_id
 from ..domain.memory import MemoryChangeState
 from ..domain.records import AuditEntry
 from ..domain.settings import (
@@ -42,9 +45,11 @@ from ..domain.settings import (
     effective_agents,
     effective_routing,
     machine_problems,
+    parse_ssh_config,
     secret_names,
     settings_diff,
 )
+from ..playbooks.prompts import schema_hint
 from ..service import Service
 from .api import service_of, visible_repos
 from .auth import User, current_user
@@ -241,7 +246,70 @@ class DefaultAgentBody(BaseModel):
 
 class MachineBody(BaseModel):
     machine: LabMachine
+    ssh_config: str | None = Field(default=None, max_length=4000)
+    """The connection as an ``~/.ssh/config`` entry; its fields replace the machine's
+    (``parse_ssh_config``)."""
     title: str = ""
+
+
+def _connected(body: MachineBody) -> LabMachine:
+    """``body.machine`` with the connection of ``body.ssh_config``, if any."""
+    machine = body.machine
+    if body.ssh_config is None or machine.transport != "ssh":
+        return machine
+    fields, problems = parse_ssh_config(body.ssh_config)
+    if problems:
+        raise HTTPException(
+            422, {"message": "the SSH entry does not check", "problems": problems}
+        )
+    return machine.model_copy(
+        update={
+            "host": fields.get("host"),
+            "user": fields.get("user"),
+            "port": fields.get("port"),
+            "proxy_jump": fields.get("proxy_jump"),
+            "identity_file": fields.get("identity_file"),
+        }
+    )
+
+
+class MachineRules(BaseModel):
+    """What the service enforces on a test machine, drafted from its description."""
+
+    workdir: str = Field(
+        description="The folder runs go in on the machine: the one the description names, else the current one."
+    )
+    setup: str = Field(
+        default="",
+        description="Shell lines run before every reproduction to prepare the environment the description names; empty when it names none.",
+    )
+    timeout_minutes: int = Field(
+        ge=1, le=360, description="The longest a run may take, in minutes."
+    )
+    forbid: list[str] = Field(
+        default_factory=list,
+        description="Python regular expressions for the commands and paths the description forbids.",
+    )
+    max_gpu_memory_mib: int = Field(
+        ge=0, description="A GPU with less memory in use than this counts as free."
+    )
+    max_gpu_util_pct: int = Field(
+        ge=0, le=100, description="A GPU at or below this utilization counts as free."
+    )
+    left_to_agent: list[str] = Field(
+        default_factory=list,
+        description="The description's rules none of the fields above can enforce; the reproduction agent follows them from the description.",
+    )
+
+
+DRAFT = """You turn the description a maintainer wrote of test machine {name} into the settings the service enforces when it runs a PR's code there (a reproduction). For each run the service makes a fresh folder under `workdir`, runs the `setup` lines, then the reproduction's own setup and script; it refuses a script that matches a `forbid` pattern; it stops the run after the time limit; and it uses a GPU only when the memory in use is below `max_gpu_memory_mib` and the utilization at most `max_gpu_util_pct`.
+- workdir: the folder the description names for runs, else the current one; a folder of its own, never /, a home directory, or /tmp.
+- setup: the commands that prepare the environment the description names, such as activating a conda or virtual environment, loading modules, or exporting variables like CUDA_VISIBLE_DEVICES for the GPUs runs may use. Only what the description asks for; no installs it does not mention.
+- timeout_minutes: the limit the description states, else the current one.
+- forbid: Python regular expressions for the commands and paths the description forbids, such as \\bray\\s+stop\\b or /data/datasets, each tight enough not to refuse unrelated commands.
+- GPU thresholds: what the description says makes a GPU free, else the current values.
+- left_to_agent: the description's rules that none of these fields can enforce; the reproduction agent reads the description and follows them.
+Do not run commands or change files: answer from the description and the current settings."""
 
 
 def _with_machine(text: str, name: str, machine: LabMachine | None) -> str:
@@ -484,7 +552,8 @@ def build_router() -> APIRouter:
         """Add or change a test machine: a settings change like any other, applied at
         once for a maintainer of the service's repository, a proposal otherwise."""
         service = service_of(request)
-        problems = machine_problems(name, body.machine)
+        machine = _connected(body)
+        problems = machine_problems(name, machine)
         if problems:
             raise HTTPException(
                 422, {"message": "the machine does not check", "problems": problems}
@@ -493,11 +562,84 @@ def build_router() -> APIRouter:
         return await save(
             request,
             DocumentBody(
-                yaml=_with_machine(current, name, body.machine),
+                yaml=_with_machine(current, name, machine),
                 title=body.title or f"settings: test machine {name}",
             ),
             user,
         )
+
+    @r.post("/labs/{name}/draft")
+    async def draft_machine(
+        request: Request,
+        name: str,
+        body: MachineBody,
+        user: User = Depends(current_user),
+    ) -> dict[str, Any]:
+        """Draft what the service enforces on a machine from its description (the
+        environment and rules in plain language): an agent reads it with the current
+        settings and returns the run folder, setup, time limit, refused commands, and
+        GPU thresholds, plus the rules only the reproduction agent can follow. Nothing
+        is saved: the page shows the draft and its diff, and Save applies it."""
+        service = service_of(request)
+        if not (await service.service_gate(user.login)).allowed:
+            await _require_maintainer(service, user)
+        machine = _connected(body)
+        route = service.settings.routing.get("chat")
+        if route is None:
+            raise HTTPException(500, "no agent route for drafting settings")
+        current = {
+            "workdir": machine.workdir,
+            "setup": machine.setup,
+            "timeout_minutes": machine.timeout_seconds // 60,
+            "forbid": machine.forbid,
+            "max_gpu_memory_mib": machine.max_gpu_memory_mib,
+            "max_gpu_util_pct": machine.max_gpu_util_pct,
+        }
+        workdir = service.settings.scratch_dir / "service" / "machines"
+        workdir.mkdir(parents=True, exist_ok=True)
+        prompt = "\n\n".join(
+            [
+                DRAFT.format(name=name),
+                "Current settings:\n"
+                + json.dumps(current, ensure_ascii=False, indent=1),
+                "Description:\n" + (machine.description.strip() or "(empty)"),
+                schema_hint(MachineRules.model_json_schema()),
+            ]
+        )
+        result = await service.a.agents.run(
+            AgentTask(
+                kind=TaskKind.CHAT,
+                prompt=prompt,
+                workdir=workdir,
+                mode="read_only",
+                output_schema=MachineRules.model_json_schema(),
+                job_id=new_id("run"),
+                requested_by=user.login,
+                untrusted_input=False,
+            ),
+            route,
+            MachineRules,
+        )
+        if not result.ok or result.structured is None:
+            raise HTTPException(502, f"the agent could not draft it: {result.error}")
+        rules = MachineRules.model_validate(result.structured)
+        drafted = machine.model_copy(
+            update={
+                "workdir": rules.workdir.strip() or machine.workdir,
+                "setup": rules.setup.strip(),
+                "timeout_seconds": rules.timeout_minutes * 60,
+                "forbid": [p for p in (x.strip() for x in rules.forbid) if p],
+                "max_gpu_memory_mib": rules.max_gpu_memory_mib,
+                "max_gpu_util_pct": rules.max_gpu_util_pct,
+            }
+        )
+        text, _ = await service.settings_text()
+        return {
+            "machine": drafted.model_dump(mode="json"),
+            "left_to_agent": rules.left_to_agent,
+            "problems": machine_problems(name, drafted),
+            "diff": settings_diff(text, _with_machine(text, name, drafted)),
+        }
 
     @r.delete("/labs/{name}")
     async def remove_machine(

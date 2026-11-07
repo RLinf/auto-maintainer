@@ -6,7 +6,7 @@
 
 import { useEffect, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
-import { api, type AgentChoices, type LabMachine, type MachineCheck, type SettingsAgent, type SettingsCheck, type SettingsProvider, type SettingsView } from "../api";
+import { api, type AgentChoices, type LabMachine, type MachineCheck, type MachineDraft, type SettingsAgent, type SettingsCheck, type SettingsProvider, type SettingsView } from "../api";
 import { useAgent, type AgentContext } from "../agent";
 import { Diff, Empty, ErrorBox, PageHead, Section, Status, useAct, When } from "../components";
 import { useRepos, useSettings } from "../data";
@@ -761,7 +761,7 @@ function LabsTab({ v, ask }: { v: SettingsView; ask: (p: string, send?: boolean)
         }
       >
         <p className="small muted" style={{ marginTop: 0 }}>
-          {t("The service reaches a machine over SSH as its own user, with the key in that user's SSH config; nothing is installed there. Each repository chooses on its own page which offered machines it uses and sets up its environment there. Each reproduction copies the PR's code into a folder of its own and removes it afterwards. Scripts run only after the person who asked approves them.")}
+          {t("The service reaches a machine over SSH as its own user; nothing is installed there. Write each machine's environment and rules in plain words: an agent turns them into what the service enforces, and the reproduction agent follows the rest. Each repository chooses on its own page which offered machines it uses. Each reproduction copies the PR's code into a folder of its own and removes it afterwards.")}
         </p>
         {adding && <MachineForm onDone={() => setAdding(false)} />}
         {!v.labs.length ? (
@@ -778,6 +778,61 @@ function LabsTab({ v, ask }: { v: SettingsView; ask: (p: string, send?: boolean)
   );
 }
 
+/** A machine's connection in one line: user@host:port via its jump hosts. */
+function connectionLine(m: LabMachine): string {
+  const host = `${m.user ? `${m.user}@` : ""}${m.host || m.name}${m.port ? `:${m.port}` : ""}`;
+  return m.proxy_jump ? `${host} via ${m.proxy_jump}` : host;
+}
+
+/** A machine's connection as an ``~/.ssh/config`` entry, for editing. */
+function sshEntry(name: string, m?: Partial<LabMachine>): string {
+  const lines = [`Host ${name || "gpu-01"}`];
+  const fields: [string, unknown][] = [
+    ["HostName", m?.host],
+    ["User", m?.user],
+    ["Port", m?.port],
+    ["ProxyJump", m?.proxy_jump],
+    ["IdentityFile", m?.identity_file],
+  ];
+  for (const [key, value] of fields) if (value) lines.push(`  ${key} ${value}`);
+  return lines.join("\n");
+}
+
+/** What the service enforces on a machine, as a short list. */
+function Enforced({ m, left }: { m: Omit<LabMachine, "name">; left?: string[] }) {
+  const t = useT();
+  return (
+    <ul className="small" style={{ margin: 0, paddingLeft: 18, display: "grid", gap: 2 }}>
+      <li>
+        {t("Runs go in")} <code>{m.workdir}</code>, {t("at most")} {Math.round(m.timeout_seconds / 60)} {t("minutes each")}
+      </li>
+      <li>
+        {t("Before every run")}: {m.setup ? <code style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{m.setup}</code> : <span className="muted">{t("nothing")}</span>}
+      </li>
+      <li>
+        {t("Refused in scripts")}:{" "}
+        {m.forbid.length ? (
+          m.forbid.map((f) => (
+            <code key={f} style={{ marginRight: 6, overflowWrap: "anywhere" }}>
+              {f}
+            </code>
+          ))
+        ) : (
+          <span className="muted">{t("only the built-in patterns")}</span>
+        )}
+      </li>
+      <li>
+        {t("A GPU is free below")} {m.max_gpu_memory_mib} MiB {t("in use and at most")} {m.max_gpu_util_pct}% {t("busy")}
+      </li>
+      {left && left.length > 0 && (
+        <li>
+          {t("Left to the agent to follow")}: {left.join("; ")}
+        </li>
+      )}
+    </ul>
+  );
+}
+
 function MachineRow({ m, canChange }: { m: LabMachine; canChange: boolean }) {
   const t = useT();
   const toast = useToast();
@@ -791,28 +846,23 @@ function MachineRow({ m, canChange }: { m: LabMachine; canChange: boolean }) {
         <span style={{ paddingTop: 2 }}>
           <Icon name="server" />
         </span>
-        <span className="main">
-          <span className="t">
-            {m.name} <span className="muted small">{m.transport === "ssh" ? m.host || m.name : t("this host")}</span>
+        <span className="main stack" style={{ gap: 6 }}>
+          <span className="t" style={{ whiteSpace: "normal" }}>
+            {m.name} <span className="muted small mono">{m.transport === "ssh" ? connectionLine(m) : t("this host")}</span>
           </span>
-          <span className="meta" style={{ whiteSpace: "normal" }}>
-            {m.description || t("No description")} · {m.repos.length ? `${t("offered only to")} ${m.repos.join(", ")}` : t("offered to every repository")} · {t("at most")}{" "}
-            {Math.round(m.timeout_seconds / 60)} {t("minutes")}
-            {m.workdir && m.workdir !== "~/auto-maintainer-runs" ? (
-              <>
-                {" "}
-                · <code>{m.workdir}</code>
-              </>
-            ) : null}
-            {m.setup ? (
-              <>
-                {" "}
-                · <code>{m.setup}</code>
-              </>
-            ) : null}
+          <span className="small muted">
+            {m.repos.length ? `${t("offered only to")} ${m.repos.join(", ")}` : t("offered to every repository")}
           </span>
+          {m.description ? (
+            <span className="small" style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>
+              {m.description}
+            </span>
+          ) : (
+            <span className="small muted">{t("No environment or rules written yet.")}</span>
+          )}
+          <Enforced m={m} />
           {c && (
-            <span className={`small ${c.ok ? "" : "danger-text"}`} style={{ marginTop: 4 }}>
+            <span className={`small ${c.ok ? "" : "danger-text"}`}>
               {c.ok ? (
                 <>
                   <Icon name="check" size={12} /> {c.system} · {c.cpus} CPUs · {c.memory_gb} GB
@@ -854,47 +904,59 @@ function MachineRow({ m, canChange }: { m: LabMachine; canChange: boolean }) {
   );
 }
 
+const DEFAULT_MACHINE: Omit<LabMachine, "name"> = {
+  description: "",
+  transport: "ssh",
+  host: null,
+  workdir: "am-labs",
+  setup: "",
+  repos: [],
+  forbid: [],
+  timeout_seconds: 1800,
+  max_gpu_memory_mib: 500,
+  max_gpu_util_pct: 0,
+};
+
+/** A machine in three parts: its name, how to reach it (an ``~/.ssh/config`` entry, or
+ * this host), and which repositories may use it; then its environment and rules in plain
+ * language. An agent drafts what the service enforces from that text (run folder,
+ * setup, time limit, refused commands, GPU thresholds), shown with the settings diff
+ * before Save applies it. */
 function MachineForm({ initial, onDone }: { initial?: LabMachine; onDone: () => void }) {
   const t = useT();
   const toast = useToast();
   const onboarded = useRepos();
   const [name, setName] = useState(initial?.name ?? "");
   const [transport, setTransport] = useState<"ssh" | "local">(initial?.transport ?? "ssh");
-  const [host, setHost] = useState(initial?.host ?? "");
-  const [description, setDescription] = useState(initial?.description ?? "");
-  const [workdir, setWorkdir] = useState(initial?.workdir ?? "~/auto-maintainer-runs");
-  const [setup, setSetup] = useState(initial?.setup ?? "");
-  const [minutes, setMinutes] = useState(String(Math.round((initial?.timeout_seconds ?? 1800) / 60)));
-  const [forbid, setForbid] = useState((initial?.forbid ?? []).join("\n"));
+  const [ssh, setSsh] = useState(initial ? sshEntry(initial.name, initial) : "");
   const [repos, setRepos] = useState<string[]>(initial?.repos ?? []);
+  const [description, setDescription] = useState(initial?.description ?? "");
+  const [draft, setDraft] = useState<{ for: string; result: MachineDraft } | null>(null);
   const repoOptions = Array.from(new Set([...(onboarded.data ?? []).map((r) => r.repo), ...(initial?.repos ?? [])]));
+  const base: Omit<LabMachine, "name"> = initial ?? DEFAULT_MACHINE;
+  // The enforced settings follow the description: a changed description needs a new draft.
+  const changed = description.trim() !== (initial?.description ?? "").trim();
+  const current = draft && draft.for === description.trim() ? draft.result : null;
+  const needsDraft = changed && description.trim() !== "" && !current;
+  const body = (m: Omit<LabMachine, "name">) => ({
+    machine: { ...m, name: undefined, transport, description: description.trim(), repos },
+    ssh_config: transport === "ssh" ? ssh : null,
+  });
+  const drafting = useAct(() => api.post<MachineDraft>(`/api/settings/labs/${name.trim()}/draft`, body(base)), []);
   const save = useAct(
-    () =>
-      api.put<{ approved: boolean }>(`/api/settings/labs/${name.trim()}`, {
-        machine: {
-          transport,
-          host: transport === "ssh" ? host.trim() || null : null,
-          description: description.trim(),
-          workdir: workdir.trim() || "~/auto-maintainer-runs",
-          setup: setup.trim(),
-          repos,
-          forbid: forbid
-            .split("\n")
-            .map((x) => x.trim())
-            .filter(Boolean),
-          timeout_seconds: Math.max(1, Number(minutes) || 30) * 60,
-          max_gpu_memory_mib: initial?.max_gpu_memory_mib ?? 1024,
-          max_gpu_util_pct: initial?.max_gpu_util_pct ?? 5,
-        },
-      }),
+    () => api.put<{ approved: boolean }>(`/api/settings/labs/${name.trim()}`, body(current ? current.machine : base)),
     [["settings"], ["labs"], ["memory"]],
   );
   return (
     <form
       className="card stack"
-      style={{ gap: 10, marginBottom: 12 }}
+      style={{ gap: 12, marginBottom: 12 }}
       onSubmit={(e) => {
         e.preventDefault();
+        if (needsDraft) {
+          drafting.mutate(undefined, { onSuccess: (r) => setDraft({ for: description.trim(), result: r }) });
+          return;
+        }
         save.mutate(undefined, {
           onSuccess: (r) => {
             toast({ title: r.approved ? (initial ? t("Saved") : t("Machine added")) : t("Change proposed"), icon: "server" });
@@ -922,33 +984,20 @@ function MachineForm({ initial, onDone }: { initial?: LabMachine; onDone: () => 
             <option value="local">{t("on this host")}</option>
           </select>
         </label>
-        {transport === "ssh" && (
-          <label className="stack" style={{ gap: 4 }}>
-            <span className="small muted">{t("SSH destination")}</span>
-            <input value={host} onChange={(e) => setHost(e.target.value)} placeholder="ci@gpu-01" />
-          </label>
-        )}
-        <label className="stack" style={{ gap: 4 }}>
-          <span className="small muted">{t("Description")}</span>
-          <input value={description} onChange={(e) => setDescription(e.target.value)} placeholder={t("8× A100 80GB, CUDA 12.4")} />
-        </label>
-        <label className="stack" style={{ gap: 4 }}>
-          <span className="small muted">{t("Work directory")}</span>
-          <input className="mono-input" value={workdir} onChange={(e) => setWorkdir(e.target.value)} placeholder="~/auto-maintainer-runs" />
-        </label>
-        <label className="stack" style={{ gap: 4 }}>
-          <span className="small muted">{t("Time limit in minutes")}</span>
-          <input type="number" min={1} max={360} value={minutes} onChange={(e) => setMinutes(e.target.value)} />
-        </label>
-        <label className="stack" style={{ gap: 4 }}>
-          <span className="small muted">{t("Run on this machine before every reproduction (optional)")}</span>
-          <input className="mono-input" value={setup} onChange={(e) => setSetup(e.target.value)} placeholder="source ~/envs/dev/bin/activate" />
-        </label>
-        <label className="stack" style={{ gap: 4 }}>
-          <span className="small muted">{t("Scripts must not match (one regular expression per line)")}</span>
-          <textarea className="mono-input" rows={2} value={forbid} onChange={(e) => setForbid(e.target.value)} placeholder="\bwget\b" />
-        </label>
       </div>
+      {transport === "ssh" && (
+        <label className="stack" style={{ gap: 4 }}>
+          <span className="small muted">{t("How to connect, written like an entry in ~/.ssh/config: HostName, User, Port, ProxyJump, IdentityFile (a key on the service's host)")}</span>
+          <textarea
+            className="mono-input"
+            rows={6}
+            value={ssh}
+            onChange={(e) => setSsh(e.target.value)}
+            placeholder={"Host gpu-01\n  HostName 10.0.0.5\n  User ci\n  Port 2222\n  ProxyJump bastion.example.com\n  IdentityFile ~/.ssh/id_ed25519"}
+            spellCheck={false}
+          />
+        </label>
+      )}
       <div className="stack" style={{ gap: 6 }}>
         <span className="small muted">
           {t("Offer only to these repositories (optional)")} · {repos.length ? `${repos.length} ${t("selected")}` : t("offered to every repository")}
@@ -982,15 +1031,45 @@ function MachineForm({ initial, onDone }: { initial?: LabMachine; onDone: () => 
           })}
         </div>
       </div>
+      <label className="stack" style={{ gap: 4 }}>
+        <span className="small muted">{t("Environment and rules, in plain words: the hardware, how to set up the environment, where data lives, what runs must not do, how long they may take")}</span>
+        <textarea
+          rows={6}
+          style={{ fontFamily: "inherit", lineHeight: 1.5 }}
+          value={description}
+          onChange={(e) => setDescription(e.target.value)}
+          placeholder={t("8× A100 80GB, CUDA 12.4. Activate the conda environment rlinf before running. Put runs in /data/am-runs. Use only GPUs 0–3; the others belong to another team. Never run ray stop or write to /data/datasets. A run may take at most two hours.")}
+        />
+      </label>
+      {current && (
+        <section className="stack" style={{ gap: 8 }}>
+          <span className="kind-chip">{t("What the service will enforce")}</span>
+          <Enforced m={current.machine} left={current.left_to_agent} />
+          {current.problems.length > 0 && (
+            <ul className="small danger-text" style={{ margin: 0, paddingLeft: 18 }}>
+              {current.problems.map((p) => (
+                <li key={p}>{p}</li>
+              ))}
+            </ul>
+          )}
+          {current.diff && (
+            <details>
+              <summary className="small muted">{t("The change to the settings")}</summary>
+              <pre className="diff">{current.diff}</pre>
+            </details>
+          )}
+        </section>
+      )}
       <div className="row">
-        <button className="primary" disabled={!name.trim() || save.isPending}>
-          {t("Save")}
+        <button className="primary" disabled={!name.trim() || save.isPending || drafting.isPending || (current?.problems.length ?? 0) > 0}>
+          {drafting.isPending ? t("Reading the description…") : needsDraft ? t("Draft the settings") : t("Save")}
         </button>
         <button type="button" className="ghost" onClick={onDone}>
           {t("Cancel")}
         </button>
+        {needsDraft && <span className="small muted">{t("An agent turns the description into what the service enforces; you see it before saving.")}</span>}
       </div>
-      <ErrorBox error={save.error} />
+      <ErrorBox error={save.error || drafting.error} />
     </form>
   );
 }

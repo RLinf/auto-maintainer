@@ -233,18 +233,33 @@ class LabMachine(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     description: str = ""
-    """What people should know when they pick it, such as its GPUs."""
+    """The machine's environment and rules in plain language: its hardware, the
+    environment runs use and how to set it up, where data lives, what runs must not
+    do, how long they may take. The reproduction agent reads it as written; the
+    settings after ``repos`` are drafted from it (``web/settings.py``, the draft
+    endpoint) and are what the service enforces."""
     transport: Literal["ssh", "local"] = "ssh"
     host: str | None = None
-    """The SSH destination (``user@host`` or an alias from the service user's SSH
-    config, which holds its key); defaults to the machine's name."""
+    """The host to reach (``HostName``: an address, a name, or an alias from the
+    service user's SSH config, which may hold the rest); defaults to the machine's
+    name. ``user@host`` is accepted too."""
+    user: str | None = None
+    """The login on the machine (``User``)."""
+    port: int | None = Field(default=None, ge=1, le=65535)
+    """The SSH port (``Port``)."""
+    proxy_jump: str | None = None
+    """Hosts to go through first (``ProxyJump``): ``[user@]host[:port]``, several
+    separated by commas."""
+    identity_file: str | None = None
+    """The private key on the service's host (``IdentityFile``), such as
+    ``~/.ssh/id_ed25519``; without one, the service user's SSH agent and config."""
+    repos: list[str] = Field(default_factory=list)
+    """Repositories that may use the machine; empty means all."""
     workdir: str = "am-labs"
     """Where runs go on the machine, relative to the login's home unless absolute.
     Each run gets its own folder there, removed afterwards."""
     setup: str = ""
     """Shell run before every reproduction, such as activating an environment."""
-    repos: list[str] = Field(default_factory=list)
-    """Repositories that may use the machine; empty means all."""
     forbid: list[str] = Field(default_factory=list)
     """Regular expressions a script must not match, besides the built-in ones."""
     timeout_seconds: int = Field(default=1800, ge=60, le=6 * 3600)
@@ -528,6 +543,80 @@ def check_settings(
     return problems
 
 
+SSH_USER = re.compile(r"^[A-Za-z_][A-Za-z0-9._-]*$")
+SSH_JUMP = re.compile(
+    r"^(?:[A-Za-z0-9._-]+@)?[A-Za-z0-9][A-Za-z0-9._-]*(?::[0-9]{1,5})?$"
+)
+SSH_KEY_PATH = re.compile(r"^[~/A-Za-z0-9._][~/A-Za-z0-9._+@-]*$")
+SSH_KEYWORDS = {
+    "hostname": "host",
+    "user": "user",
+    "port": "port",
+    "proxyjump": "proxy_jump",
+    "identityfile": "identity_file",
+}
+"""The ``~/.ssh/config`` keywords a machine's connection may use, and their fields.
+Others are refused: ``ProxyCommand``, ``LocalCommand``, ``KnownHostsCommand``, and
+``Match exec`` run commands on the service's host."""
+_SSH_LINE = re.compile(r"^(\S+?)(?:\s*=\s*|\s+)(.*)$")
+
+
+def parse_ssh_config(text: str) -> tuple[dict[str, Any], list[str]]:
+    """The connection fields of an ``~/.ssh/config``-style entry for one machine
+    (``Host`` names it and is otherwise ignored; ``HostName``, ``User``, ``Port``,
+    ``ProxyJump``, ``IdentityFile``), and the problems that keep it from being used."""
+    fields: dict[str, Any] = {}
+    problems: list[str] = []
+    hosts = 0
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        match = _SSH_LINE.match(line)
+        if match is None:
+            problems.append(f"{line!r}: write a keyword and its value")
+            continue
+        keyword, value = match.group(1), match.group(2).strip().strip('"')
+        if keyword.lower() == "host":
+            hosts += 1
+            if hosts > 1:
+                problems.append("write one Host entry per machine")
+            continue
+        field_name = SSH_KEYWORDS.get(keyword.lower())
+        if field_name is None:
+            problems.append(
+                f"{keyword} is not supported: a machine uses HostName, User, Port, "
+                "ProxyJump, and IdentityFile"
+            )
+            continue
+        if not value:
+            problems.append(f"{keyword} needs a value")
+            continue
+        if field_name == "port":
+            if not value.isdigit() or not 0 < int(value) < 65536:
+                problems.append(f"Port {value!r} is not a port number")
+                continue
+            fields["port"] = int(value)
+        else:
+            fields[field_name] = value
+    return fields, problems
+
+
+def ssh_config_text(name: str, machine: LabMachine) -> str:
+    """``machine``'s connection as an ``~/.ssh/config`` entry, for editing."""
+    lines = [f"Host {name}"]
+    for keyword, value in (
+        ("HostName", machine.host),
+        ("User", machine.user),
+        ("Port", machine.port),
+        ("ProxyJump", machine.proxy_jump),
+        ("IdentityFile", machine.identity_file),
+    ):
+        if value:
+            lines.append(f"  {keyword} {value}")
+    return "\n".join(lines)
+
+
 def machine_problems(name: str, machine: LabMachine) -> list[str]:
     """Why ``machine`` cannot be used as configured."""
     out = []
@@ -535,9 +624,26 @@ def machine_problems(name: str, machine: LabMachine) -> list[str]:
         out.append("names are lowercase words joined by hyphens, such as gpu-01")
     if machine.transport == "ssh" and not SSH_DESTINATION.match(machine.host or name):
         out.append(
-            "host must be an SSH destination such as user@gpu-01 or an alias, "
-            "without spaces or a leading '-'"
+            "HostName must be an address, a host name, or an alias (user@host also "
+            "works), without spaces or a leading '-'"
         )
+    if machine.transport == "ssh":
+        if machine.user is not None and not SSH_USER.match(machine.user):
+            out.append(f"User {machine.user!r} is not a login name")
+        jumps = (machine.proxy_jump or "").split(",") if machine.proxy_jump else []
+        for jump in jumps:
+            if not SSH_JUMP.match(jump.strip()):
+                out.append(
+                    f"ProxyJump {jump.strip()!r} must be [user@]host[:port], several "
+                    "separated by commas"
+                )
+        if machine.identity_file is not None and not SSH_KEY_PATH.match(
+            machine.identity_file
+        ):
+            out.append(
+                f"IdentityFile {machine.identity_file!r} must be a path on the "
+                "service's host, without spaces"
+            )
     workdir = machine.workdir.strip()
     if not workdir or ".." in workdir.split("/") or "\n" in workdir:
         out.append("workdir must be a plain path without '..'")

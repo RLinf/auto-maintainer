@@ -121,7 +121,14 @@ class LabExecutor:
         self.thresholds.update(self._fixed_thresholds)
         for name, machine in machines.items():
             self.hosts[name] = (
-                SshLabHost(name, machine.host or name)
+                SshLabHost(
+                    name,
+                    machine.host or name,
+                    user=machine.user,
+                    port=machine.port,
+                    proxy_jump=machine.proxy_jump,
+                    identity_file=machine.identity_file,
+                )
                 if machine.transport == "ssh"
                 else LocalLabHost(name)
             )

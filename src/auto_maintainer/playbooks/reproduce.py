@@ -305,8 +305,9 @@ class ReproducePlaybook(Playbook):
             about = "\n".join(
                 line
                 for line in (
-                    f"About {lab}: {machine.description}"
-                    if machine.description
+                    f"The environment and rules of {lab}, from its maintainers; follow "
+                    f"them:\n{machine.description.strip()}"
+                    if machine.description.strip()
                     else "",
                     "Before your setup, every run does: " + " && ".join(before)
                     if before

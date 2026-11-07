@@ -332,8 +332,40 @@ def _with_reproduction(kind: str) -> dict[str, Any]:
     }
 
 
+def _machine_rules(prompt: str) -> dict[str, Any]:
+    """The demo's draft of a test machine's enforced settings from its description:
+    the obvious values picked out of the text."""
+    import re
+
+    text = prompt.split("Description:", 1)[-1]
+    env = re.search(r"conda environment (\S+?)[ .,]", text)
+    folder = re.search(r"(/[\w./-]+-runs)", text)
+    hours = re.search(r"(\w+) hours? at most|at most (\w+) hours?", text)
+    count = {"one": 1, "two": 2, "three": 3, "four": 4}
+    limit = 30
+    if hours:
+        word = hours.group(1) or hours.group(2)
+        limit = 60 * (int(word) if word.isdigit() else count.get(word, 1))
+    forbid = []
+    if "ray stop" in text:
+        forbid.append(r"\bray\s+stop\b")
+    if "/data/datasets" in text:
+        forbid.append("/data/datasets")
+    return {
+        "workdir": folder.group(1) if folder else "am-labs",
+        "setup": f"conda activate {env.group(1)}" if env else "",
+        "timeout_minutes": limit,
+        "forbid": forbid,
+        "max_gpu_memory_mib": 500,
+        "max_gpu_util_pct": 0,
+        "left_to_agent": [],
+    }
+
+
 def _answer(task: AgentTask) -> dict[str, Any]:
     kind = str(task.kind)
+    if kind == "chat" and "You turn the description" in task.prompt:
+        return _machine_rules(task.prompt)
     if kind in ("review", "followup") and TALKING in task.prompt:
         return _talk(task, kind)
     if kind in ("review", "followup") and REPRODUCED in task.prompt:

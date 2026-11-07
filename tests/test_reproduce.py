@@ -47,8 +47,8 @@ REPO = "acme/widget"
 @pytest.mark.parametrize(
     ("machine", "problem"),
     [
-        (LabMachine(host="-oProxyCommand=touch /tmp/x"), "SSH destination"),
-        (LabMachine(host="gpu 01"), "SSH destination"),
+        (LabMachine(host="-oProxyCommand=touch /tmp/x"), "HostName"),
+        (LabMachine(host="gpu 01"), "HostName"),
         (LabMachine(workdir="../elsewhere"), "without '..'"),
         (LabMachine(workdir="/"), "folder of its own"),
         (LabMachine(forbid=["("]), "not a regular expression"),
@@ -582,3 +582,150 @@ async def test_without_a_machine_the_review_says_no_run_was_made(demo) -> None:
     ]
     assert "no test machine is set up for this repository" in review.prompt
     assert not [j for j in await h.store.list_jobs() if j.playbook == "reproduce"]
+
+
+# -- connections like ~/.ssh/config, and settings drafted from a description --------------
+
+
+def test_a_connection_is_written_like_an_ssh_config_entry() -> None:
+    from auto_maintainer.domain.settings import parse_ssh_config, ssh_config_text
+
+    fields, problems = parse_ssh_config(
+        "Host gpu-01\n  HostName 10.0.0.5\n  User ci\n  Port 2222\n"
+        "  ProxyJump ops@bastion.example.com:22,jump2\n  IdentityFile ~/.ssh/id_ed25519\n"
+    )
+    assert problems == []
+    machine = LabMachine(**fields)
+    assert (machine.host, machine.user, machine.port) == ("10.0.0.5", "ci", 2222)
+    assert machine_problems("gpu-01", machine) == []
+    assert parse_ssh_config(ssh_config_text("gpu-01", machine))[0] == fields
+    for refused in ("ProxyCommand nc %h %p", "LocalCommand id", "Match exec true"):
+        assert parse_ssh_config(f"Host x\n  {refused}\n")[1], refused
+    assert parse_ssh_config("Host x\n  Port 99999\n")[1]
+    for bad in (
+        LabMachine(host="h", proxy_jump="-oProxyCommand=id"),
+        LabMachine(host="h", user="-l root"),
+        LabMachine(host="h", identity_file="key file"),
+    ):
+        assert machine_problems("gpu-01", bad), bad
+
+
+async def test_ssh_gets_the_connection_as_options(monkeypatch) -> None:
+    from auto_maintainer.labs import hosts
+
+    seen: list[list[str]] = []
+
+    async def fake_run(argv, **kwargs):  # type: ignore[no-untyped-def]
+        seen.append(argv)
+        return type(
+            "R",
+            (),
+            {
+                "exit_code": 0,
+                "stdout": "",
+                "stderr": "",
+                "duration_seconds": 0.0,
+                "timed_out": False,
+            },
+        )()
+
+    monkeypatch.setattr(hosts, "run", fake_run)
+    host = hosts.SshLabHost(
+        "gpu-01",
+        "10.0.0.5",
+        user="ci",
+        port=2222,
+        proxy_jump="bastion",
+        identity_file="~/.ssh/k",
+    )
+    await host.run("true", timeout=5)
+    argv = seen[0]
+    for option in (
+        "User=ci",
+        "Port=2222",
+        "ProxyJump=bastion",
+        "IdentityFile=~/.ssh/k",
+        "IdentitiesOnly=yes",
+    ):
+        assert option in argv
+    assert argv[argv.index("--") + 1] == "10.0.0.5", (
+        "the host comes after --, never as an option"
+    )
+
+
+async def test_a_machines_connection_is_saved_from_its_ssh_entry(demo) -> None:
+    h, app = demo
+    entry = "Host a100-3\n  HostName 10.0.0.7\n  User ci\n  Port 2200\n  ProxyJump bastion\n"
+    async with _as(app, "maria") as maria:
+        saved = await maria.put(
+            "/api/settings/labs/a100-3",
+            json={"machine": {"description": "4× A100"}, "ssh_config": entry},
+        )
+        assert saved.status_code == 200 and saved.json()["approved"] is True, saved.text
+        refused = await maria.put(
+            "/api/settings/labs/a100-3",
+            json={
+                "machine": {},
+                "ssh_config": "Host a100-3\n  ProxyCommand nc %h %p\n",
+            },
+        )
+        assert refused.status_code == 422
+    machine = h.service.machines["a100-3"]
+    assert (machine.host, machine.user, machine.port, machine.proxy_jump) == (
+        "10.0.0.7",
+        "ci",
+        2200,
+        "bastion",
+    )
+
+
+async def test_an_agent_drafts_what_the_service_enforces_from_the_description(
+    demo,
+) -> None:
+    h, app = demo
+    asked: list[str] = []
+
+    def chat(task):  # type: ignore[no-untyped-def]
+        asked.append(task.prompt)
+        return {
+            "workdir": "/data/am-runs",
+            "setup": "conda activate rlinf\nexport CUDA_VISIBLE_DEVICES=0,1,2,3",
+            "timeout_minutes": 120,
+            "forbid": [r"\bray\s+stop\b", "/data/datasets"],
+            "max_gpu_memory_mib": 1024,
+            "max_gpu_util_pct": 5,
+            "left_to_agent": ["prefer small batch sizes"],
+        }
+
+    h.runner.on("chat", chat)
+    description = (
+        "Activate the conda environment rlinf. Runs go in /data/am-runs and use GPUs 0-3. "
+        "Never run ray stop or write to /data/datasets. Two hours at most. Prefer small batch sizes."
+    )
+    body = {
+        "machine": {"description": description},
+        "ssh_config": "Host gpu-09\n  HostName 10.0.0.9\n",
+    }
+    async with _as(app, "walt") as walt:
+        assert (
+            await walt.post("/api/settings/labs/gpu-09/draft", json=body)
+        ).status_code == 403
+    async with _as(app, "maria") as maria:
+        drafted = (
+            await maria.post("/api/settings/labs/gpu-09/draft", json=body)
+        ).json()
+        assert "gpu-09" not in h.service.machines, "a draft saves nothing"
+        assert description in asked[0]
+        machine = drafted["machine"]
+        assert machine["setup"].startswith("conda activate rlinf")
+        assert machine["timeout_seconds"] == 7200 and machine["host"] == "10.0.0.9"
+        assert drafted["problems"] == [] and drafted["left_to_agent"] == [
+            "prefer small batch sizes"
+        ]
+        assert "/data/am-runs" in drafted["diff"]
+        saved = await maria.put(
+            "/api/settings/labs/gpu-09",
+            json={"machine": machine, "ssh_config": body["ssh_config"]},
+        )
+        assert saved.json()["approved"] is True
+    assert h.service.machines["gpu-09"].forbid == [r"\bray\s+stop\b", "/data/datasets"]
