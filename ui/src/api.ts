@@ -14,16 +14,28 @@ function cookie(name: string): string {
   return match ? decodeURIComponent(match.slice(name.length + 1)) : "";
 }
 
-async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+const CSRF_REFUSED = "missing or wrong CSRF token";
+
+async function send(method: string, path: string, body?: unknown): Promise<Response> {
   const headers: Record<string, string> = { Accept: "application/json" };
   if (body !== undefined) headers["Content-Type"] = "application/json";
   if (method !== "GET" && path.startsWith("/api/")) headers["X-AM-CSRF"] = cookie("am_csrf");
-  const res = await fetch(path, {
+  return fetch(path, {
     method,
     headers,
     credentials: "same-origin",
     body: body === undefined ? undefined : JSON.stringify(body),
   });
+}
+
+async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  let res = await send(method, path, body);
+  if (res.status === 403 && method !== "GET" && (await res.clone().text()).includes(CSRF_REFUSED)) {
+    // The browser lost its token (a phone that closed its browser keeps the session
+    // but may drop it): any read gets a new one; try once more with it.
+    await fetch("/api/me", { credentials: "same-origin" });
+    res = await send(method, path, body);
+  }
   const text = await res.text();
   let data: unknown = null;
   if (text) {

@@ -108,14 +108,23 @@ def set_session(request: Request, response: Any, user: User) -> Any:
         secure=secure,
         max_age=SESSION_DAYS * 86400,
     )
+    issue_csrf(request, response)
+    return response
+
+
+def issue_csrf(request: Request, response: Any) -> None:
+    """A fresh CSRF token for the dashboard to echo on every change (``am_csrf``,
+    readable by the page). It lives as long as the session: a token that lived only
+    for the browser's session was lost whenever a phone closed its browser, while the
+    person stayed signed in, and every change they made was then refused."""
     response.set_cookie(
         CSRF_COOKIE,
         secrets.token_urlsafe(24),
         httponly=False,
         samesite="strict",
-        secure=secure,
+        secure=request.app.state.cookie_secure,
+        max_age=SESSION_DAYS * 86400,
     )
-    return response
 
 
 async def remember_token(

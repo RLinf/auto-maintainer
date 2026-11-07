@@ -141,22 +141,34 @@ def create_app(
 
 
 def install_csrf(app: FastAPI) -> None:
-    """Every state-changing ``/api`` call must echo the ``am_csrf`` cookie in a header."""
+    """Every state-changing ``/api`` call must echo the ``am_csrf`` cookie in a header.
+    A signed-in browser that lost the cookie gets a new one with its next read, so a
+    reload is enough to make changes again."""
 
     @app.middleware("http")
     async def csrf(request: Request, call_next: Any) -> Response:
-        if request.method not in (
-            "GET",
-            "HEAD",
-            "OPTIONS",
-        ) and request.url.path.startswith("/api/"):
+        safe = request.method in ("GET", "HEAD", "OPTIONS")
+        if not safe and request.url.path.startswith("/api/"):
             cookie = request.cookies.get(auth.CSRF_COOKIE, "")
             header = request.headers.get("x-am-csrf", "")
             if not cookie or not hmac.compare_digest(cookie, header):
                 return JSONResponse(
                     {"detail": "missing or wrong CSRF token"}, status_code=403
                 )
-        return await call_next(request)
+        response = await call_next(request)
+        if (
+            safe
+            and not request.cookies.get(auth.CSRF_COOKIE)
+            and request.app.state.sessions.verify(
+                request.cookies.get(auth.SESSION_COOKIE)
+            )
+            and not any(
+                value.startswith(f"{auth.CSRF_COOKIE}=")
+                for value in response.headers.getlist("set-cookie")
+            )
+        ):
+            auth.issue_csrf(request, response)
+        return response
 
 
 def install_spa(app: FastAPI) -> None:

@@ -66,6 +66,37 @@ async def test_sign_in_and_view_permissions(demo) -> None:
         ).status_code == 403
 
 
+async def test_a_browser_that_lost_its_csrf_token_gets_a_new_one(demo) -> None:
+    h, app = demo
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as phone:
+        signed_in = await phone.get("/auth/dev?login=maria", follow_redirects=False)
+        [csrf] = [
+            c
+            for c in signed_in.headers.get_list("set-cookie")
+            if c.startswith("am_csrf=")
+        ]
+        assert "max-age=" in csrf.lower(), "it lasts as long as the session"
+        # A phone that closed its browser keeps the session and may drop the token.
+        phone.cookies.delete("am_csrf")
+        refused = await phone.post(
+            "/api/prs/refresh", json={}, headers={"x-am-csrf": ""}
+        )
+        assert refused.status_code == 403
+        assert (await phone.get("/api/me")).status_code == 200
+        token = phone.cookies.get("am_csrf")
+        assert token, "the next read gives a new one"
+        again = await phone.post(
+            "/api/prs/refresh", json={}, headers={"x-am-csrf": token}
+        )
+        assert again.status_code == 200, again.text
+        kept = await phone.get("/api/me")
+        assert not [
+            c for c in kept.headers.get_list("set-cookie") if c.startswith("am_csrf=")
+        ], "a browser that has one keeps it"
+
+
 async def test_settings_change_needs_a_maintainer(demo) -> None:
     h, app = demo
     yaml_text = "schema: 1\nextends: [dco]\nmerge: {enabled: false}\n"
