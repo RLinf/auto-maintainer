@@ -4,6 +4,7 @@
 
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useSearchParams } from "react-router-dom";
+import { useT } from "./i18n";
 import { Icon } from "./icons";
 import { Popover } from "./ui";
 
@@ -202,12 +203,13 @@ export function ListToolbar<T>({
   placeholder?: string;
   children?: ReactNode;
 }) {
+  const t = useT();
   const ref = useRef<HTMLInputElement>(null);
   const [draft, setDraft] = useState(list.query);
   useEffect(() => setDraft(list.query), [list.query]);
   useEffect(() => {
-    const t = window.setTimeout(() => draft !== list.query && list.setQuery(draft), 180);
-    return () => window.clearTimeout(t);
+    const timer = window.setTimeout(() => draft !== list.query && list.setQuery(draft), 180);
+    return () => window.clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draft]);
   useEffect(() => {
@@ -277,24 +279,24 @@ export function ListToolbar<T>({
       })}
       {list.filtering && (
         <button className="ghost sm" onClick={list.clearAll}>
-          Reset
+          {t("Reset")}
         </button>
       )}
       <span className="spacer" />
       {list.groups.length > 0 && (
         <Popover
           align="right"
-          label="Group by"
+          label={t("Group by")}
           trigger={(_, toggle) => (
             <button className="ghost" onClick={toggle}>
-              <Icon name="list" /> {list.groupId ? `Group: ${list.groups.find((g) => g.id === list.groupId)?.label}` : "Group"}
+              <Icon name="list" /> {list.groupId ? `${t("Group")}: ${list.groups.find((g) => g.id === list.groupId)?.label}` : t("Group")}
             </button>
           )}
         >
           {(close) => (
             <>
-              <div className="menu-label">Group by</div>
-              {[{ id: "", label: "No grouping" }, ...list.groups].map((g) => (
+              <div className="menu-label">{t("Group by")}</div>
+              {[{ id: "", label: t("No grouping") }, ...list.groups].map((g) => (
                 <button key={g.id} className="menu-item" onClick={() => (list.setGroup(g.id), close())}>
                   <span className="menu-check">{list.groupId === g.id ? <Icon name="check" size={14} /> : null}</span>
                   {g.label}
@@ -307,16 +309,16 @@ export function ListToolbar<T>({
       {list.sorts.length > 0 && (
         <Popover
           align="right"
-          label="Sort by"
+          label={t("Sort by")}
           trigger={(_, toggle) => (
-            <button className="ghost" onClick={toggle} aria-label="Sort">
-              <Icon name={list.sortDesc ? "sortDesc" : "sortAsc"} /> {sortLabel ?? "Sort"}
+            <button className="ghost" onClick={toggle} aria-label={t("Sort")}>
+              <Icon name={list.sortDesc ? "sortDesc" : "sortAsc"} /> {sortLabel ?? t("Sort")}
             </button>
           )}
         >
           {() => (
             <>
-              <div className="menu-label">Sort by</div>
+              <div className="menu-label">{t("Sort by")}</div>
               {list.sorts.map((s) => (
                 <button key={s.id} className="menu-item" onClick={() => list.setSort(s.id)}>
                   <span className="menu-check">{list.sortId === s.id ? <Icon name={list.sortDesc ? "sortDesc" : "sortAsc"} size={14} /> : null}</span>
@@ -469,18 +471,19 @@ export function DataTable<T>({
 }
 
 export function TableFoot<T>({ list }: { list: ListState<T> }) {
+  const t = useT();
   if (!list.total) return null;
   const from = list.grouped ? 1 : list.page * list.pageSize + 1;
   const to = list.grouped ? list.count : Math.min(list.count, (list.page + 1) * list.pageSize);
   return (
     <div className="table-foot">
       <span>
-        {list.count ? `${from}–${to} of ${list.count}` : "0"}
+        {list.count ? `${from}–${to} ${t("of")} ${list.count}` : "0"}
         {list.count !== list.total ? ` (filtered from ${list.total})` : ""}
       </span>
       <span className="spacer" />
       <span className="hide-narrow">
-        <span className="kbd">j</span> <span className="kbd">k</span> move · <span className="kbd">↵</span> open
+        <span className="kbd">j</span> <span className="kbd">k</span> {t("move")} · <span className="kbd">↵</span> {t("open")}
       </span>
       {!list.grouped && list.pages > 1 && (
         <span className="row">

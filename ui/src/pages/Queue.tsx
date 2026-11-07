@@ -107,7 +107,7 @@ export default function QueuePage({ me }: { me: Me }) {
       header: t("Score"),
       cell: (p) => (p.total == null ? <span className="muted">—</span> : p.total.toFixed(1)),
       sort: "priority",
-      className: "num",
+      className: "num hide-phone",
       width: 72,
     },
     {
@@ -115,7 +115,7 @@ export default function QueuePage({ me }: { me: Me }) {
       header: t("Pull request"),
       sort: "title",
       cell: (p) => (
-        <div style={{ minWidth: 260 }}>
+        <div className="title-cell">
           <Link to={prPath(p.repo, p.number)} style={{ color: "var(--text)", fontWeight: 550 }}>
             {p.title}
           </Link>
@@ -135,6 +135,7 @@ export default function QueuePage({ me }: { me: Me }) {
       id: "state",
       header: t("Review"),
       sort: "state",
+      className: "hide-phone",
       cell: (p) => (
         <div className="stack" style={{ gap: 4, alignItems: "flex-start" }}>
           <ReviewState state={p.review_state} />
@@ -153,6 +154,7 @@ export default function QueuePage({ me }: { me: Me }) {
       id: "actions",
       header: "",
       width: 84,
+      className: "hide-phone",
       cell: (p) => (
         <span className="row" style={{ gap: 2, justifyContent: "flex-end", flexWrap: "nowrap" }}>
           <button className="ghost icon sm" title={t("Ask agent")} aria-label={t("Ask agent")} onClick={() => askAbout(p)}>

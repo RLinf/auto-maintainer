@@ -322,7 +322,7 @@ function Shell({ me }: { me: Me }) {
       {!agent.isOpen && (
         <button className="agent fab" onClick={() => agent.open()} aria-label={t("Ask agent")}>
           <Icon name="sparkles" size={18} />
-          {t("Ask agent")}
+          <span className="fab-label">{t("Ask agent")}</span>
         </button>
       )}
       <CommandPalette open={palette} onClose={() => setPalette(false)} commands={commands} me={me} />

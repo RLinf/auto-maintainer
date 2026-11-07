@@ -124,10 +124,14 @@ body {
   font: 14px/1.5 var(--sans);
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
+  /* A long path or identifier breaks instead of running out of its box. */
+  overflow-wrap: break-word;
 }
 a { color: var(--accent); text-decoration: none; }
+/* A picker whose longest option is long stays within its box. */
+select { max-width: 100%; }
 a:hover { text-decoration: underline; text-underline-offset: 2px; }
-h1 { font-size: 22px; line-height: 1.25; letter-spacing: -0.015em; margin: 0; font-weight: 650; }
+h1 { font-size: 22px; line-height: 1.25; letter-spacing: -0.015em; margin: 0; font-weight: 650; overflow-wrap: anywhere; }
 h2 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: -0.005em; }
 h3 { font-size: 13px; margin: 14px 0 6px; font-weight: 600; color: var(--text-2); }
 code, .mono { font-family: var(--mono); font-size: 12px; }
@@ -185,7 +189,7 @@ code { background: var(--code-bg); padding: 1px 5px; border-radius: 5px; }
 .strip.question { background: var(--warn-bg); color: var(--warn); }
 .strip.dev { background: var(--info-bg); color: var(--info); }
 .strip a { color: inherit; text-decoration: underline; }
-.strip.default-agent { background: var(--surface-2); border: 1px solid var(--border); font-weight: 400; margin-bottom: 10px; }
+.strip.default-agent { background: var(--surface-2); border: 1px solid var(--border); font-weight: 400; margin-bottom: 10px; flex-wrap: wrap; }
 .strip.default-agent > :last-child { margin-left: auto; }
 
 /* ---- surfaces ------------------------------------------------------------------- */
@@ -237,7 +241,7 @@ a.list-row:hover { background: var(--surface-2); text-decoration: none; }
 .list-row:last-child { border-bottom: none; }
 .list-row .main { flex: 1; min-width: 0; }
 .list-row .t { font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; color: var(--text); }
-.list-row .meta { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.list-row .meta { display: block; color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .list-row .t.wrap { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 .list-row .row-actions { opacity: 0; transition: opacity 0.12s; display: flex; gap: 4px; }
 .list-row:hover .row-actions, .list-row:focus-within .row-actions { opacity: 1; }
@@ -260,6 +264,8 @@ a.list-row:hover { background: var(--surface-2); text-decoration: none; }
 .chip-btn .n { font-size: 11px; padding: 0 6px; border-radius: 999px; background: var(--accent); color: var(--accent-text); }
 .table-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-lg); box-shadow: var(--shadow-sm); overflow: hidden; }
 .table-wrap { overflow-x: auto; }
+/* A PR's title keeps room beside the other columns; on a phone it takes what is left. */
+.title-cell { min-width: 260px; }
 table { width: 100%; border-collapse: separate; border-spacing: 0; }
 th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: middle; }
 th {
@@ -507,6 +513,7 @@ details > summary { cursor: pointer; color: var(--text-2); }
   .header-inner { gap: 6px; padding: 0 10px; }
   .tabs-nav a { padding: 5px 9px; }
   .search-trigger { width: 34px; padding: 0; justify-content: center; border-color: transparent; box-shadow: none; background: transparent; }
+
   .agent-panel { top: 0; right: 0; bottom: 0; width: 100vw; border-radius: 0; }
 }
 @media (prefers-reduced-motion: reduce) {
@@ -681,3 +688,19 @@ details.pv-section[open] > summary { margin-bottom: 6px; }
 /* ---- one repository at a time ----------------------------------------------------- */
 .repo-switch { gap: 6px; flex-wrap: wrap; margin: -4px 0 4px; }
 .repo-switch .chip-btn { border-style: solid; height: 30px; gap: 6px; }
+
+/* ---- phones (last, so it overrides the components above) --------------------------- */
+/* Titles take two lines instead of one cut short, a long word in a table breaks instead
+   of widening the table past the screen, actions that appear on hover (which a phone
+   has not) give their room to the title, and the agent button covers less of the page. */
+@media (max-width: 560px) {
+  .list-row .t, .work-row .t {
+    white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow-wrap: anywhere;
+  }
+  .table-wrap td { overflow-wrap: anywhere; }
+  .title-cell { min-width: 0; }
+  .list-row .row-actions { display: none; }
+  .hide-phone { display: none; }
+  .fab { width: 50px; height: 50px; padding: 0; right: 16px; bottom: 16px; }
+  .fab .fab-label { display: none; }
+}
