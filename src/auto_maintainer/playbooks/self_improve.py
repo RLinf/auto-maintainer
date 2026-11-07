@@ -106,6 +106,10 @@ class SelfImprove(Playbook):
         request = str(event.payload["request"]).strip()
         by = event.payload.get("by")
         approved_by = event.payload.get("approved_by")
+        # The request a maintainer of the code repository approved, the asker's own
+        # messages, and the service's own code: nothing from outside the team, so a
+        # bypass the agent's settings allow applies.
+        ctx.trusted_input = True
         base = await ctx.forge.default_branch_sha(code_repo)
         path = await ctx.workspace.prepare(
             code_repo, None, base, ctx.service.code_branch
@@ -229,7 +233,7 @@ def _prompt(request: str, by: Any, context: str) -> str:
         f"A reviewer{f' ({by})' if by else ''} asked for this in a conversation with the service:\n\n{request}",
     ]
     if context:
-        parts.append(f"Earlier in that conversation:\n\n{context}")
+        parts.append(f"What they wrote earlier in that conversation:\n\n{context}")
     parts.append(
         "Implement it with the smallest change that fits the existing design, with tests, and "
         "update AGENTS.md and docs/design.md where the behavior they describe changes. Run "

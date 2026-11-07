@@ -131,6 +131,16 @@ async def test_a_chat_request_waits_for_approval_then_becomes_a_pr(
     assert "Added ping(); pytest passed." in pr["body"], "the agent's account is kept"
     assert TESTS in h.sandbox.runs and LINT in h.sandbox.runs
     assert any("I opened" in m["text"] for m in messages if m["role"] == "assistant")
+    [work] = [
+        t
+        for t in h.runner.tasks
+        if t.kind == "self_improve" and t.mode == "workspace_write"
+    ]
+    assert not work.untrusted_input, "a bypass the agent's settings allow applies"
+    assert "walt: Can you answer pings?" in work.prompt
+    assert "I can change my code" not in work.prompt, (
+        "the agent's answers, which can repeat PR text, are not passed on"
+    )
 
 
 async def test_a_conversation_runs_one_code_change_at_a_time(

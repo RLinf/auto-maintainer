@@ -55,6 +55,12 @@ def _ask(tool: str, detail: str = "", paths: list[str] | None = None) -> AgentQu
         "git status; git log -n 5 --oneline",
         "git diff --stat || git status",
         "grep -n 'a && b; c' src/x.py",
+        "which pytest ruff sphinx-build uv",
+        "git branch -a && git remote -v && git log -n 5 --oneline",
+        "git remote get-url origin",
+        "git diff --stat 2>/dev/null || true",
+        "ls -la 2>&1 | head -5",
+        "echo checked",
     ],
 )
 def test_reading_commands_are_approved(tmp_path: Path, command: str) -> None:
@@ -83,6 +89,10 @@ def test_reading_commands_are_approved(tmp_path: Path, command: str) -> None:
         "cat x.py >> y.py",
         "git status;",
         "git status && FOO=1 ls",
+        "git remote add mirror https://example.com/x.git",
+        "ls -la /opt/venv 2>/dev/null",
+        "echo hi > /dev/nullx",
+        "echo hi >/dev/null/../../tmp/x",
     ],
 )
 def test_risky_commands_go_to_a_reviewer(tmp_path: Path, command: str) -> None:

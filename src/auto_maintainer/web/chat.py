@@ -828,8 +828,12 @@ async def _start_improve(
     history: list[Any],
 ) -> str:
     """Start the ``self_improve`` playbook for an approved request; returns the id
-    the jobs API opens it by."""
-    context = "\n".join(f"{m.role}: {m.text}" for m in history[-10:])
+    the jobs API opens it by. Its context is what people wrote in the conversation,
+    never the agent's answers, which can repeat text from PRs: the work runs on the
+    service's own code as trusted input."""
+    context = "\n".join(
+        f"{m.author or asked_by}: {m.text}" for m in history[-10:] if m.role == "user"
+    )
     event = Event(
         kind=EventKind.DASHBOARD_COMMAND,
         payload={

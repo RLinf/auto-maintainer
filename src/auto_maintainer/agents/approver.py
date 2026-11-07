@@ -20,7 +20,8 @@ joined with ``&&``, ``||``, ``;``, or ``|`` when each one is), and, for tasks th
 may write, edits inside the worktree and running tests or linters. Edits in a
 read-only task are refused. Everything else, including any path outside the run's
 directories, network access, and shell syntax that can hide a command (substitution,
-redirection, subshells, a background ``&``), goes to a reviewer.
+redirection other than discarding output to ``/dev/null`` or ``2>&1``, subshells, a
+background ``&``), goes to a reviewer.
 """
 
 from __future__ import annotations
@@ -36,7 +37,7 @@ READ_COMMANDS = frozenset(
     {
         "ls", "cat", "head", "tail", "wc", "grep", "rg", "find", "fd", "tree",
         "pwd", "stat", "file", "du", "sort", "uniq", "cut", "diff", "jq", "realpath",
-        "basename", "dirname", "nl",
+        "basename", "dirname", "nl", "which", "true", "echo", "printf",
     }
 )  # fmt: skip
 GIT_READ = frozenset(
@@ -54,6 +55,12 @@ _SHELL_META = ("$(", "`", "\n", "\\")
 """Text that can hide a command anywhere in a command line."""
 _JOINS = frozenset({"&&", "||", ";", "|"})
 """Operators that run one command after another; each command is checked alone."""
+_HARMLESS_REDIRECTS = re.compile(
+    r"(?<![^\s;|&])(?:[12]?>|&>)\s*/dev/null(?![^\s;|&])|(?<![^\s;|&])2>&1(?![^\s;|&])"
+)
+"""Redirections that only discard output or join it with errors, which agents add to
+read-only commands; any other redirection still goes to a reviewer."""
+_GIT_REMOTE_READ = frozenset({"-v", "--verbose"})
 
 
 POSTING_ANSWER = (
@@ -138,7 +145,7 @@ def safe_command(command: str, mode: str, roots: list[Path]) -> bool:
     """Whether ``command`` only reads (or, for writing tasks, tests) inside ``roots``."""
     if any(token in command for token in _SHELL_META):
         return False
-    commands = _commands(command)
+    commands = _commands(_HARMLESS_REDIRECTS.sub(" ", command))
     if commands is None:
         return False
     for words in commands:
@@ -166,6 +173,9 @@ def _safe_words(words: list[str], mode: str) -> bool:
         sub = next((w for w in words[1:] if not w.startswith("-")), "")
         if sub in GIT_READ:
             return True
+        if sub == "remote":  # listing remotes; adding or changing one is not reading
+            rest = words[words.index("remote") + 1 :]
+            return all(w in _GIT_REMOTE_READ for w in rest) or rest[:1] == ["get-url"]
         return mode == "workspace_write" and sub in GIT_WRITE
     if name == "find":
         return not any(w in _FIND_ACTIONS for w in words)
