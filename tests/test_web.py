@@ -284,6 +284,14 @@ async def test_approve_and_edit_a_proposal(demo) -> None:
         await h.settle()
         rows = {r["number"]: r for r in (await maria.get("/api/prs")).json()}
         assert rows[42]["review_activity"]["draft"]["for"] == "maria"
+        assert (rows[42]["quality"]["score"], rows[42]["quality"]["band"]) == (
+            95,
+            "excellent",
+        ), "one minor finding"
+        assert rows[43]["quality"]["posted"] is False, "a draft, not posted yet"
+        assert rows[44]["quality"] is None, "not reviewed"
+        detail = (await maria.get("/api/prs/acme/widget/42")).json()
+        assert detail["quality"] == rows[42]["quality"]
         proposals = (await maria.get("/api/proposals")).json()
         review = next(
             p
@@ -385,6 +393,9 @@ async def test_the_agent_knows_the_page_it_is_asked_from(demo) -> None:
     h.runner.on("chat", answer)
     context = {"page": "pr", "repo": "acme/widget", "number": 42}
     async with _client(app, "walt") as walt:
+        target = [{"repo": "acme/widget", "number": 42}]
+        await walt.post("/api/reviews", json={"prs": target})
+        await h.settle()
         thread = (
             await walt.post(
                 "/api/chat/threads", json={"text": "status?", "context": context}
@@ -402,3 +413,4 @@ async def test_the_agent_knows_the_page_it_is_asked_from(demo) -> None:
         )
         assert hidden.status_code == 403
     assert "looking at acme/widget#42" in seen[0] and "'this PR'" in seen[0]
+    assert "quality from its latest review" in seen[0] and "95/100" in seen[0]

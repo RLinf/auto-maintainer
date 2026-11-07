@@ -65,7 +65,7 @@ from ..domain.merge_gate import MergeArm, evaluate_merge_gate
 from ..domain.permissions import Permission
 from ..domain.profile import Conditions, RepoProfile
 from ..domain.records import ActionRecord, AuditEntry, JobStatus
-from ..domain.review import classify_review_state
+from ..domain.review import ReviewQuality, classify_review_state, review_quality
 from ..domain.run_ci import plan_run_ci
 from ..domain.scoring import Evaluation, recompute
 from ..domain.secrets import redact_secrets
@@ -860,6 +860,7 @@ def build_router() -> APIRouter:
                 continue
             ids = service.info.identities | set(profile.people.review_identities)
             activity = await review_activity(service, name)
+            quality = await review_qualities(service, name)
             own = await service.posted_as_people(name)
             for pr in await service.store.list_snapshots(name):
                 cls = classify_review_state(
@@ -901,6 +902,9 @@ def build_router() -> APIRouter:
                         "scores": ev.scores if ev else {},
                         "review_trigger": profile.review.trigger,
                         "review_activity": activity.get(pr.number, {}),
+                        "quality": quality[pr.number].model_dump(mode="json")
+                        if pr.number in quality
+                        else None,
                     }
                 )
         rows.sort(key=lambda x: (-(x["total"] or 0), -x["number"]))
@@ -1020,10 +1024,16 @@ def build_router() -> APIRouter:
             own_actions=await service.posted_as_people(repo),
         )
         ev = await service.store.get_evaluation(repo, number)
+        quality = review_quality(
+            await service.store.list_actions(
+                repo=repo, number=number, kinds=[ActionKind.REVIEW_POST], limit=500
+            )
+        )
         return {
             "pr": pr.model_dump(mode="json"),
             "review_state": cls.model_dump(mode="json"),
             "evaluation": ev.model_dump(mode="json") if ev else None,
+            "quality": quality.model_dump(mode="json") if quality else None,
             "actions": [
                 {
                     **a.model_dump(mode="json"),
@@ -2094,6 +2104,22 @@ async def _request_review(
     )
     await service.bus.publish(event)
     return {**out, "run": run, "event": event.id, "state": state, "agent": chosen}
+
+
+async def review_qualities(service: Service, repo: str) -> dict[int, ReviewQuality]:
+    """Per reviewed PR of ``repo``: its quality as its latest review found it."""
+    by_pr: dict[int, list[ActionRecord]] = {}
+    for record in await service.store.list_actions(
+        repo=repo, kinds=[ActionKind.REVIEW_POST], limit=5000
+    ):
+        if record.action.number is not None:
+            by_pr.setdefault(record.action.number, []).append(record)
+    out = {}
+    for number, records in by_pr.items():
+        quality = review_quality(records)
+        if quality is not None:
+            out[number] = quality
+    return out
 
 
 async def review_activity(service: Service, repo: str) -> dict[int, dict[str, Any]]:

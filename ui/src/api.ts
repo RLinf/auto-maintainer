@@ -170,7 +170,23 @@ export interface PrRow {
   scores: Record<string, number>;
   review_trigger: "manual" | "scan" | "events";
   review_activity: ReviewActivity;
+  quality: ReviewQuality | null;
 }
+
+/** How sound the latest review found a PR: 100 less a penalty for each finding still
+ *  open, by severity (domain/review.py: QUALITY_PENALTY). Internal. */
+export interface ReviewQuality {
+  score: number;
+  band: QualityBand;
+  /** Open findings per severity; a partly addressed one counts half. */
+  open: Record<string, number>;
+  sha: string;
+  kind: "review" | "followup";
+  posted: boolean;
+  action_id: string;
+}
+
+export type QualityBand = "excellent" | "good" | "fair" | "poor" | "bad";
 
 export interface ReviewActivity {
   job?: {
@@ -291,6 +307,7 @@ export interface PrDetail {
   };
   review_state: { state: string; reviewed_sha: string | null; latest_review_state: string | null };
   evaluation: Evaluation | null;
+  quality: ReviewQuality | null;
   actions: (ActionRecord & { proposal: Proposal | null })[];
   reviews: { sha: string; kind: string; action_id: string; result: Record<string, unknown>; created_at: string }[];
   ci: CiObservation[];

@@ -20,6 +20,11 @@ from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
+from auto_maintainer.domain.actions import (
+    Action,
+    ActionKind,
+    ActionStatus,
+)
 from auto_maintainer.domain.calendar import BusinessCalendar
 from auto_maintainer.domain.codeowners import (
     owners_for,
@@ -35,11 +40,15 @@ from auto_maintainer.domain.merge_gate import (
 )
 from auto_maintainer.domain.permissions import Permission
 from auto_maintainer.domain.profile import RepoProfile, Timing
+from auto_maintainer.domain.records import ActionRecord
 from auto_maintainer.domain.review import (
     ReviewResult,
     ReviewState,
     classify_review_state,
+    quality_band,
+    quality_score,
     render_review,
+    review_quality,
 )
 from auto_maintainer.domain.scoring import (
     DEFAULT_RUBRIC,
@@ -192,6 +201,78 @@ def test_render_review_puts_diff_findings_inline() -> None:
         and "(`x.py:3`)" in out.body
         and "  b" in out.body
     )
+
+
+def test_quality_loses_points_by_severity_and_bands_the_score() -> None:
+    assert (quality_score({}), quality_band(100)) == (100, "excellent")
+    assert quality_score({"minor": 3}) == 85 and quality_band(85) == "good"
+    assert quality_score({"major": 2}) == 60 and quality_band(60) == "fair"
+    assert quality_score({"critical": 1}) == 55 and quality_band(55) == "poor"
+    assert quality_score({"critical": 3}) == 0 and quality_band(0) == "bad"
+
+
+def _review_record(
+    kind: str, result: dict, minute: int, status=ActionStatus.EXECUTED
+) -> ActionRecord:
+    return ActionRecord(
+        action=Action(
+            kind=ActionKind.REVIEW_POST,
+            repo="acme/widget",
+            number=42,
+            head_sha=f"{minute:040x}",
+            payload={"body": "b", "kind": kind, "result": result},
+            created_at=T0 + timedelta(minutes=minute),
+        ),
+        status=status,
+    )
+
+
+def _f(id_: str, severity: str) -> dict:
+    return {"id": id_, "severity": severity, "category": "c", "title": id_, "body": ""}
+
+
+def test_quality_follows_the_chain_of_reviews() -> None:
+    first = _review_record(
+        "review", {"findings": [_f("F1", "major"), _f("F2", "minor")]}, 1
+    )
+    followup = _review_record(
+        "followup",
+        {
+            "statuses": [
+                {"id": "F1", "status": "resolved"},
+                {"id": "F2", "status": "partial"},
+            ],
+            "new_findings": [_f("F1", "nit")],
+        },
+        2,
+    )
+    q = review_quality([followup, first])
+    assert q is not None and q.open == {"minor": 0.5, "nit": 1.0}
+    assert (q.score, q.band, q.kind, q.posted) == (96, "excellent", "followup", True)
+
+    rejected = _review_record(
+        "followup",
+        {"statuses": [{"id": "F2", "status": "open"}]},
+        3,
+        ActionStatus.DENIED,
+    )
+    assert review_quality([first, followup, rejected]) == q, (
+        "a rejected draft is ignored"
+    )
+
+    draft = _review_record(
+        "followup",
+        {"statuses": [{"id": "F2", "status": "open"}]},
+        4,
+        ActionStatus.PROPOSED,
+    )
+    q = review_quality([first, followup, draft])
+    assert q is not None and q.open == {"minor": 1.0, "nit": 1.0} and not q.posted
+
+    again = _review_record("review", {"findings": [_f("F1", "critical")]}, 5)
+    q = review_quality([first, followup, draft, again])
+    assert q is not None and (q.open, q.band) == ({"critical": 1.0}, "poor")
+    assert review_quality([]) is None
 
 
 def test_scoring_boosts_are_capped_and_expire() -> None:

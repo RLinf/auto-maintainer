@@ -29,6 +29,11 @@
   --t1: #e07a2f;
   --t2: #4f6bd8;
   --t3: #8a92a3;
+  --q-excellent: #0a7a3a;
+  --q-good: #4b8500;
+  --q-fair: #9a6700;
+  --q-poor: #c2570c;
+  --q-bad: #c0322f;
   --shadow-sm: 0 1px 2px rgba(15, 23, 41, 0.06);
   --shadow: 0 1px 2px rgba(15, 23, 41, 0.05), 0 6px 20px -10px rgba(15, 23, 41, 0.18);
   --shadow-lg: 0 12px 40px -12px rgba(15, 23, 41, 0.35), 0 2px 6px rgba(15, 23, 41, 0.08);
@@ -72,6 +77,11 @@
     --t1: #ffad66;
     --t2: #94aaff;
     --t3: #8a92a6;
+    --q-excellent: #4fd17a;
+    --q-good: #a8d65c;
+    --q-fair: #f3c25a;
+    --q-poor: #ffa05c;
+    --q-bad: #ff8a80;
     --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
     --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px -12px rgba(0, 0, 0, 0.6);
     --shadow-lg: 0 16px 48px -12px rgba(0, 0, 0, 0.7);
@@ -109,6 +119,11 @@
   --t1: #ffad66;
   --t2: #94aaff;
   --t3: #8a92a6;
+  --q-excellent: #4fd17a;
+  --q-good: #a8d65c;
+  --q-fair: #f3c25a;
+  --q-poor: #ffa05c;
+  --q-bad: #ff8a80;
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px -12px rgba(0, 0, 0, 0.6);
   --shadow-lg: 0 16px 48px -12px rgba(0, 0, 0, 0.7);
@@ -305,6 +320,17 @@ td.check, th.check { width: 36px; padding-right: 0; }
 .tier-p3 { background: var(--t3); }
 :root[data-theme="dark"] .tier { color: #0b0d12; }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .tier { color: #0b0d12; } }
+/* A PR's quality: the score in its band's color, faded once new commits arrived. */
+.quality { --qc: var(--muted); font-weight: 650; font-variant-numeric: tabular-nums; color: var(--qc); background: color-mix(in srgb, var(--qc) 14%, transparent); min-width: 30px; justify-content: center; }
+.quality .q-label { font-weight: 500; }
+.quality.stale { opacity: 0.6; }
+.q-excellent { --qc: var(--q-excellent); }
+.q-good { --qc: var(--q-good); }
+.q-fair { --qc: var(--q-fair); }
+.q-poor { --qc: var(--q-poor); }
+.q-bad { --qc: var(--q-bad); }
+.quality-meter { height: 8px; border-radius: 999px; background: var(--border); overflow: hidden; }
+.quality-meter > span { display: block; height: 100%; border-radius: inherit; background: var(--qc); }
 .status-ok { background: var(--ok-bg); color: var(--ok); }
 .status-warn { background: var(--warn-bg); color: var(--warn); }
 .status-bad { background: var(--bad-bg); color: var(--bad); }

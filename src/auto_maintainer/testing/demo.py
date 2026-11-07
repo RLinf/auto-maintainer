@@ -362,6 +362,26 @@ def _machine_rules(prompt: str) -> dict[str, Any]:
     }
 
 
+_PROGRESS_FINDINGS = [
+    {
+        "id": "F2",
+        "severity": "major",
+        "category": "correctness",
+        "title": "The progress bar writes to stdout from every worker",
+        "body": "Each data-loader worker draws its own bar, so piped output interleaves them.",
+    },
+    {
+        "id": "F3",
+        "severity": "minor",
+        "category": "docs",
+        "title": "The new --progress flag is not documented",
+        "body": "The README lists the loader's flags but not this one.",
+    },
+]
+"""What the demo's review finds in the progress-bar PR besides the shared finding,
+so the demo's PRs land in different quality bands."""
+
+
 def _answer(task: AgentTask) -> dict[str, Any]:
     kind = str(task.kind)
     if kind == "chat" and "You turn the description" in task.prompt:
@@ -399,7 +419,8 @@ def _answer(task: AgentTask) -> dict[str, Any]:
                     "path": "tests/test_loader.py",
                     "line": 20,
                 }
-            ],
+            ]
+            + (_PROGRESS_FINDINGS if "progress bar" in task.prompt else []),
             "recommendation": "Ready",
             "remaining_actions": ["Add the boundary case."],
             # a label that fits the PR under review; one it already has is dropped

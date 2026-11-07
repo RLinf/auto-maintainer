@@ -4,10 +4,29 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { api, type Evaluation, type Me, type PrDetail, type ReviewStart, type RootCause, type RunCiPlan } from "../api";
+import { api, type Evaluation, type Me, type PrDetail, type ReviewQuality, type ReviewStart, type RootCause, type RunCiPlan } from "../api";
 import { useAgent } from "../agent";
 import { agentName, AgentPicker, useAgentChoice } from "../agentPicker";
-import { Empty, ErrorBox, Labels, PageHead, Pre, prPath, Section, Status, Tier, timeOf, useAct, When } from "../components";
+import {
+  Empty,
+  ErrorBox,
+  Labels,
+  openFindingsText,
+  PageHead,
+  Pre,
+  prPath,
+  Quality,
+  QUALITY_BANDS,
+  QUALITY_PENALTY,
+  qualityLabel,
+  qualityStale,
+  Section,
+  Status,
+  Tier,
+  timeOf,
+  useAct,
+  When,
+} from "../components";
 import { evaluationToast, REVIEW_STATES, usePrs, useReevaluate } from "../data";
 import { useT } from "../i18n";
 import { Icon } from "../icons";
@@ -96,6 +115,7 @@ export default function PrPage({ me }: { me: Me }) {
           <span className="row" style={{ gap: 8 }}>
             <Status value={pr.state.toLowerCase()} />
             {pr.is_draft && <Status value="draft" label={t("draft")} />}
+            {d.quality && <Quality quality={d.quality} head={pr.head_sha} />}
             <span>
               {pr.author} {t("wants to merge into")} <code>{pr.base_ref}</code> {t("from")} <code>{pr.head_sha.slice(0, 7)}</code>
             </span>
@@ -214,6 +234,7 @@ export default function PrPage({ me }: { me: Me }) {
         </div>
 
         <aside className="side">
+          <QualityCard quality={d.quality} head={pr.head_sha} />
           <EvaluationCard base={base} repo={full} number={pr.number} evaluation={d.evaluation} />
           <Section
             title={t("Merge")}
@@ -532,6 +553,50 @@ function RefreshButton({ base }: { base: string }) {
     >
       <Icon name="refresh" size={15} />
     </button>
+  );
+}
+
+/** The PR's quality as its latest review found it: the score, its band, the open
+ *  findings behind it, and how the score is counted. */
+function QualityCard({ quality, head }: { quality: ReviewQuality | null; head: string }) {
+  const t = useT();
+  const rule = QUALITY_PENALTY.map(([s, n]) => `−${n} ${t(s)}`).join(" · ");
+  return (
+    <Section
+      title={t("Quality")}
+      hint={t("internal")}
+      aside={quality ? <span className={`pill quality q-${quality.band}`}>{t(qualityLabel(quality.band))}</span> : null}
+    >
+      {quality ? (
+        <div className={`stack small q-${quality.band}`} style={{ gap: 8 }}>
+          <div className="row" style={{ gap: 6, alignItems: "baseline" }}>
+            <span style={{ fontSize: 28, fontWeight: 700, lineHeight: 1, color: "var(--qc)", fontVariantNumeric: "tabular-nums" }}>{quality.score}</span>
+            <span className="muted">/ 100</span>
+          </div>
+          <div className="quality-meter" role="img" aria-label={`${quality.score} / 100`}>
+            <span style={{ width: `${quality.score}%` }} />
+          </div>
+          <span>{openFindingsText(quality, t)}</span>
+          <span className="muted">
+            {t(quality.kind === "followup" ? "follow-up at" : "review at")} <code>{quality.sha.slice(0, 7)}</code>
+            {!quality.posted && ` · ${t("not posted")}`}
+            {qualityStale(quality, head) && ` · ${t("new commits since this review")}`}
+          </span>
+          <span className="muted">
+            {t("100 less, for each finding still open:")} {rule}. {t("A partly addressed finding counts half.")}
+          </span>
+          <span className="row" style={{ gap: 4, flexWrap: "wrap" }}>
+            {QUALITY_BANDS.map((b) => (
+              <span key={b.band} className={`pill quality q-${b.band}`} style={{ fontSize: 11 }}>
+                {b.floor}+ {t(b.label)}
+              </span>
+            ))}
+          </span>
+        </div>
+      ) : (
+        <span className="small muted">{t("Scored once the service reviews this PR, from how severe its findings are.")}</span>
+      )}
+    </Section>
   );
 }
 

@@ -4,7 +4,7 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
-import { ApiError } from "./api";
+import { ApiError, type QualityBand, type ReviewQuality } from "./api";
 import { REVIEW_STATES } from "./data";
 import { currentLang, useLang, useT, type Lang } from "./i18n";
 import { Icon, type IconName } from "./icons";
@@ -72,6 +72,59 @@ export function Section({
 export function Tier({ tier }: { tier: string | null | undefined }) {
   if (!tier) return <span className="muted" title="Not evaluated">—</span>;
   return <span className={`pill tier tier-${tier.toLowerCase()}`}>{tier}</span>;
+}
+
+export const QUALITY_BANDS: { band: QualityBand; floor: number; label: string }[] = [
+  { band: "excellent", floor: 90, label: "Excellent" },
+  { band: "good", floor: 75, label: "Good" },
+  { band: "fair", floor: 60, label: "Fair" },
+  { band: "poor", floor: 40, label: "Poor" },
+  { band: "bad", floor: 0, label: "Bad" },
+];
+/** Points lost per open finding; mirrors QUALITY_PENALTY in domain/review.py. */
+export const QUALITY_PENALTY: [string, number][] = [
+  ["critical", 45],
+  ["major", 20],
+  ["minor", 5],
+  ["nit", 1],
+];
+
+export const qualityLabel = (band: QualityBand) => QUALITY_BANDS.find((b) => b.band === band)?.label ?? band;
+
+/** The open findings behind a score, worst first: "1 major · 0.5 minor". */
+export function openFindingsText(q: ReviewQuality, t: (s: string) => string): string {
+  const parts = QUALITY_PENALTY.filter(([s]) => q.open[s]).map(([s]) => `${q.open[s]} ${t(s)}`);
+  return parts.length ? parts.join(" · ") : t("no open findings");
+}
+
+/** Whether the review that set ``q`` looked at an older commit than ``head``. */
+export function qualityStale(q: ReviewQuality, head: string | null | undefined): boolean {
+  if (!head || !q.sha) return false;
+  const n = Math.min(head.length, q.sha.length);
+  return q.sha.slice(0, n) !== head.slice(0, n);
+}
+
+/** A PR's quality as a colored pill: the score, and its band unless ``compact``. Faded
+ *  when new commits arrived since the review. */
+export function Quality({ quality, head, compact }: { quality: ReviewQuality | null | undefined; head?: string | null; compact?: boolean }) {
+  const t = useT();
+  if (!quality) return <span className="muted" title={t("Not reviewed")}>—</span>;
+  const stale = qualityStale(quality, head);
+  const title = [
+    `${t("Quality")} ${quality.score}/100 · ${t(qualityLabel(quality.band))}`,
+    openFindingsText(quality, t),
+    `${t(quality.kind === "followup" ? "follow-up at" : "review at")} ${quality.sha.slice(0, 7)}${quality.posted ? "" : ` (${t("not posted")})`}`,
+    stale ? t("new commits since this review") : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+  return (
+    <span className={`pill quality q-${quality.band}${stale ? " stale" : ""}`} title={title} aria-label={title}>
+      <span className="dot" />
+      {quality.score}
+      {!compact && <span className="q-label">{t(qualityLabel(quality.band))}</span>}
+    </span>
+  );
 }
 
 const STATUS_CLASS: Record<string, string> = {

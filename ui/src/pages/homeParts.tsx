@@ -7,7 +7,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { api, type AgentJob, type Automation, type ChatThread, type Me, type PrRow, type RepoRow, type ReviewStart } from "../api";
 import { useAgent } from "../agent";
 import { agentName, AgentPicker, reviewToast, useAgentChoice } from "../agentPicker";
-import { ErrorBox, prPath, Tier, useAct, When } from "../components";
+import { ErrorBox, prPath, Quality, Tier, useAct, When } from "../components";
 import { prKey, useSettings } from "../data";
 import { useT } from "../i18n";
 import { Icon } from "../icons";
@@ -228,6 +228,7 @@ export function ReviewCard({ rows, loading, me, automations }: { rows: PrRow[]; 
                   {p.review_state === "FOLLOWUP_REVIEW" || p.review_state === "APPROVED_NEW_COMMITS" ? ` · ${t("updated since the last review")}` : ""}
                 </span>
               </span>
+              {p.quality && <Quality quality={p.quality} head={p.head} compact />}
               <span className="small">{activity(p, me, t)}</span>
               <span className="row-actions">
                 <button
