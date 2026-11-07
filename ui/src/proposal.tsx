@@ -4,8 +4,8 @@
 // says what approving does. Used by the inbox, the home feed, the agent panel, and the
 // job view.
 
-import { useMemo, useState, type ReactNode } from "react";
-import { Link } from "react-router-dom";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { Link, useSearchParams } from "react-router-dom";
 import { api, type ProposalWithAction } from "./api";
 import { AgentPicker, useAgentChoice } from "./agentPicker";
 import { Diff, ErrorBox, prPath, RejectButton, Status, useAct, When } from "./components";
@@ -127,6 +127,14 @@ export function ProposalCard({
   const [setup, setSetup] = useState(str(payload.setup));
   const [comments, setComments] = useState<InlineComment[]>(Array.isArray(payload.comments) ? (payload.comments as InlineComment[]) : []);
   const [asMe, setAsMe] = useState(readAsMe);
+  // The review's live view, where its conversation is, when it is the one open.
+  const openedJob = useSearchParams()[0].get("job");
+  // A revision from the conversation about the review replaces the draft; show it.
+  useEffect(() => {
+    if (editing) return;
+    setBody(str(payload.body));
+    setComments(Array.isArray(payload.comments) ? (payload.comments as InlineComment[]) : []);
+  }, [payload.body, payload.comments, editing]);
   const isFix = kind === "pr.fix";
   const canAsMe = !!me?.can_post_as_me && AS_ME.has(kind);
   // A fix is pushed only by a person; the service's own account never pushes to a repository.
@@ -302,6 +310,12 @@ export function ProposalCard({
               }}
             >
               {editing ? t("Discard edits") : t("Edit")}
+            </button>
+          )}
+          {kind === "review.post" && action.provenance?.job_id && openedJob !== action.provenance.job_id && (
+            <button className="ghost" title={t("Talk with the agent about this review: ask why, push back, or have it change the draft")} onClick={() => openJob(action.provenance.job_id as string)}>
+              <Icon name="message" size={14} />
+              {t("Discuss")}
             </button>
           )}
           <RejectButton quiet busy={reject.isPending} onReject={(reason) => reject.mutate(reason)} />

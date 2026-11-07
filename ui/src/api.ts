@@ -464,6 +464,8 @@ export interface ChatMessage {
   thread_id: string;
   role: string;
   text: string;
+  /** Who wrote a user message, in a conversation several people share. */
+  author?: string | null;
   proposals: string[];
   changes?: string[];
   /** Jobs the answer started, by the id of their request. */
@@ -671,4 +673,16 @@ export interface Automation {
   followups: boolean;
   can_configure: boolean;
   reason: string;
+}
+
+/** The conversation about a review or follow-up, kept on its job. */
+export interface ReviewTalkState {
+  thread: string | null;
+  /** The run answering the newest message, while it runs. */
+  live_run: string | null;
+  messages: ChatMessage[];
+  /** The review draft the job produced, by action id. */
+  draft: string | null;
+  /** Whether the draft still waits for a decision, so a revision can be saved on it. */
+  draft_pending: boolean;
 }

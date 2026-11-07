@@ -185,7 +185,11 @@ class Followup(Playbook):
                     recommendation=result.recommendation,
                     runtime=answer.runtime,
                     kind="followup",
-                    result=result.model_dump(mode="json"),
+                    # The last reviewed commit, so a revised follow-up renders the same.
+                    result={
+                        **result.model_dump(mode="json"),
+                        "previous_sha": previous_sha,
+                    },
                 ),
                 number=pr.number,
                 head_sha=pr.head_sha,

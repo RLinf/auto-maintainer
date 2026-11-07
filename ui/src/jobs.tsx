@@ -16,6 +16,7 @@ import { Markdown } from "./markdown";
 import { openJob } from "./openJob";
 import { ProposalCard } from "./proposal";
 import { QuestionCard } from "./pages/Questions";
+import { ReviewTalk } from "./reviewTalk";
 import { Skeleton, useToast } from "./ui";
 
 export const ACTIVE = new Set(["queued", "running", "waiting"]);
@@ -409,6 +410,7 @@ function JobView({ id, onClose }: { id: string; onClose: () => void }) {
                 ))}
               </section>
             )}
+            {(d.playbook === "review" || d.playbook === "followup") && !active && <ReviewTalk job={d} me={me?.login ?? ""} />}
             <div ref={bottom} />
           </>
         ) : null}

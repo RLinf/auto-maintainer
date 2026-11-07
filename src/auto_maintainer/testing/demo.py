@@ -155,32 +155,33 @@ def _demo_steps() -> dict[str, Any]:
             ),
         ]
 
+    talk = [
+        say("Looking at the finding again."),
+        *run("Read", file_path="tests/test_loader.py", out="def test_one_item(): ..."),
+    ]
+    review = [
+        say("I'll read the change and the repository's review skill first."),
+        *run(
+            "Read",
+            file_path=".agents/skills/code-review/SKILL.md",
+            out="---\nname: code-review",
+        ),
+        *run("Read", file_path="src/loader.py", out="def load(items, size=32): ..."),
+        *run("Grep", pattern="load\\(", out="tests/test_loader.py:7\nsrc/cli.py:41"),
+        say(
+            "The guard for empty input looks right. Checking whether the tests cover the boundary at one item."
+        ),
+        *run(
+            "Bash",
+            command="python -m pytest -q tests/test_loader.py",
+            out="......\n6 passed in 0.21s",
+        ),
+        say(
+            "All six tests pass, but none loads exactly one item, which is where the old slicing broke. One finding."
+        ),
+    ]
     return {
-        "review": [
-            say("I'll read the change and the repository's review skill first."),
-            *run(
-                "Read",
-                file_path=".agents/skills/code-review/SKILL.md",
-                out="---\nname: code-review",
-            ),
-            *run(
-                "Read", file_path="src/loader.py", out="def load(items, size=32): ..."
-            ),
-            *run(
-                "Grep", pattern="load\\(", out="tests/test_loader.py:7\nsrc/cli.py:41"
-            ),
-            say(
-                "The guard for empty input looks right. Checking whether the tests cover the boundary at one item."
-            ),
-            *run(
-                "Bash",
-                command="python -m pytest -q tests/test_loader.py",
-                out="......\n6 passed in 0.21s",
-            ),
-            say(
-                "All six tests pass, but none loads exactly one item, which is where the old slicing broke. One finding."
-            ),
-        ],
+        "review": lambda task: talk if TALKING in task.prompt else review,
         "fix": [
             say("Adding the boundary test the review asked for."),
             *run("Read", file_path="tests/test_loader.py"),
@@ -247,8 +248,53 @@ LAYER: dict[str, Any] = {
 }
 
 
+TALKING = "is talking with you about it"
+"""In the prompt of a reviewer's turn in the conversation about a review."""
+
+
+def _talk(task: AgentTask, kind: str) -> dict[str, Any]:
+    """A reviewer's turn in the conversation about a review: the demo agent explains
+    its finding, and drops it when the reviewer asks it to."""
+    block = task.prompt.split("source='conversation'", 1)[-1].split(
+        "</untrusted-data>"
+    )[0]
+    said = [
+        line
+        for line in block.splitlines()
+        if ": " in line and not line.startswith("you (the agent)")
+    ]
+    last = said[-1].lower() if said else ""
+    field = "review" if kind == "review" else "followup"
+    if any(word in last for word in ("drop", "remove", "not needed")):
+        revised: dict[str, Any] = (
+            {
+                "summary": "Adds a guard for empty batches and a regression test.",
+                "findings": [],
+                "recommendation": "Ready",
+                "remaining_actions": [],
+            }
+            if kind == "review"
+            else {"statuses": [], "new_findings": [], "recommendation": "Ready"}
+        )
+        return {
+            "reply": "Agreed: `tests/test_loader.py:12` already loads a single item "
+            "through the same path, so the boundary is covered. I removed F1 from the "
+            "draft; it now recommends Ready.",
+            field: revised,
+        }
+    return {
+        "reply": "F1 is about the boundary at one item: the new test at "
+        "`tests/test_loader.py:20` loads zero items, and the old slicing in "
+        "`src/loader.py:31` broke at one. Ask me to drop it if another test covers "
+        "that case.",
+        field: None,
+    }
+
+
 def _answer(task: AgentTask) -> dict[str, Any]:
     kind = str(task.kind)
+    if kind in ("review", "followup") and TALKING in task.prompt:
+        return _talk(task, kind)
     if kind == "triage":
         return {
             "summary": "Handles empty batches in the loader without crashing.",

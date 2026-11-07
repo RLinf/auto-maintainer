@@ -266,13 +266,7 @@ class PlaybookContext:
         return (await self.permission(login)).at_least(minimum)
 
     async def author_is_team(self, pr: PrSnapshot) -> bool:
-        profile = self.require_profile()
-        if pr.author in profile.people.team:
-            return True
-        if pr.author_association in {"OWNER", "MEMBER"}:
-            return True
-        perm = await self.forge.get_permission(profile.repo, pr.author)
-        return perm.at_least(profile.people.team_min_permission)
+        return await author_is_team(self.forge, self.require_profile(), pr)
 
     async def permission(self, login: str) -> Permission:
         return await self.forge.get_permission(self.require_profile().repo, login)
@@ -318,6 +312,18 @@ def in_scope(pr: PrSnapshot, profile: RepoProfile) -> bool:
     if pr.author in scope.ignore_authors:
         return False
     return scope.include_drafts or not pr.is_draft
+
+
+async def author_is_team(forge: Any, profile: RepoProfile, pr: PrSnapshot) -> bool:
+    """Whether ``pr``'s author belongs to the repository's team: named in the profile,
+    an owner or member, or holding ``people.team_min_permission``. Only a team PR's
+    content counts as trusted input for an agent."""
+    if pr.author in profile.people.team:
+        return True
+    if pr.author_association in {"OWNER", "MEMBER"}:
+        return True
+    perm = await forge.get_permission(profile.repo, pr.author)
+    return perm.at_least(profile.people.team_min_permission)
 
 
 PR_EVENTS = (

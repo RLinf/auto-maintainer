@@ -34,6 +34,7 @@ from ..domain.actions import (
 from ..domain.agents import AgentTask, TaskKind
 from ..domain.events import Event, EventKind
 from ..domain.ids import short_sha
+from ..domain.ports import Store
 from ..domain.profile import RepoProfile
 from ..domain.records import JobStatus
 from ..domain.review import (
@@ -155,7 +156,9 @@ class ReviewPlaybook(Playbook):
                     skill_format_block(profile)
                     if own_format
                     else template_block(profile),
-                    reproduction_block(await _reproduction(ctx, pr.repo, pr.number)),
+                    reproduction_block(
+                        await reproduction_record(ctx.store, pr.repo, pr.number)
+                    ),
                     f"Review lessons from this repository's maintainers:\n{lessons}"
                     if lessons
                     else "",
@@ -333,13 +336,13 @@ class ReviewPlaybook(Playbook):
         return result.model_copy(update={"findings": kept, "dismissed": dismissed})
 
 
-async def _reproduction(ctx: PlaybookContext, repo: str, number: int) -> str | None:
+async def reproduction_record(store: Store, repo: str, number: int) -> str | None:
     """The PR's latest reproduction on a test machine that ran: the approved plan,
     where and at which commits it ran, and what the service concluded from the runs.
     Run output comes from the PR's code, so it is marked untrusted."""
     runs = [
         r
-        for r in await ctx.store.list_actions(
+        for r in await store.list_actions(
             repo=repo, number=number, kinds=[ActionKind.LAB_REPRODUCE], limit=50
         )
         if r.status == ActionStatus.EXECUTED and r.external_ref.get("runs")
@@ -350,7 +353,7 @@ async def _reproduction(ctx: PlaybookContext, repo: str, number: int) -> str | N
     plan = LabReproducePayload.model_validate(record.action.payload)
     reports = [
         job
-        for job in await ctx.store.list_jobs([JobStatus.DONE], repo=repo, limit=500)
+        for job in await store.list_jobs([JobStatus.DONE], repo=repo, limit=500)
         if job.playbook == "reproduce"
         and job.number == number
         and (job.result or {}).get("conclusion")

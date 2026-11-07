@@ -208,6 +208,10 @@ class ChatThread(BaseModel):
     runtime: str | None = None
     live_run: str | None = None
     """The run answering the newest message, while it runs; its steps are live."""
+    job_id: str | None = None
+    """For a conversation about a review: the review or follow-up job. It is shared by
+    everyone who may see the repository, and it lives on that review, not in the
+    owner's list of conversations."""
     id: str = Field(default_factory=lambda: new_id("chat"))
     created_at: datetime = Field(default_factory=utc_now)
 
@@ -233,8 +237,11 @@ class ChatMessage(BaseModel):
     role: str
     """``user``, ``assistant``, or ``tool``."""
     text: str
+    author: str | None = None
+    """Who wrote a ``user`` message, in a conversation several people share."""
     proposals: list[str] = Field(default_factory=list)
-    """Actions proposed in this message, by action id."""
+    """Actions proposed in this message (or, about a review, the draft it revised),
+    by action id."""
     changes: list[str] = Field(default_factory=list)
     """Memory changes this message made (configuration drafts, lessons), by id."""
     jobs: list[str] = Field(default_factory=list)

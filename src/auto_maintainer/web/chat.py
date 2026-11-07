@@ -164,6 +164,7 @@ def build_router() -> APIRouter:
         return [
             t.model_dump(mode="json")
             for t in await service.store.list_threads(user.login)
+            if t.job_id is None
         ]
 
     @r.post("/threads")
@@ -425,7 +426,7 @@ def build_router() -> APIRouter:
                 continue
             if p.kind == "lesson":
                 if p.repo in repos and p.lesson.strip():
-                    changes.append(await _lesson(service, user, p))
+                    changes.append(await save_lesson(service, user, p))
                 continue
             if p.kind == "evaluate":
                 if p.repo in repos:
@@ -875,7 +876,7 @@ async def _evaluate(service: Any, user: User, p: ProposedAction) -> str:
     )
 
 
-async def _lesson(service: Any, user: User, p: ProposedAction) -> str:
+async def save_lesson(service: Any, user: User, p: ProposedAction) -> str:
     """Save a review lesson for ``p.repo`` as a memory change and return its id. It
     carries ``user``'s approval when they may configure the repository, so it merges
     at once; otherwise it waits for a maintainer who may."""
