@@ -9,7 +9,7 @@ import { Link } from "react-router-dom";
 import { api, type AgentChoices, type LabMachine, type MachineCheck, type SettingsAgent, type SettingsCheck, type SettingsProvider, type SettingsView } from "../api";
 import { useAgent, type AgentContext } from "../agent";
 import { Diff, Empty, ErrorBox, PageHead, Section, Status, useAct, When } from "../components";
-import { useSettings } from "../data";
+import { useRepos, useSettings } from "../data";
 import { useT } from "../i18n";
 import { Icon, type IconName } from "../icons";
 import { agentName } from "../agentPicker";
@@ -771,75 +771,93 @@ function LabsTab({ v, ask }: { v: SettingsView; ask: (p: string, send?: boolean)
 function MachineRow({ m, canChange }: { m: LabMachine; canChange: boolean }) {
   const t = useT();
   const toast = useToast();
+  const [editing, setEditing] = useState(false);
   const check = useAct(() => api.post<MachineCheck>(`/api/settings/labs/${m.name}/check`), []);
   const remove = useAct(() => api.del<{ approved: boolean }>(`/api/settings/labs/${m.name}`), [["settings"], ["memory"]]);
   const c = check.data;
   return (
-    <div className="list-row" style={{ padding: "12px 4px", alignItems: "flex-start" }}>
-      <span style={{ paddingTop: 2 }}>
-        <Icon name="server" />
-      </span>
-      <span className="main">
-        <span className="t">
-          {m.name} <span className="muted small">{m.transport === "ssh" ? m.host || m.name : t("this host")}</span>
+    <div className="stack" style={{ gap: 8 }}>
+      <div className="list-row" style={{ padding: "12px 4px", alignItems: "flex-start" }}>
+        <span style={{ paddingTop: 2 }}>
+          <Icon name="server" />
         </span>
-        <span className="meta" style={{ whiteSpace: "normal" }}>
-          {m.description || t("No description")} · {m.repos.length ? `${t("offered only to")} ${m.repos.join(", ")}` : t("offered to every repository")} · {t("at most")}{" "}
-          {Math.round(m.timeout_seconds / 60)} {t("minutes")}
-          {m.setup ? (
-            <>
-              {" "}
-              · <code>{m.setup}</code>
-            </>
-          ) : null}
+        <span className="main">
+          <span className="t">
+            {m.name} <span className="muted small">{m.transport === "ssh" ? m.host || m.name : t("this host")}</span>
+          </span>
+          <span className="meta" style={{ whiteSpace: "normal" }}>
+            {m.description || t("No description")} · {m.repos.length ? `${t("offered only to")} ${m.repos.join(", ")}` : t("offered to every repository")} · {t("at most")}{" "}
+            {Math.round(m.timeout_seconds / 60)} {t("minutes")}
+            {m.workdir && m.workdir !== "~/auto-maintainer-runs" ? (
+              <>
+                {" "}
+                · <code>{m.workdir}</code>
+              </>
+            ) : null}
+            {m.setup ? (
+              <>
+                {" "}
+                · <code>{m.setup}</code>
+              </>
+            ) : null}
+          </span>
+          {c && (
+            <span className={`small ${c.ok ? "" : "danger-text"}`} style={{ marginTop: 4 }}>
+              {c.ok ? (
+                <>
+                  <Icon name="check" size={12} /> {c.system} · {c.cpus} CPUs · {c.memory_gb} GB
+                  {c.gpus?.length ? ` · ${c.gpus.filter((g) => g.idle).length}/${c.gpus.length} ${t("GPUs idle")}` : ` · ${t("no GPUs")}`}
+                </>
+              ) : (
+                <>
+                  <Icon name="x" size={12} /> {c.error}
+                </>
+              )}
+            </span>
+          )}
+          <ErrorBox error={check.error || remove.error} />
         </span>
-        {c && (
-          <span className={`small ${c.ok ? "" : "danger-text"}`} style={{ marginTop: 4 }}>
-            {c.ok ? (
-              <>
-                <Icon name="check" size={12} /> {c.system} · {c.cpus} CPUs · {c.memory_gb} GB
-                {c.gpus?.length ? ` · ${c.gpus.filter((g) => g.idle).length}/${c.gpus.length} ${t("GPUs idle")}` : ` · ${t("no GPUs")}`}
-              </>
-            ) : (
-              <>
-                <Icon name="x" size={12} /> {c.error}
-              </>
-            )}
+        {canChange && (
+          <span className="row" style={{ gap: 4 }}>
+            <button className="sm" disabled={check.isPending} onClick={() => check.mutate(undefined)}>
+              {check.isPending ? t("Checking…") : t("Check")}
+            </button>
+            <button className="ghost sm" onClick={() => setEditing(!editing)} aria-expanded={editing}>
+              {editing ? t("Cancel") : t("Edit")}
+            </button>
+            <button
+              className="ghost sm danger-text"
+              disabled={remove.isPending}
+              onClick={() =>
+                remove.mutate(undefined, {
+                  onSuccess: (r) => toast({ title: r.approved ? t("Removed") : t("Change proposed"), icon: "check" }),
+                })
+              }
+            >
+              {t("Remove")}
+            </button>
           </span>
         )}
-        <ErrorBox error={check.error || remove.error} />
-      </span>
-      {canChange && (
-        <span className="row" style={{ gap: 4 }}>
-          <button className="sm" disabled={check.isPending} onClick={() => check.mutate(undefined)}>
-            {check.isPending ? t("Checking…") : t("Check")}
-          </button>
-          <button
-            className="ghost sm danger-text"
-            disabled={remove.isPending}
-            onClick={() =>
-              remove.mutate(undefined, {
-                onSuccess: (r) => toast({ title: r.approved ? t("Removed") : t("Change proposed"), icon: "check" }),
-              })
-            }
-          >
-            {t("Remove")}
-          </button>
-        </span>
-      )}
+      </div>
+      {editing && <MachineForm initial={m} onDone={() => setEditing(false)} />}
     </div>
   );
 }
 
-function MachineForm({ onDone }: { onDone: () => void }) {
+function MachineForm({ initial, onDone }: { initial?: LabMachine; onDone: () => void }) {
   const t = useT();
   const toast = useToast();
-  const [name, setName] = useState("");
-  const [transport, setTransport] = useState<"ssh" | "local">("ssh");
-  const [host, setHost] = useState("");
-  const [description, setDescription] = useState("");
-  const [setup, setSetup] = useState("");
-  const [repos, setRepos] = useState("");
+  const onboarded = useRepos();
+  const [name, setName] = useState(initial?.name ?? "");
+  const [transport, setTransport] = useState<"ssh" | "local">(initial?.transport ?? "ssh");
+  const [host, setHost] = useState(initial?.host ?? "");
+  const [description, setDescription] = useState(initial?.description ?? "");
+  const [workdir, setWorkdir] = useState(initial?.workdir ?? "~/auto-maintainer-runs");
+  const [setup, setSetup] = useState(initial?.setup ?? "");
+  const [minutes, setMinutes] = useState(String(Math.round((initial?.timeout_seconds ?? 1800) / 60)));
+  const [forbid, setForbid] = useState((initial?.forbid ?? []).join("\n"));
+  const [repos, setRepos] = useState<string[]>(initial?.repos ?? []);
+  const repoOptions = Array.from(new Set([...(onboarded.data ?? []).map((r) => r.repo), ...(initial?.repos ?? [])]));
   const save = useAct(
     () =>
       api.put<{ approved: boolean }>(`/api/settings/labs/${name.trim()}`, {
@@ -847,14 +865,19 @@ function MachineForm({ onDone }: { onDone: () => void }) {
           transport,
           host: transport === "ssh" ? host.trim() || null : null,
           description: description.trim(),
+          workdir: workdir.trim() || "~/auto-maintainer-runs",
           setup: setup.trim(),
-          repos: repos
-            .split(/[\s,]+/)
-            .map((r) => r.trim())
+          repos,
+          forbid: forbid
+            .split("\n")
+            .map((x) => x.trim())
             .filter(Boolean),
+          timeout_seconds: Math.max(1, Number(minutes) || 30) * 60,
+          max_gpu_memory_mib: initial?.max_gpu_memory_mib ?? 1024,
+          max_gpu_util_pct: initial?.max_gpu_util_pct ?? 5,
         },
       }),
-    [["settings"], ["memory"]],
+    [["settings"], ["labs"], ["memory"]],
   );
   return (
     <form
@@ -864,7 +887,7 @@ function MachineForm({ onDone }: { onDone: () => void }) {
         e.preventDefault();
         save.mutate(undefined, {
           onSuccess: (r) => {
-            toast({ title: r.approved ? t("Machine added") : t("Change proposed"), icon: "server" });
+            toast({ title: r.approved ? (initial ? t("Saved") : t("Machine added")) : t("Change proposed"), icon: "server" });
             onDone();
           },
         });
@@ -873,7 +896,14 @@ function MachineForm({ onDone }: { onDone: () => void }) {
       <div className="grid2" style={{ gap: 10 }}>
         <label className="stack" style={{ gap: 4 }}>
           <span className="small muted">{t("Name")}</span>
-          <input required value={name} onChange={(e) => setName(e.target.value)} placeholder="gpu-01" pattern="[a-z][a-z0-9]*(-[a-z0-9]+)*" />
+          <input
+            required
+            disabled={!!initial}
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="gpu-01"
+            pattern="[a-z][a-z0-9]*(-[a-z0-9]+)*"
+          />
         </label>
         <label className="stack" style={{ gap: 4 }}>
           <span className="small muted">{t("Reached")}</span>
@@ -893,13 +923,54 @@ function MachineForm({ onDone }: { onDone: () => void }) {
           <input value={description} onChange={(e) => setDescription(e.target.value)} placeholder={t("8× A100 80GB, CUDA 12.4")} />
         </label>
         <label className="stack" style={{ gap: 4 }}>
+          <span className="small muted">{t("Work directory")}</span>
+          <input className="mono-input" value={workdir} onChange={(e) => setWorkdir(e.target.value)} placeholder="~/auto-maintainer-runs" />
+        </label>
+        <label className="stack" style={{ gap: 4 }}>
+          <span className="small muted">{t("Time limit in minutes")}</span>
+          <input type="number" min={1} max={360} value={minutes} onChange={(e) => setMinutes(e.target.value)} />
+        </label>
+        <label className="stack" style={{ gap: 4 }}>
           <span className="small muted">{t("Run on this machine before every reproduction (optional)")}</span>
           <input className="mono-input" value={setup} onChange={(e) => setSetup(e.target.value)} placeholder="source ~/envs/dev/bin/activate" />
         </label>
         <label className="stack" style={{ gap: 4 }}>
-          <span className="small muted">{t("Offer only to these repositories (optional)")}</span>
-          <input value={repos} onChange={(e) => setRepos(e.target.value)} placeholder="owner/name, …" />
+          <span className="small muted">{t("Scripts must not match (one regular expression per line)")}</span>
+          <textarea className="mono-input" rows={2} value={forbid} onChange={(e) => setForbid(e.target.value)} placeholder="\bwget\b" />
         </label>
+      </div>
+      <div className="stack" style={{ gap: 6 }}>
+        <span className="small muted">
+          {t("Offer only to these repositories (optional)")} · {repos.length ? `${repos.length} ${t("selected")}` : t("offered to every repository")}
+        </span>
+        <div className="row" style={{ gap: 6, flexWrap: "wrap" }} role="group" aria-label={t("Offer only to these repositories (optional)")}>
+          <button
+            type="button"
+            className={`chip-btn ${repos.length === 0 ? "on" : ""}`}
+            style={{ borderStyle: "solid", height: 30 }}
+            aria-pressed={repos.length === 0}
+            onClick={() => setRepos([])}
+          >
+            <Icon name={repos.length === 0 ? "check" : "repo"} size={13} />
+            {t("All repositories")}
+          </button>
+          {repoOptions.map((r) => {
+            const on = repos.includes(r);
+            return (
+              <button
+                key={r}
+                type="button"
+                className={`chip-btn ${on ? "on" : ""}`}
+                style={{ borderStyle: "solid", height: 30 }}
+                aria-pressed={on}
+                onClick={() => setRepos((prev) => (prev.includes(r) ? prev.filter((x) => x !== r) : [...prev, r]))}
+              >
+                <Icon name={on ? "check" : "repo"} size={13} />
+                {r}
+              </button>
+            );
+          })}
+        </div>
       </div>
       <div className="row">
         <button className="primary" disabled={!name.trim() || save.isPending}>

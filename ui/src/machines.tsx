@@ -6,19 +6,32 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { api } from "./api";
+import { api, type MachineCheck } from "./api";
 import { useAgent } from "./agent";
 import { Empty, ErrorBox, Section, useAct } from "./components";
 import { useT } from "./i18n";
 import { Icon } from "./icons";
 import { Skeleton, useToast } from "./ui";
 
+export interface ReproducePolicy {
+  level: "off" | "shadow" | "propose" | "auto";
+  conditions?: {
+    author?: "any" | "team" | "external";
+    recommendation?: string | null;
+    paths?: string[];
+  };
+  otherwise?: "off" | "shadow" | "propose" | "auto";
+}
+
 export interface RepoMachine {
   name: string;
   description: string;
   transport: string;
+  host?: string | null;
+  workdir?: string;
   machine_setup: string;
   machine_timeout_seconds: number;
+  machine_forbid?: string[];
   used: boolean;
   setup: string;
   timeout_seconds: number | null;
@@ -29,6 +42,7 @@ export interface RepoMachine {
 export interface RepoMachines {
   repo: string;
   machines: RepoMachine[];
+  reproduce_policy?: ReproducePolicy | null;
   can_configure: boolean;
   reason: string;
 }
@@ -74,8 +88,91 @@ export function useSetMachine(repo: string) {
   return { save, act };
 }
 
-function bodyOf(m: RepoMachine): UseBody {
-  return { use: m.used, setup: m.setup, timeout_seconds: m.timeout_seconds, forbid: m.forbid, protected_paths: m.protected_paths };
+const REPRODUCE_PRESETS = [
+  {
+    id: "off",
+    label: "Off",
+    body: { level: "off", conditions: { author: "any" }, otherwise: "shadow" },
+  },
+  {
+    id: "shadow",
+    label: "Record only",
+    body: { level: "shadow", conditions: { author: "any" }, otherwise: "shadow" },
+  },
+  {
+    id: "propose",
+    label: "Ask first",
+    body: { level: "propose", conditions: { author: "any" }, otherwise: "shadow" },
+  },
+  {
+    id: "team_auto",
+    label: "Automatic for team PRs, ask first for others",
+    body: { level: "auto", conditions: { author: "team" }, otherwise: "propose" },
+  },
+  {
+    id: "auto",
+    label: "Automatic",
+    body: { level: "auto", conditions: { author: "any" }, otherwise: "shadow" },
+  },
+] as const;
+
+function activePreset(policy: ReproducePolicy): string {
+  const author = policy.conditions?.author ?? "any";
+  const otherwise = policy.otherwise ?? "shadow";
+  if (policy.level === "auto" && author === "team" && otherwise === "propose") {
+    return "team_auto";
+  }
+  return policy.level;
+}
+
+function ReproducePolicyBar({ repo, policy, canConfigure }: { repo: string; policy: ReproducePolicy; canConfigure: boolean }) {
+  const t = useT();
+  const toast = useToast();
+  const set = useAct(
+    (body: (typeof REPRODUCE_PRESETS)[number]["body"]) =>
+      api.put<{ applied: boolean; reason: string }>(`/api/repos/${repo}/policy/lab.reproduce`, body),
+    [["labs"], ["profile"], ["memory"]],
+  );
+  const current = activePreset(policy);
+  return (
+    <div className="card stack" style={{ gap: 8, padding: "12px 14px", background: "var(--surface-2)" }}>
+      <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-start" }}>
+        <div className="stack" style={{ gap: 2 }}>
+          <strong className="small">{t("When a review asks to reproduce a PR")}</strong>
+          <span className="small muted">
+            {t("Anyone with access can always click Reproduce on a PR and approve the script. This rule controls whether reviews also trigger reproduction on their own.")}
+            {!canConfigure && ` ${t("Changes you make here are proposals for a maintainer of the repository.")}`}
+          </span>
+        </div>
+        <code className="small muted">lab.reproduce</code>
+      </div>
+      <div className="segmented" role="radiogroup" aria-label={t("When a review asks to reproduce a PR")}>
+        {REPRODUCE_PRESETS.map((p) => (
+          <button
+            key={p.id}
+            type="button"
+            role="radio"
+            aria-checked={current === p.id}
+            className={current === p.id ? "on" : ""}
+            disabled={set.isPending}
+            onClick={() =>
+              set.mutate(p.body, {
+                onSuccess: (r) =>
+                  toast({
+                    title: r.applied ? t("Saved") : t("Change proposed"),
+                    body: r.applied ? undefined : `${t("A maintainer of the repository applies it.")} ${r.reason}`,
+                    icon: r.applied ? "check" : "inbox",
+                  }),
+              })
+            }
+          >
+            {t(p.label)}
+          </button>
+        ))}
+      </div>
+      <ErrorBox error={set.error} />
+    </div>
+  );
 }
 
 /** The repository page's section: every machine offered to the repository. */
@@ -89,38 +186,47 @@ export function RepoMachinesSection({ repo }: { repo: string }) {
       title={t("Test machines")}
       hint={t("where this repository's PRs are reproduced")}
       aside={
-        <button
-          className="agent sm"
-          onClick={() =>
-            agent.open({
-              context: { page: "repository", repo, number: null, label: repo },
-              prompt: t("Set up how this repository uses the test machines: "),
-            })
-          }
-        >
-          <Icon name="sparkles" size={14} />
-          {t("Describe a change")}
-        </button>
+        <div className="row" style={{ gap: 6 }}>
+          <Link className="button sm ghost" to="/settings?tab=labs">
+            <Icon name="server" size={13} />
+            {t("Manage machines")}
+          </Link>
+          <button
+            className="agent sm"
+            onClick={() =>
+              agent.open({
+                context: { page: "repository", repo, number: null, label: repo },
+                prompt: t("Set up how this repository uses the test machines: "),
+              })
+            }
+          >
+            <Icon name="sparkles" size={14} />
+            {t("Describe a change")}
+          </button>
+        </div>
       }
     >
-      <p className="small muted" style={{ marginTop: 0 }}>
-        {t("The service offers these machines; this repository decides which it uses and how. A machine it does not use is not offered when someone reproduces a PR here.")}{" "}
-        {d && !d.can_configure && `${t("Changes you make here are proposals for a maintainer of the repository.")}`}
-      </p>
-      {view.isLoading ? (
-        <Skeleton rows={2} />
-      ) : !d?.machines.length ? (
-        <Empty icon="server">
-          {t("No test machine is offered to this repository.")} <Link to="/settings?tab=labs">{t("Test machines")}</Link>
-        </Empty>
-      ) : (
-        <div className="stack" style={{ gap: 10 }}>
-          {d.machines.map((m) => (
-            <MachineUse key={m.name} repo={repo} m={m} canConfigure={d.can_configure} />
-          ))}
-        </div>
-      )}
-      <ErrorBox error={view.error} />
+      <div className="stack" style={{ gap: 12 }}>
+        <p className="small muted" style={{ margin: 0 }}>
+          {t("The service offers these machines; this repository decides which it uses and how. A machine it does not use is not offered when someone reproduces a PR here.")}{" "}
+          {d && !d.can_configure && `${t("Changes you make here are proposals for a maintainer of the repository.")}`}
+        </p>
+        {d?.reproduce_policy && <ReproducePolicyBar repo={repo} policy={d.reproduce_policy} canConfigure={d.can_configure} />}
+        {view.isLoading ? (
+          <Skeleton rows={2} />
+        ) : !d?.machines.length ? (
+          <Empty icon="server">
+            {t("No test machine is offered to this repository.")} <Link to="/settings?tab=labs">{t("Test machines")}</Link>
+          </Empty>
+        ) : (
+          <div className="stack" style={{ gap: 10 }}>
+            {d.machines.map((m) => (
+              <MachineUse key={m.name} repo={repo} m={m} canConfigure={d.can_configure} />
+            ))}
+          </div>
+        )}
+        <ErrorBox error={view.error} />
+      </div>
     </Section>
   );
 }
@@ -128,7 +234,7 @@ export function RepoMachinesSection({ repo }: { repo: string }) {
 function MachineUse({ repo, m, canConfigure }: { repo: string; m: RepoMachine; canConfigure: boolean }) {
   const t = useT();
   const { save, act } = useSetMachine(repo);
-  const [open, setOpen] = useState(false);
+  const check = useAct(() => api.post<MachineCheck>(`/api/settings/labs/${m.name}/check`), []);
   const [setup, setSetup] = useState(m.setup);
   const [minutes, setMinutes] = useState(m.timeout_seconds ? String(Math.round(m.timeout_seconds / 60)) : "");
   const [forbid, setForbid] = useState(m.forbid.join("\n"));
@@ -146,80 +252,129 @@ function MachineUse({ repo, m, canConfigure }: { repo: string; m: RepoMachine; c
       .filter(Boolean);
   const edited: UseBody = {
     use: m.used,
-    setup,
+    setup: setup.trim(),
     timeout_seconds: minutes ? Math.max(1, Number(minutes)) * 60 : null,
     forbid: lines(forbid),
     protected_paths: lines(paths),
   };
+  const dirty =
+    edited.setup !== m.setup.trim() ||
+    edited.timeout_seconds !== m.timeout_seconds ||
+    edited.forbid.join("\n") !== m.forbid.join("\n") ||
+    edited.protected_paths.join("\n") !== m.protected_paths.join("\n");
   const verb = canConfigure ? t("Save") : t("Propose");
+  const c = check.data;
   return (
-    <div className={`machine-use ${m.used ? "on" : ""}`}>
+    <div className={`machine-use stack ${m.used ? "on" : ""}`} style={{ gap: 10 }}>
       <div className="row" style={{ alignItems: "flex-start" }}>
         <Icon name="server" />
         <span className="stack" style={{ gap: 2, flex: 1, minWidth: 0 }}>
-          <strong>
-            {m.name} {m.used ? <span className="pill status-ok">{t("used here")}</span> : <span className="pill">{t("not used here")}</span>}
-          </strong>
+          <span className="row" style={{ gap: 6 }}>
+            <strong>{m.name}</strong>
+            <span className="muted small">{m.transport === "ssh" ? m.host || m.name : t("this host")}</span>
+            {m.used ? <span className="pill status-ok">{t("used here")}</span> : <span className="pill">{t("not used here")}</span>}
+          </span>
           <span className="small muted">
-            {m.description || t("No description")} · {t("at most")} {Math.round(Math.min(m.timeout_seconds ?? Infinity, m.machine_timeout_seconds) / 60)} {t("minutes")}
-            {m.used && m.setup ? (
+            {m.description || t("No description")} · {t("at most")} {Math.round(Math.min(m.timeout_seconds ?? Infinity, m.machine_timeout_seconds) / 60)}{" "}
+            {t("minutes")}
+            {m.workdir ? (
               <>
                 {" "}
-                · <code>{m.setup}</code>
+                · <code>{m.workdir}</code>
+              </>
+            ) : null}
+            {m.machine_setup ? (
+              <>
+                {" "}
+                · {t("machine setup")}: <code>{m.machine_setup}</code>
               </>
             ) : null}
           </span>
+          {c && (
+            <span className={`small ${c.ok ? "" : "danger-text"}`} style={{ marginTop: 2 }}>
+              {c.ok ? (
+                <>
+                  <Icon name="check" size={12} /> {c.system} · {c.cpus} CPUs · {c.memory_gb} GB
+                  {c.gpus?.length ? ` · ${c.gpus.filter((g) => g.idle).length}/${c.gpus.length} ${t("GPUs idle")}` : ` · ${t("no GPUs")}`}
+                </>
+              ) : (
+                <>
+                  <Icon name="x" size={12} /> {c.error}
+                </>
+              )}
+            </span>
+          )}
         </span>
         <span className="row" style={{ gap: 6 }}>
-          {m.used && (
-            <button className="ghost sm" onClick={() => setOpen(!open)} aria-expanded={open}>
-              {t("Settings")}
-              <Icon name={open ? "chevronDown" : "chevronRight"} size={12} />
-            </button>
-          )}
+          <button className="ghost sm" disabled={check.isPending} onClick={() => check.mutate(undefined)}>
+            {check.isPending ? t("Checking…") : t("Check")}
+          </button>
           <button
-            className={m.used ? "ghost sm danger-text" : "sm"}
+            className={m.used ? "ghost sm danger-text" : "primary sm"}
             disabled={act.isPending}
-            onClick={() => save(m.name, { ...bodyOf(m), use: !m.used })}
+            onClick={() => save(m.name, { ...edited, use: !m.used })}
           >
             {m.used ? t("Stop using") : `${t("Use it here")}${canConfigure ? "" : ` (${t("propose")})`}`}
           </button>
         </span>
       </div>
-      {open && m.used && (
-        <div className="grid2" style={{ gap: 10, marginTop: 10 }}>
-          <label className="stack" style={{ gap: 4 }}>
-            <span className="small muted">
-              {t("Set up this repository's environment before each reproduction")}
-              {m.machine_setup ? ` (${t("after the machine's")}: ${m.machine_setup})` : ""}
-            </span>
-            <input className="mono-input" value={setup} onChange={(e) => setSetup(e.target.value)} placeholder="source ~/envs/my-repo/bin/activate" />
-          </label>
-          <label className="stack" style={{ gap: 4 }}>
-            <span className="small muted">
-              {t("Time limit in minutes (optional)")} · {t("the machine allows")} {Math.round(m.machine_timeout_seconds / 60)}
-            </span>
-            <input type="number" min={1} max={Math.round(m.machine_timeout_seconds / 60)} value={minutes} onChange={(e) => setMinutes(e.target.value)} />
-          </label>
-          <label className="stack" style={{ gap: 4 }}>
-            <span className="small muted">{t("Scripts must not match (one regular expression per line)")}</span>
-            <textarea className="mono-input" rows={2} value={forbid} onChange={(e) => setForbid(e.target.value)} placeholder="\bwget\b" />
-          </label>
-          <label className="stack" style={{ gap: 4 }}>
-            <span className="small muted">{t("Paths scripts must never touch (one per line)")}</span>
-            <textarea className="mono-input" rows={2} value={paths} onChange={(e) => setPaths(e.target.value)} placeholder="/data/checkpoints" />
-          </label>
-          <div className="row">
-            <button className="primary sm" disabled={act.isPending} onClick={() => save(m.name, edited, () => setOpen(false))}>
-              {verb}
+      <div className="grid2" style={{ gap: 10 }}>
+        <label className="stack" style={{ gap: 4 }}>
+          <span className="small muted">
+            {t("Set up this repository's environment before each reproduction")}
+            {m.machine_setup ? ` (${t("after the machine's")}: ${m.machine_setup})` : ""}
+          </span>
+          <input className="mono-input" value={setup} onChange={(e) => setSetup(e.target.value)} placeholder="source ~/envs/my-repo/bin/activate" />
+        </label>
+        <label className="stack" style={{ gap: 4 }}>
+          <span className="small muted">
+            {t("Time limit in minutes (optional)")} · {t("the machine allows")} {Math.round(m.machine_timeout_seconds / 60)}
+          </span>
+          <input
+            type="number"
+            min={1}
+            max={Math.round(m.machine_timeout_seconds / 60)}
+            placeholder={String(Math.round(m.machine_timeout_seconds / 60))}
+            value={minutes}
+            onChange={(e) => setMinutes(e.target.value)}
+          />
+        </label>
+        <label className="stack" style={{ gap: 4 }}>
+          <span className="small muted">
+            {t("Scripts must not match (one regular expression per line)")}
+            {m.machine_forbid?.length ? ` · ${t("machine forbids")}: ${m.machine_forbid.join(", ")}` : ""}
+          </span>
+          <textarea className="mono-input" rows={2} value={forbid} onChange={(e) => setForbid(e.target.value)} placeholder="\bwget\b" />
+        </label>
+        <label className="stack" style={{ gap: 4 }}>
+          <span className="small muted">{t("Paths scripts must never touch (one per line)")}</span>
+          <textarea className="mono-input" rows={2} value={paths} onChange={(e) => setPaths(e.target.value)} placeholder="/data/checkpoints" />
+        </label>
+      </div>
+      {dirty && (
+        <div className="row">
+          <button className="primary sm" disabled={act.isPending} onClick={() => save(m.name, edited)}>
+            {verb}
+          </button>
+          {!m.used && (
+            <button className="sm" disabled={act.isPending} onClick={() => save(m.name, { ...edited, use: true })}>
+              {canConfigure ? t("Save and use here") : `${t("Save and use here")} (${t("propose")})`}
             </button>
-            <button className="ghost sm" onClick={() => setOpen(false)}>
-              {t("Cancel")}
-            </button>
-          </div>
+          )}
+          <button
+            className="ghost sm"
+            onClick={() => {
+              setSetup(m.setup);
+              setMinutes(m.timeout_seconds ? String(Math.round(m.timeout_seconds / 60)) : "");
+              setForbid(m.forbid.join("\n"));
+              setPaths(m.protected_paths.join("\n"));
+            }}
+          >
+            {t("Cancel")}
+          </button>
         </div>
       )}
-      <ErrorBox error={act.error} />
+      <ErrorBox error={act.error || check.error} />
     </div>
   );
 }

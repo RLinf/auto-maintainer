@@ -7,7 +7,7 @@ import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { api, type Agreement, type GateDecision, type MemoryChange, type ProfileResponse, type RepoRow } from "../api";
 import { useAgent } from "../agent";
-import { RepoMachinesSection } from "../machines";
+import { RepoMachinesSection, useRepoMachines } from "../machines";
 import { ProfileChanges, type Profile } from "../profileView";
 import { kindLabel } from "../proposal";
 import { Empty, ErrorBox, PageHead, Section, Status, timeOf, useAct, When } from "../components";
@@ -219,8 +219,11 @@ export function RepoDetailPage() {
   const resume = useAct(() => api.post(`${base}/resume`), keys);
   const p = profile.data;
   const candidateHash = p?.candidate.candidate_hash ?? null;
+  const labs = useRepoMachines(full);
+  const usedMachines = labs.data?.machines.filter((m) => m.used).length;
   const tabs = [
     { id: "overview", label: t("Overview") },
+    { id: "labs", label: t("Test machines"), count: usedMachines },
     { id: "candidate", label: t("Profile change"), count: candidateHash ? 1 : 0 },
     { id: "settings", label: t("Settings") },
   ];
@@ -377,6 +380,8 @@ export function RepoDetailPage() {
           <ErrorBox error={approve.error} />
         </Section>
       )}
+
+      {tab === "labs" && <RepoMachinesSection repo={full} />}
 
       {tab === "settings" && (
         <div className="stack" style={{ gap: 16 }}>

@@ -29,7 +29,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from ..domain.actions import ProposalState
+from ..domain.actions import ActionKind, ProposalState
 from ..domain.agents import QuestionState
 from ..domain.events import Event, EventKind
 from ..domain.ids import check_repo
@@ -256,8 +256,11 @@ def build_router() -> APIRouter:
                     "name": name,
                     "description": machine.description,
                     "transport": machine.transport,
+                    "host": machine.host,
+                    "workdir": machine.workdir,
                     "machine_setup": machine.setup,
                     "machine_timeout_seconds": machine.timeout_seconds,
+                    "machine_forbid": machine.forbid,
                     "used": binding is not None and binding.use,
                     "setup": (binding.setup or "") if binding else "",
                     "timeout_seconds": binding.timeout_seconds if binding else None,
@@ -268,6 +271,11 @@ def build_router() -> APIRouter:
         return {
             "repo": repo,
             "machines": out,
+            "reproduce_policy": (
+                profile.rule(ActionKind.LAB_REPRODUCE).model_dump(mode="json")
+                if profile
+                else None
+            ),
             "can_configure": bool(gate and gate.allowed),
             "reason": gate.reason if gate else f"{repo} has no approved profile yet",
         }

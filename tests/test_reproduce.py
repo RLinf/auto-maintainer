@@ -220,11 +220,36 @@ async def test_only_service_maintainers_add_machines(demo) -> None:
         )
         assert applied.json()["approved"] is True
         assert h.service.machines["a100-2"].description == "4× A100"
+        edited = await maria.put(
+            "/api/settings/labs/a100-2",
+            json={
+                "machine": {
+                    **machine,
+                    "description": "8× A100",
+                    "workdir": "/scratch/am",
+                    "repos": [REPO],
+                }
+            },
+        )
+        assert edited.json()["approved"] is True
+        assert h.service.machines["a100-2"].description == "8× A100"
+        assert h.service.machines["a100-2"].workdir == "/scratch/am"
+        assert h.service.machines["a100-2"].repos == [REPO]
         offered = (await maria.get(f"/api/labs?repo={REPO}")).json()["machines"]
         [added] = [m for m in offered if m["name"] == "a100-2"]
         assert added["used"] is False
+        assert added["host"] == "ci@a100-2" and added["workdir"] == "/scratch/am"
         checked = (await maria.post("/api/settings/labs/a100-2/check")).json()
         assert checked["ok"] and checked["gpus"][0]["idle"]
+        await maria.put(
+            "/api/settings/labs/other-01",
+            json={"machine": {"host": "ci@other-01", "repos": ["acme/other"]}},
+        )
+    async with _as(app, "walt") as walt:
+        checked = await walt.post("/api/settings/labs/a100-2/check")
+        assert checked.status_code == 200 and checked.json()["ok"]
+        denied = await walt.post("/api/settings/labs/other-01/check")
+        assert denied.status_code == 403
 
 
 async def test_a_reproduction_runs_once_the_requester_approves_its_script(
@@ -366,6 +391,32 @@ async def test_each_repository_turns_machines_on_and_sets_how_it_uses_them(
         assert off.json()["applied"] is True
         offered = (await maria.get(f"/api/labs?repo={REPO}")).json()["machines"]
         assert not [m for m in offered if m["name"] == "gpu-01"][0]["used"]
+        rule = await maria.put(
+            f"/api/repos/{REPO}/policy/lab.reproduce",
+            json={
+                "level": "auto",
+                "conditions": {"author": "team"},
+                "otherwise": "propose",
+            },
+        )
+        assert rule.json()["applied"] is True
+        pol = (await maria.get(f"/api/labs?repo={REPO}")).json()["reproduce_policy"]
+        assert pol["level"] == "auto"
+        assert pol["conditions"]["author"] == "team"
+        assert pol["otherwise"] == "propose"
+        reset = await maria.put(
+            f"/api/repos/{REPO}/policy/lab.reproduce",
+            json={
+                "level": "propose",
+                "conditions": {"author": "any"},
+                "otherwise": "shadow",
+            },
+        )
+        assert reset.json()["applied"] is True
+        pol = (await maria.get(f"/api/labs?repo={REPO}")).json()["reproduce_policy"]
+        assert pol["level"] == "propose"
+        assert pol["conditions"]["author"] == "any"
+        assert pol["otherwise"] == "shadow"
 
 
 async def test_the_doctor_checks_the_machines_a_repository_uses(demo) -> None:

@@ -1295,6 +1295,16 @@ const zh: Record<string, string> = {
   "Declined by": "拒绝人",
   "Requests from conversations": "对话中提出的请求",
   "All repositories": "所有仓库",
+  "Work directory": "工作目录",
+  "Time limit in minutes": "时间上限（分钟）",
+  "Automatic for team PRs, ask first for others": "团队 PR 自动复现，其余先询问",
+  "When a review asks to reproduce a PR": "当评审需要复现 PR 时",
+  "Anyone with access can always click Reproduce on a PR and approve the script. This rule controls whether reviews also trigger reproduction on their own.":
+    "有权限的人随时可以在 PR 页面点击“复现”并批准脚本。这项规则控制评审是否也会自行触发复现。",
+  "Manage machines": "管理测试机器",
+  "machine setup": "机器准备命令",
+  "machine forbids": "机器禁止匹配",
+  "Save and use here": "保存并在这里使用",
 };
 
 const LangContext = createContext<{ lang: Lang; setLang: (l: Lang) => void }>({ lang: "zh", setLang: () => {} });
