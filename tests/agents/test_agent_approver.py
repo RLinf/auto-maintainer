@@ -142,3 +142,89 @@ def test_other_requests_need_a_reviewer(tmp_path: Path) -> None:
     assert auto_answer(_task(tmp_path), _ask("other")) is None
     question = AgentQuestion(kind=QuestionKind.INPUT, title="which?")
     assert auto_answer(_task(tmp_path), question) is None
+
+
+def test_commands_an_agents_settings_approve_run_without_asking(tmp_path: Path) -> None:
+    import shlex
+
+    approved = [
+        shlex.split("python3 .agents/skills/docs-check/check_rst_markup.py"),
+        shlex.split("python3 .agents/skills/review-pr/lint_review.py lint"),
+    ]
+    (tmp_path / "docs").mkdir()
+    for command in [
+        "python3 .agents/skills/docs-check/check_rst_markup.py docs/index.rst",
+        "python3 .agents/skills/review-pr/lint_review.py lint --pr 3 review.json",
+        "git status && python3 .agents/skills/docs-check/check_rst_markup.py docs",
+    ]:
+        assert safe_command(command, "read_only", [tmp_path], approved), command
+    for command in [
+        "python3 .agents/skills/docs-check/check_rst_markup.py /etc/passwd",
+        "python3 .agents/skills/review-pr/lint_review.py post --pr 3 review.json",
+        "python3 .agents/skills/docs-check/build_docs.py",
+        "python3 .agents/skills/docs-check/check_rst_markup.py docs && pytest -q",
+    ]:
+        assert not safe_command(command, "read_only", [tmp_path], approved), command
+    assert not safe_command(
+        "python3 .agents/skills/docs-check/check_rst_markup.py docs",
+        "read_only",
+        [tmp_path],
+    ), "nothing is approved unless the settings say so"
+
+
+@pytest.mark.parametrize(
+    ("command", "problem"),
+    [
+        ("python3", "needs the script"),
+        ("python3 -c 'import os'", "needs the script"),
+        ("bash -c ls", "needs the script"),
+        ("uv run ruff check", "runs other code"),
+        ("npm test", "runs other code"),
+        ("curl https://example.com", "runs other code"),
+        ("ls; rm -rf /", "shell syntax"),
+        ("cat x > y", "shell syntax"),
+        ("", "empty"),
+    ],
+)
+def test_settings_refuse_commands_that_could_run_anything(
+    command: str, problem: str
+) -> None:
+    from auto_maintainer.domain.settings import approve_command_problems
+
+    assert any(problem in p for p in approve_command_problems(command))
+    assert not approve_command_problems(
+        "python3 .agents/skills/docs-check/check_rst_markup.py"
+    )
+
+
+def test_an_agents_approved_commands_reach_its_answers(tmp_path: Path) -> None:
+    from auto_maintainer.agents.registry import build_runtime
+    from auto_maintainer.domain.profile import Route
+    from auto_maintainer.domain.settings import (
+        RuntimeConfig,
+        ServiceConfig,
+        check_settings,
+    )
+
+    script = "python3 .agents/skills/docs-check/check_rst_markup.py"
+    runtime = build_runtime(
+        "antigravity",
+        RuntimeConfig(adapter="antigravity", approve_commands=[script]),
+        runs_dir=tmp_path / "runs",
+    )
+    answer = runtime.auto_answer(
+        _task(tmp_path), _ask("execute", f"{script} README.rst")
+    )
+    assert answer is not None and answer.allow and answer.automatic
+    other = build_runtime(
+        "antigravity", RuntimeConfig(adapter="antigravity"), runs_dir=tmp_path / "runs"
+    )
+    assert (
+        other.auto_answer(_task(tmp_path), _ask("execute", f"{script} README.rst"))
+        is None
+    )
+    config = ServiceConfig(
+        agents={"antigravity": {"approve_commands": ["python3 -m pytest"]}}
+    )
+    problems = check_settings(config, {"review": Route(primary="antigravity")})
+    assert any("approve_commands.0" in p and "needs the script" in p for p in problems)

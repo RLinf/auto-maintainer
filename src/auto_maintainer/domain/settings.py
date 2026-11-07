@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import difflib
 import re
+import shlex
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -124,6 +125,16 @@ class RuntimeConfig(BaseModel):
     command_prefix: list[str] = Field(default_factory=list)
     """A wrapper put before the command, such as a sandbox (``bwrap ... --``) or a
     switch to an unprivileged user. ``{workdir}`` and ``{run_dir}`` are filled in."""
+    approve_commands: list[str] = Field(default_factory=list)
+    """Commands the service approves for this agent without asking a person, in any
+    task and on any PR, beyond its own rules for reading (agents the service answers
+    for: the ACP CLIs, such as Antigravity). Each is a command's leading words, such
+    as ``python3 .agents/skills/docs-check/check_rst_markup.py``; it matches that
+    command with any further arguments while the paths among them stay in the run's
+    folders. Only for commands that cannot run a PR's code or reach outside its
+    checkout, such as a repository's own read-only scripts, which come from its
+    default branch; ``approve_command_problems`` refuses an interpreter or a shell
+    without a script and the runners that run a project's code."""
     bypass_args: list[str] = Field(default_factory=list)
     """For the generic adapter: arguments that switch the CLI into its bypass mode."""
     command: list[str] = Field(default_factory=list)
@@ -392,6 +403,38 @@ def effective_routing(
     return out
 
 
+_INTERPRETERS = frozenset(
+    {"python", "python3", "bash", "sh", "zsh", "node", "perl", "ruby", "deno", "bun"}
+)
+_RUNNERS = frozenset(
+    {
+        "uv", "uvx", "pip", "pip3", "npm", "npx", "yarn", "pnpm", "make", "cargo",
+        "go", "pytest", "tox", "nox", "sudo", "env", "xargs", "timeout", "nice",
+        "docker", "kubectl", "ssh", "curl", "wget", "git",
+    }
+)  # fmt: skip
+"""Commands that run a project's code, reach the network, or run another command,
+whatever follows them: never approved by prefix. Git has its own read rules."""
+
+
+def approve_command_problems(command: str) -> list[str]:
+    """Why ``command`` may not be approved without asking; empty when it may."""
+    if any(ch in command for ch in (";", "&", "|", ">", "<", "`", "$(", "\n")):
+        return ["it has shell syntax; list a single command"]
+    try:
+        words = shlex.split(command)
+    except ValueError as e:
+        return [f"it does not parse: {e}"]
+    if not words:
+        return ["it is empty"]
+    name = words[0].rsplit("/", 1)[-1]
+    if name in _RUNNERS:
+        return [f"{name} runs other code or reaches outside the checkout"]
+    if name in _INTERPRETERS and (len(words) < 2 or words[1].startswith("-")):
+        return [f"{name} needs the script it runs, such as {name} path/to/script"]
+    return []
+
+
 def check_settings(
     config: ServiceConfig,
     defaults: Mapping[str, Route],
@@ -440,6 +483,11 @@ def check_settings(
     for name, machine in config.labs.items():
         problems += [f"labs.{name}: {p}" for p in machine_problems(name, machine)]
     for name, agent in agents.items():
+        for i, command in enumerate(agent.approve_commands):
+            problems += [
+                f"agents.{name}.approve_commands.{i} ({command!r}): {p}"
+                for p in approve_command_problems(command)
+            ]
         if agent.effort is not None and agent.effort not in EFFORTS:
             problems.append(
                 f"agents.{name}.effort: use one of {', '.join(EFFORTS)}, not {agent.effort!r}"

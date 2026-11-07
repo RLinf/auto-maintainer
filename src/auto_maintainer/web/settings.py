@@ -105,6 +105,7 @@ async def settings_view(service: Service, user: User) -> dict[str, Any]:
                         "allow_bypass",
                         "permissions",
                         "binary",
+                        "approve_commands",
                     },
                 ),
                 "can_bypass": can_bypass(cfg),

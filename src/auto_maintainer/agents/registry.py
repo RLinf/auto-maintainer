@@ -86,6 +86,7 @@ def build_runtime(
         "allow_bypass": config.allow_bypass,
         "permissions": config.permissions,
         "command_prefix": config.command_prefix,
+        "approve_commands": config.approve_commands,
         **config.options,
     }
     if config.binary:

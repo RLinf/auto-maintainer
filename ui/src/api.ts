@@ -552,6 +552,8 @@ export interface SettingsAgent {
   can_bypass: boolean;
   /** Runs under a ``command_prefix`` wrapper instead of as the service's own user. */
   confined: boolean;
+  /** Commands the service approves for this agent without asking (leading words). */
+  approve_commands: string[];
   binary: string | null;
   from_settings: boolean;
   providers_supported: string[];

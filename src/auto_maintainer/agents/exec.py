@@ -40,6 +40,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import signal
 import tempfile
@@ -322,8 +323,12 @@ class ExecRuntime:
         questions: AgentQuestions | None = None,
         provider: ProviderBinding | None = None,
         permissions: str | None = None,
+        approve_commands: Iterable[str] = (),
     ) -> None:
         self.name = name or self.default_name
+        self.approve_commands = [shlex.split(c) for c in approve_commands]
+        """Commands the service approves for this agent without asking, as words
+        (``RuntimeConfig.approve_commands``)."""
         self.binary = binary or self.default_binary
         self.runs_dir = Path(runs_dir) if runs_dir else DEFAULT_RUNS_DIR
         self.env_allow = [*self.default_env_allow, *env_allow]

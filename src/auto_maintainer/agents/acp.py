@@ -150,7 +150,7 @@ class AcpRuntime(ExecRuntime):
     ) -> AgentAnswer | None:
         if task.permissions == "bypass":
             return AgentAnswer(allow=True, by="service", automatic=True)
-        return auto_answer(task, question)
+        return auto_answer(task, question, self.approve_commands)
 
 
 CHOICES_TTL = 3600.0

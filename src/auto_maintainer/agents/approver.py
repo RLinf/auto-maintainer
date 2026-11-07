@@ -29,6 +29,7 @@ from __future__ import annotations
 import os
 import re
 import shlex
+from collections.abc import Sequence
 from pathlib import Path
 
 from ..domain.agents import AgentAnswer, AgentQuestion, AgentTask, QuestionKind
@@ -96,8 +97,14 @@ def posting_request(question: AgentQuestion) -> bool:
     return any(_POSTING_WORDS.search(t or "") for t in texts)
 
 
-def auto_answer(task: AgentTask, question: AgentQuestion) -> AgentAnswer | None:
-    """An automatic answer for ``question``, or ``None`` when a reviewer must decide."""
+def auto_answer(
+    task: AgentTask,
+    question: AgentQuestion,
+    approved: Sequence[Sequence[str]] = (),
+) -> AgentAnswer | None:
+    """An automatic answer for ``question``, or ``None`` when a reviewer must decide.
+    ``approved`` are the leading words of commands the agent's settings approve
+    (``RuntimeConfig.approve_commands``)."""
     if question.kind != QuestionKind.PERMISSION:
         return None
     roots = [task.workdir, *task.skill_dirs, *task.extra_dirs]
@@ -114,7 +121,7 @@ def auto_answer(task: AgentTask, question: AgentQuestion) -> AgentAnswer | None:
             return _allow()
         return None
     if kind == "execute" and question.detail:
-        if safe_command(question.detail, task.mode, roots):
+        if safe_command(question.detail, task.mode, roots, approved):
             return _allow()
         return None
     return None
@@ -141,8 +148,15 @@ def _commands(command: str) -> list[list[str]] | None:
     return commands
 
 
-def safe_command(command: str, mode: str, roots: list[Path]) -> bool:
-    """Whether ``command`` only reads (or, for writing tasks, tests) inside ``roots``."""
+def safe_command(
+    command: str,
+    mode: str,
+    roots: list[Path],
+    approved: Sequence[Sequence[str]] = (),
+) -> bool:
+    """Whether ``command`` only reads (or, for writing tasks, tests) inside ``roots``,
+    each of its commands either such a command or one of ``approved`` (leading words)
+    with any further arguments; paths among the arguments stay inside ``roots``."""
     if any(token in command for token in _SHELL_META):
         return False
     commands = _commands(_HARMLESS_REDIRECTS.sub(" ", command))
@@ -151,7 +165,7 @@ def safe_command(command: str, mode: str, roots: list[Path]) -> bool:
     for words in commands:
         if not words or "=" in words[0]:
             return False
-        if not _safe_words(words, mode):
+        if not (_safe_words(words, mode) or _approved(words, approved)):
             return False
         for word in words[1:]:
             value = _path_value(word)
@@ -161,6 +175,12 @@ def safe_command(command: str, mode: str, roots: list[Path]) -> bool:
             if (exists or _looks_like_path(value)) and not _inside(value, roots):
                 return False
     return True
+
+
+def _approved(words: list[str], approved: Sequence[Sequence[str]]) -> bool:
+    return any(
+        len(words) >= len(p) and list(words[: len(p)]) == list(p) for p in approved if p
+    )
 
 
 def _safe_words(words: list[str], mode: str) -> bool:

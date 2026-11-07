@@ -644,6 +644,11 @@ async def _settings_block(service: Any, user: User) -> str:
             if a.command_prefix
             else "unconfined (runs as the service's user and can read its files)"
         )
+        + (
+            f", approves without asking: {a.approve_commands}"
+            if a.approve_commands
+            else ""
+        )
         + "; custom providers it can use: "
         f"{', '.join(sorted(PROVIDER_PROTOCOLS.get(a.adapter, ()))) or 'none'}"
         + offered(name)
@@ -690,7 +695,12 @@ async def _settings_block(service: Any, user: User) -> str:
             "command_prefix: [<argv of a wrapper the CLI runs under, such as sudo -u "
             "<agent-user> -- or bwrap ... --; {workdir} and {run_dir} are filled in per "
             "run>] (keeps the agent from reading the host's files, such as the tokens "
-            "reviewers signed in with)}}\n"
+            "reviewers signed in with), "
+            "approve_commands: [<a command's leading words that the service approves for "
+            "this agent without asking, on any PR, such as python3 .agents/skills/docs-check/"
+            "check_rst_markup.py; only commands that cannot run a PR's code or reach outside "
+            "its checkout: a repository's own read-only scripts, never an interpreter or "
+            "shell without its script, a test or build runner, or the network>]}}\n"
             "providers: {<id>: {name, protocol: anthropic | openai | openai-responses, "
             "base_url, api_key: <SECRET_NAME>, models: [...]}}\n"
             "routing: {<task>: {primary, fallback: [...], verifier, model, effort, "

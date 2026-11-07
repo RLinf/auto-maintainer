@@ -442,6 +442,16 @@ function AgentsTab({ v, ask }: { v: SettingsView; ask: (p: string, send?: boolea
                   <strong>{provider ? provider.name || provider.id : t("its own sign-in")}</strong>
                   {budget ? ` · ${t("Budget")}: ${budget}` : ""}
                   {a.providers_supported.length === 0 && <> · {t("cannot use custom providers")}</>}
+                  {a.approve_commands.length > 0 && (
+                    <div className="small" style={{ marginTop: 4 }}>
+                      {t("Runs without asking")}:{" "}
+                      {a.approve_commands.map((c) => (
+                        <code key={c} style={{ marginRight: 6, overflowWrap: "anywhere" }}>
+                          {c}
+                        </code>
+                      ))}
+                    </div>
+                  )}
                 </>
               }
               actions={
