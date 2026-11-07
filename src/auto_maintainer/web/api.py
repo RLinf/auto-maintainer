@@ -63,7 +63,7 @@ from ..domain.memory import (
 )
 from ..domain.merge_gate import MergeArm, evaluate_merge_gate
 from ..domain.permissions import Permission
-from ..domain.profile import RepoProfile
+from ..domain.profile import Conditions, RepoProfile
 from ..domain.records import ActionRecord, AuditEntry, JobStatus
 from ..domain.review import classify_review_state
 from ..domain.run_ci import plan_run_ci
@@ -344,6 +344,8 @@ class PrTarget(BaseModel):
 
 class LevelBody(BaseModel):
     level: Autonomy
+    conditions: Conditions | None = None
+    otherwise: Autonomy | None = None
 
 
 class AutomationBody(BaseModel):
@@ -781,7 +783,8 @@ def build_router() -> APIRouter:
     ) -> dict[str, Any]:
         """How far one action kind may go on its own in the repository (off, record
         only, propose, auto), in its settings layer: a maintainer applies it by making
-        it, anyone else proposes it. Conditions on the level are kept."""
+        it, anyone else proposes it. Conditions on the level are kept unless the caller
+        supplies them."""
         service = service_of(request)
         repo = _repo(owner, name)
         await require_view(service, user, repo)
@@ -800,6 +803,17 @@ def build_router() -> APIRouter:
         policy = dict(layer.get("policy") or {})
         rule = dict(policy.get(kind) or {})
         rule["level"] = str(body.level)
+        if body.conditions is not None:
+            cond = body.conditions.model_dump(mode="json", exclude_defaults=True)
+            if cond:
+                rule["conditions"] = cond
+            else:
+                rule.pop("conditions", None)
+        if body.otherwise is not None:
+            if body.otherwise != Autonomy.SHADOW:
+                rule["otherwise"] = str(body.otherwise)
+            else:
+                rule.pop("otherwise", None)
         policy[kind] = rule
         layer["policy"] = policy
         try:

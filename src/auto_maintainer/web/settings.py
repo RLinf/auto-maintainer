@@ -46,7 +46,7 @@ from ..domain.settings import (
     settings_diff,
 )
 from ..service import Service
-from .api import service_of
+from .api import service_of, visible_repos
 from .auth import User, current_user
 
 
@@ -519,9 +519,13 @@ def build_router() -> APIRouter:
     ) -> dict[str, Any]:
         """Connect to the machine and report what it is and its GPUs."""
         service = service_of(request)
-        await _require_maintainer(service, user)
+        machine = service.machines.get(name)
+        if not (await service.service_gate(user.login)).allowed:
+            visible = await visible_repos(service, user) if machine else []
+            if not (machine and any(machine.serves(repo) for repo in visible)):
+                await _require_maintainer(service, user)
         runner = service.a.lab_runner
-        if runner is None or name not in service.machines:
+        if runner is None or machine is None:
             raise HTTPException(404, f"no test machine named {name!r} is in force")
         try:
             return await runner.check(name)

@@ -76,7 +76,7 @@ export function ReproduceButton({ repo, number, align = "right" }: { repo: strin
                   {t("No test machine is offered to it.")} <Link to="/settings?tab=labs">{t("Set one up")}</Link>
                 </span>
               )}
-              <Link to={`/repos/${repo}?tab=settings`}>{t("How this repository uses test machines")}</Link>
+              <Link to={`/repos/${repo}?tab=labs`}>{t("How this repository uses test machines")}</Link>
             </div>
           ) : (
             <>
@@ -118,7 +118,7 @@ export function ReproduceButton({ repo, number, align = "right" }: { repo: strin
             </>
           )}
           {used.length > 0 && unused.length > 0 && (
-            <Link className="small" to={`/repos/${repo}?tab=settings`}>
+            <Link className="small" to={`/repos/${repo}?tab=labs`}>
               {unused.length} {t("more offered but not used here")} →
             </Link>
           )}
