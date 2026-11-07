@@ -446,6 +446,7 @@ class Service:
         await self.reload_settings()
         await self.actuator.reconcile_intents()
         await self.questions.cancel_orphans()
+        await self.engine.recover()
         self._confirming = asyncio.create_task(
             self._confirm_deploy(), name="confirm-deploy"
         )

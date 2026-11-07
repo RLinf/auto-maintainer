@@ -508,7 +508,7 @@ Stack: Python 3.11+ via uv, asyncio, Pydantic v2, FastAPI with uvicorn, SQLAlche
 
 | Failure | What happens |
 |---|---|
-| The service crashes during a job | The job's lease expires and the job runs again from fresh reads. Idempotency keys stop repeated writes. An agent task resumes its session when the runtime supports it and restarts otherwise. |
+| The service crashes or restarts during a job | The job returns to the queue when the service starts again (job store, 5.4) and runs again from fresh reads. Idempotency keys stop repeated writes. An agent task resumes its session when the runtime supports it and restarts otherwise. |
 | The service crashes between a forge write and recording it | The actuator records an intent before each write. On startup, an intent without a result is reconciled by looking for the action's marker or reading the target's state, and it is retried only if the write did not happen. |
 | The forge is down or rate-limited | Polling backs off, the actuator holds its queue, jobs wait, and the dashboard shows a banner. |
 | An agent CLI fails, runs out of quota, or returns invalid output | Invalid output gets one repair turn; after that, the router moves to the fallback runtime and opens the failing runtime's circuit breaker. A job that runs out of runtimes fails and shows on the dashboard. |
@@ -572,7 +572,7 @@ Network: forge calls honor `HTTPS_PROXY`.
 
 ### 5.4 Engine
 
-- **Job store.** Jobs are rows with `repo`, `playbook`, `key`, `status`, `attempts`, `payload`, `result`. The key is unique per playbook, so a second event for the same PR and SHA joins the existing job. Jobs survive restarts; on startup, `running` jobs older than their lease return to `queued`.
+- **Job store.** Jobs are rows with `repo`, `playbook`, `key`, `status`, `attempts`, `payload`, `result`. The key is unique per playbook, so a second event for the same PR and SHA joins the existing job. Jobs survive restarts. A stop (a deploy, `am stop`) cancels the running jobs and puts them back in `queued` without counting the attempt it ended (`Engine.stop`), and on startup any job a crashed process left `running` returns to `queued` before the engine starts, that attempt counted (`Engine.recover`), so unfinished reviews and other work run again at once from fresh reads instead of waiting for their lease to expire; questions their agents left pending are cancelled (`cancel_orphans`).
 - **Scheduler.** Cron triggers from `schedules.yaml` (digest, reconcile, compaction, flake report, doctors), each producing a `schedule.tick` event.
 - **Worker pools.** Separate concurrency limits for forge I/O, agent runs per runtime, and lab leases, plus a fair share per repository so one busy repository cannot starve the others.
 - **Waits.** A playbook that returns `wait_for(events, timeout)` parks its job in `waiting` with a subscription (event kinds plus target). A matching event or the timeout re-queues the job, which runs again from fresh reads (4.3).

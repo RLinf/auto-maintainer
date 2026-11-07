@@ -71,6 +71,8 @@ class Engine:
         self._running: set[asyncio.Task[None]] = set()
         self._job_tasks: dict[str, asyncio.Task[object]] = {}
         self._stopped: dict[str, str] = {}
+        self._stopping = False
+        """Set while the service stops: the jobs it cancels go back to the queue."""
         self.on_change: Callable[[Job], None] | None = None
         """Called whenever a job's status changes, for the dashboard."""
 
@@ -161,13 +163,36 @@ class Engine:
 
     # -- workers -----------------------------------------------------------------------
 
+    async def recover(self) -> int:
+        """Queue again the jobs a previous process left running, before this one
+        starts: it stopped without putting them back (a crash, or a kill). The attempt
+        they were on counts, so a job that keeps bringing the service down runs out of
+        attempts. Returns how many it queued or, out of attempts, failed."""
+        now = self.clock.now()
+        left = await self.store.list_jobs([JobStatus.RUNNING], limit=100_000)
+        for job in left:
+            job.status = (
+                JobStatus.QUEUED
+                if job.attempts < job.max_attempts
+                else JobStatus.FAILED
+            )
+            job.error = "the service stopped while it ran"
+            job.lease_until = None
+            job.updated_at = now
+            await self.store.save_job(job)
+        return len(left)
+
     def start(self) -> None:
+        self._stopping = False
         for pool, size in self.pools.items():
             self._tasks.append(
                 asyncio.create_task(self._pool_loop(pool, size), name=f"pool:{pool}")
             )
 
     async def stop(self) -> None:
+        """Stop working. Running jobs are cancelled and go back to the queue, so the
+        next start (after a deploy, for example) runs them again at once."""
+        self._stopping = True
         for task in self._tasks + list(self._running):
             task.cancel()
         for task in self._tasks + list(self._running):
@@ -242,6 +267,8 @@ class Engine:
         except asyncio.CancelledError:
             by = self._stopped.pop(job.id, None)
             if by is None:
+                if self._stopping:
+                    await self._requeue_for_restart(job)
                 raise
             if current is not None:
                 current.uncancel()
@@ -254,6 +281,20 @@ class Engine:
             return None
         finally:
             self._job_tasks.pop(job.id, None)
+
+    async def _requeue_for_restart(self, job: Job) -> None:
+        """Put a job the service stopped back in the queue, without counting the
+        attempt the stop ended: it runs again, from fresh reads, once the service is
+        back."""
+        current = await self.store.get_job(job.id) or job
+        if current.status != JobStatus.RUNNING:
+            return
+        current.status = JobStatus.QUEUED
+        current.attempts = max(0, current.attempts - 1)
+        current.lease_until = None
+        current.error = None
+        current.updated_at = self.clock.now()
+        await self.store.save_job(current)
 
     async def _run_job(self, job: Job) -> PlaybookResult | None:
         self._changed(job)

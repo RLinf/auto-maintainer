@@ -277,3 +277,76 @@ async def test_scoring_someone_asked_for_is_agent_work_and_quiet_rescoring_is_no
         assert quiet.id not in {j["id"] for j in scoring}
         mine = (await maria.get("/api/work")).json()
         assert {j["id"] for j in mine} == {j["id"] for j in asked}
+
+
+async def test_a_job_the_service_stops_runs_again_after_it_starts(demo) -> None:
+    h, app = demo
+    engine = h.service.engine
+    h.runner.steps["review"] = [
+        AgentEvent(type=AgentEventType.MESSAGE, text=f"step {i}") for i in range(40)
+    ]
+    h.runner.step_delay = 0.05
+    async with _as(app, "maria") as maria:
+        await maria.post("/api/reviews", json={"prs": [{"repo": REPO, "number": 43}]})
+    await h.service.bus.drain()
+    [job] = [
+        j for j in await h.store.list_jobs([JobStatus.QUEUED]) if j.playbook == "review"
+    ]
+    engine.start()
+    for _ in range(200):
+        if len(await h.service.progress.steps(job.id)) > 2:
+            break
+        await asyncio.sleep(0.02)
+    await engine.stop()  # a deploy
+    stopped = await h.store.get_job(job.id)
+    assert stopped is not None and stopped.status == JobStatus.QUEUED
+    assert stopped.attempts == 0, "the stop does not count as an attempt"
+
+    h.runner.step_delay = 0
+    engine.start()
+    for _ in range(300):
+        done = await h.store.get_job(job.id)
+        if done is not None and done.status == JobStatus.DONE:
+            break
+        await asyncio.sleep(0.02)
+    await engine.stop()
+    assert done is not None and done.status == JobStatus.DONE, done
+    drafts = [
+        r
+        for r in await h.store.list_actions(repo=REPO, number=43, kinds=["review.post"])
+        if r.action.provenance.job_id == job.id
+    ]
+    assert len(drafts) == 1
+
+
+async def test_jobs_a_crashed_process_left_running_are_queued_at_start(demo) -> None:
+    from datetime import timedelta
+
+    from auto_maintainer.domain.records import Job
+
+    h, _ = demo
+    now = h.clock.now()
+    left = Job(
+        playbook="review",
+        key="review:acme/widget#43:left",
+        repo=REPO,
+        number=43,
+        pool="agent",
+        status=JobStatus.RUNNING,
+        attempts=1,
+        lease_until=now + timedelta(hours=1),
+        created_at=now,
+        updated_at=now,
+    )
+    spent = left.model_copy(
+        update={"id": "job_spent", "key": "review:acme/widget#43:spent", "attempts": 3}
+    )
+    for job in (left, spent):
+        stored, _ = await h.store.upsert_job(job)
+        await h.store.save_job(job.model_copy(update={"id": stored.id}))
+    assert await h.service.engine.recover() == 2
+    again = await h.store.get_job(left.id)
+    assert again is not None and again.status == JobStatus.QUEUED
+    assert again.attempts == 1 and again.lease_until is None
+    out = await h.store.get_job("job_spent")
+    assert out is not None and out.status == JobStatus.FAILED
