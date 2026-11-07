@@ -80,7 +80,7 @@ These hold everywhere. Reviewers reject changes that break them; `tests/test_lay
 - **Agent output is validated** against a Pydantic model defined next to the playbook that asks for it; the router uses the runtime's schema flag when it has one and one repair turn otherwise.
 - **Secrets never leave the host config.** No tokens in git remote URLs, command lines, prompts, logs, or transcripts; git reads them from `AM_GIT_TOKEN` through a credential helper. Agent environments come from the allowlist in `agents/sandbox.py`.
 - **Async all the way.** No blocking calls on the event loop; adapters run subprocesses through `subproc.run`. Times are UTC; business days go through `domain.calendar`.
-- **Labs follow their guard rules** (design 5.10): template commands, or a reproduction script that its requester approved and that passes `domain/labs.py:script_refusals`; one worktree or run folder per run; lease only idle GPUs; never modify the base clone; no credentials on a machine (code goes over as archives); cleanup in `finally`.
+- **Labs follow their guard rules** (design 5.10): template commands, or a reproduction script that passes `domain/labs.py:script_refusals` and that its requester approved or, for a review, that the repository's `lab.reproduce` rule runs on its own; one worktree or run folder per run; lease only idle GPUs; never modify the base clone; no credentials on a machine (code goes over as archives); cleanup in `finally`.
 - **Schemas are versioned.** A table change needs an Alembic migration in `store/migrations/versions/`; a profile or lock schema change needs a version bump and a loader for the previous version.
 
 ## The service changing itself

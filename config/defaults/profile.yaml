@@ -17,7 +17,7 @@ policy:
   pr.convert_to_draft: {level: shadow}
   pr.close: {level: shadow}
   pr.fix: {level: shadow}             # drafted for whoever asked; opened as them
-  lab.reproduce: {level: shadow}      # drafted for whoever asked; runs once they approve the script
+  lab.reproduce: {level: shadow}      # a person's request runs once they approve it; raised, reviews reproduce on their own
   issue.label: {level: shadow}
   issue.comment: {level: shadow}
   lab.run: {level: shadow}

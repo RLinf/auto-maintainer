@@ -71,6 +71,15 @@ def _conditions_hold(conditions: Conditions, facts: PolicyFacts) -> tuple[bool, 
     return True, ""
 
 
+def level_for(kind: ActionKind, profile: RepoProfile, facts: PolicyFacts) -> Autonomy:
+    """The level the repository's rule gives ``kind`` for these facts: its ``level``
+    when its conditions hold, else ``otherwise``. ``decide`` applies the service-wide
+    limits on top; a playbook uses this to say ahead what will happen."""
+    rule = profile.rule(kind)
+    holds, _ = _conditions_hold(rule.conditions, facts)
+    return rule.level if holds else rule.otherwise
+
+
 def decide(action: Action, profile: RepoProfile, facts: PolicyFacts) -> Decision:
     kind = action.kind
     public = kind.touches_repository

@@ -318,10 +318,17 @@ class ActionPipeline:
         return proposal
 
     async def save_edits(
-        self, proposal_id: str, login: str, edited_payload: dict[str, Any]
+        self,
+        proposal_id: str,
+        login: str,
+        edited_payload: dict[str, Any],
+        *,
+        person: bool = True,
     ) -> Proposal:
         """Keep a person's edits to a pending draft without deciding it, so they can
-        come back to it; approving later posts what was saved."""
+        come back to it; approving later posts what was saved. With ``person=False``
+        the service revises its own draft (a reproduction's results added to a review):
+        it is not marked edited and leaves no signal to learn from."""
         proposal = await self.store.get_proposal(proposal_id)
         if proposal is None:
             raise ApprovalError(f"proposal {proposal_id} does not exist")
@@ -331,7 +338,9 @@ class ActionPipeline:
             )
         record = await self.store.get_action(proposal.action_id)
         assert record is not None, f"proposal {proposal_id} points at a missing action"
-        if await self._apply_edits(proposal, record, login, edited_payload):
+        if await self._apply_edits(
+            proposal, record, login, edited_payload, person=person
+        ):
             # The leak check reads the text as it now is.
             proposal.warnings = await self._warnings(
                 record.action, await self._profile_for(record.action)
@@ -346,6 +355,8 @@ class ActionPipeline:
         record: ActionRecord,
         login: str,
         edited_payload: dict[str, Any],
+        *,
+        person: bool = True,
     ) -> bool:
         """Validate ``edited_payload`` against the action's payload model and put it
         in place; returns whether it changed anything."""
@@ -354,6 +365,10 @@ class ActionPipeline:
         new_payload = typed.model_dump(mode="json")
         if new_payload == action.payload:
             return False
+        if not person:
+            action.payload = new_payload
+            record.action = action
+            return True
         await self.store.add_signal(
             Signal(
                 kind=SignalKind.DRAFT_EDITED,

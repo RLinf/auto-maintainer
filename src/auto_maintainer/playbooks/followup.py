@@ -44,11 +44,14 @@ from .prompts import (
     label_block,
     label_choices,
     pr_block,
+    reproduction_block,
     review_skill_block,
     schema_hint,
     untrusted,
 )
+from .reproduce import auto_reproduction
 from .requests import FOLLOWUP_STATES, review_key, review_request, starts_review
+from .review import reproduce_after, reproduction_record
 
 
 class Followup(Playbook):
@@ -107,6 +110,7 @@ class Followup(Playbook):
         info = await ctx.forge.get_repo(pr.repo)
         choices = label_choices(info.labels, profile, pr)
         limit = profile.review.max_suggested_labels
+        repro = await auto_reproduction(ctx, pr, profile, ctx.trusted_input)
         workdir = await ctx.workspace.prepare(
             pr.repo, pr.number, pr.head_sha, info.default_branch
         )
@@ -141,6 +145,11 @@ class Followup(Playbook):
                         30_000,
                     ),
                     f"Last reviewed commit: {previous_sha or 'unknown'}. Head: {pr.head_sha}.",
+                    reproduction_block(
+                        await reproduction_record(ctx.store, pr.repo, pr.number),
+                        upcoming=repro.upcoming(),
+                        no_machine=repro.no_machine,
+                    ),
                     untrusted(
                         "diff.since_review", incremental or "(not available)", 80_000
                     ),
@@ -247,10 +256,12 @@ class Followup(Playbook):
             )
         return PlaybookResult(
             actions=actions,
+            events=reproduce_after(repro, pr, actions[0].id, request),
             result={
                 "statuses": len(result.statuses),
                 "new": len(result.new_findings),
                 "labels": result.labels,
+                **({"reproduce_on": repro.lab} if repro.lab else {}),
             },
         )
 

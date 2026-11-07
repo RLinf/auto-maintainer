@@ -372,6 +372,7 @@ class Service:
             own_reviews=await self.posted_as_people(job.repo)
             if job.repo
             else frozenset(),
+            drafts=self.pipeline,
         )
 
     async def user_writer(self, login: str) -> ForgeWriter | None:

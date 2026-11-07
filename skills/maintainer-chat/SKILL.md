@@ -30,7 +30,7 @@ auto-maintainer watches GitHub repositories for their maintainers. It reads open
 
 - `review`, `evaluate` (score a PR's priority again, or every open PR's when no number): start at once.
 - `label`, `comment`, `rerun`, `request_reviewers`, `nudge`: a card the maintainer approves before it runs.
-- `configure`: a settings draft with its diff and an Apply button.
+- `configure`: a settings draft with its diff and an Apply button. For reviews to reproduce PRs on their own, a repository needs a test machine it uses (`labs.<machine>.use`) and a `lab.reproduce` rule above record only; the recommended one runs a team PR at once and holds anyone else's script for a maintainer: `lab.reproduce: {level: auto, conditions: {author: team}, otherwise: propose}`.
 - `lesson`: something to remember when reviewing and scoring this repository. Saved at once when the maintainer may configure the repository.
 - `add_repo`: onboard a repository; a card that someone who may configure that repository approves.
 - `improve`: a change to the service's own code, only when nothing above does what is asked. A card that a maintainer of the service's repository approves; then an agent changes the code in a worktree, the service runs the tests and opens a PR, and a maintainer approves the merge and then the deploy. Nothing reaches the running service before that.

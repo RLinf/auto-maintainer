@@ -380,3 +380,154 @@ async def test_the_doctor_checks_the_machines_a_repository_uses(demo) -> None:
     machines["gpu-01"] = machines["gpu-01"].model_copy(update={"repos": ["acme/other"]})
     items = {i.check: i for i in await run_doctor(profile, h.forge, set(), machines)}
     assert not items["lab gpu-01"].ok and "not offered" in items["lab gpu-01"].detail
+
+
+# -- a review reproduces its PR -------------------------------------------------------------
+
+
+async def _reproduce_in_reviews(h: Any) -> None:
+    """The repository's rule: a team PR runs at once, anyone else's waits for a
+    maintainer to approve its script."""
+    from auto_maintainer.domain.memory import profile_path
+    from auto_maintainer.profiles.layers import dump_yaml, parse_yaml
+
+    path = profile_path(REPO)
+    layer = parse_yaml(h.memory.files[path], path)
+    layer.setdefault("policy", {})["lab.reproduce"] = {
+        "level": "auto",
+        "conditions": {"author": "team"},
+        "otherwise": "propose",
+    }
+    h.memory.files[path] = dump_yaml(layer)
+    await h.approve_directly(REPO, "maria")
+
+
+async def _review(h: Any, client: httpx.AsyncClient, number: int) -> dict[str, Any]:
+    """Ask for a review of ``number``; its draft, as the proposals list shows it."""
+    await client.post("/api/reviews", json={"prs": [{"repo": REPO, "number": number}]})
+    await h.settle()
+    [draft] = [
+        p
+        for p in (await client.get("/api/proposals")).json()
+        if p["action"]["action"]["kind"] == "review.post"
+        and p["action"]["action"]["number"] == number
+    ]
+    return draft
+
+
+async def test_a_team_prs_review_reproduces_it_at_once_and_adds_the_result(
+    demo,
+) -> None:
+    h, app = demo
+    await _reproduce_in_reviews(h)
+    async with _as(app, "maria") as maria:
+        draft = await _review(h, maria, 44)  # bob may write: on the team
+    [review] = [
+        t
+        for t in h.runner.tasks
+        if t.kind == "review" and "That reproduction has ended" not in t.prompt
+    ]
+    assert "starts after this review: it runs at once" in review.prompt
+    [plan] = [
+        t
+        for t in h.runner.tasks
+        if t.kind == "reproduce" and "You are planning" in t.prompt
+    ]
+    assert "follow its documentation" in plan.prompt
+    assert "it runs on its own" in plan.prompt
+    [ran] = h.service.a.lab_runner.reproduced
+    assert ran["payload"].requested_by == "maria", "who asked for the review"
+    records = await h.store.list_actions(repo=REPO, number=44, kinds=["lab.reproduce"])
+    assert [r.status for r in records] == ["executed"] and records[0].approver is None
+    updated = [t for t in h.runner.tasks if "That reproduction has ended" in t.prompt]
+    assert len(updated) == 1 and "batch of one item" in updated[0].prompt
+    record = await h.store.get_action(draft["action_id"])
+    assert record is not None and "Reproduced on a test machine" in str(
+        record.action.payload["body"]
+    )
+    proposal = await h.store.proposal_for_action(draft["action_id"])
+    assert proposal is not None and proposal.state == "pending"
+    assert not proposal.edited, "the service's own addition is not a person's edit"
+    comments = await h.store.list_actions(
+        repo=REPO, number=44, kinds=["comment.upsert"]
+    )
+    assert not [
+        c
+        for c in comments
+        if "reproduction" in c.action.discriminator + str(c.action.payload)
+    ]
+
+
+async def test_an_outside_prs_reproduction_waits_for_a_maintainer(demo) -> None:
+    h, app = demo
+    await _reproduce_in_reviews(h)
+    async with _as(app, "maria") as maria:
+        draft = await _review(h, maria, 42)  # alice is not on the team
+        [review] = [
+            t
+            for t in h.runner.tasks
+            if t.kind == "review" and "That reproduction has ended" not in t.prompt
+        ]
+        assert "waits for a maintainer to approve its script" in review.prompt
+        assert h.service.a.lab_runner.reproduced == []
+        [script] = [
+            p
+            for p in (await maria.get("/api/proposals")).json()
+            if p["action"]["action"]["kind"] == "lab.reproduce"
+        ]
+        assert script["requested_by"] is None
+        # The review is posted before the script is approved: the result becomes a
+        # comment of its own.
+        posted = await maria.post(f"/api/proposals/{draft['id']}/approve", json={})
+        assert posted.status_code == 200, posted.text
+        await maria.post(f"/api/proposals/{script['id']}/approve", json={})
+        await h.settle()
+    assert len(h.service.a.lab_runner.reproduced) == 1
+    comments = await h.store.list_actions(
+        repo=REPO, number=42, kinds=["comment.upsert"]
+    )
+    assert any(c.action.payload.get("purpose") == "reproduction" for c in comments), (
+        "the result follows the posted review as a comment"
+    )
+
+
+async def test_a_run_the_machine_cannot_do_is_reported_in_the_review(demo) -> None:
+    h, app = demo
+    await _reproduce_in_reviews(h)
+    h.runner.on(
+        "reproduce",
+        lambda task: {
+            "summary": "Run the documented pick-and-place demo.",
+            "blocked": "the docs run it on a UR5 arm, which the machine does not have",
+        },
+    )
+    async with _as(app, "maria") as maria:
+        await _review(h, maria, 44)
+    assert h.service.a.lab_runner.reproduced == []
+    assert not await h.store.list_actions(repo=REPO, number=44, kinds=["lab.reproduce"])
+    [updated] = [t for t in h.runner.tasks if "That reproduction has ended" in t.prompt]
+    assert "UR5 arm" in updated.prompt and '"ran": false' in updated.prompt
+    [job] = [j for j in await h.store.list_jobs() if j.playbook == "reproduce"]
+    assert job.result and job.result["blocked"] and job.result.get("revised")
+
+
+async def test_without_a_machine_the_review_says_no_run_was_made(demo) -> None:
+    from auto_maintainer.domain.memory import profile_path
+    from auto_maintainer.profiles.layers import dump_yaml, parse_yaml
+
+    h, app = demo
+    await _reproduce_in_reviews(h)
+    path = profile_path(REPO)
+    layer = parse_yaml(h.memory.files[path], path)
+    layer["labs"] = {"gpu-01": {"use": False}}
+    h.memory.files[path] = dump_yaml(layer)
+    await h.approve_directly(REPO, "maria")
+    async with _as(app, "maria") as maria:
+        await _review(h, maria, 44)
+    [review] = [
+        t
+        for t in h.runner.tasks
+        if t.kind == "review" and "That reproduction has ended" not in t.prompt
+    ]
+    assert "no test machine is set up for this repository" in review.prompt
+    assert not [j for j in await h.store.list_jobs() if j.playbook == "reproduce"]

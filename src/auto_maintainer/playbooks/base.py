@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Protocol
 
 from pydantic import BaseModel, Field
 
@@ -149,6 +149,20 @@ class ServiceInfo:
     """Test machines from the service settings, by name; changed in place."""
 
 
+class DraftEditor(Protocol):
+    """Revises a draft that still waits for a decision (the actuator's pipeline).
+    Playbooks use it only to add to their own drafts, never to decide one."""
+
+    async def save_edits(
+        self,
+        proposal_id: str,
+        login: str,
+        edited_payload: dict[str, Any],
+        *,
+        person: bool = True,
+    ) -> Any: ...
+
+
 @dataclass
 class PlaybookContext:
     job: Job
@@ -176,6 +190,9 @@ class PlaybookContext:
     """A runtime the requester chose; the job's main task runs on it with no fallback."""
     own_reviews: frozenset[str] = frozenset()
     """This service's review actions that maintainers posted as themselves."""
+    drafts: DraftEditor | None = None
+    """Revises the service's own pending drafts, such as a review a reproduction
+    finished after."""
     _codeowners: list[OwnerRule] | None = None
 
     def require_profile(self) -> RepoProfile:

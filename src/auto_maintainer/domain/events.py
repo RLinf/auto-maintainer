@@ -44,6 +44,9 @@ class EventKind(StrEnum):
     DASHBOARD_COMMAND = "dashboard.command"
     CHAT_MESSAGE = "chat.message"
     PRIORITY_OVERRIDDEN = "priority.overridden"
+    REVIEW_REPRODUCE = "review.reproduce"
+    """A review asked for its PR to be reproduced on a test machine; the reproduce
+    playbook runs it and adds the result to the review."""
     PRIORITY_RESCORE = "priority.rescore"
     """The rubric's dimensions changed since this PR was scored; the evaluate
     playbook scores every dimension again."""

@@ -29,10 +29,10 @@ from auto_maintainer.domain.actions import ReviewPostPayload
 from auto_maintainer.domain.permissions import Permission
 from auto_maintainer.domain.profile import RepoProfile
 from auto_maintainer.domain.review import FindingStatus, FollowupResult
+from auto_maintainer.playbooks.review_revise import FollowupRevision, apply_revision
 from auto_maintainer.testing.demo import build_demo
 from auto_maintainer.testing.fakes import make_pr
 from auto_maintainer.web.app import create_app
-from auto_maintainer.web.review_talk import FollowupTalkAnswer, _apply
 
 REPO = "acme/widget"
 
@@ -174,7 +174,7 @@ def test_a_revised_follow_up_renders_against_the_commit_it_followed() -> None:
         recommendation="Changes requested",
         result={"statuses": [], "new_findings": [], "previous_sha": "b" * 40},
     )
-    answer = FollowupTalkAnswer(
+    answer = FollowupRevision(
         reply="ok",
         followup=FollowupResult(
             statuses=[FindingStatus(id="F1", status="resolved", title="t")],
@@ -183,6 +183,6 @@ def test_a_revised_follow_up_renders_against_the_commit_it_followed() -> None:
     )
     profile = RepoProfile(repo=REPO)
     pr = make_pr(REPO, 42, sha="a" * 40)
-    out = _apply(answer, payload, profile, pr, "a" * 40, own_format=False)
+    out = apply_revision(answer, payload, profile, pr, "a" * 40, own_format=False)
     assert out is not None and out["result"]["previous_sha"] == "b" * 40
     assert "aaaaaaa" in out["body"] and out["recommendation"] == "Ready"

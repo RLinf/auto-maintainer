@@ -291,10 +291,53 @@ def _talk(task: AgentTask, kind: str) -> dict[str, Any]:
     }
 
 
+REPRODUCED = "That reproduction has ended"
+"""In the prompt that adds a finished reproduction to the review it followed."""
+
+
+def _with_reproduction(kind: str) -> dict[str, Any]:
+    """The review again, with what the reproduction showed."""
+    if kind == "followup":
+        return {
+            "reply": "Added the reproduction's result.",
+            "followup": {
+                "statuses": [],
+                "new_findings": [],
+                "summary": "Reproduced on a test machine: a batch of one item loads at this head.",
+                "recommendation": "Ready",
+            },
+        }
+    return {
+        "reply": "Added the reproduction's result to the review.",
+        "review": {
+            "summary": (
+                "Adds a guard for empty batches and a regression test. Reproduced on a "
+                "test machine: before this PR a batch of one item failed to load; at its "
+                "head it loads."
+            ),
+            "findings": [
+                {
+                    "id": "F1",
+                    "severity": "minor",
+                    "category": "tests",
+                    "title": "Test does not cover a batch size of one",
+                    "body": "The new test checks zero items but not the boundary at one item.",
+                    "path": "tests/test_loader.py",
+                    "line": 20,
+                }
+            ],
+            "recommendation": "Ready",
+            "remaining_actions": ["Add the boundary case."],
+        },
+    }
+
+
 def _answer(task: AgentTask) -> dict[str, Any]:
     kind = str(task.kind)
     if kind in ("review", "followup") and TALKING in task.prompt:
         return _talk(task, kind)
+    if kind in ("review", "followup") and REPRODUCED in task.prompt:
+        return _with_reproduction(kind)
     if kind == "triage":
         return {
             "summary": "Handles empty batches in the loader without crashing.",

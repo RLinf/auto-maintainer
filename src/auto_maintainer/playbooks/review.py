@@ -44,7 +44,7 @@ from ..domain.review import (
     classify_review_state,
     render_review,
 )
-from ..domain.snapshot import PrState
+from ..domain.snapshot import PrSnapshot, PrState
 from .base import PR_EVENTS, Playbook, PlaybookContext, PlaybookResult, in_scope
 from .prompts import (
     accepted_labels,
@@ -61,7 +61,14 @@ from .prompts import (
     template_block,
     untrusted,
 )
-from .requests import FOLLOWUP_STATES, review_key, review_request, starts_review
+from .reproduce import AutoReproduction, auto_reproduction
+from .requests import (
+    FOLLOWUP_STATES,
+    ReviewRequest,
+    review_key,
+    review_request,
+    starts_review,
+)
 
 
 class Verdict(BaseModel):
@@ -138,6 +145,7 @@ class ReviewPlaybook(Playbook):
         info = await ctx.forge.get_repo(pr.repo)
         choices = label_choices(info.labels, profile, pr)
         limit = profile.review.max_suggested_labels
+        repro = await auto_reproduction(ctx, pr, profile, ctx.trusted_input)
         workdir = await ctx.workspace.prepare(
             pr.repo, pr.number, pr.head_sha, info.default_branch
         )
@@ -157,7 +165,9 @@ class ReviewPlaybook(Playbook):
                     if own_format
                     else template_block(profile),
                     reproduction_block(
-                        await reproduction_record(ctx.store, pr.repo, pr.number)
+                        await reproduction_record(ctx.store, pr.repo, pr.number),
+                        upcoming=repro.upcoming(),
+                        no_machine=repro.no_machine,
                     ),
                     f"Review lessons from this repository's maintainers:\n{lessons}"
                     if lessons
@@ -285,11 +295,13 @@ class ReviewPlaybook(Playbook):
             )
         return PlaybookResult(
             actions=actions,
+            events=reproduce_after(repro, pr, actions[0].id, request),
             result={
                 "findings": len(result.findings),
                 "dismissed": len(result.dismissed),
                 "recommendation": result.recommendation,
                 "labels": result.labels,
+                **({"reproduce_on": repro.lab} if repro.lab else {}),
             },
         )
 
@@ -334,6 +346,31 @@ class ReviewPlaybook(Playbook):
                     )
                 )
         return result.model_copy(update={"findings": kept, "dismissed": dismissed})
+
+
+def reproduce_after(
+    repro: AutoReproduction,
+    pr: PrSnapshot,
+    review_action: str,
+    request: ReviewRequest | None,
+) -> list[Event]:
+    """The request that reproduces ``pr`` once its review is drafted, when one runs;
+    it names the review draft, which the reproduction adds its result to."""
+    if repro.lab is None:
+        return []
+    return [
+        Event(
+            kind=EventKind.REVIEW_REPRODUCE,
+            repo=pr.repo,
+            number=pr.number,
+            sha=pr.head_sha,
+            payload={
+                "lab": repro.lab,
+                "review": review_action,
+                "by": request.by if request is not None and request.manual else None,
+            },
+        )
+    ]
 
 
 async def reproduction_record(store: Store, repo: str, number: int) -> str | None:

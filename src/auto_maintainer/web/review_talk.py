@@ -29,7 +29,6 @@ decision. Questions the agent asks go to that reviewer, on the same view.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from pathlib import Path
 from typing import Any
@@ -42,26 +41,19 @@ from ..domain.agents import AgentTask, TaskKind
 from ..domain.ids import new_id
 from ..domain.profile import RepoProfile, Route
 from ..domain.records import ActionRecord, ChatMessage, ChatThread, Job
-from ..domain.review import (
-    FollowupResult,
-    ReviewResult,
-    render_followup,
-    render_review,
-)
 from ..domain.secrets import redact_secrets
 from ..domain.snapshot import PrSnapshot
 from ..playbooks.base import author_is_team
-from ..playbooks.prompts import (
-    pr_block,
-    reproduction_block,
-    review_skill_block,
-    schema_hint,
-    skill_format_block,
-    skill_owns_format,
-    template_block,
-    untrusted,
-)
+from ..playbooks.prompts import reproduction_block, schema_hint, untrusted
 from ..playbooks.review import reproduction_record
+from ..playbooks.review_revise import (
+    answer_model,
+    apply_revision,
+    names,
+    owns_format,
+    revision_blocks,
+    task_kind_of,
+)
 from ..service import Service
 from .api import service_of
 from .auth import User, current_user
@@ -70,39 +62,11 @@ from .jobs import _job
 
 log = logging.getLogger(__name__)
 
-TALKS_ON = {"review": TaskKind.REVIEW, "followup": TaskKind.FOLLOWUP}
-"""Playbooks whose jobs have a conversation, and the task kind (and route) of a turn."""
+TALKS_ON = {"review", "followup"}
+"""Playbooks whose jobs have a conversation."""
 
 _turns: dict[str, asyncio.Lock] = {}
 """One turn at a time per conversation, in this process."""
-
-
-class ReviewTalkAnswer(BaseModel):
-    reply: str = Field(
-        description="Your answer to the reviewer, in the language they write in."
-    )
-    review: ReviewResult | None = Field(
-        default=None,
-        description="The whole review, revised, when this turn changes it; null when it stays as it is.",
-    )
-    lessons: list[str] = Field(
-        default_factory=list,
-        description="Rules for future reviews of this repository that the reviewer stated or agreed to.",
-    )
-
-
-class FollowupTalkAnswer(BaseModel):
-    reply: str = Field(
-        description="Your answer to the reviewer, in the language they write in."
-    )
-    followup: FollowupResult | None = Field(
-        default=None,
-        description="The whole follow-up, revised, when this turn changes it; null when it stays as it is.",
-    )
-    lessons: list[str] = Field(
-        default_factory=list,
-        description="Rules for future reviews of this repository that the reviewer stated or agreed to.",
-    )
 
 
 TALK = """You wrote the {what} of PR #{number} in {repo} given below, and {user}, a reviewer, is talking with you about it. They may ask why you found something, disagree with a finding, ask you to change the draft, or ask you to check more: other files, a test, the docs, a scenario.
@@ -130,16 +94,6 @@ async def _draft(service: Service, job: Job) -> ActionRecord | None:
         if record.action.provenance.job_id == job.id:
             return record
     return None
-
-
-def _draft_text(payload: ReviewPostPayload) -> str:
-    """The draft as it would be posted now: the main comment, then each inline
-    comment under its place in the diff."""
-    parts = [payload.body]
-    for c in payload.comments:
-        lines = f"{c.start_line}-{c.line}" if c.start_line else str(c.line)
-        parts.append(f"--- inline comment on {c.path}:{lines}\n{c.body}")
-    return "\n\n".join(parts)
 
 
 def _route(
@@ -173,53 +127,6 @@ async def _checkout(
     thread.session = None
     await service.store.save_thread(thread)
     return path, info.default_branch
-
-
-def _apply(
-    answer: ReviewTalkAnswer | FollowupTalkAnswer,
-    payload: ReviewPostPayload,
-    profile: RepoProfile,
-    pr: PrSnapshot,
-    head_sha: str,
-    own_format: bool,
-) -> dict[str, Any] | None:
-    """The draft's new payload when the answer revises the review, rendered as the
-    playbook renders it; ``None`` when it does not."""
-    if isinstance(answer, ReviewTalkAnswer):
-        review = answer.review
-        if review is None:
-            return None
-        meaning = profile.review.meaning_of(review.recommendation)
-        if meaning is None:
-            meaning = (
-                "changes"
-                if any(f.severity in ("critical", "major") for f in review.findings)
-                else "ready"
-            )
-        review.recommendation = profile.review.recommendations[meaning]
-        review.labels = []
-        rendered = render_review(review, profile, set(pr.paths), own_format=own_format)
-        result: dict[str, Any] = review.model_dump(mode="json")
-        recommendation = review.recommendation
-    else:
-        followup = answer.followup
-        if followup is None:
-            return None
-        if profile.review.meaning_of(followup.recommendation) is None:
-            followup.recommendation = payload.recommendation or followup.recommendation
-        followup.labels = []
-        previous = (payload.result or {}).get("previous_sha")
-        rendered = render_followup(followup, head_sha, previous, profile)
-        result = {**followup.model_dump(mode="json"), "previous_sha": previous}
-        recommendation = followup.recommendation
-    return payload.model_copy(
-        update={
-            "body": rendered.body,
-            "comments": rendered.comments,
-            "recommendation": recommendation,
-            "result": result,
-        }
-    ).model_dump(mode="json")
 
 
 def build_router() -> APIRouter:
@@ -343,28 +250,14 @@ async def _turn(
         ChatMessage(thread_id=thread.id, role="user", text=text, author=user.login)
     )
     history = await service.store.list_messages(thread.id)
-    kind = TALKS_ON[job.playbook]
     payload = ReviewPostPayload.model_validate(record.action.payload)
+    kind = task_kind_of(payload)
     head = record.action.head_sha or pr.head_sha
     workdir, default_branch = await _checkout(service, thread, record, pr)
     diff = await service.a.workspace.diff(workdir, f"origin/{default_branch}", head)
-    own_format = kind == TaskKind.REVIEW and skill_owns_format(profile, workdir)
-    model: type[ReviewTalkAnswer] | type[FollowupTalkAnswer] = (
-        ReviewTalkAnswer if kind == TaskKind.REVIEW else FollowupTalkAnswer
-    )
-    what, field = (
-        ("review", "review")
-        if kind == TaskKind.REVIEW
-        else ("follow-up review", "followup")
-    )
-    if kind == TaskKind.REVIEW:
-        format_block = (
-            skill_format_block(profile) if own_format else template_block(profile)
-        )
-    else:
-        format_block = "`recommendation` must be one of: " + ", ".join(
-            repr(v) for v in profile.review.recommendations.values()
-        )
+    own_format = owns_format(kind, profile, workdir)
+    model = answer_model(kind)
+    what, field = names(kind)
     lessons = await service.knowledge.review_lessons(job.repo, profile)
     prompt = "\n\n".join(
         part
@@ -377,28 +270,21 @@ async def _turn(
                 field=field,
                 public_language=profile.languages.public,
             ),
-            review_skill_block(profile, service.info.skills_dir, workdir),
-            format_block,
-            reproduction_block(
-                await reproduction_record(service.store, job.repo, job.number)
+            *revision_blocks(
+                kind=kind,
+                profile=profile,
+                skills_dir=service.info.skills_dir,
+                workdir=workdir,
+                reproduction=reproduction_block(
+                    await reproduction_record(service.store, job.repo, job.number)
+                ),
+                lessons=lessons,
+                pr=pr,
+                head=head,
+                default_branch=default_branch,
+                diff=diff,
+                payload=payload,
             ),
-            f"Review lessons from this repository's maintainers:\n{lessons}"
-            if lessons
-            else "",
-            f"The working directory is a checkout of the reviewed commit {head}. "
-            f"Compare against origin/{default_branch}."
-            + (
-                f" The PR's head is now {pr.head_sha}: say so when it matters."
-                if pr.head_sha != head
-                else ""
-            ),
-            pr_block(pr, diff),
-            untrusted(
-                f"{field}.structured",
-                json.dumps(payload.result or {}, ensure_ascii=False, indent=1),
-                60_000,
-            ),
-            untrusted(f"{field}.draft", _draft_text(payload), 60_000),
             untrusted(
                 "conversation",
                 "\n".join(
@@ -457,7 +343,7 @@ async def _turn(
             "I removed what looked like a credential from your message before reading it."
         )
     revised = False
-    new_payload = _apply(answer, payload, profile, pr, head, own_format)
+    new_payload = apply_revision(answer, payload, profile, pr, head, own_format)
     if new_payload is not None:
         proposal = await service.store.proposal_for_action(record.action.id)
         if proposal is None or proposal.state != ProposalState.PENDING:

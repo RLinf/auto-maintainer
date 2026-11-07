@@ -182,20 +182,40 @@ def skill_format_block(profile: RepoProfile) -> str:
     )
 
 
-def reproduction_block(record: str | None) -> str:
+def reproduction_block(
+    record: str | None,
+    *,
+    upcoming: str | None = None,
+    no_machine: bool = False,
+) -> str:
     """What the reviewer knows about running the PR: the service's latest reproduction
-    on a test machine, or that there is none."""
+    on a test machine, one that starts after this review (``upcoming``, how it starts),
+    or that there is none, and why when the repository has no machine for it."""
+    parts = []
     if record:
-        return (
+        parts.append(
             "Reproduction on record, from the service's test machines (use it where the "
             "skill asks how the PR was reproduced and what came out; say which commit it ran "
             "and whether that is the head you review): " + record
         )
-    return (
-        "No reproduction of this PR is on record. Where the skill asks how the PR was "
-        "reproduced, say that no run was made and what a run would need; a maintainer can "
-        "start one with Reproduce on the PR's page."
-    )
+    if upcoming:
+        parts.append(
+            f"A reproduction of this PR on a test machine starts after this review: {upcoming}. "
+            "Where the skill asks how the PR was reproduced and what came out, say that a run "
+            "following the PR's documentation is underway and that its results will be added "
+            "to this review; do not guess them."
+        )
+    elif not record:
+        parts.append(
+            (
+                "No reproduction was run: no test machine is set up for this repository. "
+                if no_machine
+                else "No reproduction of this PR is on record. "
+            )
+            + "Where the skill asks how the PR was reproduced, say that no run was made and "
+            "what a run would need (hardware, data, and the documented steps)."
+        )
+    return "\n\n".join(parts)
 
 
 def review_skill_block(profile: RepoProfile, skills_dir: Path, workdir: Path) -> str:
