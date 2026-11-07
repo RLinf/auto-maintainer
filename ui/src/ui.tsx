@@ -1,5 +1,5 @@
 // Small interaction primitives: popovers and menus, URL-synced tabs, toasts, the theme,
-// keyboard shortcuts, and loading skeletons.
+// keyboard shortcuts, loading skeletons, and following live content to the bottom.
 
 import {
   createContext,
@@ -9,6 +9,7 @@ import {
   useRef,
   useState,
   type ReactNode,
+  type RefObject,
 } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Icon, type IconName } from "./icons";
@@ -243,6 +244,40 @@ export function useHotkey(key: string, handler: (e: KeyboardEvent) => void, enab
 }
 
 // ---- skeleton ------------------------------------------------------------------------------
+
+/** Keeps the scrolling box ``ref`` at its bottom while its content grows (new steps, or
+ * text streaming into one) as long as the reader is at the bottom. Scrolling up to read
+ * stops it; scrolling back down resumes it. Returns ``stick``, which scrolls to the bottom
+ * and resumes following, for when the reader acts (sends a message). */
+export function useFollowBottom(ref: RefObject<HTMLElement | null>): () => void {
+  const following = useRef(true);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const onScroll = () => {
+      following.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+    };
+    const follow = () => {
+      if (following.current) el.scrollTop = el.scrollHeight;
+    };
+    el.addEventListener("scroll", onScroll, { passive: true });
+    const changes = new MutationObserver(follow);
+    changes.observe(el, { childList: true, subtree: true, characterData: true });
+    const resizes = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(follow);
+    resizes?.observe(el);
+    follow();
+    return () => {
+      el.removeEventListener("scroll", onScroll);
+      changes.disconnect();
+      resizes?.disconnect();
+    };
+  }, [ref]);
+  return useCallback(() => {
+    following.current = true;
+    const el = ref.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [ref]);
+}
 
 export function Skeleton({ rows = 4 }: { rows?: number }) {
   return (

@@ -25,7 +25,7 @@ import { Icon, type IconName } from "./icons";
 import { JobById, Steps } from "./jobs";
 import { ProposalCard } from "./proposal";
 import { ChangeById } from "./settingsChange";
-import { useHotkey } from "./ui";
+import { useFollowBottom, useHotkey } from "./ui";
 
 export interface AgentContext {
   page: string;
@@ -356,9 +356,11 @@ export function Conversation({
   const pendingText = send.isPending ? send.variables : null;
   const last = list[list.length - 1];
   const showPending = pendingText && !(last && last.role === "user" && last.text === pendingText);
+  // Follows the conversation and the agent's live steps; sending a message jumps back down.
+  const stick = useFollowBottom(body);
   useEffect(() => {
-    body.current?.scrollTo({ top: body.current.scrollHeight, behavior: "smooth" });
-  }, [list.length, send.isPending]);
+    if (send.isPending) stick();
+  }, [send.isPending, stick]);
   useEffect(() => {
     if (autoFocus) input.current?.focus();
   }, [autoFocus]);

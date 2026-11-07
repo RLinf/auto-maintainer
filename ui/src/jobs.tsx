@@ -17,7 +17,7 @@ import { openJob } from "./openJob";
 import { ProposalCard } from "./proposal";
 import { QuestionCard } from "./pages/Questions";
 import { ReviewTalk } from "./reviewTalk";
-import { Skeleton, useToast } from "./ui";
+import { Skeleton, useFollowBottom, useToast } from "./ui";
 
 export const ACTIVE = new Set(["queued", "running", "waiting"]);
 
@@ -325,13 +325,9 @@ function JobView({ id, onClose }: { id: string; onClose: () => void }) {
   const questions = useQuestions("pending");
   const proposals = useProposals();
   const stop = useAct(() => api.post<AgentJob>(`/api/jobs/${job.data?.id ?? id}/stop`), [["job"], ["work"], ["prs"]]);
-  const bottom = useRef<HTMLDivElement>(null);
   const body = useRef<HTMLDivElement>(null);
   const steps = job.data?.steps ?? [];
-  useEffect(() => {
-    const el = body.current;
-    if (el && el.scrollHeight - el.scrollTop - el.clientHeight < 160) bottom.current?.scrollIntoView({ block: "end" });
-  }, [steps.length]);
+  useFollowBottom(body);
 
   const d = job.data;
   const pb = d ? (PLAYBOOK[d.playbook] ?? { label: d.playbook, icon: "activity" as IconName }) : null;
@@ -411,7 +407,6 @@ function JobView({ id, onClose }: { id: string; onClose: () => void }) {
               </section>
             )}
             {(d.playbook === "review" || d.playbook === "followup") && !active && <ReviewTalk job={d} me={me?.login ?? ""} />}
-            <div ref={bottom} />
           </>
         ) : null}
       </div>
