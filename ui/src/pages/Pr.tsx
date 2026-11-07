@@ -85,7 +85,11 @@ export default function PrPage({ me }: { me: Me }) {
         ]}
         title={
           <>
-            {pr.title} <span className="muted" style={{ fontWeight: 400 }}>#{pr.number}</span>
+            {pr.title}{" "}
+            <a className="pr-number" href={pr.url} target="_blank" rel="noreferrer" title={t("Open on GitHub in a new tab")}>
+              #{pr.number}
+              <Icon name="external" size={15} />
+            </a>
           </>
         }
         sub={
@@ -100,6 +104,9 @@ export default function PrPage({ me }: { me: Me }) {
         }
         actions={
           <>
+            <a className="button" href={pr.url} target="_blank" rel="noreferrer" title={t("Open on GitHub in a new tab")}>
+              GitHub <Icon name="external" size={13} />
+            </a>
             <button className="agent" onClick={() => agent.open()}>
               <Icon name="sparkles" />
               {t("Ask agent")}
@@ -147,9 +154,6 @@ export default function PrPage({ me }: { me: Me }) {
               </button>
             )}
             <RefreshButton base={base} />
-            <a className="button" href={pr.url} target="_blank" rel="noreferrer">
-              GitHub <Icon name="external" size={13} />
-            </a>
           </>
         }
       />

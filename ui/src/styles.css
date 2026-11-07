@@ -180,6 +180,10 @@ code { background: var(--code-bg); padding: 1px 5px; border-radius: 5px; }
 .page-head { display: flex; align-items: flex-start; gap: 14px; flex-wrap: wrap; }
 .page-head .titles { display: flex; flex-direction: column; gap: 4px; min-width: 0; flex: 1 1 320px; }
 .page-head .sub { color: var(--muted); font-size: 13px; }
+/* A PR's number beside its title opens the PR on GitHub. */
+.pr-number { color: var(--muted); font-weight: 400; white-space: nowrap; }
+.pr-number svg { margin-left: 3px; vertical-align: -1px; opacity: 0.7; }
+.pr-number:hover { color: var(--accent); }
 .page-head .actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .crumbs { display: flex; gap: 6px; align-items: center; font-size: 13px; color: var(--muted); }
 .crumbs a { color: var(--muted); }

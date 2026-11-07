@@ -1243,6 +1243,7 @@ const zh: Record<string, string> = {
   "Scoring again": "正在重新评估",
   "Priority evaluation": "优先级评估",
   "Scoring priority": "正在评估优先级",
+  "Open on GitHub in a new tab": "在新标签页中打开 GitHub 上的 PR",
   "Group by": "分组方式",
   "No grouping": "不分组",
   "Sort by": "排序方式",
