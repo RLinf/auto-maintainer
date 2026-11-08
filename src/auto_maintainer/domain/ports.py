@@ -355,6 +355,11 @@ class Workspace(Protocol):
         """The commit where ``b`` branched from ``a``, or ``None``."""
         ...
 
+    async def merge(self, path: Any, branch: str) -> MergeAttempt:
+        """Start merging ``branch`` of the base repository into the worktree's commit,
+        without committing; the files that conflict keep their conflict markers."""
+        ...
+
     async def archive(self, path: Any, ref: str, max_bytes: int = 200_000_000) -> str:
         """The files of ``ref`` as a gzipped tar, base64-encoded, for copying the code
         to a test machine without giving it any credentials.
@@ -363,6 +368,12 @@ class Workspace(Protocol):
             ValueError: The archive is larger than ``max_bytes``.
         """
         ...
+
+
+class MergeAttempt(BaseModel):
+    merge_sha: str
+    """The commit of the merged branch."""
+    conflicts: list[str] = Field(default_factory=list)
 
 
 class WorkChanges(BaseModel):
@@ -383,9 +394,15 @@ class BranchPublisher(Protocol):
         branch: str,
         message: str,
         author: tuple[str, str] | None = None,
+        *,
+        merge_sha: str | None = None,
+        resolved: dict[str, str] | None = None,
+        push_to: str | None = None,
     ) -> str:
-        """Apply ``patch`` on ``base_sha``, commit it (as ``author``: name and email,
-        else the service), push ``branch``; return the commit."""
+        """Apply ``patch`` on ``base_sha`` (or, with ``merge_sha``, merge that commit
+        into ``base_sha``, taking ``resolved`` for the files that conflict), commit it
+        (as ``author``: name and email, else the service), and push ``branch`` of
+        ``push_to`` (else ``repo``) without forcing; return the commit."""
         ...
 
 

@@ -318,14 +318,27 @@ class MemoryChangePayload(_Payload):
 
 
 class FixPrPayload(_Payload):
-    """Changes an agent made for review findings, opened as a PR into the reviewed
-    PR's branch by the maintainer who approves it, with their own account."""
+    """Changes an agent made to a PR, pushed by the maintainer who approves it, with
+    their own account: as a PR into the PR's branch, or straight onto that branch.
+    A merge of the base branch into the PR (with an agent's resolution of its
+    conflicts) is the same action with ``merge_ref`` set."""
 
     title: str
     body: str
     patch: str
     """``git diff --binary`` of the change, on the reviewed PR's head commit."""
     base_sha: str
+    target: Literal["pr", "branch"] = "pr"
+    """``pr``: a new branch and a PR into the PR's branch. ``branch``: one commit on
+    the PR's branch itself, which the approver must be allowed to push to; the
+    approver chooses."""
+    merge_ref: str | None = None
+    """When set, the commit merges this branch of the base repository, at
+    ``merge_sha``, into the PR: a merge commit, with ``resolved`` for the files that
+    conflict. ``patch`` then only shows the resolution."""
+    merge_sha: str | None = None
+    resolved: dict[str, str] = Field(default_factory=dict)
+    """The resolved content of each file the merge conflicts in, by path."""
     files: list[str] = Field(default_factory=list)
     findings: list[str] = Field(default_factory=list)
     """The review findings this addresses, by id."""

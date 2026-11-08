@@ -50,6 +50,7 @@ export default function AgentsPage() {
     { id: "runtime", header: t("Agent"), cell: (r) => <span className="mono">{r.runtime}</span> },
     {
       id: "task",
+      primary: true,
       header: t("Task"),
       cell: (r) => (
         <span className="row" style={{ gap: 6 }}>

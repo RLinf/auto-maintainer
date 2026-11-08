@@ -19,8 +19,9 @@ searching inside the run's directories, read-only shell commands there (also sev
 joined with ``&&``, ``||``, ``;``, or ``|`` when each one is), and, for tasks that
 may write, edits inside the worktree. What a task may execute follows its
 ``run_code``: ``none`` reads only; ``skills`` (every task on a target repository) also
-runs static linters and the scripts in the repository's skill folders; ``any`` (the
-service's own code) also runs tests. Below ``any``, everything else is denied at once
+runs static linters, the scripts in the repository's skill folders, and ``gh``'s
+reading commands (``GH_READ``, or ``gh api`` as a GET) with the service's own GitHub
+login; ``any`` (the service's own code) also runs tests. Below ``any``, everything else is denied at once
 (``NO_CODE_ANSWER`` for commands), since a repository's code runs only on its test
 machines; for ``any``, it goes to a reviewer. That includes any path outside the
 run's directories, network access, and shell syntax that can hide a command
@@ -71,6 +72,24 @@ OUTSIDE_ANSWER = (
 _FIND_ACTIONS = frozenset({"-exec", "-execdir", "-delete", "-ok", "-okdir", "-fprint"})
 _SHELL_META = ("$(", "`", "\n", "\\")
 """Text that can hide a command anywhere in a command line."""
+_EXPANSION = re.compile(r"\$[A-Za-z_{]")
+"""A variable expansion, which could print the GitHub token an agent holds."""
+GH_READ: dict[str, frozenset[str]] = {
+    "pr": frozenset({"view", "diff", "list", "checks", "status"}),
+    "issue": frozenset({"view", "list", "status"}),
+    "run": frozenset({"view", "list"}),
+    "workflow": frozenset({"view", "list"}),
+    "repo": frozenset({"view"}),
+    "release": frozenset({"view", "list"}),
+    "label": frozenset({"list"}),
+    "search": frozenset({"prs", "issues", "code", "commits", "repos"}),
+}
+"""The ``gh`` commands that only read; everything else ``gh`` can do is refused."""
+_GH_REFUSED = frozenset({"--web", "-w", "--hostname"})
+_GH_API_WRITES = frozenset(
+    {"-f", "-F", "--field", "--raw-field", "--input", "--hostname"}
+)
+"""``gh api`` flags that send data (and so make the request a POST) or change host."""
 _JOINS = frozenset({"&&", "||", ";", "|"})
 """Operators that run one command after another; each command is checked alone."""
 _HARMLESS_REDIRECTS = re.compile(
@@ -189,7 +208,7 @@ def safe_command(
     with ``skills`` or more, static linters and scripts inside ``skill_roots``; with
     ``any``, tests too (for writing tasks), or one of ``approved`` (leading words)
     with any further arguments. Paths among the arguments stay inside ``roots``."""
-    if any(token in command for token in _SHELL_META):
+    if any(token in command for token in _SHELL_META) or _EXPANSION.search(command):
         return False
     commands = _commands(_HARMLESS_REDIRECTS.sub(" ", command))
     if commands is None:
@@ -202,6 +221,8 @@ def safe_command(
             or _approved(words, approved)
         ):
             return False
+        if os.path.basename(words[0]) == "gh":
+            continue  # its arguments name GitHub objects, not local paths
         for word in words[1:]:
             value = _path_value(word)
             if value is None:
@@ -244,6 +265,8 @@ def _safe_words(
         return True
     if run_code == "none":
         return False
+    if name == "gh":
+        return _gh_reads(words[1:])
     if name == "ruff" and _static_ruff(words[1:], mode):
         return True
     if cwd is not None and _skill_script(words, skill_roots, cwd):
@@ -253,6 +276,34 @@ def _safe_words(
     if name in TEST_COMMANDS:
         return True
     return name == "uv" and words[1:2] == ["run"] and words[2:3] == ["pytest"]
+
+
+def _gh_reads(args: list[str]) -> bool:
+    """Whether ``gh args`` only reads from GitHub: one of ``GH_READ``, or ``gh api``
+    as a GET without data, input, or another host."""
+    if any(a in _GH_REFUSED or a.startswith("--hostname=") for a in args):
+        return False
+    group = args[0] if args else ""
+    if group == "api":
+        for i, arg in enumerate(args):
+            flag = arg.split("=", 1)[0]
+            if flag in _GH_API_WRITES or (
+                len(arg) > 2 and arg[:2] in ("-f", "-F") and not arg.startswith("--")
+            ):
+                return False
+            if flag in ("-X", "--method"):
+                value = (
+                    arg.split("=", 1)[1]
+                    if "=" in arg
+                    else (args[i + 1] if i + 1 < len(args) else "")
+                )
+                if value.upper() != "GET":
+                    return False
+            if arg.startswith("-X") and len(arg) > 2 and arg[2:].upper() != "GET":
+                return False
+        return True
+    sub = args[1] if len(args) > 1 else ""
+    return sub in GH_READ.get(group, frozenset())
 
 
 def _static_ruff(args: list[str], mode: str) -> bool:

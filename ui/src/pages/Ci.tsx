@@ -79,7 +79,7 @@ export default function CiPage() {
   });
   const sum = (k: keyof JobRow) => jobs.reduce((n, j) => n + (j[k] as number), 0);
   const jobColumns: Column<JobRow>[] = [
-    { id: "job", header: t("Job"), sort: "job", cell: (j) => <span className="mono">{j.job}</span> },
+    { id: "job", primary: true, header: t("Job"), sort: "job", cell: (j) => <span className="mono">{j.job}</span> },
     { id: "flaky", header: t("Flaky"), sort: "flaky", className: "num", cell: (j) => j.flaky || <span className="muted">0</span> },
     { id: "infra", header: t("Infrastructure"), sort: "infra", className: "num", cell: (j) => j.infra || <span className="muted">0</span> },
     { id: "pr", header: t("Caused by the PR"), sort: "pr", className: "num", cell: (j) => j.pr_caused || <span className="muted">0</span> },
@@ -90,6 +90,7 @@ export default function CiPage() {
     { id: "when", header: t("When"), sort: "when", cell: (o) => <When at={o.created_at} />, width: 96 },
     {
       id: "pr",
+      primary: true,
       header: t("Pull request"),
       cell: (o) => (o.number != null ? <Link to={prPath(o.repo, o.number)}>{`${o.repo}#${o.number}`}</Link> : o.repo),
       className: "small",

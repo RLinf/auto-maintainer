@@ -291,6 +291,104 @@ async def test_a_fix_is_drafted_for_the_reviewer_and_opened_as_them(demo) -> Non
     )
 
 
+async def test_a_fix_can_go_straight_onto_the_prs_branch(demo) -> None:
+    h, app = demo
+    await _review(app, "maria", 42)
+    await h.settle()
+
+    def fix(task: Any) -> Any:
+        if task.mode == "read_only":
+            return {"title": "test: cover one", "summary": "Adds a test.", "fixed": []}
+        (Path(task.workdir) / "test_one.py").write_text("def test_one(): ...\n")
+        return AgentResult(runtime="scripted", ok=True, text="Added a test.")
+
+    h.runner.on("fix", fix)
+    await h.service.a.user_tokens.set("maria", UserToken(token="t"))
+    async with _as(app, "maria") as maria:
+        await maria.post(f"/api/prs/{REPO}/42/fix", json={})
+        await h.settle()
+        [draft] = [
+            p
+            for p in (await maria.get("/api/proposals")).json()
+            if p["action"]["action"]["kind"] == "pr.fix"
+        ]
+        payload = {**draft["action"]["action"]["payload"], "target": "branch"}
+        ok = await maria.post(
+            f"/api/proposals/{draft['id']}/approve",
+            json={"as_me": True, "payload": payload},
+        )
+        assert ok.status_code == 200, ok.text
+        await h.settle()
+    pr = h.forge.prs[(REPO, 42)]
+    publisher = h.service.a.publisher
+    assert publisher is not None
+    [pushed] = publisher.published
+    assert pushed["branch"] == pr.head_ref and pushed["base"] == pr.head_sha
+    assert pushed["push_to"] == (pr.head_repo or REPO)
+    assert pushed["author"] == ("maria", "maria@users.noreply.github.com")
+    assert not h.forge.writes_of("create_pr"), "no PR into the PR"
+
+
+async def test_merging_the_base_branch_without_conflicts_is_githubs_update(
+    demo,
+) -> None:
+    h, app = demo
+    async with _as(app, "maria") as maria:
+        refused = await maria.post(f"/api/prs/{REPO}/42/merge-base", json={})
+        assert refused.status_code == 403, "pushed as a person, never the service"
+        await h.service.a.user_tokens.set("maria", UserToken(token="t"))
+        out = (await maria.post(f"/api/prs/{REPO}/42/merge-base", json={})).json()
+        await h.settle()
+    assert out["run"] == "update"
+    [update] = h.forge.writes_of("update_branch")
+    assert update["number"] == 42 and update["author"] == "maria"
+
+
+async def test_an_agent_resolves_conflicts_and_the_merge_is_pushed_as_the_approver(
+    demo,
+) -> None:
+    from auto_maintainer.domain.snapshot import Mergeable
+
+    h, app = demo
+    pr = h.forge.prs[(REPO, 42)]
+    h.forge.prs[(REPO, 42)] = pr.model_copy(update={"mergeable": Mergeable.CONFLICTING})
+    h.service.a.workspace.merge_conflicts = {  # type: ignore[attr-defined]
+        "src/loader.py": "<<<<<<< HEAD\nmine\n=======\ntheirs\n>>>>>>> main\n"
+    }
+
+    def resolve(task: Any) -> Any:
+        assert "resolving merge conflicts for maria" in task.prompt
+        assert "src/loader.py" in task.prompt and "Never run code" in task.prompt
+        (Path(task.workdir) / "src" / "loader.py").write_text("mine and theirs\n")
+        return AgentResult(runtime="scripted", ok=True, text="Kept both changes.")
+
+    h.runner.on("fix", resolve)
+    await h.service.a.user_tokens.set("maria", UserToken(token="t"))
+    async with _as(app, "maria") as maria:
+        out = (await maria.post(f"/api/prs/{REPO}/42/merge-base", json={})).json()
+        assert out["run"] == "resolve"
+        await h.settle()
+        [draft] = [
+            p
+            for p in (await maria.get("/api/proposals")).json()
+            if p["action"]["action"]["kind"] == "pr.fix"
+        ]
+        payload = draft["action"]["action"]["payload"]
+        assert payload["merge_ref"] == "main" and payload["target"] == "branch"
+        assert payload["resolved"] == {"src/loader.py": "mine and theirs\n"}
+        ok = await maria.post(
+            f"/api/proposals/{draft['id']}/approve", json={"as_me": True}
+        )
+        assert ok.status_code == 200, ok.text
+        await h.settle()
+    publisher = h.service.a.publisher
+    assert publisher is not None
+    [pushed] = publisher.published
+    assert pushed["merge_sha"] == "d" * 40 and pushed["branch"] == pr.head_ref
+    assert pushed["resolved"] == {"src/loader.py": "mine and theirs\n"}
+    assert pushed["author"][0] == "maria"
+
+
 # -- labels the review suggests ----------------------------------------------------------
 
 

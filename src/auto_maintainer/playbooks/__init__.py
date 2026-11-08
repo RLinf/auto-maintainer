@@ -26,8 +26,14 @@ from .followup import Followup
 from .housekeeping import Journal, LabTest, Stale
 from .hygiene import Hygiene
 from .merge import MergePlaybook
+from .merge_base import MergeBasePlaybook
 from .onboard import Onboard, ProfileDrift
-from .quality import QualityPlaybook, QualityScan, QuickQualityPlaybook
+from .quality import (
+    QualityPlaybook,
+    QualityScan,
+    QuickLearnPlaybook,
+    QuickQualityPlaybook,
+)
 from .reproduce import ReproducePlaybook
 from .review import ReviewPlaybook
 from .review_scan import ReviewScan
@@ -54,9 +60,11 @@ def all_playbooks() -> list[Playbook]:
         Journal(),
         SelfImprove(),
         FixPlaybook(),
+        MergeBasePlaybook(),
         ReproducePlaybook(),
         QualityPlaybook(),
         QuickQualityPlaybook(),
+        QuickLearnPlaybook(),
         QualityScan(),
     ]
 

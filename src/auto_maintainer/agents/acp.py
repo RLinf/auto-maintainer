@@ -72,9 +72,22 @@ _OPTION_KINDS = {
 }
 _OK_STOPS = {"end_turn", "max_tokens", "max_turn_requests"}
 
+MAX_CONTINUATIONS = 3
+"""Turns an agent may be asked to go on after one ended on a refused request."""
+
+CONTINUE = (
+    "The service refused what you asked to do: {refused}. That is final; do not try it "
+    "again or another way around it. Continue your task without it, from what you have "
+    "read, and finish with the result your task asks for."
+)
+"""Some agents (Antigravity) end their turn when a request is refused, waiting for a
+person to say what to do instead; nobody will, so the conversation says it."""
+
 
 class AcpRuntime(ExecRuntime):
     """Base class for CLIs that speak ACP; subclasses build the command line."""
+
+    gates_commands = True
 
     def capabilities(self) -> Capabilities:
         return Capabilities(
@@ -273,6 +286,11 @@ class AcpConversation(Conversation):
         self.session_id: str | None = None
         self.current: list[str] = []
         self.last_message = ""
+        self.refused: list[str] = []
+        """What the service refused during the current turn, with why."""
+        self.spoke = False
+        """Whether the agent wrote a message during the current turn."""
+        self.continuations = 0
 
     # -- Conversation ------------------------------------------------------------------
 
@@ -331,6 +349,13 @@ class AcpConversation(Conversation):
             outcome: dict[str, Any] = {"outcome": "cancelled"}
         else:
             outcome = {"outcome": "selected", "optionId": chosen}
+        if not answer.allow:
+            what = ask.question.detail or ask.question.title
+            self.refused.append(
+                f"{what[:200]} ({answer.message[:300]})"
+                if answer.message
+                else what[:200]
+            )
         return [
             _line({"jsonrpc": "2.0", "id": request_id, "result": {"outcome": outcome}})
         ]
@@ -385,6 +410,24 @@ class AcpConversation(Conversation):
         if method == "session/prompt":
             self._flush()
             stop = str(result.get("stopReason") or "")
+            if (
+                stop == "end_turn"
+                and self.refused
+                and not self.spoke
+                and self.continuations < MAX_CONTINUATIONS
+            ):
+                # The turn ended on a refusal with nothing said: ask the agent to go on.
+                self.continuations += 1
+                refused = "; ".join(self.refused[-3:])
+                return Step(
+                    events=[
+                        AgentEvent(
+                            type=AgentEventType.MESSAGE,
+                            text=f"[continuing after a refusal: {refused[:300]}]",
+                        )
+                    ],
+                    send=[self._prompt(CONTINUE.format(refused=refused))],
+                )
             usage = result.get("usage") or {}
             error = (
                 None if stop in _OK_STOPS else f"the agent stopped: {stop or 'unknown'}"
@@ -416,21 +459,18 @@ class AcpConversation(Conversation):
             self.session_id is not None
             and "session/prompt" not in self.pending.values()
         ):
-            return [
-                self._request(
-                    "session/prompt",
-                    {
-                        "sessionId": self.session_id,
-                        "prompt": [
-                            {
-                                "type": "text",
-                                "text": self.runtime.prompt_text(self.task),
-                            }
-                        ],
-                    },
-                )
-            ]
+            return [self._prompt(self.runtime.prompt_text(self.task))]
         return []
+
+    def _prompt(self, text: str) -> str:
+        """A turn of the session; what the service refused and whether the agent
+        spoke are counted per turn."""
+        self.refused = []
+        self.spoke = False
+        return self._request(
+            "session/prompt",
+            {"sessionId": self.session_id, "prompt": [{"type": "text", "text": text}]},
+        )
 
     def _agent_request(self, msg: dict[str, Any]) -> Step:
         method = msg.get("method")
@@ -491,6 +531,7 @@ class AcpConversation(Conversation):
             text = content.get("text") if isinstance(content, dict) else None
             if text:
                 self.current.append(str(text))
+                self.spoke = self.spoke or bool(str(text).strip())
                 return [AgentEvent(type=AgentEventType.MESSAGE, text=str(text))]
             return []
         if kind == "agent_thought_chunk":

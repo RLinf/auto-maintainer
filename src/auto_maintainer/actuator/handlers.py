@@ -46,6 +46,7 @@ from ..domain.actions import (
     ServiceDeployPayload,
     ThreadReplyPayload,
 )
+from ..domain.ids import same_commit
 from ..domain.markers import parse_markers
 from ..domain.ports import ReviewCommentSpec
 from ..domain.profile import RepoProfile
@@ -522,21 +523,41 @@ async def _pr_fix(
     pr: PrSnapshot | None,
     approver: str | None,
 ) -> dict[str, Any]:
-    """Push the fix to a branch and open a PR into the reviewed PR's branch, both as
-    the approving maintainer (the executor gives this handler their writer and
-    publisher; the service's own account never runs it)."""
+    """Push the change as the approving maintainer (the executor gives this handler
+    their writer and publisher; the service's own account never runs it): straight
+    onto the PR's branch, or to a new branch with a PR into the PR's branch. A merge
+    of the base branch always goes onto the PR's branch."""
     assert profile is not None and pr is not None and approver
     p = FixPrPayload.model_validate(action.payload)
     if x.publisher is None:
         raise RuntimeError("this service cannot push branches")
     owner = action.repo.split("/", 1)[0]
-    branch = f"am/fix-{pr.number}-{action.id[-6:]}"
     email = f"{approver}@users.noreply.github.com"
     message = (
         f"{p.title}\n\n{p.body}\n\n"
         f"Drafted by an agent in auto-maintainer; reviewed and pushed by {approver}.\n\n"
         f"Signed-off-by: {approver} <{email}>"
     )
+    head_repo = pr.head_repo or action.repo
+    if p.target == "branch" or p.merge_ref:
+        if not same_commit(pr.head_sha, p.base_sha):
+            raise Stale(
+                f"the PR moved from {p.base_sha[:7]} to {pr.head_sha[:7]} since this "
+                "was drafted; ask for it again"
+            )
+        sha = await x.publisher.publish(
+            action.repo,
+            p.base_sha,
+            p.patch,
+            pr.head_ref,
+            message,
+            author=(approver, email),
+            merge_sha=p.merge_sha,
+            resolved=p.resolved,
+            push_to=head_repo,
+        )
+        return {"pushed": f"{head_repo}:{pr.head_ref}", "sha": sha}
+    branch = f"am/fix-{pr.number}-{action.id[-6:]}"
     sha = await x.publisher.publish(
         action.repo, p.base_sha, p.patch, branch, message, author=(approver, email)
     )

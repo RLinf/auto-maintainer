@@ -233,16 +233,25 @@ export function WorkRow({ job, me }: { job: AgentJob; me: string }) {
         <Icon name={pb.icon} size={16} />
       </span>
       <span className="main">
-        <span className="t">
-          {t(pb.label)}
-          {job.number != null && (
-            <span className="muted">
-              {" "}
-              · {job.repo}#{job.number}
+        {job.title ? (
+          <>
+            <span className="kicker">
+              {t(pb.label)}
+              {job.number != null && ` · ${job.repo}#${job.number}`}
             </span>
-          )}
-          {job.title && <span className="work-title"> {job.title}</span>}
-        </span>
+            <span className="t">{job.title}</span>
+          </>
+        ) : (
+          <span className="t">
+            {t(pb.label)}
+            {job.number != null && (
+              <span className="muted">
+                {" "}
+                · {job.repo}#{job.number}
+              </span>
+            )}
+          </span>
+        )}
         <span className="meta">
           {agentName(job.agent) || t("Default agent")}
           {job.by ? ` · ${job.by === me ? t("you") : job.by}` : ""} · <When at={job.updated_at} />

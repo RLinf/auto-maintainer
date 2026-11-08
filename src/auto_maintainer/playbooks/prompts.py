@@ -83,7 +83,10 @@ NO_CODE_RULE = (
     "through the service's reproduction (its record is below, or there is none). Read the "
     "code and its git history instead; the scripts in the repository's skill folders may "
     "run. Steps of a skill that run tests or the PR's code are left to the reproduction: "
-    "say what it should check."
+    "say what it should check. To read GitHub (this PR's reviews and comments, other "
+    "PRs, issues, CI runs), use gh's reading commands, such as gh pr view --comments, "
+    "gh pr diff, gh issue view, gh run view, or gh api as a GET, when gh is logged in; "
+    "nothing else reaches the network (no curl or wget), and gh never writes."
 )
 """The rule every agent working on a target repository reads; the approver enforces
 it (``AgentTask.run_code``)."""

@@ -53,6 +53,7 @@ AGENT_PLAYBOOKS = {
     "evaluate": "evaluate",
     "quality": "review",
     "quick_quality": "evaluate",
+    "merge_base": "fix",
 }
 """Playbooks whose work is an agent's, and the task kind of their main agent run."""
 

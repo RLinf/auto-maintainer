@@ -45,7 +45,7 @@ import shutil
 import signal
 import tempfile
 import time
-from collections.abc import AsyncIterator, Iterable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar
@@ -68,7 +68,7 @@ from ..domain.agents import (
 from ..domain.ports import AgentQuestions
 from ..domain.settings import ProviderBinding
 from .approver import POSTING_ANSWER, posting_request
-from .sandbox import build_env, scrub
+from .sandbox import build_env, register_secret, scrub
 from .structured import extract_json
 
 log = logging.getLogger(__name__)
@@ -404,6 +404,32 @@ class ExecRuntime:
         """Settle a question without a reviewer, or return ``None``; adapters override."""
         return None
 
+    gates_commands: ClassVar[bool] = False
+    """Every command the CLI runs passes the service's automatic rules first (the ACP
+    runtimes, outside bypass mode), so it may hold the service's GitHub login: the
+    rules let only ``gh``'s reading commands use it."""
+
+    github_token: Callable[[str], Awaitable[str | None]] | None = None
+    """The service's GitHub token for a repository; set by the composition root."""
+
+    async def github_env(self, task: AgentTask) -> dict[str, str]:
+        """``GH_TOKEN`` for a task on a repository whose commands this runtime gates,
+        so ``gh``'s reading commands work with the service's own login (no separate
+        login); nothing for any other task or runtime, or in bypass mode."""
+        if (
+            not self.gates_commands
+            or self.github_token is None
+            or not task.repo
+            or task.run_code != "skills"
+            or task.permissions in ("bypass", "restricted")
+        ):
+            return {}
+        token = await self.github_token(task.repo)
+        if not token:
+            return {}
+        register_secret(token)
+        return {"GH_TOKEN": token}
+
     async def resolve(self, task: AgentTask, question: AgentQuestion) -> AgentAnswer:
         """Answer a question the CLI is blocked on.
 
@@ -579,6 +605,7 @@ class ExecRuntime:
             )
         env = build_env(task, self.env_allow)
         env.update(isolation_env(files.dir))
+        env.update(await self.github_env(task))
         env.update(self.task_env(task))
         for name, value in self.provider_env().items():
             if value is None:

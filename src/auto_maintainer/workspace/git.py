@@ -27,7 +27,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
-from ..domain.ports import CommandResult, WorkChanges
+from ..domain.ports import CommandResult, MergeAttempt, WorkChanges
 from ..subproc import run
 
 TokenFn = Callable[[str], Awaitable[str | None]]
@@ -265,6 +265,52 @@ class GitWorkspace:
         ).stdout
         return WorkChanges(base_sha=base, patch=patch, files=names.split())
 
+    def _repo_of(self, path: Path) -> str:
+        """The repository a worktree under ``repo_dir`` belongs to."""
+        owner, name = (
+            Path(path).resolve().relative_to((self.root / "repos").resolve()).parts[:2]
+        )
+        return f"{owner}/{name}"
+
+    async def merge(self, path: Any, branch: str) -> MergeAttempt:
+        path = Path(path)
+        repo = self._repo_of(path)
+        ref = f"refs/remotes/origin/{branch}"
+        await self._git(
+            repo, "fetch", "-q", "origin", f"+refs/heads/{branch}:{ref}", cwd=path
+        )
+        merge_sha = (
+            await run(["git", "rev-parse", ref], cwd=path, check=True)
+        ).stdout.strip()
+        return MergeAttempt(
+            merge_sha=merge_sha, conflicts=await self._merge(path, merge_sha)
+        )
+
+    async def _merge(self, path: Path, sha: str) -> list[str]:
+        """Merge ``sha`` into the worktree without committing; the conflicted files."""
+        name, email = self.author
+        await run(
+            [
+                "git",
+                "-c",
+                f"user.name={name}",
+                "-c",
+                f"user.email={email}",
+                "merge",
+                "--no-ff",
+                "--no-commit",
+                sha,
+            ],
+            cwd=path,
+            timeout=600,
+        )
+        listed = await run(
+            ["git", "diff", "--name-only", "-z", "--diff-filter=U"],
+            cwd=path,
+            check=True,
+        )
+        return [p for p in listed.stdout.split("\0") if p]
+
     async def merge_base(self, path: Any, a: str, b: str) -> str | None:
         result = await run(["git", "merge-base", a, b], cwd=Path(path), timeout=120)
         if not result.ok:
@@ -297,9 +343,15 @@ class GitWorkspace:
         branch: str,
         message: str,
         author: tuple[str, str] | None = None,
+        *,
+        merge_sha: str | None = None,
+        resolved: dict[str, str] | None = None,
+        push_to: str | None = None,
     ) -> str:
-        """Apply ``patch`` on ``base_sha`` in a fresh worktree, commit (as ``author``,
-        else the service), and push ``branch``."""
+        """Apply ``patch`` on ``base_sha`` in a fresh worktree (or merge ``merge_sha``
+        into it, taking ``resolved`` for the files that conflict), commit (as
+        ``author``, else the service), and push ``branch`` of ``push_to`` (else
+        ``repo``) without forcing, so a branch that moved meanwhile refuses it."""
         lock = self._locks.setdefault(repo, asyncio.Lock())
         async with lock:
             mirror = await self._ensure_mirror(repo)
@@ -321,13 +373,33 @@ class GitWorkspace:
                 cwd=mirror,
             )
         try:
-            await run(
-                ["git", "apply", "--index", "--binary", "--whitespace=nowarn", "-"],
-                cwd=path,
-                stdin=patch,
-                timeout=300,
-                check=True,
-            )
+            if merge_sha:
+                have = await run(
+                    ["git", "cat-file", "-e", f"{merge_sha}^{{commit}}"], cwd=path
+                )
+                if not have.ok:
+                    await self._git(repo, "fetch", "-q", "origin", merge_sha, cwd=path)
+                conflicts = await self._merge(path, merge_sha)
+                missing = [c for c in conflicts if c not in (resolved or {})]
+                if missing:
+                    raise RuntimeError(
+                        "the merge now conflicts in "
+                        + ", ".join(missing)
+                        + ", which the resolution does not cover; ask for it again"
+                    )
+                for conflict in conflicts:
+                    (path / conflict).write_text(
+                        (resolved or {})[conflict], encoding="utf-8"
+                    )
+                    await run(["git", "add", "--", conflict], cwd=path, check=True)
+            elif patch:
+                await run(
+                    ["git", "apply", "--index", "--binary", "--whitespace=nowarn", "-"],
+                    cwd=path,
+                    stdin=patch,
+                    timeout=300,
+                    check=True,
+                )
             name, email = author or self.author
             await run(
                 [
@@ -348,8 +420,13 @@ class GitWorkspace:
             sha = (
                 await run(["git", "rev-parse", "HEAD"], cwd=path, check=True)
             ).stdout.strip()
+            remote = (
+                f"{self._forge_url}/{push_to}.git"
+                if push_to and push_to != repo
+                else "origin"
+            )
             await self._git(
-                repo, "push", "-q", "origin", f"HEAD:refs/heads/{branch}", cwd=path
+                repo, "push", "-q", remote, f"HEAD:refs/heads/{branch}", cwd=path
             )
             return sha
         finally:

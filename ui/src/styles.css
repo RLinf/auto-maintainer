@@ -200,6 +200,8 @@ code { background: var(--code-bg); padding: 1px 5px; border-radius: 5px; }
 .pr-number svg { margin-left: 3px; vertical-align: -1px; opacity: 0.7; }
 .pr-number:hover { color: var(--accent); }
 .page-head .actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.page-head.stacked { flex-direction: column; align-items: stretch; }
+.page-head.stacked .titles { flex: 1 1 auto; }
 .crumbs { display: flex; gap: 6px; align-items: center; font-size: 13px; color: var(--muted); }
 .crumbs a { color: var(--muted); }
 
@@ -341,7 +343,7 @@ td.check, th.check { width: 36px; padding-right: 0; }
 .status-muted { background: var(--surface-3); color: var(--muted); }
 .badge { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; padding: 1px 9px; border-radius: 999px; background: var(--warn-bg); color: var(--warn); font-weight: 500; }
 .labels { display: inline-flex; flex-wrap: wrap; gap: 4px; }
-.label { font-size: 11.5px; padding: 0 7px; border: 1px solid var(--border-strong); border-radius: 999px; color: var(--text-2); line-height: 19px; }
+.label { font-size: 11.5px; padding: 0 7px; border: 1px solid var(--border-strong); border-radius: 999px; color: var(--text-2); line-height: 19px; white-space: nowrap; max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
 .state { font-size: 12px; font-weight: 550; color: var(--text-2); white-space: nowrap; }
 
 /* ---- text helpers ------------------------------------------------------------------------ */
@@ -634,6 +636,7 @@ textarea.mono-input { width: 100%; }
 .work-row .main { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
 .work-row .t { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .work-row .work-title { font-weight: 400; color: var(--text-2); }
+.work-row .kicker { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .work-row .meta { color: var(--muted); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .work-icon { flex-shrink: 0; width: 32px; height: 32px; border-radius: 10px; display: grid; place-items: center; background: var(--surface-2); color: var(--text-2); }
 .work-icon.live { background: var(--accent-soft); color: var(--accent); }
@@ -736,4 +739,29 @@ details.pv-section[open] > summary { margin-bottom: 6px; }
   .hide-phone { display: none; }
   .fab { width: 50px; height: 50px; padding: 0; right: 16px; bottom: 16px; }
   .fab .fab-label { display: none; }
+  /* A table with a primary column turns into cards: the title takes the first row
+     beside its checkbox, and the other cells follow, each with its column's name. */
+  table.cards, table.cards tbody { display: block; }
+  table.cards thead { display: none; }
+  table.cards tr { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 12px 14px; border-bottom: 1px solid var(--border); }
+  table.cards tr:last-child { border-bottom: none; }
+  table.cards td { display: block; padding: 0; border: 0; min-width: 0; max-width: 100%; text-align: left; font-size: 13px; }
+  table.cards td.check { order: -2; width: auto; padding: 0; }
+  table.cards td.primary { order: -1; flex: 1 1 calc(100% - 40px); font-size: 14px; }
+  table.cards td.primary a { font-size: 15px; }
+  table.cards td[data-label]:not(.primary)::before { content: attr(data-label); color: var(--muted); font-size: 11px; }
+  table.cards td[data-label]:not(.primary) { display: inline-grid; grid-template-columns: auto auto; column-gap: 6px; align-items: center; justify-content: start; }
+  table.cards td.hide-phone, table.cards td.hide-narrow { display: none !important; }
+  table.cards .group-row td { flex: 1 1 100%; }
+  /* An agent's job: its status goes under the text, so the title has the width. */
+  .work-row { flex-wrap: wrap; row-gap: 4px; }
+  .work-row > .main { flex: 1 1 calc(100% - 48px); }
+  .work-row > .pill { margin-left: 46px; }
+  .work-row .t { -webkit-line-clamp: 3; }
+  /* A PR row on Home: the title takes the first row beside its checkbox. */
+  .list-row.pr-row { flex-wrap: wrap; row-gap: 6px; }
+  .list-row.pr-row > input { order: -2; }
+  .list-row.pr-row > .main { order: -1; flex: 1 1 calc(100% - 34px); }
+  .list-row.pr-row > .small { flex: 1 1 auto; }
+  .page-head h1 { font-size: 20px; overflow-wrap: anywhere; }
 }

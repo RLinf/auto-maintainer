@@ -36,7 +36,7 @@ const POSTED_BODY = new Set([
   "pr.fix",
 ]);
 
-interface InlineComment {
+export interface InlineComment {
   path: string;
   line: number;
   start_line?: number | null;
@@ -136,6 +136,10 @@ export function ProposalCard({
     setComments(Array.isArray(payload.comments) ? (payload.comments as InlineComment[]) : []);
   }, [payload.body, payload.comments, editing]);
   const isFix = kind === "pr.fix";
+  // A merge of the base branch always goes onto the PR's branch; a fix may do either.
+  const isMerge = isFix && !!str(payload.merge_ref);
+  const [target, setTarget] = useState(str(payload.target) || "pr");
+  const changedTarget = isFix && !isMerge && target !== (str(payload.target) || "pr");
   const canAsMe = !!me?.can_post_as_me && AS_ME.has(kind);
   // A fix is pushed only by a person; the service's own account never pushes to a repository.
   const postAsMe = isFix || (canAsMe && asMe);
@@ -147,11 +151,11 @@ export function ProposalCard({
     ...payload,
     ...(typeof payload.body === "string" ? { body } : {}),
     ...(Array.isArray(payload.comments) ? { comments } : {}),
-    ...(isFix ? { title } : {}),
+    ...(isFix ? { title, ...(isMerge ? {} : { target }) } : {}),
     ...(kind === "lab.reproduce" ? { script, setup } : {}),
   });
   const approve = useAct((as?: boolean) => {
-    const edited = editing ? editedPayload() : undefined;
+    const edited = editing || changedTarget ? editedPayload() : undefined;
     const mine = as ?? postAsMe;
     return api.post(`/api/proposals/${proposal.id}/approve`, { ...(edited ? { payload: edited } : {}), ...(mine ? { as_me: true } : {}) });
   }, PROPOSAL_KEYS);
@@ -164,7 +168,11 @@ export function ProposalCard({
   const editable = typeof payload.body === "string" || kind === "lab.reproduce" || (Array.isArray(payload.comments) && comments.length > 0);
   const findings = ((payload.result as { findings?: unknown[] } | undefined)?.findings ?? []).length;
   const approveLabel = isFix
-    ? t("Open the PR as me")
+    ? isMerge
+      ? t("Push the merge as me")
+      : target === "branch"
+        ? t("Push to the PR as me")
+        : t("Open the PR as me")
     : kind === "lab.reproduce"
       ? `${t("Run on")} ${str(payload.lab)}`
       : kind === "review.post"
@@ -286,6 +294,12 @@ export function ProposalCard({
               </Popover>
             )}
           </div>
+          {isFix && !isMerge && (
+            <select value={target} onChange={(e) => setTarget(e.target.value)} aria-label={t("Where the fix goes")}>
+              <option value="pr">{t("As a PR into this PR")}</option>
+              <option value="branch">{t("As a commit on the PR's branch")}</option>
+            </select>
+          )}
           {editing && (
             <button disabled={save.isPending} onClick={() => save.mutate(undefined, { onSuccess: () => setEditing(false) })}>
               <Icon name="check" size={14} />
@@ -381,10 +395,13 @@ function KindBody({
 
   if (kind === "pr.fix") {
     const changed = list(payload.files);
+    const merge = str(payload.merge_ref);
     parts.push(
       <div key="fix" className="small muted">
-        {changed.length} {t("files changed")}
-        {str(payload.runtime) ? ` · ${str(payload.runtime)}` : ""} · {t("into the PR's branch")}
+        {merge
+          ? `${t("Merges")} ${merge} (${str(payload.merge_sha).slice(0, 7)}) ${t("into the PR's branch")} · ${changed.length} ${t("conflicted files resolved")}`
+          : `${changed.length} ${t("files changed")}`}
+        {str(payload.runtime) ? ` · ${str(payload.runtime)}` : ""}
       </div>,
       editing ? <input key="title" value={title} onChange={(e) => setTitle(e.target.value)} aria-label={t("PR title")} /> : <strong key="title">{str(payload.title)}</strong>,
     );
@@ -527,6 +544,88 @@ function KindBody({
 
 /** Have an agent change the PR's code for a review's findings; the diff comes back as
  * a ``pr.fix`` draft for the person who asked. */
+/** Bring the PR's base branch into it, as the person who presses: GitHub updates the
+ *  branch at once when they merge cleanly; otherwise an agent resolves the conflicts
+ *  and the merge comes back as a draft to read and push. */
+export function MergeBaseButton({
+  repo,
+  number,
+  base,
+  conflicting,
+  canPush,
+}: {
+  repo: string;
+  number: number;
+  base: string;
+  conflicting: boolean;
+  canPush: boolean;
+}) {
+  const t = useT();
+  const toast = useToast();
+  const [agent, setAgent] = useAgentChoice("fix");
+  const merge = useAct(
+    () =>
+      api.post<{ run: "update" | "resolve"; status?: string; error?: string | null; event?: string }>(`/api/prs/${repo}/${number}/merge-base`, {
+        agent: agent || null,
+      }),
+    [["pr"], ["prs"], ["proposals"], ["work"]],
+  );
+  const label = conflicting ? `${t("Resolve conflicts with")} ${base}` : `${t("Merge")} ${base}`;
+  return (
+    <Popover
+      align="right"
+      label={label}
+      trigger={(open, toggle) => (
+        <button className={open ? "on" : ""} onClick={toggle} aria-expanded={open}>
+          <Icon name="merge" size={14} />
+          {label}
+        </button>
+      )}
+    >
+      {(close) => (
+        <div className="stack" style={{ gap: 10, padding: 6, width: 340, maxWidth: "calc(100vw - 48px)" }}>
+          <span className="small muted">
+            {conflicting
+              ? t("An agent merges the base branch into the PR and resolves the conflicts. You read the resolution, then push the merge onto the PR's branch as yourself.")
+              : t("GitHub merges the base branch into the PR's branch now, as you.")}
+          </span>
+          <div className="row">
+            {conflicting && <AgentPicker value={agent} onChange={setAgent} task="fix" />}
+            <button
+              className="primary right"
+              disabled={merge.isPending || !canPush}
+              title={canPush ? undefined : t("Sign in with GitHub, so the merge is pushed as you.")}
+              onClick={() =>
+                merge.mutate(undefined, {
+                  onSuccess: (out) => {
+                    close();
+                    if (out.run === "resolve") {
+                      toast({
+                        title: t("Resolving the conflicts"),
+                        body: t("The merge comes back to you as a draft; you push it as yourself."),
+                        icon: "sparkles",
+                        action: out.event ? { label: t("Watch"), onClick: () => openJob(out.event as string) } : undefined,
+                      });
+                    } else if (out.status === "executed") {
+                      toast({ title: `${t("Merged")} ${base}`, body: t("GitHub updated the PR's branch as you."), icon: "check" });
+                    } else {
+                      toast({ title: t("The branch was not updated"), body: out.error ?? out.status, icon: "x" });
+                    }
+                  },
+                })
+              }
+            >
+              {merge.isPending ? t("Starting…") : conflicting ? t("Start resolving") : t("Merge it as me")}
+            </button>
+          </div>
+          {!canPush && <span className="small muted">{t("Sign in with GitHub, so the merge is pushed as you.")}</span>}
+          <ErrorBox error={merge.error} />
+        </div>
+      )}
+    </Popover>
+  );
+}
+
 export function FixButton({
   repo,
   number,

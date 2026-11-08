@@ -46,7 +46,7 @@ export default function AuditPage() {
       cell: (a) =>
         a.repo && a.number != null ? <Link to={prPath(a.repo, a.number)}>{`${a.repo}#${a.number}`}</Link> : a.repo ? <Link to={`/repos/${a.repo}`}>{a.repo}</Link> : <span className="muted">{t("service")}</span>,
     },
-    { id: "summary", header: t("Summary"), cell: (a) => <span className="small">{a.summary}</span> },
+    { id: "summary", primary: true, header: t("Summary"), cell: (a) => <span className="small">{a.summary}</span> },
   ];
   return (
     <>

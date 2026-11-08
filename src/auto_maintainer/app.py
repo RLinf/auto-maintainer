@@ -82,6 +82,16 @@ async def build_service(cfg: HostConfig, dev: bool = False) -> Service:
     runtimes_cfg = merge_configs((_yaml(op / "runtimes.yaml") or {}).get("runtimes"))
     runtimes = build_runtimes(runtimes_cfg, runs_dir=data / "runs")
 
+    def with_github(built: dict[str, Any]) -> dict[str, Any]:
+        """Runtimes whose commands the service gates may read GitHub with its own
+        login (``ExecRuntime.github_env``); no separate login is needed."""
+        for runtime in built.values():
+            if getattr(runtime, "gates_commands", False):
+                runtime.github_token = tokens.token
+        return built
+
+    runtimes = with_github(runtimes)
+
     async def usage_today(runtime: str) -> tuple[int, float]:
         now = clock.now()
         start = now - timedelta(
@@ -108,7 +118,9 @@ async def build_service(cfg: HostConfig, dev: bool = False) -> Service:
     ) -> None:
         """New service settings: rebuild the runtimes and hand them to the router."""
         router.reconfigure(
-            build_runtimes(agents, runs_dir=data / "runs", providers=providers),
+            with_github(
+                build_runtimes(agents, runs_dir=data / "runs", providers=providers)
+            ),
             budgets_of(agents),
         )
 

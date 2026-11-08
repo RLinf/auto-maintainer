@@ -205,7 +205,7 @@ export function ReviewCard({ rows, loading, me, automations }: { rows: PrRow[]; 
       ) : (
         <div className="list">
           {shown.map((p) => (
-            <label key={prKey(p)} className="list-row" style={{ cursor: "pointer" }}>
+            <label key={prKey(p)} className="list-row pr-row" style={{ cursor: "pointer" }}>
               <input
                 type="checkbox"
                 checked={selected.has(prKey(p))}
@@ -225,10 +225,14 @@ export function ReviewCard({ rows, loading, me, automations }: { rows: PrRow[]; 
                 </Link>
                 <span className="meta">
                   {p.repo}#{p.number} · {p.author} · <When at={p.updated_at} />
-                  {p.review_state === "FOLLOWUP_REVIEW" || p.review_state === "APPROVED_NEW_COMMITS" ? ` · ${t("updated since the last review")}` : ""}
                 </span>
               </span>
               {(p.quality || p.quick_quality) && <Quality quality={p.quality} quick={p.quick_quality} head={p.head} compact />}
+              {(p.review_state === "FOLLOWUP_REVIEW" || p.review_state === "APPROVED_NEW_COMMITS") && (
+                <span className="pill status-warn" title={t("New commits since the last review")}>
+                  {t("Needs follow-up")}
+                </span>
+              )}
               <span className="small">{activity(p, me, t)}</span>
               <span className="row-actions">
                 <button

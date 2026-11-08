@@ -46,6 +46,7 @@ from ..domain.review import (
     QualityAssessment,
     QualityVerdict,
     QuickQuality,
+    ReviewQuality,
     review_chain,
     review_quality,
 )
@@ -78,6 +79,17 @@ QUALITY_STATE = "quality:{repo}#{number}"
 """The latest quality an agent gave a PR's review after it was written."""
 QUALITY_TRIED = "quality_tried:{action_id}"
 """Set once the scan asked for a review's quality, so a failed run is not repeated."""
+QUICK_MISS = 15
+"""A review score this far from the quick score of the same commit means the quick
+check missed something; the misses teach later quick scores."""
+MISSES_STATE = "quick_misses:{repo}"
+"""The latest misses of a repository's quick scores (``QuickMiss``), newest last."""
+COMPARED_STATE = "quick_compared:{key}"
+LESSONS_STATE = "quick_lessons:{repo}"
+"""Rules an agent drew from the misses, which every quick score of the repository reads."""
+LEARN_AFTER = 3
+"""New misses that make an agent draw the rules again."""
+MAX_MISSES = 30
 SCAN_BATCH = 3
 """Reviews the scan sends for scoring per repository and tick."""
 
@@ -136,6 +148,78 @@ class ChecklistItem(BaseModel):
 
 class QuickChecklist(BaseModel):
     items: list[ChecklistItem] = Field(default_factory=list, max_length=12)
+
+
+class QuickMiss(BaseModel):
+    """A PR whose review scored it far from its quick score of the same commit."""
+
+    number: int
+    quick: int
+    review: int
+    quick_reason: str = ""
+    review_reason: str = ""
+    checks: dict[str, bool | None] = Field(default_factory=dict)
+    at: str = ""
+
+
+class QuickLessons(BaseModel):
+    rules: list[str] = Field(
+        default_factory=list,
+        max_length=6,
+        description="At most six rules, each one line in plain words.",
+    )
+
+
+LEARN = """Quick quality scores of {repo}'s PRs are checked against the full review that follows them. Below are recent PRs where the two disagreed by {gap} points or more, with what the quick check and the review each said, the current rules for quick checks, and the repository's checklist.
+- Write the rules a quick check of this repository should follow so it would have scored these PRs closer to their reviews: what to look for in a diff, and how much it weighs. At most six, each one line in plain words, about kinds of changes, not about these PRs.
+- Keep the current rules that still hold, change those the misses contradict, and drop the rest.
+- Do not ask questions, post, push, edit files, or run anything. Return only the structured result."""
+
+
+async def quick_misses(store: Store, repo: str) -> list[QuickMiss]:
+    raw = await store.get_state(MISSES_STATE.format(repo=repo))
+    items = raw if isinstance(raw, list) else []
+    out = []
+    for item in items:
+        try:
+            out.append(QuickMiss.model_validate(item))
+        except ValueError:
+            continue
+    return out
+
+
+async def quick_lessons(store: Store, repo: str) -> dict:
+    """The rules drawn from the misses: ``{"rules": [...], "at": ..., "misses": n}``,
+    where ``misses`` counts the misses they were drawn from."""
+    raw = await store.get_state(LESSONS_STATE.format(repo=repo))
+    return raw if isinstance(raw, dict) else {}
+
+
+def lessons_block(lessons: dict, misses: list[QuickMiss]) -> str:
+    """What reviews taught the quick check: its learned rules, and the latest misses."""
+    parts = []
+    rules = [r for r in lessons.get("rules") or [] if isinstance(r, str)]
+    if rules:
+        parts.append(
+            "Rules this repository's reviews taught quick checks (learned from quick "
+            "scores a review corrected); follow them:\n"
+            + "\n".join(f"- {r}" for r in rules)
+        )
+    if misses:
+        parts.append(
+            "Recent quick scores a review corrected; do not repeat these misses:\n"
+            + untrusted(
+                "calibration.misses",
+                "\n".join(
+                    f"#{m.number}: quick {m.quick}, after review {m.review}. The quick "
+                    f"check said: {m.quick_reason[:200]} The review found: "
+                    f"{m.review_reason[:240]}"
+                    for m in misses[-4:]
+                ),
+                6_000,
+            )
+        )
+    return "\n\n".join(parts)
 
 
 def condensed_diff(diff: str) -> str:
@@ -361,6 +445,10 @@ async def score_quickly(
                 QUICK.format(number=pr.number, repo=pr.repo),
                 quality_block(profile),
                 checklist_block(checklist),
+                lessons_block(
+                    await quick_lessons(ctx.store, pr.repo),
+                    await quick_misses(ctx.store, pr.repo),
+                ),
                 f"Review lessons from this repository's maintainers:\n{lessons[:3000]}"
                 if lessons
                 else "",
@@ -589,6 +677,76 @@ class QuickQualityPlaybook(Playbook):
         return _quick_result(await score_quickly(ctx, pr, profile))
 
 
+class QuickLearnPlaybook(Playbook):
+    """Draws the rules quick checks of a repository follow from the quick scores its
+    reviews corrected (``quality.learn``, from the scan), in the background."""
+
+    name = "quick_learn"
+    triggers = (EventKind.QUICK_LEARN,)
+    pool = "quality"
+
+    def key(self, event: Event) -> str:
+        return f"quick_learn:{event.repo}:{event.id}"
+
+    async def run(self, ctx: PlaybookContext, event: Event) -> PlaybookResult:
+        profile = ctx.require_profile()
+        misses = await quick_misses(ctx.store, profile.repo)
+        if not misses:
+            return PlaybookResult(result={"skipped": "no misses to learn from"})
+        current = await quick_lessons(ctx.store, profile.repo)
+        cached = await ctx.store.get_state(CHECKLIST_STATE.format(repo=profile.repo))
+        checklist = [
+            ChecklistItem.model_validate(i)
+            for i in (cached.get("items") if isinstance(cached, dict) else None) or []
+        ]
+        rows = "\n".join(
+            f"#{m.number}: quick {m.quick}, after review {m.review}. Checks the quick "
+            f"check marked: {m.checks}. The quick check said: {m.quick_reason[:400]} "
+            f"The review found: {m.review_reason[:400]}"
+            for m in misses
+        )
+        answer = await ctx.ask(
+            AgentTask(
+                kind=TaskKind.EVALUATE,
+                prompt="\n\n".join(
+                    part
+                    for part in [
+                        LEARN.format(repo=profile.repo, gap=QUICK_MISS),
+                        "Current rules:\n"
+                        + "\n".join(f"- {r}" for r in current.get("rules") or [])
+                        if current.get("rules")
+                        else "There are no rules yet.",
+                        checklist_block(checklist),
+                        untrusted("quick.misses", rows, 20_000),
+                        schema_hint(QuickLessons.model_json_schema()),
+                    ]
+                    if part
+                ),
+                workdir=ctx.scratch(),
+                mode="read_only",
+                run_code="none",
+                budget="quick",
+                output_schema=QuickLessons.model_json_schema(),
+                repo=profile.repo,
+            ),
+            QuickLessons,
+        )
+        if not answer.ok or answer.structured is None:
+            raise RuntimeError(f"the learning agent failed: {answer.error}")
+        rules = [
+            r.strip() for r in QuickLessons.model_validate(answer.structured).rules
+        ][:6]
+        await ctx.store.set_state(
+            LESSONS_STATE.format(repo=profile.repo),
+            {
+                "rules": rules,
+                "at": ctx.clock.now().isoformat(),
+                "misses": int(event.payload.get("misses") or len(misses)),
+            },
+        )
+        return PlaybookResult(result={"rules": rules})
+
+
 class QualityScan(Playbook):
     """On the review scan's tick: asks for the quality of the latest review of each
     open PR that has none, ``SCAN_BATCH`` at a time and once per review; and, unless
@@ -618,6 +776,7 @@ class QualityScan(Playbook):
             if record.action.number is not None:
                 by_pr.setdefault(record.action.number, []).append(record)
         events: list[Event] = []
+        misses: list[QuickMiss] = []
         unscored: list[tuple[PrSnapshot, str | None]] = []
         for pr in await ctx.store.list_snapshots(profile.repo, open_only=True):
             if not in_scope(pr, profile):
@@ -629,6 +788,10 @@ class QualityScan(Playbook):
             latest = chain[-1]
             assessed = await assessed_quality(ctx.store, pr.repo, pr.number)
             quality = review_quality(chain, assessed)
+            if quality is not None:
+                missed = await self._compare(ctx, pr, quality)
+                if missed is not None:
+                    misses.append(missed)
             if quality is None or not same_commit(quality.sha, pr.head_sha):
                 # New commits since the review: the new head gets a quick score.
                 unscored.append((pr, quality.sha if quality else None))
@@ -654,13 +817,77 @@ class QualityScan(Playbook):
             if profile.review.quick_quality
             else []
         )
+        learn = await self._remember(ctx, profile.repo, misses)
         return PlaybookResult(
-            events=events + quick,
+            events=events + quick + learn,
             result={
                 "requested": [e.number for e in events],
                 "quick": [e.number for e in quick],
+                "misses": [m.number for m in misses],
             },
         )
+
+    async def _compare(
+        self, ctx: PlaybookContext, pr: PrSnapshot, quality: ReviewQuality
+    ) -> QuickMiss | None:
+        """Compare a review's score with the quick score of the same commit, once per
+        review score; the miss, when they are ``QUICK_MISS`` apart."""
+        quick = await quick_quality(ctx.store, pr.repo, pr.number)
+        if quick is None or not same_commit(quick.sha, quality.sha):
+            return None
+        key = COMPARED_STATE.format(
+            key=f"{quality.action_id}:{quality.score}:{quick.at.isoformat()}"
+        )
+        if await ctx.store.get_state(key):
+            return None
+        await ctx.store.set_state(key, ctx.clock.now().isoformat())
+        if abs(quick.score - quality.score) < QUICK_MISS:
+            return None
+        return QuickMiss(
+            number=pr.number,
+            quick=quick.score,
+            review=quality.score,
+            quick_reason=quick.reasons.get("en") or quick.reason,
+            review_reason=quality.reasons.get("en") or quality.reason,
+            checks=quick.checks,
+            at=ctx.clock.now().isoformat(),
+        )
+
+    async def _remember(
+        self, ctx: PlaybookContext, repo: str, misses: list[QuickMiss]
+    ) -> list[Event]:
+        """Keep the new misses; once ``LEARN_AFTER`` of them came since the rules were
+        last drawn, ask for the rules again."""
+        known = await quick_misses(ctx.store, repo)
+        if misses:
+            known = (known + misses)[-MAX_MISSES:]
+            await ctx.store.set_state(
+                MISSES_STATE.format(repo=repo), [m.model_dump() for m in known]
+            )
+        total = int(
+            await ctx.store.get_state(f"{MISSES_STATE.format(repo=repo)}:n") or 0
+        )
+        total += len(misses)
+        if misses:
+            await ctx.store.set_state(f"{MISSES_STATE.format(repo=repo)}:n", total)
+        learned = int((await quick_lessons(ctx.store, repo)).get("misses") or 0)
+        if total - learned < LEARN_AFTER:
+            return []
+        active = await ctx.store.list_jobs(
+            [JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.WAITING],
+            repo=repo,
+            limit=500,
+        )
+        if any(job.playbook == "quick_learn" for job in active):
+            return []
+        return [
+            Event(
+                kind=EventKind.QUICK_LEARN,
+                repo=repo,
+                payload={"misses": total},
+                source="scan",
+            )
+        ]
 
     async def _quick(
         self,

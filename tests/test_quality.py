@@ -38,6 +38,8 @@ from auto_maintainer.playbooks.quality import (
     assessed_quality,
     condensed_diff,
     quick_facts,
+    quick_lessons,
+    quick_misses,
     quick_quality,
 )
 from auto_maintainer.testing.fakes import make_pr
@@ -383,5 +385,81 @@ async def test_the_review_standard_is_drawn_into_a_checklist_once(
         assert all(t.budget == "quick" and t.run_code == "none" for t in quick), (
             "quick and reading only"
         )
+    finally:
+        await h.close()
+
+
+async def test_quick_scores_learn_from_reviews_that_disagree(tmp_path: Path) -> None:
+    """Three reviews far from their quick scores teach rules every later quick score
+    reads; a review close to its quick score teaches nothing."""
+    h = await Harness.create(tmp_path)
+    learned: list[str] = []
+
+    def evaluate(t):
+        if t.prompt.startswith("Quick quality scores of"):
+            learned.append(t.prompt)
+            return {
+                "rules": [
+                    "A change to shared worker code without tests is fair at best."
+                ]
+            }
+        if t.prompt.startswith(QUICK):
+            return {
+                "score": 88,
+                "reasons": {"en": "Looks clean.", "zh": "看起来整洁。"},
+                "checks": {"tests": True},
+            }
+        return {"scores": {}, "summary": "s", "rationale": "r"}
+
+    h.runner.on("triage", lambda t: {"summary": "s", "labels": []})
+    h.runner.on("evaluate", evaluate)
+    h.runner.on(
+        "review",
+        lambda t: _review(
+            {
+                "score": 86 if "PR: #45" in t.prompt else 55,
+                "reason": "Touches shared worker code with no tests.",
+            }
+        ),
+    )
+    for number in (42, 43, 44, 45, 46):
+        h.forge.put_pr(make_pr(number=number, sha=f"{number:040x}"))
+    tick = Event(kind=EventKind.SCHEDULE_TICK, payload={"name": "review_scan"})
+    try:
+        await h.poll()
+        await h.emit(tick)
+        for number in (42, 43, 44, 45):
+            await h.emit(
+                Event(
+                    kind=EventKind.DASHBOARD_COMMAND,
+                    repo=REPO,
+                    number=number,
+                    payload={"command": "review", "by": "maria", "source": "dashboard"},
+                )
+            )
+        await h.emit(tick.model_copy(update={"id": "evt_compare"}))
+        misses = await quick_misses(h.store, REPO)
+        assert sorted(m.number for m in misses) == [42, 43, 44], "#45 agreed"
+        assert misses[0].quick == 88 and misses[0].review == 55
+        assert len(learned) == 1 and "#42: quick 88, after review 55" in learned[0]
+        rules = (await quick_lessons(h.store, REPO))["rules"]
+        assert rules == [
+            "A change to shared worker code without tests is fair at best."
+        ]
+
+        await h.emit(tick.model_copy(update={"id": "evt_again"}))
+        assert len(learned) == 1, "nothing new to learn from"
+
+        await h.emit(
+            Event(
+                kind=EventKind.QUALITY_REQUESTED,
+                repo=REPO,
+                number=46,
+                payload={"by": "maria", "quick": True},
+            )
+        )
+        last = [t for t in h.runner.tasks if t.prompt.startswith(QUICK)][-1]
+        assert "shared worker code without tests is fair at best" in last.prompt
+        assert "#42: quick 88, after review 55" in last.prompt
     finally:
         await h.close()

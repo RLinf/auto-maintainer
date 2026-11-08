@@ -58,7 +58,7 @@ export default function ServicePage() {
     { id: "at", header: t("When"), sort: "at", cell: (h) => <When at={h.at} />, width: 100 },
     { id: "kind", header: t("Kind"), cell: (h) => <span className="mono">{h.kind}</span> },
     { id: "status", header: t("Status"), cell: (h) => <Status value={h.status} /> },
-    { id: "summary", header: t("Summary"), cell: (h) => <span className="small">{h.summary}</span> },
+    { id: "summary", primary: true, header: t("Summary"), cell: (h) => <span className="small">{h.summary}</span> },
     { id: "error", header: t("Error"), cell: (h) => <span className="small muted">{h.error?.slice(0, 200)}</span>, className: "hide-narrow" },
   ];
 

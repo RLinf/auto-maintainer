@@ -62,7 +62,7 @@ export default function QuestionsPage() {
     param: "h",
   });
   const columns: Column<AgentQuestion>[] = [
-    { id: "title", header: t("Question"), sort: "title", cell: (q) => <span style={{ fontWeight: 550 }}>{q.title}</span> },
+    { id: "title", primary: true, header: t("Question"), sort: "title", cell: (q) => <span style={{ fontWeight: 550 }}>{q.title}</span> },
     {
       id: "answer",
       header: t("Answer"),

@@ -64,6 +64,7 @@ export function ReposPage() {
   const columns: Column<RepoRow>[] = [
     {
       id: "repo",
+      primary: true,
       header: t("Repository"),
       sort: "repo",
       cell: (r) => (
@@ -549,6 +550,7 @@ function ReviewGuidesSection({ repo }: { repo: string }) {
               </span>
             </span>
           </label>
+          <QuickLessons view={d} />
           <div className="row">
             <span className="spacer" />
             <button
@@ -572,6 +574,46 @@ function ReviewGuidesSection({ repo }: { repo: string }) {
       )}
       <ErrorBox error={view.error || save.error} />
     </Section>
+  );
+}
+
+/** What reviews taught the quick scores: the rules drawn from quick scores a review
+ *  corrected by a wide margin, and those corrections. Learned automatically. */
+function QuickLessons({ view }: { view: ReviewGuides }) {
+  const t = useT();
+  const rules = view.quick_lessons.rules ?? [];
+  const misses = view.quick_misses;
+  if (!rules.length && !misses.length) {
+    return <span className="small muted">{t("Quick scores learn from reviews: when a review scores a PR far from its quick score, the next quick scores take it into account.")}</span>;
+  }
+  return (
+    <div className="stack small" style={{ gap: 6 }}>
+      <strong>
+        {t("Learned from reviews")}
+        {view.quick_lessons.at && (
+          <span className="muted" style={{ fontWeight: 400 }}>
+            {" "}
+            · <When at={view.quick_lessons.at} />
+          </span>
+        )}
+      </strong>
+      {rules.length > 0 && (
+        <ul style={{ margin: 0, paddingLeft: 20 }}>
+          {rules.map((r, i) => (
+            <li key={i}>{r}</li>
+          ))}
+        </ul>
+      )}
+      {misses.length > 0 && (
+        <span className="muted">
+          {t("Quick scores a review corrected:")}{" "}
+          {misses
+            .slice(-6)
+            .map((m) => `#${m.number} ${m.quick} → ${m.review}`)
+            .join(" · ")}
+        </span>
+      )}
+    </div>
   );
 }
 

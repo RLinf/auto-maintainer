@@ -56,6 +56,9 @@ class EventKind(StrEnum):
     QUICK_QUALITY = "quality.quick"
     """Give a PR nobody reviewed yet a quick quality score from its diff, in the
     background; the quality scan asks for it."""
+    QUICK_LEARN = "quality.learn"
+    """Draw again the rules a repository's quick quality scores follow, from the quick
+    scores its reviews corrected."""
     MERGE_ARMED = "merge.armed"
     MERGE_DISARMED = "merge.disarmed"
     MERGE_QUEUE = "merge.queue"

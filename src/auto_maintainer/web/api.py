@@ -46,6 +46,7 @@ from ..domain.actions import (
     ProposalState,
     RerunPayload,
     ServiceDeployPayload,
+    UpdateBranchPayload,
     make_action,
 )
 from ..domain.agents import AgentAnswer, AgentQuestion, QuestionState
@@ -74,11 +75,16 @@ from ..domain.review import (
 from ..domain.run_ci import plan_run_ci
 from ..domain.scoring import Evaluation, recompute
 from ..domain.secrets import redact_secrets
-from ..domain.snapshot import PrState
+from ..domain.snapshot import Mergeable, PrState
 from ..playbooks.evaluate import haystack, rubric_of
 from ..playbooks.hygiene import hygiene_key
 from ..playbooks.prompts import DEFAULT_QUALITY_GUIDE, DEFAULT_WRITING_GUIDE
-from ..playbooks.quality import assessed_quality, quick_quality
+from ..playbooks.quality import (
+    assessed_quality,
+    quick_lessons,
+    quick_misses,
+    quick_quality,
+)
 from ..profiles.layers import ProfileError, parse_yaml
 from ..profiles.lock import parse_lock, profile_diff
 from ..service import Service
@@ -177,10 +183,13 @@ _DIFFS: dict[tuple[str, int, str], str] = {}
 """Recent PR diffs by (repo, number, head SHA); a head never changes its diff."""
 
 
-async def _run_now(service: Service, user: User, action: Action) -> ActionRecord:
+async def _run_now(
+    service: Service, user: User, action: Action, *, as_them: bool = False
+) -> ActionRecord:
     """Submit ``action`` as drafted for ``user`` and approve it as them at once: a
     button a person pressed. The policy decides again on approval, so a pause, a
-    budget, or a hard limit can still hold or deny it; the record says which."""
+    budget, or a hard limit can still hold or deny it; the record says which. With
+    ``as_them``, it runs with their own GitHub account."""
     record = await service.pipeline.submit(action)
     if record.status == ActionStatus.PROPOSED:
         proposal = next(
@@ -195,7 +204,9 @@ async def _run_now(service: Service, user: User, action: Action) -> ActionRecord
         )
         if proposal is not None:
             try:
-                await service.pipeline.approve(proposal.id, user.login)
+                await service.pipeline.approve(
+                    proposal.id, user.login, post_as=user.login if as_them else None
+                )
             except ValueError as e:
                 raise HTTPException(409, str(e)) from e
     return await service.store.get_action(record.action.id) or record
@@ -416,6 +427,11 @@ class QualityBody(EvaluationsBody):
 class RefreshBody(BaseModel):
     repos: list[str] = Field(default_factory=list)
     """Repositories to read now; empty means every one the user sees."""
+
+
+class MergeBaseBody(BaseModel):
+    agent: str | None = None
+    """The agent that resolves conflicts, when there are any."""
 
 
 class FixBody(BaseModel):
@@ -762,6 +778,10 @@ def build_router() -> APIRouter:
             "writing_guide": profile.review.writing_guide,
             "quality_guide": profile.review.quality_guide,
             "quick_quality": profile.review.quick_quality,
+            "quick_lessons": await quick_lessons(service.store, repo),
+            "quick_misses": [
+                m.model_dump() for m in await quick_misses(service.store, repo)
+            ][-10:],
             "default_writing_guide": DEFAULT_WRITING_GUIDE,
             "default_quality_guide": DEFAULT_QUALITY_GUIDE,
             "can_configure": gate.allowed,
@@ -1244,6 +1264,63 @@ def build_router() -> APIRouter:
                 pr, profile.label_for("ci_gate") if profile else None
             ).model_dump(mode="json"),
         }
+
+    @r.post("/prs/{owner}/{name}/{number}/merge-base")
+    async def merge_base(
+        request: Request,
+        owner: str,
+        name: str,
+        number: int,
+        body: MergeBaseBody,
+        user: User = Depends(current_user),
+    ) -> dict[str, Any]:
+        """Bring the PR's base branch into it, as the person who pressed the button.
+        Without conflicts GitHub updates the branch at once (the press is the
+        approval); with conflicts an agent resolves them and the merge comes back as
+        a draft for them to read and push."""
+        service = service_of(request)
+        repo = _repo(owner, name)
+        await require_view(service, user, repo)
+        if not await service.can_post_as(user.login):
+            raise HTTPException(
+                403, "sign in with GitHub, so the merge is pushed as you"
+            )
+        pr = await service.a.forge.get_pr(
+            repo, number
+        ) or await service.store.get_snapshot(repo, number)
+        if pr is None or pr.state != PrState.OPEN:
+            raise HTTPException(409, f"{repo}#{number} is not open")
+        if pr.mergeable != Mergeable.CONFLICTING:
+            record = await _run_now(
+                service,
+                user,
+                make_action(
+                    ActionKind.PR_UPDATE_BRANCH,
+                    repo,
+                    UpdateBranchPayload(),
+                    number=number,
+                    head_sha=pr.head_sha,
+                    discriminator=f"merge-base:{new_id('req')}",
+                    rationale=f"{user.login} pressed Merge {pr.base_ref}",
+                    draft_for=user.login,
+                ),
+                as_them=True,
+            )
+            return {
+                "run": "update",
+                "status": record.status,
+                "error": record.error,
+                "action": record.action.id,
+            }
+        event = Event(
+            kind=EventKind.DASHBOARD_COMMAND,
+            repo=repo,
+            number=number,
+            payload={"command": "merge_base", "by": user.login, "agent": body.agent},
+            source="dashboard",
+        )
+        await service.bus.publish(event)
+        return {"run": "resolve", "event": event.id}
 
     @r.post("/prs/{owner}/{name}/{number}/ci")
     async def run_ci(

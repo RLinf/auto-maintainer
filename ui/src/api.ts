@@ -221,6 +221,9 @@ export interface ReviewGuides {
   quality_guide: string | null;
   /** Whether every open PR gets a quick score before its review. */
   quick_quality: boolean;
+  /** Rules quick scores follow, drawn automatically from the quick scores reviews corrected. */
+  quick_lessons: { rules?: string[]; at?: string; misses?: number };
+  quick_misses: { number: number; quick: number; review: number; at: string }[];
   default_writing_guide: string;
   default_quality_guide: string;
   can_configure: boolean;
@@ -339,6 +342,8 @@ export interface PrDetail {
     author: string;
     head_sha: string;
     base_ref: string;
+    head_ref?: string;
+    mergeable?: "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
     url: string;
     labels: string[];
     is_draft: boolean;

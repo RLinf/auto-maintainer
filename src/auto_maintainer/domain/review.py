@@ -389,7 +389,7 @@ def render_review(
     }
     if own_format and any(text.strip() for text in result.sections.values()):
         body = "\n\n".join(
-            f"### {heading.strip()}\n\n{text.strip()}"
+            f"### {heading.strip().lstrip('#').strip()}\n\n{text.strip()}"
             for heading, text in result.sections.items()
             if text.strip()
         )

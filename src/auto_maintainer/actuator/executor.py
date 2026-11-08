@@ -35,7 +35,9 @@ from .memory_gate import try_merge_memory
 
 log = logging.getLogger(__name__)
 
-AS_PERSON = frozenset({ActionKind.REVIEW_POST, ActionKind.PR_FIX})
+AS_PERSON = frozenset(
+    {ActionKind.REVIEW_POST, ActionKind.PR_FIX, ActionKind.PR_UPDATE_BRANCH}
+)
 """Action kinds a maintainer may run with their own GitHub account."""
 
 _COMMENT_KINDS = {

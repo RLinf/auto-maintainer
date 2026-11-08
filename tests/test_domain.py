@@ -272,6 +272,18 @@ def test_quality_is_the_latest_review_that_judged_one() -> None:
     assert review_quality([_review_record("review", None, 1)]) is None
 
 
+def test_a_skills_own_headings_are_not_doubled() -> None:
+    result = ReviewResult.model_validate(
+        {
+            "summary": "s",
+            "recommendation": "Ready",
+            "sections": {"### 1. What settings did you use?": "A800, 8 GPUs."},
+        }
+    )
+    out = render_review(result, RepoProfile(repo="acme/widget"), set(), own_format=True)
+    assert out.body.startswith("### 1. What settings did you use?\n\nA800")
+
+
 def test_scoring_boosts_are_capped_and_expire() -> None:
     goals = [
         StageGoal(id="A", title="a", keywords=["ascend"], boost=4),

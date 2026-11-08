@@ -45,6 +45,7 @@ from ..domain.ports import (
     CommandResult,
     DeployResult,
     GpuStatus,
+    MergeAttempt,
     ReviewCommentSpec,
     UpdateStatus,
     WorkChanges,
@@ -362,6 +363,7 @@ class FakeForge:
             repo=repo,
             number=number,
             expected_head_sha=expected_head_sha,
+            author=self.login,
         )
 
     async def merge(
@@ -595,6 +597,10 @@ class FakeWorkspace:
         self.diff_text = diff_text
         self.prepared: list[tuple[str, int | None, str]] = []
         self.released: list[Path] = []
+        self.merge_conflicts: dict[str, str] = {}
+        """Files a merge conflicts in, with their content (conflict markers included),
+        written into the worktree by ``merge``."""
+        self.merged: list[str] = []
 
     async def prepare(
         self, repo: str, number: int | None, sha: str, default_branch: str
@@ -614,6 +620,14 @@ class FakeWorkspace:
 
     async def merge_base(self, path: Any, a: str, b: str) -> str | None:
         return "b" * 40
+
+    async def merge(self, path: Any, branch: str) -> MergeAttempt:
+        self.merged.append(branch)
+        for name, text in self.merge_conflicts.items():
+            target = Path(path) / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text)
+        return MergeAttempt(merge_sha="d" * 40, conflicts=sorted(self.merge_conflicts))
 
     async def archive(self, path: Any, ref: str, max_bytes: int = 200_000_000) -> str:
         return base64.b64encode(f"code at {ref}".encode()).decode("ascii")
@@ -646,6 +660,10 @@ class FakePublisher:
         branch: str,
         message: str,
         author: tuple[str, str] | None = None,
+        *,
+        merge_sha: str | None = None,
+        resolved: dict[str, str] | None = None,
+        push_to: str | None = None,
     ) -> str:
         self.published.append(
             {
@@ -655,6 +673,9 @@ class FakePublisher:
                 "branch": branch,
                 "message": message,
                 "author": author,
+                "merge_sha": merge_sha,
+                "resolved": resolved or {},
+                "push_to": push_to or repo,
             }
         )
         return "c" * 40

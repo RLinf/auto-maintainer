@@ -2,7 +2,7 @@
 // an override), and whether it can merge. The agent opened here talks about this PR.
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api, type Evaluation, type Me, type PrDetail, type QuickQuality, type ReviewQuality, type ReviewStart, type RootCause, type RunCiPlan } from "../api";
 import { useAgent } from "../agent";
@@ -33,8 +33,9 @@ import { evaluationToast, qualityToast, REVIEW_STATES, usePrs, useReevaluate, us
 import { useLang, useT } from "../i18n";
 import { Icon } from "../icons";
 import { Markdown } from "../markdown";
+import { CommentOnDiff, parseDiff, usePrDiff } from "../diffview";
 import { DataTable, ListToolbar, useList, type Column } from "../list";
-import { FixButton } from "../proposal";
+import { FixButton, MergeBaseButton, type InlineComment } from "../proposal";
 import { ReproduceButton } from "../reproduce";
 import { ACTIVE, PrWork, usePrWork } from "../jobs";
 import { openJob } from "../openJob";
@@ -113,15 +114,19 @@ export default function PrPage({ me }: { me: Me }) {
             </a>
           </>
         }
+        stacked
         sub={
-          <span className="row" style={{ gap: 8 }}>
-            <Status value={pr.state.toLowerCase()} />
-            {pr.is_draft && <Status value="draft" label={t("draft")} />}
-            {(d.quality || d.quick_quality) && <Quality quality={d.quality} quick={d.quick_quality} head={pr.head_sha} />}
-            <span>
-              {pr.author} {t("wants to merge into")} <code>{pr.base_ref}</code> {t("from")} <code>{pr.head_sha.slice(0, 7)}</code>
+          <span className="stack" style={{ gap: 6 }}>
+            <span className="row" style={{ gap: 8 }}>
+              <Status value={pr.state.toLowerCase()} />
+              {pr.is_draft && <Status value="draft" label={t("draft")} />}
+              {pr.mergeable === "CONFLICTING" && <Status value="failed" label={`${t("conflicts with")} ${pr.base_ref}`} />}
+              {(d.quality || d.quick_quality) && <Quality quality={d.quality} quick={d.quick_quality} head={pr.head_sha} />}
+              <span>
+                {pr.author} {t("wants to merge into")} <code>{pr.base_ref}</code> {t("from")} <code>{pr.head_sha.slice(0, 7)}</code>
+              </span>
             </span>
-            <Labels labels={pr.labels} max={6} />
+            {pr.labels.length > 0 && <Labels labels={pr.labels} max={8} />}
           </span>
         }
         actions={
@@ -166,6 +171,15 @@ export default function PrPage({ me }: { me: Me }) {
               {reviewing ? t("Reviewing…") : d.review_state.reviewed_sha ? t("Follow up") : t("Review")}
             </button>
             {latestReview && <FixButton repo={full} number={pr.number} review={latestReview} align="right" />}
+            {pr.state === "OPEN" && (
+              <MergeBaseButton
+                repo={full}
+                number={pr.number}
+                base={pr.base_ref}
+                conflicting={pr.mergeable === "CONFLICTING"}
+                canPush={!!me.can_post_as_me}
+              />
+            )}
             <ReproduceButton repo={full} number={pr.number} />
             <RunCiButton repo={full} number={pr.number} plan={d.run_ci} />
             {claimedBy === me.login ? (
@@ -188,26 +202,7 @@ export default function PrPage({ me }: { me: Me }) {
           {tab === "overview" && <Overview d={d} />}
           {tab === "files" && <Files d={d} />}
           {tab === "timeline" && <Timeline d={d} />}
-          {tab === "reviews" && (
-            <Section title={t("Reviews by the service")}>
-              {d.reviews.length ? (
-                <div className="stack">
-                  {d.reviews.map((r, i) => (
-                    <details key={i} open={i === 0}>
-                      <summary className="small">
-                        {r.kind} {t("at")} <code>{r.sha.slice(0, 7)}</code> · <When at={r.created_at} />
-                      </summary>
-                      <div style={{ marginTop: 8 }}>
-                        {typeof r.result.body === "string" ? <Markdown text={r.result.body} className="posted" /> : <Pre text={JSON.stringify(r.result, null, 2)} />}
-                      </div>
-                    </details>
-                  ))}
-                </div>
-              ) : (
-                <Empty icon="pr">{t("The service has not posted a review on this PR.")}</Empty>
-              )}
-            </Section>
-          )}
+          {tab === "reviews" && <ReviewsTab d={d} repo={full} number={pr.number} />}
           {tab === "ci" && (
             <Section title={t("CI diagnoses")}>
               {d.ci.length ? (
@@ -329,6 +324,71 @@ export default function PrPage({ me }: { me: Me }) {
   );
 }
 
+/** A review body as stored: an older renderer doubled a skill's own heading marks. */
+function reviewBody(body: string): string {
+  return body.replace(/^(#{1,6})\s+#{1,6}\s+/gm, "$1 ");
+}
+
+/** The reviews the service posted on the PR, newest first: the main comment as GitHub
+ *  renders it, then each inline comment on the code it is about. */
+function ReviewsTab({ d, repo, number }: { d: PrDetail; repo: string; number: number }) {
+  const t = useT();
+  const [open, setOpen] = useState<number>(0);
+  const commentsOf = (actionId: string): InlineComment[] => {
+    const record = d.actions.find((a) => a.action.id === actionId);
+    const comments = record?.action.payload.comments;
+    return Array.isArray(comments) ? (comments as InlineComment[]) : [];
+  };
+  const anyComments = d.reviews.some((r) => commentsOf(r.action_id).length > 0);
+  const diff = usePrDiff(repo, number, anyComments);
+  const files = useMemo(() => (diff.data ? parseDiff(diff.data.diff) : null), [diff.data]);
+  if (!d.reviews.length) {
+    return (
+      <Section title={t("Reviews by the service")}>
+        <Empty icon="pr">{t("The service has not posted a review on this PR.")}</Empty>
+      </Section>
+    );
+  }
+  return (
+    <Section title={t("Reviews by the service")}>
+      <div className="stack" style={{ gap: 12 }}>
+        {d.reviews.map((r, i) => {
+          const comments = commentsOf(r.action_id);
+          return (
+            <details key={i} open={open === i} onToggle={(e) => (e.currentTarget.open ? setOpen(i) : open === i && setOpen(-1))}>
+              <summary className="small">
+                {t(r.kind === "followup" ? "Follow-up review" : "Review")} {t("at")} <code>{r.sha.slice(0, 7)}</code> · <When at={r.created_at} />
+                {comments.length > 0 && ` · ${comments.length} ${t("inline comments")}`}
+              </summary>
+              <div className="stack" style={{ marginTop: 10, gap: 12 }}>
+                {typeof r.result.body === "string" ? (
+                  <Markdown text={reviewBody(r.result.body)} className="posted" />
+                ) : (
+                  <Pre text={JSON.stringify(r.result, null, 2)} />
+                )}
+                {comments.map((c, j) => (
+                  <CommentOnDiff
+                    key={`${c.path}:${c.line}:${j}`}
+                    files={files}
+                    loading={diff.isLoading}
+                    path={c.path}
+                    line={c.line}
+                    start={c.start_line}
+                    side={c.side}
+                    outdated={t("This line is no longer in the PR's diff.")}
+                  >
+                    <Markdown text={c.body} className="posted" />
+                  </CommentOnDiff>
+                ))}
+              </div>
+            </details>
+          );
+        })}
+      </div>
+    </Section>
+  );
+}
+
 function Overview({ d }: { d: PrDetail }) {
   const t = useT();
   const ev = d.evaluation;
@@ -389,7 +449,7 @@ function Files({ d }: { d: PrDetail }) {
     param: "files",
   });
   const columns: Column<F>[] = [
-    { id: "path", header: t("Path"), sort: "path", cell: (f) => <span className="mono">{f.path}</span> },
+    { id: "path", primary: true, header: t("Path"), sort: "path", cell: (f) => <span className="mono">{f.path}</span> },
     { id: "add", header: "+", sort: "add", className: "num", cell: (f) => <span style={{ color: "var(--ok)" }}>{f.additions}</span> },
     { id: "del", header: "−", sort: "del", className: "num", cell: (f) => <span style={{ color: "var(--bad)" }}>{f.deletions}</span> },
     {
@@ -436,7 +496,7 @@ function Timeline({ d }: { d: PrDetail }) {
   });
   const columns: Column<TimelineRow>[] = [
     { id: "when", header: t("When"), sort: "when", cell: (a) => <When at={a.action.created_at} />, width: 100 },
-    { id: "kind", header: t("Action"), sort: "kind", cell: (a) => <span className="mono">{a.action.kind}</span> },
+    { id: "kind", primary: true, header: t("Action"), sort: "kind", cell: (a) => <span className="mono">{a.action.kind}</span> },
     { id: "status", header: t("Status"), sort: "status", cell: (a) => <Status value={a.status} /> },
     {
       id: "decision",

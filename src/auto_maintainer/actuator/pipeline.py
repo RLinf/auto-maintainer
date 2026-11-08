@@ -290,9 +290,11 @@ class ActionPipeline:
             if post_as != login or action.kind not in (
                 ActionKind.REVIEW_POST,
                 ActionKind.PR_FIX,
+                ActionKind.PR_UPDATE_BRANCH,
             ):
                 raise ApprovalError(
-                    "only a review draft or a fix can be posted as its approver"
+                    "only a review draft, a fix, or a branch update can be done as "
+                    "its approver"
                 )
             record.post_as = post_as
         elif action.kind == ActionKind.PR_FIX:

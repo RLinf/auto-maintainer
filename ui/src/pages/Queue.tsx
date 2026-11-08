@@ -134,6 +134,7 @@ export default function QueuePage({ me }: { me: Me }) {
     },
     {
       id: "title",
+      primary: true,
       header: t("Pull request"),
       sort: "title",
       cell: (p) => (
@@ -157,7 +158,6 @@ export default function QueuePage({ me }: { me: Me }) {
       id: "state",
       header: t("Review"),
       sort: "state",
-      className: "hide-phone",
       cell: (p) => (
         <div className="stack" style={{ gap: 4, alignItems: "flex-start" }}>
           <ReviewState state={p.review_state} />

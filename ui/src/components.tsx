@@ -15,14 +15,17 @@ export function PageHead({
   sub,
   actions,
   crumbs,
+  stacked,
 }: {
   title: ReactNode;
   sub?: ReactNode;
   actions?: ReactNode;
   crumbs?: { to: string; label: string }[];
+  /** Actions on their own row under the title, for long titles and many actions. */
+  stacked?: boolean;
 }) {
   return (
-    <div className="page-head">
+    <div className={`page-head${stacked ? " stacked" : ""}`}>
       <div className="titles">
         {crumbs && (
           <nav className="crumbs" aria-label="Breadcrumb">

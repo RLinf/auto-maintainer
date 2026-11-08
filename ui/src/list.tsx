@@ -350,6 +350,11 @@ export interface Column<T> {
   sort?: string;
   className?: string;
   width?: number | string;
+  /** On a phone, where the table turns into cards, this column (the title) takes the
+   *  card's first row; the other cells follow it, each named by ``label``. */
+  primary?: boolean;
+  /** The cell's name on a phone card; the header when it is text. */
+  label?: string;
 }
 
 export function DataTable<T>({
@@ -444,7 +449,11 @@ export function DataTable<T>({
         </td>
       )}
       {columns.map((c) => (
-        <td key={c.id} className={c.className}>
+        <td
+          key={c.id}
+          className={`${c.className ?? ""}${c.primary ? " primary" : ""}`.trim() || undefined}
+          data-label={c.label ?? (typeof c.header === "string" && c.header ? c.header : undefined)}
+        >
           {c.cell(row)}
         </td>
       ))}
@@ -454,7 +463,7 @@ export function DataTable<T>({
   return (
     <div className="table-card">
       <div className="table-wrap">
-        <table>
+        <table className={columns.some((c) => c.primary) ? "cards" : undefined}>
           <thead>{header}</thead>
           <tbody>
             {list.grouped

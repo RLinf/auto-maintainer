@@ -604,3 +604,53 @@ async def test_a_repositorys_task_asks_people_nothing_about_code(
     intent = AgentQuestion(kind=QuestionKind.INPUT, title="Which design is wanted?")
     assert (await runtime.resolve(task, intent)).allow is True
     assert len(desk.questions) == 1
+
+
+async def test_an_agent_that_stops_on_a_refusal_is_told_to_go_on(
+    tmp_path: Path, talking_cli
+) -> None:
+    """Antigravity ends its turn when a request is refused, waiting for a person; the
+    conversation tells it what was refused and to finish without it."""
+    cli = talking_cli(
+        [
+            {
+                "wait": '"initialize"',
+                "emit": [{"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": 1}}],
+            },
+            {
+                "wait": '"session/new"',
+                "emit": [{"jsonrpc": "2.0", "id": 2, "result": {"sessionId": "s1"}}],
+            },
+            {
+                "wait": '"session/set_mode"',
+                "emit": [{"jsonrpc": "2.0", "id": 3, "result": {}}],
+            },
+            {
+                "wait": '"session/prompt"',
+                "emit": [
+                    _permission("p1", "execute", "pytest", {"CommandLine": "pytest -q"})
+                ],
+            },
+            {
+                "wait": '"p1"',
+                "emit": [
+                    {"jsonrpc": "2.0", "id": 4, "result": {"stopReason": "end_turn"}}
+                ],
+            },
+            {
+                "wait": "do not try it again",
+                "emit": [
+                    _chunk('{"ok": true}'),
+                    {"jsonrpc": "2.0", "id": 5, "result": {"stopReason": "end_turn"}},
+                ],
+            },
+        ]
+    )
+    rt = AntigravityRuntime(binary=str(cli.path), runs_dir=tmp_path / "runs")
+    task = _task(tmp_path, output_schema=SCHEMA, run_code="skills", requested_by=None)
+    _, result = await _run(rt, task)
+    assert result.ok and result.structured == {"ok": True}, result.error
+    prompts = _sent(cli, "method", "session/prompt")
+    assert len(prompts) == 2
+    again = prompts[1]["params"]["prompt"][0]["text"]
+    assert "pytest -q" in again and "test machines" in again
