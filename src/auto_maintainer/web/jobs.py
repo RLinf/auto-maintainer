@@ -51,6 +51,7 @@ AGENT_PLAYBOOKS = {
     "onboard": "onboard",
     "self_improve": "self_improve",
     "evaluate": "evaluate",
+    "quality": "review",
 }
 """Playbooks whose work is an agent's, and the task kind of their main agent run."""
 

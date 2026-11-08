@@ -379,11 +379,29 @@ _PROGRESS_FINDINGS = [
     },
 ]
 """What the demo's review finds in the progress-bar PR besides the shared finding,
-so the demo's PRs land in different quality bands."""
+so the demo's PRs show different findings."""
+
+
+def _quality(task: AgentTask) -> dict[str, Any]:
+    """The demo's judgment of a PR's quality: the progress bar is a useful feature
+    with a design problem; the other PRs are small, well-placed fixes."""
+    if "progress bar" in task.prompt:
+        return {
+            "score": 64,
+            "reason": "A useful feature, but every worker drawing its own bar is a "
+            "design problem to settle before the smaller fixes.",
+        }
+    return {
+        "score": 88,
+        "reason": "A focused fix that follows the loader's existing checks; only a "
+        "boundary test is missing.",
+    }
 
 
 def _answer(task: AgentTask) -> dict[str, Any]:
     kind = str(task.kind)
+    if kind == "review" and task.prompt.startswith("You judge the quality of PR"):
+        return _quality(task)
     if kind == "chat" and "You turn the description" in task.prompt:
         return _machine_rules(task.prompt)
     if kind in ("review", "followup") and TALKING in task.prompt:
@@ -421,6 +439,7 @@ def _answer(task: AgentTask) -> dict[str, Any]:
                 }
             ]
             + (_PROGRESS_FINDINGS if "progress bar" in task.prompt else []),
+            "quality": _quality(task),
             "recommendation": "Ready",
             "remaining_actions": ["Add the boundary case."],
             # a label that fits the PR under review; one it already has is dropped
@@ -437,7 +456,12 @@ def _answer(task: AgentTask) -> dict[str, Any]:
             ]
         }
     if kind == "followup":
-        return {"statuses": [], "new_findings": [], "recommendation": "Ready"}
+        return {
+            "statuses": [],
+            "new_findings": [],
+            "recommendation": "Ready",
+            "quality": _quality(task),
+        }
     if kind == "ci_diagnose":
         return {
             "category": "pr_caused",

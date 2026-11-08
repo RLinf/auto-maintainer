@@ -184,6 +184,12 @@ class Review(_Section):
     """Whether reviews and follow-ups suggest labels from the repository's own (never
     the role labels the service manages); a suggestion is a ``label.apply`` action."""
     max_suggested_labels: int = Field(default=3, ge=1, le=10)
+    writing_guide: str | None = Field(default=None, max_length=8000)
+    """How every review, follow-up, and revision of one is written, in plain words;
+    ``None`` uses the service's default (``playbooks.prompts.DEFAULT_WRITING_GUIDE``)."""
+    quality_guide: str | None = Field(default=None, max_length=8000)
+    """How the reviewing agent judges the PR's quality from 0 to 100; ``None`` uses
+    the service's default (``playbooks.prompts.DEFAULT_QUALITY_GUIDE``)."""
 
     def meaning_of(self, recommendation: str | None) -> str | None:
         """Map a recommendation label back to ``ready``, ``changes``, or ``blocked``."""

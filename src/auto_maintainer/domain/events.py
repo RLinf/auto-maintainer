@@ -50,6 +50,9 @@ class EventKind(StrEnum):
     PRIORITY_RESCORE = "priority.rescore"
     """The rubric's dimensions changed since this PR was scored; the evaluate
     playbook scores every dimension again."""
+    QUALITY_REQUESTED = "quality.requested"
+    """Score the quality of a PR's latest review again, or for the first time when it
+    has none; the quality playbook runs it."""
     MERGE_ARMED = "merge.armed"
     MERGE_DISARMED = "merge.disarmed"
     MERGE_QUEUE = "merge.queue"

@@ -42,11 +42,11 @@ from auto_maintainer.domain.permissions import Permission
 from auto_maintainer.domain.profile import RepoProfile, Timing
 from auto_maintainer.domain.records import ActionRecord
 from auto_maintainer.domain.review import (
+    QualityAssessment,
     ReviewResult,
     ReviewState,
     classify_review_state,
     quality_band,
-    quality_score,
     render_review,
     review_quality,
 )
@@ -203,17 +203,30 @@ def test_render_review_puts_diff_findings_inline() -> None:
     )
 
 
-def test_quality_loses_points_by_severity_and_bands_the_score() -> None:
-    assert (quality_score({}), quality_band(100)) == (100, "excellent")
-    assert quality_score({"minor": 3}) == 85 and quality_band(85) == "good"
-    assert quality_score({"major": 2}) == 60 and quality_band(60) == "fair"
-    assert quality_score({"critical": 1}) == 55 and quality_band(55) == "poor"
-    assert quality_score({"critical": 3}) == 0 and quality_band(0) == "bad"
+def test_quality_bands_and_lenient_scores() -> None:
+    assert [quality_band(n) for n in (100, 90, 89, 75, 60, 59, 40, 39, 0)] == [
+        "excellent",
+        "excellent",
+        "good",
+        "good",
+        "fair",
+        "poor",
+        "poor",
+        "bad",
+        "bad",
+    ]
+    base = {"summary": "s", "recommendation": "Ready"}
+    scored = ReviewResult.model_validate({**base, "quality": {"score": 87.6}})
+    assert scored.quality is not None and scored.quality.score == 88
+    clamped = ReviewResult.model_validate({**base, "quality": {"score": 130}})
+    assert clamped.quality is not None and clamped.quality.score == 100
+    assert ReviewResult.model_validate({**base, "quality": "great"}).quality is None
 
 
 def _review_record(
-    kind: str, result: dict, minute: int, status=ActionStatus.EXECUTED
+    kind: str, quality: int | None, minute: int, status=ActionStatus.EXECUTED
 ) -> ActionRecord:
+    result = {"quality": {"score": quality, "reason": f"r{minute}"}} if quality else {}
     return ActionRecord(
         action=Action(
             kind=ActionKind.REVIEW_POST,
@@ -227,52 +240,36 @@ def _review_record(
     )
 
 
-def _f(id_: str, severity: str) -> dict:
-    return {"id": id_, "severity": severity, "category": "c", "title": id_, "body": ""}
-
-
-def test_quality_follows_the_chain_of_reviews() -> None:
-    first = _review_record(
-        "review", {"findings": [_f("F1", "major"), _f("F2", "minor")]}, 1
-    )
-    followup = _review_record(
-        "followup",
-        {
-            "statuses": [
-                {"id": "F1", "status": "resolved"},
-                {"id": "F2", "status": "partial"},
-            ],
-            "new_findings": [_f("F1", "nit")],
-        },
-        2,
-    )
+def test_quality_is_the_latest_review_that_judged_one() -> None:
+    first = _review_record("review", 62, 1)
+    followup = _review_record("followup", 81, 2)
     q = review_quality([followup, first])
-    assert q is not None and q.open == {"minor": 0.5, "nit": 1.0}
-    assert (q.score, q.band, q.kind, q.posted) == (96, "excellent", "followup", True)
-
-    rejected = _review_record(
+    assert q is not None and (q.score, q.band, q.kind, q.reason) == (
+        81,
+        "good",
         "followup",
-        {"statuses": [{"id": "F2", "status": "open"}]},
-        3,
-        ActionStatus.DENIED,
+        "r2",
     )
+
+    rejected = _review_record("followup", 30, 3, ActionStatus.DENIED)
     assert review_quality([first, followup, rejected]) == q, (
         "a rejected draft is ignored"
     )
 
-    draft = _review_record(
-        "followup",
-        {"statuses": [{"id": "F2", "status": "open"}]},
-        4,
-        ActionStatus.PROPOSED,
-    )
+    draft = _review_record("followup", 70, 4, ActionStatus.PROPOSED)
     q = review_quality([first, followup, draft])
-    assert q is not None and q.open == {"minor": 1.0, "nit": 1.0} and not q.posted
+    assert q is not None and (q.score, q.posted) == (70, False)
 
-    again = _review_record("review", {"findings": [_f("F1", "critical")]}, 5)
-    q = review_quality([first, followup, draft, again])
-    assert q is not None and (q.open, q.band) == ({"critical": 1.0}, "poor")
-    assert review_quality([]) is None
+    unjudged = _review_record("followup", None, 5)
+    q = review_quality([first, followup, unjudged])
+    assert q is not None and q.score == 81, "falls back to the last review that judged"
+
+    assessed = QualityAssessment(
+        score=55, reason="again", action_id=unjudged.action.id, at=T0
+    )
+    q = review_quality([first, followup, unjudged], assessed)
+    assert q is not None and (q.score, q.rescored, q.band) == (55, True, "poor")
+    assert review_quality([_review_record("review", None, 1)]) is None
 
 
 def test_scoring_boosts_are_capped_and_expire() -> None:

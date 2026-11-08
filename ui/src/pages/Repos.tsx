@@ -5,7 +5,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { api, type Agreement, type GateDecision, type MemoryChange, type ProfileResponse, type RepoRow } from "../api";
+import { api, type Agreement, type GateDecision, type MemoryChange, type ProfileResponse, type RepoRow, type ReviewGuides } from "../api";
 import { useAgent } from "../agent";
 import { RepoMachinesSection, useRepoMachines } from "../machines";
 import { ProfileChanges, type Profile } from "../profileView";
@@ -345,6 +345,9 @@ export function RepoDetailPage() {
             )}
           </Section>
           <LevelsSection repo={full} />
+          <div style={{ gridColumn: "1 / -1" }}>
+            <ReviewGuidesSection repo={full} />
+          </div>
         </div>
       )}
 
@@ -482,6 +485,113 @@ function SettingsEditor({
       )}
       <ErrorBox error={save.error} />
     </Section>
+  );
+}
+
+/** How the repository's reviews are written and how their agent judges a PR's
+ *  quality: plain text every review, follow-up, and revision reads. The service's
+ *  default applies until a maintainer changes it; saving is a settings change that a
+ *  maintainer of the repository applies. */
+function ReviewGuidesSection({ repo }: { repo: string }) {
+  const t = useT();
+  const toast = useToast();
+  const url = `/api/repos/${repo}/review-guides`;
+  const view = useQuery({ queryKey: ["profile", repo, "review-guides"], queryFn: () => api.get<ReviewGuides>(url) });
+  const d = view.data;
+  const [writing, setWriting] = useState("");
+  const [quality, setQuality] = useState("");
+  useEffect(() => {
+    if (!d) return;
+    setWriting(d.writing_guide ?? d.default_writing_guide);
+    setQuality(d.quality_guide ?? d.default_quality_guide);
+  }, [d]);
+  const save = useAct(
+    () => api.put<{ applied: boolean; reason: string }>(url, { writing_guide: writing, quality_guide: quality }),
+    [["profile"], ["memory"]],
+  );
+  const changed =
+    !!d &&
+    (writing.trim() !== (d.writing_guide ?? d.default_writing_guide).trim() || quality.trim() !== (d.quality_guide ?? d.default_quality_guide).trim());
+  return (
+    <Section title={t("How reviews read and score")} hint={t("every review, follow-up, and revision")}>
+      {!d ? (
+        view.isLoading ? <Skeleton rows={4} /> : null
+      ) : (
+        <div className="stack" style={{ gap: 14 }}>
+          <span className="small muted">
+            {t("Plain instructions the reviewing agent follows, over the review skill's own format.")}{" "}
+            {d.can_configure ? t("You qualify, so saving is your approval.") : t("Changes you make here are proposals for a maintainer of the repository.")}
+          </span>
+          <GuideField
+            label={t("Writing")}
+            hint={t("How the review comment reads: who it is for, how long it is, and how much code it shows.")}
+            value={writing}
+            onChange={setWriting}
+            fallback={d.default_writing_guide}
+          />
+          <GuideField
+            label={t("Quality score")}
+            hint={t("How the agent scores the PR from 0 to 100. Internal: never posted. The bands are fixed: 90 excellent, 75 good, 60 fair, 40 poor.")}
+            value={quality}
+            onChange={setQuality}
+            fallback={d.default_quality_guide}
+          />
+          <div className="row">
+            <span className="spacer" />
+            <button
+              className="primary"
+              disabled={!changed || save.isPending}
+              onClick={() =>
+                save.mutate(undefined, {
+                  onSuccess: (r) =>
+                    toast({
+                      title: r.applied ? t("Saved") : t("Change proposed"),
+                      body: r.applied ? t("The next reviews follow it.") : `${t("A maintainer of the repository applies it.")} ${r.reason}`,
+                      icon: r.applied ? "check" : "inbox",
+                    }),
+                })
+              }
+            >
+              {d.can_configure ? t("Save and apply") : t("Propose")}
+            </button>
+          </div>
+        </div>
+      )}
+      <ErrorBox error={view.error || save.error} />
+    </Section>
+  );
+}
+
+function GuideField({
+  label,
+  hint,
+  value,
+  onChange,
+  fallback,
+}: {
+  label: string;
+  hint: string;
+  value: string;
+  onChange: (v: string) => void;
+  fallback: string;
+}) {
+  const t = useT();
+  const isDefault = value.trim() === fallback.trim();
+  return (
+    <label className="stack" style={{ gap: 6 }}>
+      <span className="row" style={{ gap: 8 }}>
+        <strong>{label}</strong>
+        <span className={`pill ${isDefault ? "status-ok" : "status-warn"}`}>{isDefault ? t("service default") : t("this repository's own")}</span>
+        <span className="spacer" />
+        {!isDefault && (
+          <button type="button" className="ghost sm" onClick={() => onChange(fallback)}>
+            {t("Restore the default")}
+          </button>
+        )}
+      </span>
+      <span className="small muted">{hint}</span>
+      <textarea value={value} onChange={(e) => onChange(e.target.value)} rows={Math.min(16, Math.max(5, value.split("\n").reduce((n, line) => n + Math.max(1, Math.ceil(line.length / 110)), 1)))} />
+    </label>
   );
 }
 

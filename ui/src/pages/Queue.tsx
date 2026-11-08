@@ -7,7 +7,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { api, type Me, type PrRow, type ReviewActivity, type ReviewStart } from "../api";
 import { useAgent } from "../agent";
 import { ErrorBox, Labels, PageHead, prPath, Quality, QUALITY_BANDS, qualityLabel, ReviewState, Tier, timeOf, useAct, When } from "../components";
-import { evaluationToast, prKey, REVIEW_ORDER, REVIEW_STATES, TIER_ORDER, usePrs, useReevaluate, useRepos, useSyncPrs } from "../data";
+import { evaluationToast, prKey, qualityToast, REVIEW_ORDER, REVIEW_STATES, TIER_ORDER, usePrs, useReevaluate, useRepos, useScoreQuality, useSyncPrs } from "../data";
 import { RepoTabs, useRepoScope } from "../repoScope";
 import { useT } from "../i18n";
 import { Icon } from "../icons";
@@ -92,6 +92,7 @@ export default function QueuePage({ me }: { me: Me }) {
 
   const [reviewer, setReviewer] = useAgentChoice("review");
   const again = useReevaluate();
+  const quality = useScoreQuality();
   const sync = useSyncPrs();
   const [confirmAll, setConfirmAll] = useState(false);
   const review = useAct(
@@ -300,6 +301,22 @@ export default function QueuePage({ me }: { me: Me }) {
           <Icon name="sparkles" size={14} />
           {`${t("Score again")} ${selected.length}`}
         </button>
+        {selected.some((p) => p.quality || p.reviewed_sha) && (
+          <button
+            className="sm"
+            disabled={quality.isPending}
+            title={t("An agent judges each reviewed PR's quality again by the repository's quality guide")}
+            onClick={() =>
+              quality.mutate(
+                selected.filter((p) => p.quality || p.reviewed_sha).map((p) => ({ repo: p.repo, number: p.number })),
+                { onSuccess: (out) => (toast(qualityToast(out, t)), list.clearSelection()) },
+              )
+            }
+          >
+            <Icon name="sparkles" size={14} />
+            {`${t("Score quality")} ${selected.filter((p) => p.quality || p.reviewed_sha).length}`}
+          </button>
+        )}
         <button
           className="sm"
           onClick={() =>

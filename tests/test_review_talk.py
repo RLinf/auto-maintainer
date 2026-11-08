@@ -109,6 +109,9 @@ async def test_a_reviewer_talks_the_agent_out_of_a_finding(demo) -> None:
     payload = ReviewPostPayload.model_validate(record.action.payload)
     assert payload.comments == [] and payload.recommendation == "Ready"
     assert (payload.result or {})["findings"] == [], "a fix reads the revised findings"
+    assert (payload.result or {})["quality"]["score"] == 88, (
+        "a revision that does not judge the quality again keeps it"
+    )
     proposal = await h.store.proposal_for_action(draft)
     assert proposal is not None and proposal.edited and proposal.state == "pending"
     edits = [s for s in await h.store.list_signals() if s.kind == "draft_edited"]

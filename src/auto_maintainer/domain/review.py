@@ -21,7 +21,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from .actions import ActionKind, ActionStatus, InlineComment
 from .ids import same_commit, short_sha
@@ -162,6 +162,57 @@ class TestRun(BaseModel):
     skipped_reason: str | None = None
 
 
+class QualityVerdict(BaseModel):
+    """The reviewing agent's judgment of the PR's quality, following the repository's
+    quality guide (``review.quality``). Internal: never posted."""
+
+    score: int = Field(
+        ge=0,
+        le=100,
+        description="0 to 100, as the quality guide you were given defines it.",
+    )
+    reason: str = Field(
+        default="",
+        description="One or two plain sentences on what most decides the score.",
+    )
+
+    @field_validator("score", mode="before")
+    @classmethod
+    def _round(cls, value: Any) -> Any:
+        if isinstance(value, float):
+            return round(value)
+        return value
+
+
+def _lenient_quality(value: Any) -> Any:
+    """A quality the agent got wrong is dropped rather than failing its review: a
+    score outside 0 to 100 is clamped, and anything else unreadable becomes ``None``."""
+    if value is None or isinstance(value, QualityVerdict):
+        return value
+    if isinstance(value, int | float):
+        value = {"score": value}
+    if not isinstance(value, dict):
+        return None
+    raw = value.get("score")
+    if isinstance(raw, str):
+        try:
+            raw = float(raw.strip())
+        except ValueError:
+            return None
+    if not isinstance(raw, int | float) or isinstance(raw, bool):
+        return None
+    return {
+        "score": max(0, min(100, round(raw))),
+        "reason": str(value.get("reason") or ""),
+    }
+
+
+_QUALITY_DESCRIPTION = (
+    "Your judgment of the PR's quality, following the quality guide you were given. "
+    "Internal: never mention it in the summary, the sections, or the findings."
+)
+
+
 class ReviewResult(BaseModel):
     """The structure every review skill returns (design 5.6)."""
 
@@ -177,6 +228,11 @@ class ReviewResult(BaseModel):
         description="Labels from the list you were given that this PR should carry "
         "and does not have yet; empty when none clearly applies.",
     )
+    quality: QualityVerdict | None = Field(
+        default=None, description=_QUALITY_DESCRIPTION
+    )
+
+    _quality = field_validator("quality", mode="before")(_lenient_quality)
 
 
 class FindingStatus(BaseModel):
@@ -197,6 +253,12 @@ class FollowupResult(BaseModel):
         description="Labels from the list you were given that this PR should carry "
         "now and does not have yet; empty when none clearly applies.",
     )
+    quality: QualityVerdict | None = Field(
+        default=None,
+        description=_QUALITY_DESCRIPTION + " Judge the PR as it is at its head now.",
+    )
+
+    _quality = field_validator("quality", mode="before")(_lenient_quality)
 
 
 class RenderedReview(BaseModel):
@@ -363,15 +425,8 @@ def render_followup(
 
 
 # ---------------------------------------------------------------------------
-# Quality: how sound the latest review found the PR (design 5.6).
+# Quality: the reviewing agent's judgment of the PR (design 5.6).
 # ---------------------------------------------------------------------------
-
-QUALITY_PENALTY: dict[str, int] = {"critical": 45, "major": 20, "minor": 5, "nit": 1}
-"""Points a PR loses from 100 for each finding still open, by severity. One
-critical finding leaves it ``poor`` at best; two majors leave it ``fair``."""
-
-PARTIAL_WEIGHT = 0.5
-"""A finding a follow-up found partly addressed counts this much of its penalty."""
 
 QualityBand = Literal["excellent", "good", "fair", "poor", "bad"]
 
@@ -382,7 +437,8 @@ QUALITY_BANDS: tuple[tuple[int, QualityBand], ...] = (
     (40, "poor"),
     (0, "bad"),
 )
-"""The lowest score of each band, best first."""
+"""The lowest score of each band, best first; the default quality guide describes
+the same bands to the agent."""
 
 _COUNTED_DRAFTS = {
     ActionStatus.SHADOWED,
@@ -396,21 +452,31 @@ _COUNTED_DRAFTS = {
 assessment. A draft a maintainer rejected (``denied``) does not."""
 
 
+class QualityAssessment(QualityVerdict):
+    """A quality an agent gave a review after it was written: for a review that had
+    none, or when a maintainer asked for the PR to be scored again."""
+
+    action_id: str
+    """The ``review.post`` action it scores."""
+    sha: str = ""
+    at: datetime
+
+
 class ReviewQuality(BaseModel):
-    """The PR's quality as its latest review or follow-up found it: 100 less
-    ``QUALITY_PENALTY`` for each finding still open. Internal: it never reaches
-    a public action."""
+    """A PR's quality as the agent judged it in its latest review that has one, or in
+    a later assessment of that review. Internal: it never reaches a public action."""
 
     score: int = Field(ge=0, le=100)
     band: QualityBand
-    open: dict[str, float] = Field(default_factory=dict)
-    """Open findings per severity; a partly addressed one counts ``PARTIAL_WEIGHT``."""
+    reason: str = ""
     sha: str = ""
-    """The head the latest review assessed."""
+    """The head the judged review looked at."""
     kind: Literal["review", "followup"] = "review"
     posted: bool = True
-    """Whether that latest review was posted, or is a draft or a shadow run."""
+    """Whether that review was posted, or is a draft or a shadow run."""
     action_id: str = ""
+    rescored: bool = False
+    """Whether the score comes from a later assessment, not from the review itself."""
 
 
 def quality_band(score: int) -> QualityBand:
@@ -421,50 +487,10 @@ def quality_band(score: int) -> QualityBand:
     return "bad"
 
 
-def quality_score(open_findings: dict[str, float]) -> int:
-    """100 less the penalty of each open finding, between 0 and 100."""
-    penalty = sum(QUALITY_PENALTY.get(s, 0) * n for s, n in open_findings.items())
-    return max(0, min(100, round(100 - penalty)))
-
-
-def open_findings(chain: Iterable[tuple[str, dict[str, Any]]]) -> dict[str, float]:
-    """Open findings per severity after a chain of reviews, oldest first, each a
-    ``(kind, result)`` pair. A first review starts the chain over; a follow-up marks
-    earlier findings resolved, partly addressed, or open, and adds its new ones."""
-    findings: dict[str, tuple[str, float]] = {}
-    for kind, result in chain:
-        if kind == "review":
-            findings = {}
-            added = result.get("findings") or []
-        else:
-            weights = {"resolved": 0.0, "partial": PARTIAL_WEIGHT, "open": 1.0}
-            for status in result.get("statuses") or []:
-                key = str(status.get("id") or "")
-                if key in findings and status.get("status") in weights:
-                    severity, _ = findings[key]
-                    findings[key] = (severity, weights[status["status"]])
-            added = result.get("new_findings") or []
-        for f in added:
-            severity = f.get("severity")
-            if severity not in QUALITY_PENALTY:
-                continue
-            key = str(f.get("id") or len(findings))
-            while key in findings:
-                key += "'"
-            findings[key] = (severity, 1.0)
-    out: dict[str, float] = {}
-    for severity, weight in findings.values():
-        if weight:
-            out[severity] = out.get(severity, 0.0) + weight
-    return out
-
-
-def review_quality(records: Iterable[ActionRecord]) -> ReviewQuality | None:
-    """The quality of one PR from its ``review.post`` actions, any order.
-
-    The chain is what follow-ups built on: the posted reviews, in order, then the
-    latest review when it is a newer draft or shadow run. ``None`` when the PR has
-    no review."""
+def review_chain(records: Iterable[ActionRecord]) -> list[ActionRecord]:
+    """A PR's reviews as follow-ups build on them, oldest first: the posted
+    ``review.post`` actions, then the latest one when it is a newer draft or shadow
+    run."""
     reviews = sorted(
         (
             r
@@ -474,27 +500,41 @@ def review_quality(records: Iterable[ActionRecord]) -> ReviewQuality | None:
         ),
         key=lambda r: r.action.created_at,
     )
-    if not reviews:
-        return None
     chain = [r for r in reviews if r.status == ActionStatus.EXECUTED]
-    if reviews[-1].status != ActionStatus.EXECUTED:
+    if reviews and reviews[-1].status != ActionStatus.EXECUTED:
         chain.append(reviews[-1])
-    latest = chain[-1]
-    kind = "followup" if latest.action.payload.get("kind") == "followup" else "review"
-    found = open_findings(
-        (
-            "followup" if r.action.payload.get("kind") == "followup" else "review",
-            r.action.payload.get("result") or {},
+    return chain
+
+
+def review_quality(
+    records: Iterable[ActionRecord], assessed: QualityAssessment | None = None
+) -> ReviewQuality | None:
+    """The quality of one PR from its ``review.post`` actions, in any order: the
+    newest review in its chain with a quality, where ``assessed`` replaces the
+    quality of the review it scores. ``None`` when no review has one."""
+    for record in reversed(review_chain(records)):
+        verdict: QualityVerdict | None
+        rescored = assessed is not None and assessed.action_id == record.action.id
+        if rescored:
+            verdict = assessed
+        else:
+            raw = (record.action.payload.get("result") or {}).get("quality")
+            try:
+                verdict = QualityVerdict.model_validate(_lenient_quality(raw))
+            except ValueError:
+                verdict = None
+        if verdict is None:
+            continue
+        return ReviewQuality(
+            score=verdict.score,
+            band=quality_band(verdict.score),
+            reason=verdict.reason,
+            sha=record.action.head_sha or "",
+            kind="followup"
+            if record.action.payload.get("kind") == "followup"
+            else "review",
+            posted=record.status == ActionStatus.EXECUTED,
+            action_id=record.action.id,
+            rescored=rescored,
         )
-        for r in chain
-    )
-    score = quality_score(found)
-    return ReviewQuality(
-        score=score,
-        band=quality_band(score),
-        open=found,
-        sha=latest.action.head_sha or "",
-        kind=kind,
-        posted=latest.status == ActionStatus.EXECUTED,
-        action_id=latest.action.id,
-    )
+    return None

@@ -44,10 +44,12 @@ from .prompts import (
     label_block,
     label_choices,
     pr_block,
+    quality_block,
     reproduction_block,
     review_skill_block,
     schema_hint,
     untrusted,
+    writing_block,
 )
 from .reproduce import auto_reproduction
 from .requests import FOLLOWUP_STATES, review_key, review_request, starts_review
@@ -144,6 +146,8 @@ class Followup(Playbook):
                         or "(no structured findings; read the earlier review comments)",
                         30_000,
                     ),
+                    writing_block(profile),
+                    quality_block(profile, followup=True),
                     f"Last reviewed commit: {previous_sha or 'unknown'}. Head: {pr.head_sha}.",
                     reproduction_block(
                         await reproduction_record(ctx.store, pr.repo, pr.number),

@@ -72,6 +72,8 @@ from ..domain.secrets import redact_secrets
 from ..domain.snapshot import PrState
 from ..playbooks.evaluate import haystack, rubric_of
 from ..playbooks.hygiene import hygiene_key
+from ..playbooks.prompts import DEFAULT_QUALITY_GUIDE, DEFAULT_WRITING_GUIDE
+from ..playbooks.quality import assessed_quality
 from ..profiles.layers import ProfileError, parse_yaml
 from ..profiles.lock import parse_lock, profile_diff
 from ..service import Service
@@ -353,6 +355,12 @@ class AutomationBody(BaseModel):
     every_hours: int = Field(default=6, ge=1, le=168)
     max_prs: int = Field(default=5, ge=1, le=50)
     followups: bool = True
+
+
+class ReviewGuidesBody(BaseModel):
+    writing_guide: str | None = Field(default=None, max_length=8000)
+    quality_guide: str | None = Field(default=None, max_length=8000)
+    """Empty, or the service's default, restores the default."""
 
 
 def cron_every(hours: int) -> str:
@@ -724,6 +732,82 @@ def build_router() -> APIRouter:
             "reason": decision.reason,
         }
 
+    @r.get("/repos/{owner}/{name}/review-guides")
+    async def review_guides(
+        request: Request, owner: str, name: str, user: User = Depends(current_user)
+    ) -> dict[str, Any]:
+        """How the repository's reviews are written and how their agent judges a PR's
+        quality: each guide as the repository sets it (``None`` for the default),
+        and the defaults."""
+        service = service_of(request)
+        repo = _repo(owner, name)
+        await require_view(service, user, repo)
+        profile = await service.profiles.active(repo)
+        if profile is None:
+            raise HTTPException(409, f"{repo} has no approved profile yet")
+        gate = await service.gate.check(repo, user.login, profile, person=True)
+        return {
+            "repo": repo,
+            "writing_guide": profile.review.writing_guide,
+            "quality_guide": profile.review.quality_guide,
+            "default_writing_guide": DEFAULT_WRITING_GUIDE,
+            "default_quality_guide": DEFAULT_QUALITY_GUIDE,
+            "can_configure": gate.allowed,
+            "reason": gate.reason,
+        }
+
+    @r.put("/repos/{owner}/{name}/review-guides")
+    async def set_review_guides(
+        request: Request,
+        owner: str,
+        name: str,
+        body: ReviewGuidesBody,
+        user: User = Depends(current_user),
+    ) -> dict[str, Any]:
+        """Change the guides through the repository's settings layer; a maintainer
+        applies it by making it, anyone else proposes it."""
+        service = service_of(request)
+        repo = _repo(owner, name)
+        await require_view(service, user, repo)
+        current = await service.profiles.active(repo)
+        layer = parse_yaml(
+            await service.a.memory.read_text(profile_path(repo)) or "", "settings"
+        )
+        review = dict(layer.get("review") or {})
+        for key, text, default in (
+            ("writing_guide", body.writing_guide, DEFAULT_WRITING_GUIDE),
+            ("quality_guide", body.quality_guide, DEFAULT_QUALITY_GUIDE),
+        ):
+            text = (text or "").strip()
+            if text and text != default.strip():
+                review[key] = text + "\n"
+            else:
+                review.pop(key, None)
+        if review:
+            layer["review"] = review
+        else:
+            layer.pop("review", None)
+        try:
+            merged, change = await service.profiles.propose_memory_layer(
+                repo, layer, user.login, "review: writing and quality guides"
+            )
+        except ProfileError as e:
+            raise HTTPException(422, str(e)) from e
+        decision = await service.gate.check(
+            repo, user.login, current, merged.profile, person=True
+        )
+        if decision.allowed:
+            change.approvals = {repo: [user.login]}
+        change.requested_by = user.login
+        await service.store.save_memory_change(change)
+        await service.submit_memory_change(change)
+        stored = await service.store.get_memory_change(change.id)
+        return {
+            "applied": bool(stored and stored.state == "merged"),
+            "change": stored.model_dump(mode="json") if stored else None,
+            "reason": decision.reason,
+        }
+
     @r.post("/repos/{owner}/{name}/pause")
     async def pause_repo(
         request: Request,
@@ -978,6 +1062,56 @@ def build_router() -> APIRouter:
             service, user.login, [(t.repo, t.number) for t in targets], "dashboard"
         )
 
+    @r.post("/quality")
+    async def request_quality(
+        request: Request, body: EvaluationsBody, user: User = Depends(current_user)
+    ) -> list[dict[str, Any]]:
+        """Have an agent score each PR's quality again, from its latest review and
+        with the repository's quality guide as it is now. A PR being scored already
+        joins that job instead of starting another."""
+        service = service_of(request)
+        targets = body.prs[:MAX_EVALUATIONS]
+        for target in targets:
+            await require_view(service, user, target.repo)
+        running = {
+            (job.repo, job.number): job
+            for job in await service.store.list_jobs(
+                [JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.WAITING], limit=5000
+            )
+            if job.playbook == "quality"
+        }
+        out = []
+        for target in targets:
+            job = running.get((target.repo, target.number))
+            if job is not None:
+                first = job.events[0].get("id") if job.events else None
+                out.append(
+                    {
+                        "repo": target.repo,
+                        "number": target.number,
+                        "run": "joined",
+                        "event": first or job.id,
+                    }
+                )
+                continue
+            event = Event(
+                kind=EventKind.QUALITY_REQUESTED,
+                repo=target.repo,
+                number=target.number,
+                payload={"by": user.login},
+                source="dashboard",
+            )
+            await service.bus.publish(event)
+            out.append(
+                {
+                    "repo": target.repo,
+                    "number": target.number,
+                    "run": "score",
+                    "event": event.id,
+                }
+            )
+        return out
+
     @r.get("/prs/{owner}/{name}/{number}")
     async def pr_detail(
         request: Request,
@@ -1027,7 +1161,8 @@ def build_router() -> APIRouter:
         quality = review_quality(
             await service.store.list_actions(
                 repo=repo, number=number, kinds=[ActionKind.REVIEW_POST], limit=500
-            )
+            ),
+            await assessed_quality(service.store, repo, number),
         )
         return {
             "pr": pr.model_dump(mode="json"),
@@ -2116,7 +2251,9 @@ async def review_qualities(service: Service, repo: str) -> dict[int, ReviewQuali
             by_pr.setdefault(record.action.number, []).append(record)
     out = {}
     for number, records in by_pr.items():
-        quality = review_quality(records)
+        quality = review_quality(
+            records, await assessed_quality(service.store, repo, number)
+        )
         if quality is not None:
             out[number] = quality
     return out

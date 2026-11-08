@@ -29,6 +29,7 @@ const PLAYBOOK: Record<string, { label: string; icon: IconName }> = {
   onboard: { label: "Onboarding", icon: "repo" },
   self_improve: { label: "Self-improvement", icon: "settings" },
   evaluate: { label: "Priority evaluation", icon: "sort" },
+  quality: { label: "Quality score", icon: "sparkles" },
 };
 
 export function playbookLabel(name: string): string {

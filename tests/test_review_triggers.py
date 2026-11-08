@@ -42,6 +42,7 @@ REVIEW = {
         }
     ],
     "recommendation": "Ready",
+    "quality": {"score": 84, "reason": "A small fix in the right place."},
 }
 
 

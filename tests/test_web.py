@@ -121,6 +121,40 @@ async def test_settings_change_needs_a_maintainer(demo) -> None:
     assert (await h.service.profiles.active("acme/widget")).merge.enabled is False
 
 
+async def test_review_guides_are_the_maintainers_setting(demo) -> None:
+    h, app = demo
+    url = "/api/repos/acme/widget/review-guides"
+    async with _client(app, "walt") as walt:
+        view = (await walt.get(url)).json()
+        assert view["writing_guide"] is None and view["can_configure"] is False
+        out = (await walt.put(url, json={"writing_guide": "Short."})).json()
+        assert out["applied"] is False, "a non-maintainer proposes"
+    profile = await h.service.profiles.active("acme/widget")
+    assert profile is not None and profile.review.writing_guide is None
+    async with _client(app, "maria") as maria:
+        out = (
+            await maria.put(
+                url,
+                json={"writing_guide": "Short and plain.", "quality_guide": "Taste."},
+            )
+        ).json()
+        assert out["applied"] is True
+        view = (await maria.get(url)).json()
+        assert (view["writing_guide"], view["quality_guide"]) == (
+            "Short and plain.\n",
+            "Taste.\n",
+        )
+        out = await maria.put(
+            url,
+            json={
+                "writing_guide": view["default_writing_guide"],
+                "quality_guide": "Taste.",
+            },
+        )
+        view = (await maria.get(url)).json()
+        assert view["writing_guide"] is None, "the default text restores the default"
+
+
 async def test_profile_approval_reports_a_failed_memory_write(demo) -> None:
     h, app = demo
     h.forge.put_file(
@@ -285,13 +319,18 @@ async def test_approve_and_edit_a_proposal(demo) -> None:
         rows = {r["number"]: r for r in (await maria.get("/api/prs")).json()}
         assert rows[42]["review_activity"]["draft"]["for"] == "maria"
         assert (rows[42]["quality"]["score"], rows[42]["quality"]["band"]) == (
-            95,
-            "excellent",
-        ), "one minor finding"
+            88,
+            "good",
+        ), "the reviewing agent's judgment"
         assert rows[43]["quality"]["posted"] is False, "a draft, not posted yet"
         assert rows[44]["quality"] is None, "not reviewed"
         detail = (await maria.get("/api/prs/acme/widget/42")).json()
         assert detail["quality"] == rows[42]["quality"]
+        again = await maria.post("/api/quality", json={"prs": targets[:1]})
+        assert again.json()[0]["run"] == "score"
+        await h.settle()
+        rows = {r["number"]: r for r in (await maria.get("/api/prs")).json()}
+        assert rows[42]["quality"]["rescored"] is True
         proposals = (await maria.get("/api/proposals")).json()
         review = next(
             p
@@ -413,4 +452,4 @@ async def test_the_agent_knows_the_page_it_is_asked_from(demo) -> None:
         )
         assert hidden.status_code == 403
     assert "looking at acme/widget#42" in seen[0] and "'this PR'" in seen[0]
-    assert "quality from its latest review" in seen[0] and "95/100" in seen[0]
+    assert "Internal quality" in seen[0] and "88/100" in seen[0]

@@ -10,6 +10,7 @@ import {
   type MemoryChange,
   type PrRow,
   type ProposalWithAction,
+  type QualityStart,
   type RepoRow,
   type ServiceView,
   type SettingsView,
@@ -100,6 +101,26 @@ export function useReevaluate() {
     // The scoring jobs exist once the request returns: show their progress at once.
     onSuccess: () => void client.invalidateQueries({ queryKey: ["work"] }),
   });
+}
+
+/** Have an agent score the quality of each PR's latest review again. */
+export function useScoreQuality() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (prs: { repo: string; number: number }[]) => api.post<QualityStart[]>("/api/quality", { prs }),
+    onSuccess: () => void client.invalidateQueries({ queryKey: ["work"] }),
+  });
+}
+
+/** What to tell the person after asking for quality scores. */
+export function qualityToast(out: QualityStart[], t: (s: string) => string) {
+  const first = out[0];
+  return {
+    title: out.length === 1 ? (first?.run === "joined" ? t("Already being scored") : t("Scoring quality")) : `${t("Scoring quality")}: ${out.length}`,
+    body: t("An agent judges each PR by the repository's quality guide; the score appears when it finishes."),
+    icon: "sparkles" as const,
+    action: first?.event ? { label: t("Watch"), onClick: () => openJob(first.event) } : undefined,
+  };
 }
 
 /** Read PRs from GitHub now: every repository the user sees, or the ones given. */

@@ -44,11 +44,13 @@ from ..domain.review import (
 from ..domain.snapshot import PrSnapshot
 from .prompts import (
     pr_block,
+    quality_block,
     review_skill_block,
     skill_format_block,
     skill_owns_format,
     template_block,
     untrusted,
+    writing_block,
 )
 
 
@@ -143,6 +145,8 @@ def revision_blocks(
     return [
         review_skill_block(profile, skills_dir, workdir),
         format_block,
+        writing_block(profile),
+        quality_block(profile, followup=kind != TaskKind.REVIEW),
         reproduction,
         f"Review lessons from this repository's maintainers:\n{lessons}"
         if lessons
@@ -201,6 +205,9 @@ def apply_revision(
         rendered = render_followup(followup, head_sha, previous, profile)
         result = {**followup.model_dump(mode="json"), "previous_sha": previous}
         recommendation = followup.recommendation
+    if result.get("quality") is None and (payload.result or {}).get("quality"):
+        # A revision that does not judge the quality again keeps the draft's.
+        result["quality"] = (payload.result or {})["quality"]
     return payload.model_copy(
         update={
             "body": rendered.body,

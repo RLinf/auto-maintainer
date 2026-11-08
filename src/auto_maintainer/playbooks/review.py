@@ -53,6 +53,7 @@ from .prompts import (
     label_block,
     label_choices,
     pr_block,
+    quality_block,
     reproduction_block,
     review_skill_block,
     schema_hint,
@@ -60,6 +61,7 @@ from .prompts import (
     skill_owns_format,
     template_block,
     untrusted,
+    writing_block,
 )
 from .reproduce import AutoReproduction, auto_reproduction
 from .requests import (
@@ -164,6 +166,8 @@ class ReviewPlaybook(Playbook):
                     skill_format_block(profile)
                     if own_format
                     else template_block(profile),
+                    writing_block(profile),
+                    quality_block(profile),
                     reproduction_block(
                         await reproduction_record(ctx.store, pr.repo, pr.number),
                         upcoming=repro.upcoming(),

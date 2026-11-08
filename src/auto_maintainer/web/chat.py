@@ -57,7 +57,7 @@ from ..domain.memory import (
     repo_dir,
 )
 from ..domain.records import ChatMessage, ChatRequest, ChatThread, JobStatus
-from ..domain.review import QUALITY_PENALTY, review_quality
+from ..domain.review import review_quality
 from ..domain.secrets import redact_secrets
 from ..domain.settings import (
     PROVIDER_PROTOCOLS,
@@ -67,6 +67,7 @@ from ..domain.settings import (
     secret_names,
 )
 from ..playbooks.prompts import schema_hint, untrusted
+from ..playbooks.quality import assessed_quality
 from ..profiles.layers import ProfileError, parse_yaml
 from .api import (
     code_maintainer,
@@ -551,15 +552,14 @@ async def _page_block(
                 number=pr.number,
                 kinds=[ActionKind.REVIEW_POST],
                 limit=500,
-            )
+            ),
+            await assessed_quality(service.store, pr.repo, pr.number),
         )
         if quality is not None:
-            found = ", ".join(f"{n:g} {s}" for s, n in quality.open.items()) or "none"
             lines.append(
-                f"Internal quality from its latest {quality.kind} at {quality.sha[:12]}: "
-                f"{quality.score}/100 ({quality.band}); open findings: {found}. It is "
-                f"100 less {', '.join(f'{p} per {s}' for s, p in QUALITY_PENALTY.items())}"
-                " open finding, half for a partly addressed one."
+                f"Internal quality, as the reviewing agent judged it at {quality.sha[:12]} "
+                f"by the repository's quality guide: {quality.score}/100 ({quality.band}). "
+                f"{quality.reason}".rstrip()
             )
         lines.append(untrusted("pr.title", pr.title, 500))
         lines.append(untrusted("pr.body", pr.body or "(empty)", 6000))

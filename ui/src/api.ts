@@ -173,17 +173,38 @@ export interface PrRow {
   quality: ReviewQuality | null;
 }
 
-/** How sound the latest review found a PR: 100 less a penalty for each finding still
- *  open, by severity (domain/review.py: QUALITY_PENALTY). Internal. */
+/** A PR's quality as the reviewing agent judged it, by the repository's quality guide
+ *  (domain/review.py: review_quality). Internal. */
 export interface ReviewQuality {
   score: number;
   band: QualityBand;
-  /** Open findings per severity; a partly addressed one counts half. */
-  open: Record<string, number>;
+  reason: string;
+  /** The head the judged review looked at. */
   sha: string;
   kind: "review" | "followup";
   posted: boolean;
   action_id: string;
+  /** The score comes from scoring that review again, not from the review itself. */
+  rescored: boolean;
+}
+
+export interface QualityStart {
+  repo: string;
+  number: number;
+  run: "score" | "joined";
+  event: string;
+}
+
+/** How a repository's reviews are written and how their agent judges quality;
+ *  ``null`` means the service's default. */
+export interface ReviewGuides {
+  repo: string;
+  writing_guide: string | null;
+  quality_guide: string | null;
+  default_writing_guide: string;
+  default_quality_guide: string;
+  can_configure: boolean;
+  reason: string;
 }
 
 export type QualityBand = "excellent" | "good" | "fair" | "poor" | "bad";

@@ -1,7 +1,7 @@
 // One PR: what it is, what the service did and plans to do, its internal priority (with
 // an override), and whether it can merge. The agent opened here talks about this PR.
 
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api, type Evaluation, type Me, type PrDetail, type ReviewQuality, type ReviewStart, type RootCause, type RunCiPlan } from "../api";
@@ -11,13 +11,11 @@ import {
   Empty,
   ErrorBox,
   Labels,
-  openFindingsText,
   PageHead,
   Pre,
   prPath,
   Quality,
   QUALITY_BANDS,
-  QUALITY_PENALTY,
   qualityLabel,
   qualityStale,
   Section,
@@ -27,7 +25,7 @@ import {
   useAct,
   When,
 } from "../components";
-import { evaluationToast, REVIEW_STATES, usePrs, useReevaluate } from "../data";
+import { evaluationToast, qualityToast, REVIEW_STATES, usePrs, useReevaluate, useScoreQuality } from "../data";
 import { useT } from "../i18n";
 import { Icon } from "../icons";
 import { Markdown } from "../markdown";
@@ -234,7 +232,7 @@ export default function PrPage({ me }: { me: Me }) {
         </div>
 
         <aside className="side">
-          <QualityCard quality={d.quality} head={pr.head_sha} />
+          <QualityCard repo={full} number={pr.number} quality={d.quality} head={pr.head_sha} reviewed={d.actions.some((a) => a.action.kind === "review.post")} />
           <EvaluationCard base={base} repo={full} number={pr.number} evaluation={d.evaluation} />
           <Section
             title={t("Merge")}
@@ -556,11 +554,38 @@ function RefreshButton({ base }: { base: string }) {
   );
 }
 
-/** The PR's quality as its latest review found it: the score, its band, the open
- *  findings behind it, and how the score is counted. */
-function QualityCard({ quality, head }: { quality: ReviewQuality | null; head: string }) {
+/** The PR's quality as the reviewing agent judged it: the score, its band, the
+ *  agent's reason, and Score again, which has an agent judge it afresh. */
+function QualityCard({
+  repo,
+  number,
+  quality,
+  head,
+  reviewed,
+}: {
+  repo: string;
+  number: number;
+  quality: ReviewQuality | null;
+  head: string;
+  reviewed: boolean;
+}) {
   const t = useT();
-  const rule = QUALITY_PENALTY.map(([s, n]) => `−${n} ${t(s)}`).join(" · ");
+  const toast = useToast();
+  const score = useScoreQuality();
+  const client = useQueryClient();
+  const scoring = (usePrWork(repo, number).data ?? []).find((j) => j.playbook === "quality" && ACTIVE.has(j.status));
+  const scoringId = scoring?.id;
+  const [watched, setWatched] = useState<string | undefined>();
+  useEffect(() => {
+    // Read the PR again once the agent scoring it finishes, so the new score shows.
+    if (scoringId) setWatched(scoringId);
+    else if (watched) {
+      setWatched(undefined);
+      void client.invalidateQueries({ queryKey: ["pr"] });
+      void client.invalidateQueries({ queryKey: ["prs"] });
+    }
+  }, [scoringId, watched, client]);
+  const start = () => score.mutate([{ repo, number }], { onSuccess: (out) => toast(qualityToast(out, t)) });
   return (
     <Section
       title={t("Quality")}
@@ -576,14 +601,20 @@ function QualityCard({ quality, head }: { quality: ReviewQuality | null; head: s
           <div className="quality-meter" role="img" aria-label={`${quality.score} / 100`}>
             <span style={{ width: `${quality.score}%` }} />
           </div>
-          <span>{openFindingsText(quality, t)}</span>
+          {quality.reason && <span style={{ fontSize: 13 }}>{quality.reason}</span>}
           <span className="muted">
-            {t(quality.kind === "followup" ? "follow-up at" : "review at")} <code>{quality.sha.slice(0, 7)}</code>
+            {t(
+              quality.rescored
+                ? quality.kind === "followup"
+                  ? "scored again for the follow-up at"
+                  : "scored again for the review at"
+                : quality.kind === "followup"
+                  ? "judged in the follow-up at"
+                  : "judged in the review at",
+            )}{" "}
+            <code>{quality.sha.slice(0, 7)}</code>
             {!quality.posted && ` · ${t("not posted")}`}
             {qualityStale(quality, head) && ` · ${t("new commits since this review")}`}
-          </span>
-          <span className="muted">
-            {t("100 less, for each finding still open:")} {rule}. {t("A partly addressed finding counts half.")}
           </span>
           <span className="row" style={{ gap: 4, flexWrap: "wrap" }}>
             {QUALITY_BANDS.map((b) => (
@@ -594,8 +625,24 @@ function QualityCard({ quality, head }: { quality: ReviewQuality | null; head: s
           </span>
         </div>
       ) : (
-        <span className="small muted">{t("Scored once the service reviews this PR, from how severe its findings are.")}</span>
+        <span className="small muted">
+          {reviewed ? t("This PR's review has no quality score yet.") : t("The reviewing agent scores the PR's quality, by the repository's quality guide.")}
+        </span>
       )}
+      {scoring ? (
+        <button className="ghost sm row" style={{ marginTop: 10, gap: 6 }} onClick={() => openJob(scoring.id)}>
+          <span className="pulse" />
+          {t("An agent is scoring its quality")}
+        </button>
+      ) : (
+        reviewed && (
+          <button className="ghost sm" style={{ marginTop: 10 }} disabled={score.isPending} onClick={start} title={t("An agent judges the PR again by the repository's quality guide")}>
+            <Icon name="sparkles" size={14} />
+            {quality ? t("Score quality again") : t("Score quality")}
+          </button>
+        )
+      )}
+      <ErrorBox error={score.error} />
     </Section>
   );
 }

@@ -81,21 +81,7 @@ export const QUALITY_BANDS: { band: QualityBand; floor: number; label: string }[
   { band: "poor", floor: 40, label: "Poor" },
   { band: "bad", floor: 0, label: "Bad" },
 ];
-/** Points lost per open finding; mirrors QUALITY_PENALTY in domain/review.py. */
-export const QUALITY_PENALTY: [string, number][] = [
-  ["critical", 45],
-  ["major", 20],
-  ["minor", 5],
-  ["nit", 1],
-];
-
 export const qualityLabel = (band: QualityBand) => QUALITY_BANDS.find((b) => b.band === band)?.label ?? band;
-
-/** The open findings behind a score, worst first: "1 major · 0.5 minor". */
-export function openFindingsText(q: ReviewQuality, t: (s: string) => string): string {
-  const parts = QUALITY_PENALTY.filter(([s]) => q.open[s]).map(([s]) => `${q.open[s]} ${t(s)}`);
-  return parts.length ? parts.join(" · ") : t("no open findings");
-}
 
 /** Whether the review that set ``q`` looked at an older commit than ``head``. */
 export function qualityStale(q: ReviewQuality, head: string | null | undefined): boolean {
@@ -104,15 +90,16 @@ export function qualityStale(q: ReviewQuality, head: string | null | undefined):
   return q.sha.slice(0, n) !== head.slice(0, n);
 }
 
-/** A PR's quality as a colored pill: the score, and its band unless ``compact``. Faded
- *  when new commits arrived since the review. */
+/** A PR's quality as a colored pill: the agent's score, and its band unless
+ *  ``compact``; the agent's reason on hover. Faded when new commits arrived since the
+ *  review it judged. */
 export function Quality({ quality, head, compact }: { quality: ReviewQuality | null | undefined; head?: string | null; compact?: boolean }) {
   const t = useT();
   if (!quality) return <span className="muted" title={t("Not reviewed")}>—</span>;
   const stale = qualityStale(quality, head);
   const title = [
     `${t("Quality")} ${quality.score}/100 · ${t(qualityLabel(quality.band))}`,
-    openFindingsText(quality, t),
+    quality.reason,
     `${t(quality.kind === "followup" ? "follow-up at" : "review at")} ${quality.sha.slice(0, 7)}${quality.posted ? "" : ` (${t("not posted")})`}`,
     stale ? t("new commits since this review") : "",
   ]

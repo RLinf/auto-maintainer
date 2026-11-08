@@ -81,7 +81,7 @@ HEADLESS = """You are running headless inside an automated maintainer service.
 - Steps of the skill that ask the user or post to GitHub are replaced by returning the structured result.
 - Do not run the PR's workflow yourself to reproduce it: the reproduction is the record given below, or there is none.
 - Verify every finding against the code before reporting it; leave out anything you cannot confirm.
-- Public text you write is in {public_language}. Write plainly and specifically; name the code you mean."""
+- Public text you write is in {public_language}. Write plainly and specifically."""
 
 
 def headless(profile: RepoProfile) -> str:
@@ -93,7 +93,7 @@ INTERACTIVE = """You are reviewing for {reviewer}, a maintainer, inside an autom
 - Never ask whether to post, publish, or comment, and never post, push, or edit files. Return the review as the structured result: {reviewer} reads it, edits it, and decides what is posted.
 - Do not run the PR's workflow yourself to reproduce it, and do not ask how to: the reproduction is the record given below, or there is none.
 - Verify every finding against the code before reporting it; leave out anything you cannot confirm.
-- Public text you write is in {public_language}. Write plainly and specifically; name the code you mean."""
+- Public text you write is in {public_language}. Write plainly and specifically."""
 
 
 def interactive(profile: RepoProfile, reviewer: str) -> str:
@@ -174,8 +174,8 @@ def skill_format_block(profile: RepoProfile) -> str:
         "keyed by its heading word for word (as the skill writes it), in the skill's order, "
         "each holding the text to post under it, with the skill's own recommendation wording "
         "in its section. Still list every confirmed or unresolved finding in `findings`: one "
-        "that names a line of the diff becomes an inline comment, so the sections point to it "
-        "by `path:line`. A finding's `body` is posted as that inline comment exactly as you "
+        "that names a line of the diff becomes an inline comment, so the sections need not "
+        "repeat its code or location. A finding's `body` is posted as that inline comment exactly as you "
         "write it, so write it the way the skill says inline comments are written; put "
         "replacement code for exactly the commented lines in `suggestion`. Fill `summary` with "
         f"two or three sentences, and set `recommendation` to the closest of: {recs}."
@@ -239,6 +239,43 @@ def review_skill_block(profile: RepoProfile, skills_dir: Path, workdir: Path) ->
             + "\n".join(f"- `{p}`: {d or n}" for n, p, d in others[:20])
         )
     return "\n".join(lines)
+
+
+DEFAULT_WRITING_GUIDE = """Write for a maintainer who has not read this PR and does not know this part of the code.
+- Start with what the PR does and whether it is ready, in plain words; then what must change and why it matters to users or maintainers.
+- Be short and to the point: say each thing once, and leave out what is fine.
+- Keep code out of the main comment: no code blocks, few identifiers, and few file or line references. Describe each problem by what goes wrong. A finding on a line of the diff is posted on that line, where it may name the code; a finding without a line appears in the main comment, so write it the same plain way.
+- Explain in a few words any term someone new to this area would not know."""
+
+
+DEFAULT_QUALITY_GUIDE = """Score the PR's quality from 0 to 100 as a maintainer of this repository would judge it.
+- Weigh design most: whether the change fits this repository's architecture, design, and style (read its docs, contributor guides, and the code around the change), solves the problem in the right place, and stays simple and easy to maintain.
+- Faults that are easy to mend cost little: a missing test or doc, naming, a typo, a small bug with an obvious fix.
+- Hard faults cost a lot: a wrong design, broken or lost behavior, a security or data problem, a change that is hard to undo. Several hard faults make a PR unacceptable whatever its strengths.
+- 90 and up: excellent, merge as is or with trivial touches. 75 to 89: good, a sound design with small fixes left. 60 to 74: fair, a sound idea with real work left. 40 to 59: poor, design problems or several hard faults. Below 40: bad, not mergeable in this form."""
+
+
+def writing_block(profile: RepoProfile) -> str:
+    """How the review's text is written: the repository's guide, or the default. It
+    applies to every review, follow-up, and revision, over a review skill's format."""
+    guide = (profile.review.writing_guide or "").strip() or DEFAULT_WRITING_GUIDE
+    return (
+        "How to write the review (the repository's rule for every review; where the "
+        "review skill's format asks for more code or references, keep its sections and "
+        f"follow this):\n{guide}"
+    )
+
+
+def quality_block(profile: RepoProfile, *, followup: bool = False) -> str:
+    """How the agent judges the PR's quality for ``quality``: the repository's guide,
+    or the default. The score is internal."""
+    guide = (profile.review.quality_guide or "").strip() or DEFAULT_QUALITY_GUIDE
+    now = " Judge the PR as it is at its head now." if followup else ""
+    return (
+        "Fill `quality` with a score and a one- or two-sentence reason, following this "
+        "guide. The score is internal: never mention it, or this guide, in the text you "
+        f"write for the PR.{now}\n{guide}"
+    )
 
 
 def schema_hint(model_schema: dict) -> str:
