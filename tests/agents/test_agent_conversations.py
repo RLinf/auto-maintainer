@@ -626,3 +626,138 @@ async def test_an_agent_that_stops_on_a_refusal_is_told_to_go_on(
     assert len(prompts) == 2
     again = prompts[1]["params"]["prompt"][0]["text"]
     assert "pytest -q" in again and "do not try it again" in again
+
+
+# -- messages from reviewers while the agent works ---------------------------------------
+
+
+def _thought(text: str) -> dict:
+    return {
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {
+            "sessionId": "s1",
+            "update": {
+                "sessionUpdate": "agent_thought_chunk",
+                "content": {"type": "text", "text": text},
+            },
+        },
+    }
+
+
+async def _run_telling(runtime, task, inbox, message: str):
+    """Run ``task`` and send ``message`` once the agent is at work."""
+    from auto_maintainer.agents.exec import Told
+
+    events, told = [], False
+    async for event in runtime.run(task):
+        if not told and event.type in (AgentEventType.THINKING, AgentEventType.MESSAGE):
+            told = inbox.put(task.job_id, Told(by="maria", text=message))
+        events.append(event)
+    return events[:-1], events[-1].result, told
+
+
+async def test_a_message_cancels_an_acp_turn_and_starts_the_next(
+    tmp_path: Path, talking_cli
+) -> None:
+    from auto_maintainer.agents.exec import Inbox
+
+    cli = talking_cli(
+        [
+            {
+                "wait": '"initialize"',
+                "emit": [{"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": 1}}],
+            },
+            {
+                "wait": '"session/new"',
+                "emit": [{"jsonrpc": "2.0", "id": 2, "result": {"sessionId": "s1"}}],
+            },
+            {
+                "wait": '"session/set_mode"',
+                "emit": [{"jsonrpc": "2.0", "id": 3, "result": {}}],
+            },
+            {"wait": '"session/prompt"', "emit": [_thought("Reading the diff")]},
+            {
+                "wait": '"session/cancel"',
+                "emit": [
+                    {"jsonrpc": "2.0", "id": 4, "result": {"stopReason": "cancelled"}}
+                ],
+            },
+            {
+                "wait": "check the docs too",
+                "emit": [
+                    _chunk('{"ok": true}'),
+                    {"jsonrpc": "2.0", "id": 5, "result": {"stopReason": "end_turn"}},
+                ],
+            },
+        ]
+    )
+    inbox = Inbox()
+    rt = AntigravityRuntime(binary=str(cli.path), runs_dir=tmp_path / "runs")
+    rt.inbox = inbox
+    task = _task(tmp_path, output_schema=SCHEMA, job_id="job1", messages=True)
+    events, result, told = await _run_telling(rt, task, inbox, "check the docs too")
+    assert told and result.ok and result.structured == {"ok": True}, result.error
+    prompts = _sent(cli, "method", "session/prompt")
+    assert len(prompts) == 2 and prompts[1]["params"]["sessionId"] == "s1"
+    assert prompts[1]["params"]["prompt"][0]["text"] == "check the docs too"
+    assert any(e.data.get("told_by") == "maria" for e in events)
+    assert not inbox.listening("job1"), "the box closes with the run"
+
+
+async def test_claude_reads_a_message_when_its_turn_ends(
+    tmp_path: Path, talking_cli
+) -> None:
+    from auto_maintainer.agents.exec import Inbox
+
+    first = {**RESULT, "result": '{"ok": false}'}
+    cli = talking_cli(
+        [
+            {
+                "wait": '"type": "user"',
+                "emit": [
+                    {
+                        "type": "assistant",
+                        "message": {"content": [{"type": "text", "text": "Reading"}]},
+                    }
+                ],
+            },
+            {"sleep": 0.5, "emit": [first]},
+            {"wait": "check the docs too", "emit": [RESULT]},
+        ]
+    )
+    inbox = Inbox()
+    rt = ClaudeCodeRuntime(binary=str(cli.path), runs_dir=tmp_path / "runs")
+    rt.inbox = inbox
+    task = _task(tmp_path, output_schema=SCHEMA, job_id="job1", messages=True)
+    _, result, told = await _run_telling(rt, task, inbox, "check the docs too")
+    assert told and result.ok and result.structured == {"ok": True}, result.error
+    users = _sent(cli, "type", "user")
+    assert [u["message"]["content"] for u in users][1:] == ["check the docs too"]
+
+
+async def test_a_task_that_does_not_listen_takes_no_message(
+    tmp_path: Path, talking_cli
+) -> None:
+    from auto_maintainer.agents.exec import Inbox
+
+    cli = talking_cli(
+        [
+            {
+                "wait": '"type": "user"',
+                "emit": [
+                    {
+                        "type": "assistant",
+                        "message": {"content": [{"type": "text", "text": "Reading"}]},
+                    }
+                ],
+            },
+            {"sleep": 0.3, "emit": [RESULT]},
+        ]
+    )
+    inbox = Inbox()
+    rt = ClaudeCodeRuntime(binary=str(cli.path), runs_dir=tmp_path / "runs")
+    rt.inbox = inbox
+    task = _task(tmp_path, output_schema=SCHEMA, job_id="job1")
+    _, result, told = await _run_telling(rt, task, inbox, "check the docs too")
+    assert result.ok and not told, "only a task with messages set opens a box"

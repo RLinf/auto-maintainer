@@ -251,6 +251,9 @@ class ChatMessage(BaseModel):
     """What this message asks to do once a person approves it."""
     run_id: str | None = None
     """For an answer: the agent run that wrote it, whose steps stay readable."""
+    while_running: bool = False
+    """A ``user`` message sent to the agent while it wrote the review; the review
+    answers it."""
     id: str = Field(default_factory=lambda: new_id("msg"))
     created_at: datetime = Field(default_factory=utc_now)
 

@@ -417,7 +417,7 @@ function JobView({ id, onClose }: { id: string; onClose: () => void }) {
                 ))}
               </section>
             )}
-            {(d.playbook === "review" || d.playbook === "followup") && !active && <ReviewTalk job={d} me={me?.login ?? ""} />}
+            {(d.playbook === "review" || d.playbook === "followup") && <ReviewTalk job={d} me={me?.login ?? ""} active={active} />}
           </>
         ) : null}
       </div>

@@ -189,3 +189,138 @@ def test_a_revised_follow_up_renders_against_the_commit_it_followed() -> None:
     out = apply_revision(answer, payload, profile, pr, "a" * 40, own_format=False)
     assert out is not None and out["result"]["previous_sha"] == "b" * 40
     assert "aaaaaaa" in out["body"] and out["recommendation"] == "Ready"
+
+
+async def test_a_posted_review_is_revised_by_an_edit_of_the_posted_text(demo) -> None:
+    h, app = demo
+    async with _as(app, "maria") as maria:
+        job = await _reviewed(h, maria, 42)
+        talk = (await maria.get(f"/api/jobs/{job['id']}/talk")).json()
+        draft = talk["draft"]
+        proposal = await h.store.proposal_for_action(draft)
+        assert proposal is not None
+        await maria.post(f"/api/proposals/{proposal.id}/approve", json={})
+        await h.settle()
+        posted = await h.store.get_action(draft)
+        assert posted is not None and posted.status == "executed"
+        review_id = posted.external_ref["review_id"]
+
+        said = (
+            await maria.post(
+                f"/api/jobs/{job['id']}/talk",
+                json={"text": "test_one_item covers it; please drop F1."},
+            )
+        ).json()
+        [edit_id] = said["proposals"]
+        assert edit_id != draft and "stay as they are" in said["text"]
+        state = (await maria.get(f"/api/jobs/{job['id']}/talk")).json()
+        assert state["posted"] and state["revision"] == edit_id
+        edit = await h.store.get_action(edit_id)
+        assert edit is not None and edit.action.kind == "review.update"
+        assert edit.action.payload["target_id"] == review_id
+        assert edit.action.payload["revises"] == draft
+        assert edit.action.payload["author"] is None
+        assert edit.action.head_sha == posted.action.head_sha, (
+            "the edited review still covers the commit it reviewed"
+        )
+
+        again = (
+            await maria.post(
+                f"/api/jobs/{job['id']}/talk", json={"text": "Why is F1 a finding?"}
+            )
+        ).json()
+        assert again["proposals"] == [], "a turn that only answers drafts nothing"
+        assert edit.action.payload["body"].strip()[:80] in h.runner.tasks[-1].prompt, (
+            "the next turn reads the review as the waiting edit has it"
+        )
+
+        edit_proposal = await h.store.proposal_for_action(edit_id)
+        assert edit_proposal is not None
+        refused = await maria.post(
+            f"/api/proposals/{edit_proposal.id}/approve", json={"as_me": True}
+        )
+        assert refused.status_code == 409, "the service's review is edited as it"
+        await maria.post(f"/api/proposals/{edit_proposal.id}/approve", json={})
+        await h.settle()
+    [update] = h.forge.writes_of("update_review")
+    assert update["review_id"] == review_id and "F1" not in update["body"]
+    revised = await h.store.get_action(draft)
+    assert revised is not None
+    assert (revised.action.payload["result"] or {})["findings"] == [], (
+        "follow-ups and scores read the revised review"
+    )
+    [record] = await h.store.list_review_records(REPO, 42)
+    assert (
+        record.result["findings"] == []
+        and record.result["body"] == (revised.action.payload["body"])
+    )
+
+
+async def test_a_review_posted_as_a_maintainer_is_edited_only_by_them(demo) -> None:
+    from auto_maintainer.actuator.pipeline import ApprovalError
+    from auto_maintainer.domain.actions import (
+        ActionKind,
+        ReviewUpdatePayload,
+        make_action,
+    )
+
+    h, _app = demo
+    action = make_action(
+        ActionKind.REVIEW_UPDATE,
+        REPO,
+        ReviewUpdatePayload(
+            target="review", target_id=7, body="New text.", author="maria"
+        ),
+        number=42,
+        head_sha="a" * 40,
+        discriminator="talk:test",
+        draft_for="maria",
+    )
+    await h.service.pipeline.submit(action, force_propose=True)
+    proposal = await h.store.proposal_for_action(action.id)
+    assert proposal is not None
+    with pytest.raises(ApprovalError):
+        await h.service.pipeline.approve(proposal.id, "walt", post_as="walt")
+    with pytest.raises(ApprovalError):
+        await h.service.pipeline.approve(proposal.id, "maria")
+    with pytest.raises(ApprovalError, match="as themselves"):
+        # An edit cannot hand the review to someone else.
+        await h.service.pipeline.approve(
+            proposal.id,
+            "walt",
+            {**action.payload, "author": "walt"},
+            post_as="walt",
+        )
+    approved = await h.service.pipeline.approve(proposal.id, "maria", post_as="maria")
+    assert approved.state == "approved"
+    record = await h.store.get_action(action.id)
+    assert record is not None and record.post_as == "maria"
+
+
+async def test_a_message_reaches_the_agent_while_it_reviews(demo) -> None:
+    h, app = demo
+    async with _as(app, "maria") as maria:
+        job = await _reviewed(h, maria, 42)
+        h.runner.listening_jobs[job["id"]] = 1
+        state = (await maria.get(f"/api/jobs/{job['id']}/talk")).json()
+        assert state["listening"]
+        sent = (
+            await maria.post(
+                f"/api/jobs/{job['id']}/talk",
+                json={"text": "Also check the docs for the new flag."},
+            )
+        ).json()
+        assert sent["while_running"] and sent["author"] == "maria"
+        [(job_id, by, text)] = h.runner.told
+        assert (job_id, by) == (job["id"], "maria")
+        assert "Also check the docs for the new flag." in text
+        assert "never post, push, or run the PR's code" in text
+        h.runner.listening_jobs[job["id"]] = 0
+        state = (await maria.get(f"/api/jobs/{job['id']}/talk")).json()
+        assert not state["listening"]
+        assert [m["text"] for m in state["messages"]] == [
+            "Also check the docs for the new flag."
+        ]
+    steps = {str(t.kind): t.messages for t in h.runner.tasks if t.job_id == job["id"]}
+    assert steps["review"], "the agent writing the review takes messages"
+    assert not any(v for k, v in steps.items() if k != "review"), steps

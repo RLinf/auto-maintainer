@@ -1,24 +1,28 @@
-// The conversation about a review, on the review's live view. Reviewers ask the agent
-// why it found something, push back, have it revise the pending draft, or have it check
-// more; questions the agent asks while it answers wait here for an answer. Everyone who
-// may see the repository shares the conversation. A revision is saved on the draft as
-// the edit of the reviewer who asked; nothing is posted until someone posts the draft.
+// The conversation about a review, on the review's live view. While the agent writes
+// the review, a message reaches it at work and the review it finishes answers it. Once
+// there is a draft, reviewers ask the agent why it found something, push back, have it
+// revise the draft, or have it check more; questions the agent asks while it answers
+// wait here for an answer. Everyone who may see the repository shares the conversation.
+// A revision is saved on a pending draft as the edit of the reviewer who asked; for a
+// review already posted it becomes a draft that edits the posted review once whoever
+// posted it approves. Nothing is posted until someone decides.
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Fragment, useState } from "react";
 import { api, type AgentJob, type ChatMessage, type JobStep, type ReviewTalkState } from "./api";
 import { ErrorBox } from "./components";
-import { useQuestions } from "./data";
+import { useProposals, useQuestions } from "./data";
 import { useT } from "./i18n";
 import { Icon } from "./icons";
 import { Steps } from "./jobs";
 import { Markdown } from "./markdown";
 import { QuestionCard } from "./pages/Questions";
+import { ProposalCard } from "./proposal";
 import { ChangeById } from "./settingsChange";
 
 type TurnSteps = { run: string | null; live: boolean; steps: JobStep[] };
 
-export function ReviewTalk({ job, me }: { job: AgentJob; me: string }) {
+export function ReviewTalk({ job, me, active }: { job: AgentJob; me: string; active: boolean }) {
   const t = useT();
   const client = useQueryClient();
   const [text, setText] = useState("");
@@ -26,6 +30,8 @@ export function ReviewTalk({ job, me }: { job: AgentJob; me: string }) {
   const talk = useQuery({
     queryKey: ["job", job.id, "talk"],
     queryFn: () => api.get<ReviewTalkState>(`/api/jobs/${job.id}/talk`),
+    // While the review is written, whether its agent takes messages changes step by step.
+    refetchInterval: active ? 3000 : false,
   });
   const send = useMutation({
     mutationFn: (said: string) => api.post<ChatMessage>(`/api/jobs/${job.id}/talk`, { text: said }),
@@ -47,13 +53,17 @@ export function ReviewTalk({ job, me }: { job: AgentJob; me: string }) {
   const runs = new Set([...messages.map((m) => m.run_id), live.data?.run, talk.data?.live_run].filter((x): x is string => !!x));
   const waiting = (questions.data ?? []).filter((q) => q.job_id && runs.has(q.job_id));
   const draft = talk.data?.draft ?? null;
+  const listening = !!talk.data?.listening;
+  const canSend = !!draft || listening;
+  const proposals = useProposals();
+  const revision = talk.data?.revision ? (proposals.data ?? []).find((p) => p.action_id === talk.data?.revision) : undefined;
   // The service keeps the message as soon as the turn starts; show it once.
   const last = messages[messages.length - 1];
   const showPending = !!pendingText && !(last?.role === "user" && last.text === pendingText);
 
   const submit = (said: string) => {
     const clean = said.trim();
-    if (!clean || busy || !draft) return;
+    if (!clean || busy || !canSend) return;
     setPendingText(clean);
     setText("");
     send.mutate(clean);
@@ -66,9 +76,15 @@ export function ReviewTalk({ job, me }: { job: AgentJob; me: string }) {
       </span>
       {!messages.length && !pendingText && (
         <span className="small muted">
-          {draft
-            ? t("Ask why it found something, disagree with a finding, have it change the draft, or ask it to check more. Changes are saved on the draft; nothing is posted until someone posts it.")
-            : t("The conversation opens once the review has a draft.")}
+          {listening
+            ? t("The agent is writing the review. Tell it what to check or what to leave out: your message reaches it at work, and the review it finishes answers it.")
+            : draft
+              ? talk.data?.posted
+                ? t("Ask why it found something, disagree with a finding, or ask it to check more. This review is posted: a change becomes a draft that edits the posted review once it is approved.")
+                : t("Ask why it found something, disagree with a finding, have it change the draft, or ask it to check more. Changes are saved on the draft; nothing is posted until someone posts it.")
+              : active
+                ? t("You can talk to the agent once it starts writing the review.")
+                : t("The conversation opens once the review has a draft.")}
         </span>
       )}
       {messages.map((m) => (
@@ -77,6 +93,7 @@ export function ReviewTalk({ job, me }: { job: AgentJob; me: string }) {
             <div className="bubble user">
               <span className="small" style={{ display: "block", opacity: 0.75 }}>
                 {m.author === me ? t("you") : m.author}
+                {m.while_running && ` · ${t("sent while it reviewed")}`}
               </span>
               {m.text}
             </div>
@@ -90,6 +107,11 @@ export function ReviewTalk({ job, me }: { job: AgentJob; me: string }) {
               <Icon name="check" size={13} /> {t("Revised the draft above")}
             </span>
           )}
+          {m.role !== "user" && m.proposals.some((id) => id !== draft) && (
+            <span className="small" style={{ color: "var(--ok)" }}>
+              <Icon name="check" size={13} /> {t("Drafted an edit of the posted review")}
+            </span>
+          )}
           {(m.changes ?? []).map((id) => (
             <ChangeById key={id} id={id} />
           ))}
@@ -97,6 +119,9 @@ export function ReviewTalk({ job, me }: { job: AgentJob; me: string }) {
         </Fragment>
       ))}
       {showPending && <div className="bubble user">{pendingText}</div>}
+      {last?.role === "user" && last.while_running && listening && !send.isPending && (
+        <span className="small muted">{t("The agent has your message; the review it finishes answers it.")}</span>
+      )}
       {busy &&
         (live.data?.steps.length ? (
           <div className="agent-live" aria-live="polite">
@@ -119,7 +144,13 @@ export function ReviewTalk({ job, me }: { job: AgentJob; me: string }) {
           ))}
         </section>
       )}
-      {draft && !talk.data?.draft_pending && (
+      {revision && (
+        <section className="stack" style={{ gap: 8 }}>
+          <span className="kind-chip">{t("Edit of the posted review, waiting for a decision")}</span>
+          <ProposalCard proposal={revision} compact />
+        </section>
+      )}
+      {draft && !talk.data?.draft_pending && !talk.data?.posted && (
         <span className="small muted">{t("This draft was already decided: the agent still answers, but its revisions are not saved.")}</span>
       )}
       <form
@@ -132,9 +163,9 @@ export function ReviewTalk({ job, me }: { job: AgentJob; me: string }) {
         <textarea
           value={text}
           rows={Math.min(6, Math.max(2, text.split("\n").length))}
-          placeholder={t("Ask about the review, or ask for a change…")}
+          placeholder={listening ? t("Tell the agent what to check while it reviews…") : t("Ask about the review, or ask for a change…")}
           aria-label={t("Message")}
-          disabled={!draft}
+          disabled={!canSend}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
@@ -143,7 +174,7 @@ export function ReviewTalk({ job, me }: { job: AgentJob; me: string }) {
             }
           }}
         />
-        <button className="primary icon" disabled={!text.trim() || busy || !draft} aria-label={t("Send")}>
+        <button className="primary icon" disabled={!text.trim() || busy || !canSend} aria-label={t("Send")}>
           <Icon name="send" size={15} />
         </button>
       </form>

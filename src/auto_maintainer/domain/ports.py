@@ -284,6 +284,16 @@ class AgentRunner(Protocol):
         observer that raises never stops the run."""
         ...
 
+    def tell(self, job_id: str, by: str, text: str) -> bool:
+        """Bring ``text``, a message from the reviewer ``by``, to the agent running for
+        ``job_id`` now (a task with ``messages`` on a CLI that can take one). Whether
+        an agent took it; a message nobody takes is not kept."""
+        ...
+
+    def listening(self, job_id: str) -> bool:
+        """Whether an agent running for ``job_id`` takes messages now."""
+        ...
+
 
 # ---------------------------------------------------------------------------
 # Memory, labs, notifications, events
@@ -639,6 +649,13 @@ class Store(Protocol):
     ) -> list[Signal]: ...
     async def save_signal(self, signal: Signal) -> None: ...
     async def add_review_record(self, record: ReviewRecord) -> None: ...
+    async def revise_review_record(
+        self, repo: str, number: int, action_id: str, result: dict[str, Any]
+    ) -> bool:
+        """Replace the findings of the review ``action_id`` posted, once its posted text
+        was edited; whether there was one."""
+        ...
+
     async def list_review_records(
         self, repo: str, number: int
     ) -> list[ReviewRecord]: ...

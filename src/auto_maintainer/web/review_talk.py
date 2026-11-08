@@ -15,15 +15,18 @@
 """Reviewers talking with the agent about its review (design 5.13).
 
 A review or follow-up job has one conversation, shared by everyone who may see its
-repository and kept on the job's live view. Reviewers ask why the agent found
-something, push back, have it change the draft, or have it check more. Each turn runs
-an agent in a checkout of the reviewed commit, with the PR, the repository's review
-skill, the review as it stands (reviewers' edits included), and the conversation so
-far, since not every agent CLI can resume a session. A turn that changes the review
-returns it whole: the service renders it as the playbook would and saves it on the
-pending draft as an edit by the reviewer who asked, so the findings a fix or a
-follow-up reads change with the text. Nothing is posted; the draft still waits for a
-decision. Questions the agent asks go to that reviewer, on the same view.
+repository and kept on the job's live view. While the agent writes the review, a
+message goes to it at work (``AgentRunner.tell``), and the review it finishes answers
+it. Once the review has a draft, reviewers ask why the agent found something, push
+back, have it change the draft, or have it check more. Each such turn runs an agent in
+a checkout of the reviewed commit, with the PR, the repository's review skill, the
+review as it stands (reviewers' edits included), and the conversation so far, since
+not every agent CLI can resume a session. A turn that changes the review returns it
+whole: the service renders it as the playbook would. On a pending draft it is saved as
+an edit by the reviewer who asked; on a review already posted it becomes a
+``review.update`` draft that edits the posted text, as whoever posted it, once
+approved. Nothing is posted without a decision. Questions the agent asks go to that
+reviewer, on the same view.
 """
 
 from __future__ import annotations
@@ -36,7 +39,14 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from ..domain.actions import ActionKind, ProposalState, ReviewPostPayload
+from ..domain.actions import (
+    ActionKind,
+    ActionStatus,
+    ProposalState,
+    ReviewPostPayload,
+    ReviewUpdatePayload,
+    make_action,
+)
 from ..domain.agents import AgentTask, TaskKind
 from ..domain.ids import new_id
 from ..domain.profile import RepoProfile, Route
@@ -44,7 +54,7 @@ from ..domain.records import ActionRecord, ChatMessage, ChatThread, Job
 from ..domain.secrets import redact_secrets
 from ..domain.snapshot import PrSnapshot
 from ..playbooks.base import author_is_team
-from ..playbooks.prompts import reproduction_block, schema_hint, untrusted
+from ..playbooks.prompts import reproduction_block, schema_hint, told_block, untrusted
 from ..playbooks.review import reproduction_record
 from ..playbooks.review_revise import (
     answer_model,
@@ -85,6 +95,30 @@ class TalkBody(BaseModel):
 
 def thread_id_of(job: Job) -> str:
     return f"chat_{job.id}"
+
+
+def _posted(record: ActionRecord) -> int | None:
+    """The id of the review ``record`` posted on GitHub, if it was posted."""
+    if record.status != ActionStatus.EXECUTED:
+        return None
+    review_id = record.external_ref.get("review_id")
+    return int(review_id) if review_id else None
+
+
+async def _revision(service: Service, record: ActionRecord) -> ActionRecord | None:
+    """The pending ``review.update`` draft that edits the review ``record`` posted."""
+    for other in await service.store.list_actions(
+        repo=record.action.repo,
+        number=record.action.number,
+        kinds=[ActionKind.REVIEW_UPDATE],
+        limit=200,
+    ):
+        if other.action.payload.get("revises") != record.action.id:
+            continue
+        proposal = await service.store.proposal_for_action(other.action.id)
+        if proposal is not None and proposal.state == ProposalState.PENDING:
+            return other
+    return None
 
 
 async def _draft(service: Service, job: Job) -> ActionRecord | None:
@@ -154,9 +188,13 @@ def build_router() -> APIRouter:
             if record
             else None
         )
+        revision = await _revision(service, record) if record else None
         return {
             "thread": thread.id if thread else None,
             "live_run": thread.live_run if thread else None,
+            "listening": service.a.agents.listening(job.id),
+            "posted": bool(record and _posted(record)),
+            "revision": revision.action.id if revision else None,
             "messages": [
                 m.model_dump(mode="json")
                 for m in (
@@ -204,15 +242,20 @@ def build_router() -> APIRouter:
         user: User = Depends(current_user),
     ) -> dict[str, Any]:
         """One turn: the reviewer's message and the agent's answer, which may revise
-        the pending draft (saved as the reviewer's edit) and save lessons."""
+        the pending draft (saved as the reviewer's edit) or the posted review (a
+        ``review.update`` draft) and save lessons. While the review is being written,
+        the message goes to the agent at work instead."""
         service = service_of(request)
         job = await talk_job(service, user, job_id)
         assert job.repo and job.number is not None
+        if service.a.agents.listening(job.id):
+            return await _tell(service, user, job, body.text)
         record = await _draft(service, job)
         if record is None:
             raise HTTPException(
                 409,
-                "this job has no review draft to talk about; it may still be running",
+                "the agent cannot take a message now: it is between steps, or its CLI "
+                "cannot read one while it works. Send it once the review has a draft.",
             )
         profile = await service.profiles.active(job.repo)
         pr = await service.a.forge.get_pr(job.repo, job.number)
@@ -225,6 +268,42 @@ def build_router() -> APIRouter:
             return await _turn(service, user, job, record, profile, pr, body.text)
 
     return r
+
+
+async def _tell(service: Service, user: User, job: Job, said: str) -> dict[str, Any]:
+    """Bring a reviewer's message to the agent writing the review; the review it
+    finishes answers it, and later turns read it in the conversation."""
+    assert job.repo and job.number is not None
+    text, removed = redact_secrets(said)
+    if not service.a.agents.tell(job.id, user.login, told_block(user.login, text)):
+        raise HTTPException(409, "the agent finished this step; send it again")
+    thread = await service.store.get_thread(thread_id_of(job)) or ChatThread(
+        id=thread_id_of(job),
+        owner=user.login,
+        title=f"{job.repo}#{job.number}",
+        repo=job.repo,
+        number=job.number,
+        job_id=job.id,
+    )
+    await service.store.save_thread(thread)
+    message = ChatMessage(
+        thread_id=thread.id,
+        role="user",
+        text=text,
+        author=user.login,
+        while_running=True,
+    )
+    await service.store.add_message(message)
+    if removed:
+        await service.store.add_message(
+            ChatMessage(
+                thread_id=thread.id,
+                role="assistant",
+                text="I removed what looked like a credential from your message "
+                "before the agent read it.",
+            )
+        )
+    return message.model_dump(mode="json")
 
 
 async def _turn(
@@ -252,6 +331,14 @@ async def _turn(
     )
     history = await service.store.list_messages(thread.id)
     payload = ReviewPostPayload.model_validate(record.action.payload)
+    posted = _posted(record)
+    revision = await _revision(service, record) if posted else None
+    if revision is not None:
+        # The review as it stands is the revision waiting to be posted.
+        pending = ReviewUpdatePayload.model_validate(revision.action.payload)
+        payload = payload.model_copy(
+            update={"body": pending.body, "result": pending.result or payload.result}
+        )
     kind = task_kind_of(payload)
     head = record.action.head_sha or pr.head_sha
     workdir, default_branch = await _checkout(service, thread, record, pr)
@@ -343,20 +430,32 @@ async def _turn(
         notes.append(
             "I removed what looked like a credential from your message before reading it."
         )
-    revised = False
+    revised: list[str] = []
     new_payload = apply_revision(answer, payload, profile, pr, head, own_format)
     if new_payload is not None:
         proposal = await service.store.proposal_for_action(record.action.id)
-        if proposal is None or proposal.state != ProposalState.PENDING:
-            notes.append(
-                "The draft was already decided, so this revision is not saved on it."
-            )
-        else:
+        if proposal is not None and proposal.state == ProposalState.PENDING:
             try:
                 await service.pipeline.save_edits(proposal.id, user.login, new_payload)
-                revised = True
+                revised.append(record.action.id)
             except ValueError as e:
                 notes.append(f"The revision could not be saved on the draft: {e}")
+        elif posted is not None:
+            revised.append(
+                await _revise_posted(
+                    service, user, record, revision, posted, new_payload, run
+                )
+            )
+            if new_payload.get("comments") != payload.comments:
+                notes.append(
+                    "Comments already posted on lines of the diff stay as they are; "
+                    "the revision changes the review's text."
+                )
+        else:
+            notes.append(
+                "The draft was already decided and not posted, so this revision is "
+                "not saved."
+            )
     changes = [
         await save_lesson(
             service, user, ProposedAction(kind="lesson", repo=job.repo, lesson=lesson)
@@ -368,9 +467,52 @@ async def _turn(
         thread_id=thread.id,
         role="assistant",
         text="\n\n".join([answer.reply, *notes]),
-        proposals=[record.action.id] if revised else [],
+        proposals=revised,
         changes=changes,
         run_id=run,
     )
     await service.store.add_message(message)
     return message.model_dump(mode="json")
+
+
+async def _revise_posted(
+    service: Service,
+    user: User,
+    record: ActionRecord,
+    revision: ActionRecord | None,
+    review_id: int,
+    new_payload: dict[str, Any],
+    run: str,
+) -> str:
+    """Draft the edit of a posted review, or update the edit already waiting, and
+    return its action id. Whoever posted the review approves it, as GitHub lets only
+    a review's author edit it."""
+    update = ReviewUpdatePayload(
+        target="review",
+        target_id=review_id,
+        body=str(new_payload["body"]),
+        runtime=new_payload.get("runtime"),
+        kind=new_payload.get("kind") or "review",
+        revises=record.action.id,
+        result=new_payload.get("result"),
+        author=record.post_as,
+    )
+    if revision is not None:
+        proposal = await service.store.proposal_for_action(revision.action.id)
+        if proposal is not None and proposal.state == ProposalState.PENDING:
+            await service.pipeline.save_edits(
+                proposal.id, user.login, update.model_dump(mode="json")
+            )
+            return revision.action.id
+    action = make_action(
+        ActionKind.REVIEW_UPDATE,
+        record.action.repo,
+        update,
+        number=record.action.number,
+        head_sha=record.action.head_sha,
+        discriminator=f"talk:{run}",
+        rationale=f"revise the review posted for {user.login} in the conversation",
+        draft_for=record.post_as or user.login,
+    )
+    saved = await service.pipeline.submit(action, force_propose=True)
+    return saved.action.id

@@ -190,6 +190,7 @@ class ReviewPlaybook(Playbook):
                 output_schema=ReviewResult.model_json_schema(),
                 skill_dirs=ctx.skill_dirs(),
                 repo=pr.repo,
+                messages=True,
             )
             answer = await ctx.ask(task, ReviewResult)
             if not answer.ok or answer.structured is None:

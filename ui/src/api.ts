@@ -550,6 +550,8 @@ export interface ChatMessage {
   requests?: ChatRequest[];
   /** The agent run that wrote an answer; its steps stay readable. */
   run_id?: string | null;
+  /** A message sent to the agent while it wrote the review. */
+  while_running?: boolean;
   created_at: string;
 }
 
@@ -776,6 +778,12 @@ export interface ReviewTalkState {
   draft: string | null;
   /** Whether the draft still waits for a decision, so a revision can be saved on it. */
   draft_pending: boolean;
+  /** Whether the agent writing the review takes messages now. */
+  listening: boolean;
+  /** Whether the draft was posted on GitHub; a revision then drafts an edit of it. */
+  posted: boolean;
+  /** The pending edit of the posted review, by action id. */
+  revision: string | null;
 }
 
 

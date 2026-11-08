@@ -30,6 +30,10 @@ input then stays open: the runtime writes the conversation's opening lines, feed
 every output line, writes what it answers, and resolves the questions it raises,
 first through ``auto_answer`` and then through the reviewers' question desk. The
 task's timeout stops counting while a question waits for a reviewer.
+
+A conversation with ``takes_messages`` also carries what reviewers say while the agent
+works (design 5.13): for a task with ``messages`` set, the runtime opens the job's box
+in the router's ``Inbox`` and hands each message to ``Conversation.tell`` as it comes.
 """
 
 from __future__ import annotations
@@ -45,7 +49,7 @@ import shutil
 import signal
 import tempfile
 import time
-from collections.abc import AsyncIterator, Iterable
+from collections.abc import AsyncIterator, Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar
@@ -244,8 +248,53 @@ class Step:
     """The exchange is over: standard input is closed so the CLI exits."""
 
 
+@dataclass(frozen=True)
+class Told:
+    """A reviewer's message for an agent at work: ``text`` is the whole prompt that
+    brings it, written by the core; ``by`` is the reviewer's login."""
+
+    by: str
+    text: str
+
+
+class Inbox:
+    """Messages for agents at work, by job: a reviewer talks to the agent of a review
+    while it runs. Only runs that listen open a box; a message for a job with none is
+    not kept."""
+
+    def __init__(self) -> None:
+        self._boxes: dict[str, list[asyncio.Queue[Told]]] = {}
+
+    @contextlib.contextmanager
+    def open(self, job_id: str) -> Iterator[asyncio.Queue[Told]]:
+        """A box for one run of ``job_id``, open while the context lasts."""
+        box: asyncio.Queue[Told] = asyncio.Queue()
+        self._boxes.setdefault(job_id, []).append(box)
+        try:
+            yield box
+        finally:
+            boxes = self._boxes.get(job_id, [])
+            if box in boxes:
+                boxes.remove(box)
+            if not boxes:
+                self._boxes.pop(job_id, None)
+
+    def listening(self, job_id: str) -> bool:
+        return bool(self._boxes.get(job_id))
+
+    def put(self, job_id: str, told: Told) -> bool:
+        """Deliver ``told`` to every run of ``job_id`` that listens; whether one did."""
+        boxes = self._boxes.get(job_id, [])
+        for box in boxes:
+            box.put_nowait(told)
+        return bool(boxes)
+
+
 class Conversation:
     """A two-way exchange with one running CLI; adapters subclass it."""
+
+    takes_messages: ClassVar[bool] = False
+    """Whether ``tell`` brings a reviewer's message to the agent while it works."""
 
     def opening(self) -> list[str]:
         """Lines to write as soon as the process starts."""
@@ -257,6 +306,12 @@ class Conversation:
 
     def answer(self, ask: Ask, answer: AgentAnswer) -> list[str]:
         """Lines that deliver ``answer`` to the CLI."""
+        return []
+
+    def tell(self, text: str) -> list[str]:
+        """Lines that bring ``text``, a reviewer's message, to the agent now; none when
+        the conversation holds it until the agent's turn ends. The agent then takes
+        it into account and finishes with its result as before."""
         return []
 
 
@@ -358,6 +413,8 @@ class ExecRuntime:
         self.command_prefix = list(command_prefix)
         self.questions = questions
         """Where questions go that ``auto_answer`` does not settle; set by the router."""
+        self.inbox: Inbox | None = None
+        """Where reviewers' messages for running tasks wait; set by the router."""
 
     # -- adapter hooks -----------------------------------------------------------
 
@@ -654,18 +711,59 @@ class ExecRuntime:
         deadline = loop.time() + task.timeout_seconds
         timed_out = False
         document: list[str] = []
+        listens = (
+            talk is not None
+            and talk.takes_messages
+            and task.messages
+            and task.job_id is not None
+            and self.inbox is not None
+        )
+        box_context = (
+            self.inbox.open(task.job_id)  # type: ignore[union-attr,arg-type]
+            if listens
+            else contextlib.nullcontext(None)
+        )
+        reading: asyncio.Future[bytes] | None = None
+        waiting: asyncio.Future[Told] | None = None
         try:
-            with files.transcript.open("w", encoding="utf-8") as transcript:
+            with (
+                files.transcript.open("w", encoding="utf-8") as transcript,
+                box_context as box,
+            ):
                 while True:
                     remaining = deadline - loop.time()
                     if remaining <= 0:
                         timed_out = True
                         break
-                    try:
-                        raw = await asyncio.wait_for(proc.stdout.readline(), remaining)  # type: ignore[union-attr]
-                    except TimeoutError:
+                    if reading is None:
+                        reading = asyncio.ensure_future(proc.stdout.readline())  # type: ignore[union-attr]
+                    if box is not None and waiting is None:
+                        waiting = asyncio.ensure_future(box.get())
+                    ready, _ = await asyncio.wait(
+                        [f for f in (reading, waiting) if f is not None],
+                        timeout=remaining,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if not ready:
                         timed_out = True
                         break
+                    if waiting is not None and waiting in ready:
+                        told = waiting.result()
+                        waiting = None
+                        assert talk is not None
+                        transcript.write(
+                            json.dumps({"told_by": told.by}, ensure_ascii=False) + "\n"
+                        )
+                        yield AgentEvent(
+                            type=AgentEventType.MESSAGE,
+                            text=f"[a message from {told.by} reached the agent]",
+                            data={"told_by": told.by},
+                        )
+                        await _write_lines(proc.stdin, talk.tell(told.text))
+                        if reading not in ready:
+                            continue
+                    raw = reading.result()
+                    reading = None
                     if not raw:
                         break
                     line = raw.decode("utf-8", "replace").rstrip("\n")
@@ -732,6 +830,11 @@ class ExecRuntime:
                 except TimeoutError:
                     timed_out = True
         finally:
+            for pending in (reading, waiting):
+                if pending is not None and not pending.done():
+                    pending.cancel()
+                    with contextlib.suppress(BaseException):
+                        await pending
             if proc.returncode is None:
                 await self._terminate(proc)
             if container is not None and self.container_sandbox is not None:

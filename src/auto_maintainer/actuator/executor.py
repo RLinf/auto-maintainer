@@ -36,7 +36,12 @@ from .memory_gate import try_merge_memory
 log = logging.getLogger(__name__)
 
 AS_PERSON = frozenset(
-    {ActionKind.REVIEW_POST, ActionKind.PR_FIX, ActionKind.PR_UPDATE_BRANCH}
+    {
+        ActionKind.REVIEW_POST,
+        ActionKind.REVIEW_UPDATE,
+        ActionKind.PR_FIX,
+        ActionKind.PR_UPDATE_BRANCH,
+    }
 )
 """Action kinds a maintainer may run with their own GitHub account."""
 
@@ -136,6 +141,13 @@ class Actuator:
             if action.kind == ActionKind.PR_FIX and not record.post_as:
                 raise RuntimeError(
                     "a fix PR is pushed and opened only as the maintainer who approves it"
+                )
+            if action.kind == ActionKind.REVIEW_UPDATE and record.post_as != (
+                action.payload.get("author") or None
+            ):
+                raise RuntimeError(
+                    "a posted review is edited only by whoever posted it: "
+                    f"{action.payload.get('author') or 'the service'}"
                 )
             if record.post_as and action.kind in AS_PERSON:
                 writer = await x.writer_as(record.post_as) if x.writer_as else None

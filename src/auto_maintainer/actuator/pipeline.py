@@ -286,15 +286,28 @@ class ActionPipeline:
         action = record.action
         if edited_payload is not None:
             await self._apply_edits(proposal, record, login, edited_payload)
+        author = (
+            action.payload.get("author") or None
+            if action.kind == ActionKind.REVIEW_UPDATE
+            else None
+        )
+        if action.kind == ActionKind.REVIEW_UPDATE and post_as != author:
+            # GitHub lets only a review's author edit it.
+            raise ApprovalError(
+                f"{author} posted this review, so only they can change it, as themselves"
+                if author
+                else "the service posted this review, so it changes it under its own name"
+            )
         if post_as is not None:
             if post_as != login or action.kind not in (
                 ActionKind.REVIEW_POST,
+                ActionKind.REVIEW_UPDATE,
                 ActionKind.PR_FIX,
                 ActionKind.PR_UPDATE_BRANCH,
             ):
                 raise ApprovalError(
-                    "only a review draft, a fix, or a branch update can be done as "
-                    "its approver"
+                    "only a review draft, a review's revision, a fix, or a branch "
+                    "update can be done as its approver"
                 )
             record.post_as = post_as
         elif action.kind == ActionKind.PR_FIX:
@@ -365,6 +378,10 @@ class ActionPipeline:
         action = record.action
         typed = PAYLOADS[action.kind].model_validate(edited_payload)
         new_payload = typed.model_dump(mode="json")
+        if action.kind == ActionKind.REVIEW_UPDATE:
+            # Which review is edited, and by whom, stay as drafted; the text changes.
+            for key in ("target", "target_id", "kind", "revises", "author"):
+                new_payload[key] = action.payload.get(key, new_payload[key])
         if new_payload == action.payload:
             return False
         if not person:

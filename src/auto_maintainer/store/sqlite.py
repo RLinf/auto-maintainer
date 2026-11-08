@@ -638,6 +638,25 @@ class SqliteStore:
             )
         )
 
+    async def revise_review_record(
+        self, repo: str, number: int, action_id: str, result: dict[str, Any]
+    ) -> bool:
+        stmt = select(m.review_records.c.id, m.review_records.c.data).where(
+            m.review_records.c.repo == repo, m.review_records.c.number == number
+        )
+        for row in await self._fetch(stmt):
+            record = ReviewRecord.model_validate_json(row.data)
+            if record.action_id != action_id:
+                continue
+            record.result = result
+            await self._exec(
+                update(m.review_records)
+                .where(m.review_records.c.id == row.id)
+                .values(data=_dump(record))
+            )
+            return True
+        return False
+
     async def list_review_records(self, repo: str, number: int) -> list[ReviewRecord]:
         stmt = (
             select(m.review_records.c.data)

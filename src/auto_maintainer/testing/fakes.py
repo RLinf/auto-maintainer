@@ -521,6 +521,10 @@ class ScriptedRunner:
         self.step_delay = 0.0
         """Seconds between those events; the demo sets it so the view moves."""
         self.progress: Any = None
+        self.listening_jobs: dict[str, int] = {}
+        """Jobs with a task running now that takes reviewers' messages."""
+        self.told: list[tuple[str, str, str]] = []
+        """Messages delivered to running tasks: job, reviewer, text."""
 
     def queue(
         self, kind: str, answer: dict[str, Any] | BaseModel | AgentResult
@@ -545,7 +549,32 @@ class ScriptedRunner:
             )
         return result
 
+    def tell(self, job_id: str, by: str, text: str) -> bool:
+        if not self.listening(job_id):
+            return False
+        self.told.append((job_id, by, text))
+        return True
+
+    def listening(self, job_id: str) -> bool:
+        return self.listening_jobs.get(job_id, 0) > 0
+
     async def _answer(
+        self, task: AgentTask, route: Route, output_model: type[BaseModel] | None
+    ) -> AgentResult:
+        listens = task.messages and task.job_id is not None
+        if listens:
+            assert task.job_id is not None
+            self.listening_jobs[task.job_id] = (
+                self.listening_jobs.get(task.job_id, 0) + 1
+            )
+        try:
+            return await self._scripted(task, route, output_model)
+        finally:
+            if listens:
+                assert task.job_id is not None
+                self.listening_jobs[task.job_id] -= 1
+
+    async def _scripted(
         self, task: AgentTask, route: Route, output_model: type[BaseModel] | None
     ) -> AgentResult:
         self.tasks.append(task)

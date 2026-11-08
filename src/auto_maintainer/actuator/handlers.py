@@ -191,7 +191,7 @@ async def _review_update(
         action,
         profile,
         p.body,
-        marker_kind="followup",
+        marker_kind=p.kind,
         pr=pr,
         runtime=p.runtime,
         approver=approver,
@@ -200,6 +200,22 @@ async def _review_update(
         await x.writer.update_review(action.repo, pr.number, p.target_id, body)
     else:
         await x.writer.update_comment(action.repo, p.target_id, body)
+    if p.revises:
+        # The posted review now says something else: keep what follow-ups, scores,
+        # and the conversation read in step with it.
+        original = await x.store.get_action(p.revises)
+        if original is not None:
+            payload = {**original.action.payload, "body": p.body}
+            if p.result is not None:
+                payload["result"] = p.result
+            original.action = original.action.model_copy(update={"payload": payload})
+            await x.store.save_action(original)
+        await x.store.revise_review_record(
+            action.repo,
+            pr.number,
+            p.revises,
+            {**(p.result or {}), "body": p.body},
+        )
     return {"target": p.target, "id": p.target_id}
 
 
@@ -684,9 +700,8 @@ HANDLERS: dict[ActionKind, HandlerSpec] = {
     ActionKind.REVIEW_POST: HandlerSpec(
         _review_post, needs_pr=True, needs_current_head=True
     ),
-    ActionKind.REVIEW_UPDATE: HandlerSpec(
-        _review_update, needs_pr=True, needs_current_head=True
-    ),
+    # An edited review still covers the commit it reviewed, whatever came since.
+    ActionKind.REVIEW_UPDATE: HandlerSpec(_review_update, needs_pr=True),
     ActionKind.THREAD_REPLY: HandlerSpec(_thread_reply, needs_pr=True),
     ActionKind.COMMENT_UPSERT: HandlerSpec(_comment_upsert, needs_pr=True),
     ActionKind.CI_RERUN_FAILED: HandlerSpec(

@@ -141,8 +141,11 @@ export function ProposalCard({
   const [target, setTarget] = useState(str(payload.target) || "pr");
   const changedTarget = isFix && !isMerge && target !== (str(payload.target) || "pr");
   const canAsMe = !!me?.can_post_as_me && AS_ME.has(kind);
+  // An edit of a posted review is done by whoever posted it: GitHub lets only the author edit it.
+  const reviewAuthor = kind === "review.update" ? str(payload.author) : "";
+  const notTheAuthor = !!reviewAuthor && me?.login !== reviewAuthor;
   // A fix is pushed only by a person; the service's own account never pushes to a repository.
-  const postAsMe = isFix || (canAsMe && asMe);
+  const postAsMe = isFix || !!reviewAuthor || (canAsMe && asMe);
   const hasComments = Array.isArray(payload.comments) && (payload.comments as unknown[]).length > 0;
   const diff = usePrDiff(action?.repo ?? "", action?.number, expanded && hasComments);
   const files = useMemo(() => (diff.data ? parseDiff(diff.data.diff) : null), [diff.data]);
@@ -179,7 +182,11 @@ export function ProposalCard({
         ? postAsMe
           ? t("Post as me")
           : t("Post")
-        : POSTED_BODY.has(kind)
+        : kind === "review.update" && payload.revises
+          ? reviewAuthor
+            ? t("Update the review as me")
+            : t("Update the posted review")
+          : POSTED_BODY.has(kind)
           ? t("Post")
           : t("Approve");
 
@@ -250,8 +257,16 @@ export function ProposalCard({
           <div className="split-button">
             <button
               className="primary"
-              disabled={approve.isPending || (isFix && !me?.can_post_as_me)}
-              title={isFix && !me?.can_post_as_me ? t("Sign in with GitHub to open it as yourself.") : undefined}
+              disabled={approve.isPending || ((isFix || !!reviewAuthor) && !me?.can_post_as_me) || notTheAuthor}
+              title={
+                notTheAuthor
+                  ? `${t("Only the reviewer who posted it can change it:")} @${reviewAuthor}`
+                  : isFix && !me?.can_post_as_me
+                    ? t("Sign in with GitHub to open it as yourself.")
+                    : reviewAuthor && !me?.can_post_as_me
+                      ? t("Sign in with GitHub to do it as yourself.")
+                      : undefined
+              }
               onClick={() => approve.mutate(undefined)}
             >
               <Icon name={isFix ? "pr" : kind === "lab.reproduce" ? "server" : "check"} size={14} />
@@ -341,6 +356,16 @@ export function ProposalCard({
         </div>
       )}
       {isFix && !done && me && !me.can_post_as_me && <span className="small muted">{t("Sign in with GitHub to open it as yourself.")}</span>}
+      {kind === "review.update" && !!payload.revises && !done && (
+        <span className="small muted">
+          {reviewAuthor
+            ? notTheAuthor
+              ? `${t("Only the reviewer who posted it can change it:")} @${reviewAuthor}.`
+              : t("This edits the review you posted, as you.")
+            : t("This edits the review the service posted.")}{" "}
+          {t("Comments already posted on lines of the diff stay as they are.")}
+        </span>
+      )}
       {proposal.edited && !editing && !done && <span className="small muted">{t("Edited; posting sends the saved version.")}</span>}
       <ErrorBox error={approve.error || reject.error || save.error} />
     </div>

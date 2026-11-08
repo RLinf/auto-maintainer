@@ -314,11 +314,19 @@ class ClaudeCodeRuntime(ExecRuntime):
 
 
 class ClaudeConversation(Conversation):
-    """Claude Code's stream-json control protocol for one task."""
+    """Claude Code's stream-json control protocol for one task.
+
+    A reviewer's message (``tell``) waits for the turn in progress to end and then
+    goes as the next user message of the same session; the run ends with the last
+    turn's result.
+    """
+
+    takes_messages = True
 
     def __init__(self, runtime: ClaudeCodeRuntime, task: AgentTask) -> None:
         self.runtime = runtime
         self.task = task
+        self.told: list[str] = []
 
     def opening(self) -> list[str]:
         return [
@@ -329,13 +337,7 @@ class ClaudeConversation(Conversation):
                     "request": {"subtype": "initialize", "hooks": None},
                 }
             ),
-            json.dumps(
-                {
-                    "type": "user",
-                    "message": {"role": "user", "content": self.task.prompt},
-                },
-                ensure_ascii=False,
-            ),
+            self._user(self.task.prompt),
         ]
 
     def feed(self, line: str) -> Step:
@@ -347,9 +349,21 @@ class ClaudeConversation(Conversation):
             "control_cancel_request",
         ):
             return Step()
-        return Step(
-            events=self.runtime.parse_line(line),
-            done=data is not None and data.get("type") == "result",
+        ended = data is not None and data.get("type") == "result"
+        if ended and self.told and data.get("subtype") == "success":
+            text = "\n\n".join(self.told)
+            self.told = []
+            return Step(events=self.runtime.parse_line(line), send=[self._user(text)])
+        return Step(events=self.runtime.parse_line(line), done=ended)
+
+    def tell(self, text: str) -> list[str]:
+        self.told.append(text)
+        return []
+
+    def _user(self, text: str) -> str:
+        return json.dumps(
+            {"type": "user", "message": {"role": "user", "content": text}},
+            ensure_ascii=False,
         )
 
     def answer(self, ask: Ask, answer: AgentAnswer) -> list[str]:

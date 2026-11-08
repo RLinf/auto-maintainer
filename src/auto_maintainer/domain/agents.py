@@ -118,6 +118,9 @@ class AgentTask(BaseModel):
     job_id: str | None = None
     requested_by: str | None = None
     """The maintainer who asked for this work; the agent's questions go to them first."""
+    messages: bool = False
+    """Reviewers may talk to the agent while it runs (``AgentRunner.tell`` with
+    ``job_id``): set for the agent writing a review or a follow-up."""
     id: str = Field(default_factory=lambda: new_id("run"))
 
 

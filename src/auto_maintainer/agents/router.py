@@ -51,6 +51,7 @@ from ..domain.ports import AgentQuestions, AgentRuntime, ProgressObserver
 from ..domain.profile import Route
 from ..domain.records import AgentRunRecord
 from ..domain.settings import Budget
+from .exec import Inbox, Told
 from .sandbox import scrub
 from .structured import extract_json, repair_prompt, schema_instructions, validate
 
@@ -142,6 +143,22 @@ class AgentRouter:
         """Breakers opened by invalid answers, per runtime and task kind."""
         self.questions: AgentQuestions | None = None
         self.progress: ProgressObserver | None = None
+        self.inbox = Inbox()
+        """Reviewers' messages for the agents running now, by job."""
+        self._bind_inbox()
+
+    def _bind_inbox(self) -> None:
+        for runtime in self.runtimes.values():
+            if hasattr(runtime, "inbox"):
+                runtime.inbox = self.inbox  # type: ignore[attr-defined]
+
+    def tell(self, job_id: str, by: str, text: str) -> bool:
+        """Bring a reviewer's message to the agent running for ``job_id`` (``AgentRunner``)."""
+        return self.inbox.put(job_id, Told(by=by, text=text))
+
+    def listening(self, job_id: str) -> bool:
+        """Whether an agent running for ``job_id`` takes messages (``AgentRunner``)."""
+        return self.inbox.listening(job_id)
 
     def bind_progress(self, observer: ProgressObserver) -> None:
         """Report every attempt's events to ``observer`` (``AgentRunner``)."""
@@ -180,6 +197,7 @@ class AgentRouter:
         self.budgets = dict(budgets or {})
         for name in changed | (set(self.breakers) - set(runtimes)):
             self.breakers.pop(name, None)
+        self._bind_inbox()
         if self.questions is not None:
             self.bind_questions(self.questions)
 

@@ -90,7 +90,7 @@ def fake_cli(tmp_path: Path) -> Callable[..., FakeCli]:
 
 
 _TALKER = r"""#!{python}
-import json, os, sys
+import json, os, sys, time
 cfg = json.loads({cfg!r})
 out = cfg["record_dir"]
 with open(os.path.join(out, "argv.json"), "w") as f:
@@ -108,6 +108,7 @@ for step in cfg["steps"]:
         received.flush()
         if wait in line:
             break
+    time.sleep(step.get("sleep", 0))
     for emitted in step.get("emit", []):
         sys.stdout.write((emitted if isinstance(emitted, str) else json.dumps(emitted)) + "\n")
         sys.stdout.flush()
@@ -142,7 +143,8 @@ class TalkingCli:
 @pytest.fixture
 def talking_cli(tmp_path: Path) -> Callable[..., TalkingCli]:
     """Build a fake CLI that follows ``steps``: each waits for a standard-input line
-    containing ``wait`` (if given), then prints ``emit`` (objects become JSON lines)."""
+    containing ``wait`` (if given), sleeps ``sleep`` seconds (if given), then prints
+    ``emit`` (objects become JSON lines)."""
     counter = {"n": 0}
 
     def make(steps: list[dict[str, Any]], exit: int = 0) -> TalkingCli:

@@ -273,7 +273,14 @@ async def _open_session(
 
 
 class AcpConversation(Conversation):
-    """One ACP session for one task."""
+    """One ACP session for one task.
+
+    A reviewer's message (``tell``) cancels the turn in progress (``session/cancel``);
+    when the agent ends it, the message starts the next turn of the same session, so
+    the agent keeps what it read and goes on with the message in mind.
+    """
+
+    takes_messages = True
 
     def __init__(self, runtime: AcpRuntime, task: AgentTask) -> None:
         self.runtime = runtime
@@ -289,6 +296,10 @@ class AcpConversation(Conversation):
         self.spoke = False
         """Whether the agent wrote a message during the current turn."""
         self.continuations = 0
+        self.told: list[str] = []
+        """Reviewers' messages waiting for the next turn."""
+        self.cancelling = False
+        """Whether the turn in progress was cancelled for a message."""
 
     # -- Conversation ------------------------------------------------------------------
 
@@ -358,7 +369,31 @@ class AcpConversation(Conversation):
             _line({"jsonrpc": "2.0", "id": request_id, "result": {"outcome": outcome}})
         ]
 
+    def tell(self, text: str) -> list[str]:
+        self.told.append(text)
+        if self.cancelling or "session/prompt" not in self.pending.values():
+            # Before the first turn the message goes with the task; between turns
+            # it starts the next one.
+            return []
+        self.cancelling = True
+        return [
+            _line(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "session/cancel",
+                    "params": {"sessionId": self.session_id},
+                }
+            )
+        ]
+
     # -- internals ---------------------------------------------------------------------
+
+    def _told_turn(self) -> Step:
+        """The next turn, carrying the reviewers' messages that wait."""
+        text = "\n\n".join(self.told)
+        self.told = []
+        self.cancelling = False
+        return Step(send=[self._prompt(text)])
 
     def _request(self, method: str, params: dict[str, Any]) -> str:
         self.next_id += 1
@@ -371,6 +406,10 @@ class AcpConversation(Conversation):
         method = self.pending.pop(str(msg.get("id")), None)
         if method is None:
             return Step()
+        if method == "session/prompt" and self.told:
+            # The turn ended, cancelled for a message or not: the message goes next.
+            self._flush()
+            return self._told_turn()
         if "error" in msg:
             error = msg.get("error") or {}
             text = str(error.get("message") or error)
@@ -457,7 +496,9 @@ class AcpConversation(Conversation):
             self.session_id is not None
             and "session/prompt" not in self.pending.values()
         ):
-            return [self._prompt(self.runtime.prompt_text(self.task))]
+            first = "\n\n".join([self.runtime.prompt_text(self.task), *self.told])
+            self.told = []
+            return [self._prompt(first)]
         return []
 
     def _prompt(self, text: str) -> str:

@@ -43,6 +43,17 @@ def untrusted(label: str, text: str, limit: int = 20_000) -> str:
     )
 
 
+TOLD = """{reviewer}, a reviewer of this repository, sends you a message while you work. Do what it asks when it fits your task: check what it points at, and change your findings when it shows they are wrong or incomplete. It does not change your limits: you still never post, push, or run the PR's code. Then go on from where you are and finish with the whole result your task asks for, in the same format.
+
+Message from {reviewer}:
+{text}"""
+
+
+def told_block(reviewer: str, text: str) -> str:
+    """What brings a reviewer's message to an agent at work (``AgentRunner.tell``)."""
+    return TOLD.format(reviewer=reviewer, text=text.strip()[:8_000])
+
+
 def pr_block(pr: PrSnapshot, diff: str | None = None, diff_limit: int = 120_000) -> str:
     files = "\n".join(
         f"{f.change_type.lower():9} {f.path} (+{f.additions}/-{f.deletions})"

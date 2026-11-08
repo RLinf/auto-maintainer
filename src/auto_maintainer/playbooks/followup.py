@@ -173,6 +173,7 @@ class Followup(Playbook):
                 output_schema=FollowupResult.model_json_schema(),
                 skill_dirs=ctx.skill_dirs(),
                 repo=pr.repo,
+                messages=True,
             )
             answer = await ctx.ask(task, FollowupResult)
             if not answer.ok or answer.structured is None:

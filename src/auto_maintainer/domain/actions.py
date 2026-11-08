@@ -244,10 +244,23 @@ class ReviewPostPayload(_Payload):
 
 
 class ReviewUpdatePayload(_Payload):
+    """New text for a review or comment the service already posted. The action's
+    ``head_sha`` is the commit that review covers, which its marker keeps."""
+
     target: Literal["review", "comment"]
     target_id: int
     body: str
     runtime: str | None = None
+    kind: Literal["review", "followup"] = "followup"
+    """The marker the new text keeps: the kind of review it replaces."""
+    revises: str | None = None
+    """The ``review.post`` action that posted the review; its body and findings
+    change with the posted text, so follow-ups and scores read the revision."""
+    result: dict[str, Any] | None = None
+    """The revised structured review result, for ``revises``; never posted."""
+    author: str | None = None
+    """Who posted the review: the maintainer's login when they posted it as
+    themselves, since only they can edit it, or ``None`` for the service."""
 
 
 class ThreadReplyPayload(_Payload):
