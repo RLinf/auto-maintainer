@@ -159,7 +159,7 @@ class ServiceSettings:
     host_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
     schedules: dict[str, str] = field(default_factory=dict)
     pools: dict[str, int] = field(
-        default_factory=lambda: {"io": 8, "agent": 3, "lab": 1}
+        default_factory=lambda: {"io": 8, "agent": 3, "lab": 1, "quality": 2}
     )
     dev_mode: bool = False
     write_caps: tuple[int, int] = (120, 40)

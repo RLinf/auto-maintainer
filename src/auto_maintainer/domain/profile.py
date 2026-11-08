@@ -187,6 +187,9 @@ class Review(_Section):
     writing_guide: str | None = Field(default=None, max_length=8000)
     """How every review, follow-up, and revision of one is written, in plain words;
     ``None`` uses the service's default (``playbooks.prompts.DEFAULT_WRITING_GUIDE``)."""
+    quick_quality: bool = True
+    """Whether every open PR gets a quick quality score from its diff before it is
+    reviewed, in the background (``playbooks/quality.py``)."""
     quality_guide: str | None = Field(default=None, max_length=8000)
     """How the reviewing agent judges the PR's quality from 0 to 100; ``None`` uses
     the service's default (``playbooks.prompts.DEFAULT_QUALITY_GUIDE``)."""

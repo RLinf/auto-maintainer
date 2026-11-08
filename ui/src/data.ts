@@ -103,11 +103,13 @@ export function useReevaluate() {
   });
 }
 
-/** Have an agent score the quality of each PR's latest review again. */
+/** Have an agent score each PR's quality: a reviewed PR from its review, any other
+ *  (or every one, with ``quick``) quickly from its diff. */
 export function useScoreQuality() {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: (prs: { repo: string; number: number }[]) => api.post<QualityStart[]>("/api/quality", { prs }),
+    mutationFn: ({ prs, quick = false }: { prs: { repo: string; number: number }[]; quick?: boolean }) =>
+      api.post<QualityStart[]>("/api/quality", { prs, quick }),
     onSuccess: () => void client.invalidateQueries({ queryKey: ["work"] }),
   });
 }

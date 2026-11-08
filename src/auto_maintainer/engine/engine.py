@@ -64,7 +64,10 @@ class Engine:
         self.profiles = profiles
         self.bus = bus
         self.clock = clock
-        self.pools = pools or {"io": 8, "agent": 3, "lab": 1}
+        self.pools = dict(pools or {"io": 8, "agent": 3, "lab": 1, "quality": 2})
+        for playbook in playbooks:
+            # A pool the host's settings leave out still runs, one job at a time.
+            self.pools.setdefault(playbook.pool, 1)
         self.lease_seconds = lease_seconds
         self._wake: dict[str, asyncio.Event] = {p: asyncio.Event() for p in self.pools}
         self._tasks: list[asyncio.Task[None]] = []

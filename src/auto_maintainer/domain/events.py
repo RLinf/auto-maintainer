@@ -53,6 +53,9 @@ class EventKind(StrEnum):
     QUALITY_REQUESTED = "quality.requested"
     """Score the quality of a PR's latest review again, or for the first time when it
     has none; the quality playbook runs it."""
+    QUICK_QUALITY = "quality.quick"
+    """Give a PR nobody reviewed yet a quick quality score from its diff, in the
+    background; the quality scan asks for it."""
     MERGE_ARMED = "merge.armed"
     MERGE_DISARMED = "merge.disarmed"
     MERGE_QUEUE = "merge.queue"

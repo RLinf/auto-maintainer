@@ -119,8 +119,10 @@ class HostConfig(_Cfg):
     host_overrides: dict[str, dict[str, Any]] = Field(default_factory=dict)
     """Per repository: host paths for its labs (design 2.2, layer 5)."""
     pools: dict[str, int] = Field(
-        default_factory=lambda: {"io": 8, "agent": 3, "lab": 1}
+        default_factory=lambda: {"io": 8, "agent": 3, "lab": 1, "quality": 2}
     )
+    """Jobs each pool runs at once. ``quality`` runs the quick quality scores of the
+    PRs nobody reviewed yet, in the background, apart from the reviews in ``agent``."""
     poll_seconds: int = 120
     write_caps: tuple[int, int] = (120, 40)
     sandbox_repo: str | None = None

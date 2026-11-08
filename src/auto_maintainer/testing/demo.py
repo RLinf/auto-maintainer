@@ -402,6 +402,12 @@ def _answer(task: AgentTask) -> dict[str, Any]:
     kind = str(task.kind)
     if kind == "review" and task.prompt.startswith("You judge the quality of PR"):
         return _quality(task)
+    if kind == "evaluate" and task.prompt.startswith("You give PR"):
+        quick = _quality(task)
+        return {
+            **quick,
+            "score": quick["score"] - 6 if "docs:" not in task.prompt else 93,
+        }
     if kind == "chat" and "You turn the description" in task.prompt:
         return _machine_rules(task.prompt)
     if kind in ("review", "followup") and TALKING in task.prompt:

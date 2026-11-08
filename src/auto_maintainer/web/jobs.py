@@ -52,6 +52,7 @@ AGENT_PLAYBOOKS = {
     "self_improve": "self_improve",
     "evaluate": "evaluate",
     "quality": "review",
+    "quick_quality": "evaluate",
 }
 """Playbooks whose work is an agent's, and the task kind of their main agent run."""
 
@@ -426,6 +427,14 @@ def build_router() -> APIRouter:
                 # Scoring nobody asked for mostly runs no agent (a PR changed a
                 # little, so only its total is recomputed): it shows once an agent
                 # works on it.
+                continue
+            if (
+                job.playbook == "quick_quality"
+                and number is None
+                and job.status not in ACTIVE
+            ):
+                # Quick scores run for every open PR in the background: a finished
+                # one shows on its PR, not in lists across PRs.
                 continue
             view = await job_view(service, job, me=user.login)
             if (

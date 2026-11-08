@@ -331,6 +331,13 @@ async def test_approve_and_edit_a_proposal(demo) -> None:
         await h.settle()
         rows = {r["number"]: r for r in (await maria.get("/api/prs")).json()}
         assert rows[42]["quality"]["rescored"] is True
+        quick = await maria.post(
+            "/api/quality", json={"prs": [{"repo": "acme/widget", "number": 44}]}
+        )
+        assert quick.status_code == 200
+        await h.settle()
+        rows = {r["number"]: r for r in (await maria.get("/api/prs")).json()}
+        assert rows[44]["quality"] is None and rows[44]["quick_quality"]["score"] == 93
         proposals = (await maria.get("/api/proposals")).json()
         review = next(
             p

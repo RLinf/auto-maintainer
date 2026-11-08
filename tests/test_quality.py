@@ -27,7 +27,7 @@ from auto_maintainer.playbooks.prompts import (
     DEFAULT_QUALITY_GUIDE,
     DEFAULT_WRITING_GUIDE,
 )
-from auto_maintainer.playbooks.quality import assessed_quality
+from auto_maintainer.playbooks.quality import assessed_quality, quick_quality
 from auto_maintainer.testing.fakes import make_pr
 from auto_maintainer.testing.harness import Harness
 
@@ -142,5 +142,87 @@ async def test_a_review_without_a_score_is_scored_once(tmp_path: Path) -> None:
             )
         )
         assert len(_scoring(h)) == 2, "a maintainer can ask again"
+    finally:
+        await h.close()
+
+
+QUICK = "You give PR"
+
+
+async def test_every_open_pr_gets_a_quick_score_until_its_review_scores_it(
+    tmp_path: Path,
+) -> None:
+    h = await Harness.create(tmp_path)
+    h.runner.on("triage", lambda t: {"summary": "s", "labels": []})
+    h.runner.on(
+        "evaluate",
+        lambda t: (
+            {"score": 72, "reason": "Fits the loader's design; small gaps."}
+            if t.prompt.startswith(QUICK)
+            else {"scores": {}, "summary": "s", "rationale": "r"}
+        ),
+    )
+    h.runner.on(
+        "review",
+        lambda t: _review({"score": 61, "reason": "The full read found more."}),
+    )
+    for number, sha in ((42, "a" * 40), (43, "b" * 40)):
+        h.forge.put_pr(
+            make_pr(
+                number=number,
+                sha=sha,
+                files=[PrFile(path="src/a.py")],
+                commits=[Commit(sha=sha, message="fix: a")],
+            )
+        )
+    try:
+        await h.poll()
+        tick = Event(kind=EventKind.SCHEDULE_TICK, payload={"name": "review_scan"})
+        await h.emit(tick)
+        quick = {n: await quick_quality(h.store, REPO, n) for n in (42, 43)}
+        assert {n: q.score for n, q in quick.items() if q} == {42: 72, 43: 72}
+        assert quick[42] is not None and quick[42].band == "fair"
+        asked = [t for t in h.runner.tasks if t.prompt.startswith(QUICK)]
+        assert len(asked) == 2 and "PR: #4" in asked[0].prompt
+
+        await h.emit(tick.model_copy(update={"id": "evt_again"}))
+        assert len([t for t in h.runner.tasks if t.prompt.startswith(QUICK)]) == 2
+
+        await h.emit(
+            Event(
+                kind=EventKind.DASHBOARD_COMMAND,
+                repo=REPO,
+                number=42,
+                payload={"command": "review", "by": "maria", "source": "dashboard"},
+            )
+        )
+        q = await _quality(h)
+        assert q is not None and q.score == 61, "the review's score is the accurate one"
+
+        pr = await h.forge.get_pr(REPO, 43)
+        h.forge.put_pr(pr.model_copy(update={"head_sha": "c" * 40}))
+        await h.poll()
+        h.clock.advance(hours=7)
+        await h.emit(tick.model_copy(update={"id": "evt_later"}))
+        rescored = await quick_quality(h.store, REPO, 43)
+        assert rescored is not None and rescored.sha == "c" * 40
+        assert not [
+            t
+            for t in h.runner.tasks
+            if t.prompt.startswith(QUICK) and "PR: #42" in t.prompt
+        ][1:], "a reviewed PR is not scored quickly again"
+    finally:
+        await h.close()
+
+
+async def test_quick_scores_can_be_turned_off(tmp_path: Path) -> None:
+    h = await _reviewed(tmp_path, None, {"review": {"quick_quality": False}})
+    try:
+        h.forge.put_pr(make_pr(number=43, sha="b" * 40, files=[PrFile(path="a")]))
+        await h.poll()
+        await h.emit(
+            Event(kind=EventKind.SCHEDULE_TICK, payload={"name": "review_scan"})
+        )
+        assert await quick_quality(h.store, REPO, 43) is None
     finally:
         await h.close()

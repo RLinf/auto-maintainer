@@ -171,6 +171,7 @@ export interface PrRow {
   review_trigger: "manual" | "scan" | "events";
   review_activity: ReviewActivity;
   quality: ReviewQuality | null;
+  quick_quality: QuickQuality | null;
 }
 
 /** A PR's quality as the reviewing agent judged it, by the repository's quality guide
@@ -188,6 +189,17 @@ export interface ReviewQuality {
   rescored: boolean;
 }
 
+/** A quick score of a PR from its diff, before any review (playbooks/quality.py).
+ *  The review's score is the accurate one. Internal. */
+export interface QuickQuality {
+  score: number;
+  band: QualityBand;
+  reason: string;
+  /** The head it looked at. */
+  sha: string;
+  at: string;
+}
+
 export interface QualityStart {
   repo: string;
   number: number;
@@ -201,6 +213,8 @@ export interface ReviewGuides {
   repo: string;
   writing_guide: string | null;
   quality_guide: string | null;
+  /** Whether every open PR gets a quick score before its review. */
+  quick_quality: boolean;
   default_writing_guide: string;
   default_quality_guide: string;
   can_configure: boolean;
@@ -329,6 +343,7 @@ export interface PrDetail {
   review_state: { state: string; reviewed_sha: string | null; latest_review_state: string | null };
   evaluation: Evaluation | null;
   quality: ReviewQuality | null;
+  quick_quality: QuickQuality | null;
   actions: (ActionRecord & { proposal: Proposal | null })[];
   reviews: { sha: string; kind: string; action_id: string; result: Record<string, unknown>; created_at: string }[];
   ci: CiObservation[];

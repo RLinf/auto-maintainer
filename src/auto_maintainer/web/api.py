@@ -73,7 +73,7 @@ from ..domain.snapshot import PrState
 from ..playbooks.evaluate import haystack, rubric_of
 from ..playbooks.hygiene import hygiene_key
 from ..playbooks.prompts import DEFAULT_QUALITY_GUIDE, DEFAULT_WRITING_GUIDE
-from ..playbooks.quality import assessed_quality
+from ..playbooks.quality import assessed_quality, quick_quality
 from ..profiles.layers import ProfileError, parse_yaml
 from ..profiles.lock import parse_lock, profile_diff
 from ..service import Service
@@ -361,6 +361,7 @@ class ReviewGuidesBody(BaseModel):
     writing_guide: str | None = Field(default=None, max_length=8000)
     quality_guide: str | None = Field(default=None, max_length=8000)
     """Empty, or the service's default, restores the default."""
+    quick_quality: bool = True
 
 
 def cron_every(hours: int) -> str:
@@ -400,6 +401,11 @@ MAX_EVALUATIONS = 500
 
 class EvaluationsBody(BaseModel):
     prs: list[PrTarget]
+
+
+class QualityBody(EvaluationsBody):
+    quick: bool = False
+    """Score quickly from the diff even a PR that has a review."""
 
 
 class RefreshBody(BaseModel):
@@ -750,6 +756,7 @@ def build_router() -> APIRouter:
             "repo": repo,
             "writing_guide": profile.review.writing_guide,
             "quality_guide": profile.review.quality_guide,
+            "quick_quality": profile.review.quick_quality,
             "default_writing_guide": DEFAULT_WRITING_GUIDE,
             "default_quality_guide": DEFAULT_QUALITY_GUIDE,
             "can_configure": gate.allowed,
@@ -783,13 +790,20 @@ def build_router() -> APIRouter:
                 review[key] = text + "\n"
             else:
                 review.pop(key, None)
+        if body.quick_quality:
+            review.pop("quick_quality", None)
+        else:
+            review["quick_quality"] = False
         if review:
             layer["review"] = review
         else:
             layer.pop("review", None)
         try:
             merged, change = await service.profiles.propose_memory_layer(
-                repo, layer, user.login, "review: writing and quality guides"
+                repo,
+                layer,
+                user.login,
+                "review: writing and quality guides, quick scores",
             )
         except ProfileError as e:
             raise HTTPException(422, str(e)) from e
@@ -989,6 +1003,11 @@ def build_router() -> APIRouter:
                         "quality": quality[pr.number].model_dump(mode="json")
                         if pr.number in quality
                         else None,
+                        "quick_quality": quick.model_dump(mode="json")
+                        if (
+                            quick := await quick_quality(service.store, name, pr.number)
+                        )
+                        else None,
                     }
                 )
         rows.sort(key=lambda x: (-(x["total"] or 0), -x["number"]))
@@ -1064,11 +1083,12 @@ def build_router() -> APIRouter:
 
     @r.post("/quality")
     async def request_quality(
-        request: Request, body: EvaluationsBody, user: User = Depends(current_user)
+        request: Request, body: QualityBody, user: User = Depends(current_user)
     ) -> list[dict[str, Any]]:
-        """Have an agent score each PR's quality again, from its latest review and
-        with the repository's quality guide as it is now. A PR being scored already
-        joins that job instead of starting another."""
+        """Have an agent score each PR's quality with the repository's quality guide
+        as it is now: a reviewed PR from its latest review, any other (or every one,
+        with ``quick``) quickly from its diff. A PR being scored already joins that
+        job instead of starting another."""
         service = service_of(request)
         targets = body.prs[:MAX_EVALUATIONS]
         for target in targets:
@@ -1098,7 +1118,7 @@ def build_router() -> APIRouter:
                 kind=EventKind.QUALITY_REQUESTED,
                 repo=target.repo,
                 number=target.number,
-                payload={"by": user.login},
+                payload={"by": user.login, "quick": body.quick},
                 source="dashboard",
             )
             await service.bus.publish(event)
@@ -1169,6 +1189,9 @@ def build_router() -> APIRouter:
             "review_state": cls.model_dump(mode="json"),
             "evaluation": ev.model_dump(mode="json") if ev else None,
             "quality": quality.model_dump(mode="json") if quality else None,
+            "quick_quality": quick.model_dump(mode="json")
+            if (quick := await quick_quality(service.store, repo, number))
+            else None,
             "actions": [
                 {
                     **a.model_dump(mode="json"),

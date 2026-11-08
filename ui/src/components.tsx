@@ -4,7 +4,7 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
-import { ApiError, type QualityBand, type ReviewQuality } from "./api";
+import { ApiError, type QualityBand, type QuickQuality, type ReviewQuality } from "./api";
 import { REVIEW_STATES } from "./data";
 import { currentLang, useLang, useT, type Lang } from "./i18n";
 import { Icon, type IconName } from "./icons";
@@ -83,33 +83,53 @@ export const QUALITY_BANDS: { band: QualityBand; floor: number; label: string }[
 ];
 export const qualityLabel = (band: QualityBand) => QUALITY_BANDS.find((b) => b.band === band)?.label ?? band;
 
-/** Whether the review that set ``q`` looked at an older commit than ``head``. */
-export function qualityStale(q: ReviewQuality, head: string | null | undefined): boolean {
+/** Whether a score was given at an older commit than ``head``. */
+export function qualityStale(q: { sha: string }, head: string | null | undefined): boolean {
   if (!head || !q.sha) return false;
   const n = Math.min(head.length, q.sha.length);
   return q.sha.slice(0, n) !== head.slice(0, n);
 }
 
-/** A PR's quality as a colored pill: the agent's score, and its band unless
- *  ``compact``; the agent's reason on hover. Faded when new commits arrived since the
- *  review it judged. */
-export function Quality({ quality, head, compact }: { quality: ReviewQuality | null | undefined; head?: string | null; compact?: boolean }) {
+/** The score a PR shows: the review's (accurate) when it has one, else the quick one. */
+export function shownQuality(quality: ReviewQuality | null | undefined, quick: QuickQuality | null | undefined): { score: number; band: QualityBand } | null {
+  return quality ?? quick ?? null;
+}
+
+/** A PR's quality as a colored pill: the review's score, or else the quick score at a
+ *  glance (dashed); the score, its band unless ``compact``, and the agent's reason on
+ *  hover. Faded when new commits arrived since it was given. */
+export function Quality({
+  quality,
+  quick,
+  head,
+  compact,
+}: {
+  quality: ReviewQuality | null | undefined;
+  quick?: QuickQuality | null;
+  head?: string | null;
+  compact?: boolean;
+}) {
   const t = useT();
-  if (!quality) return <span className="muted" title={t("Not reviewed")}>—</span>;
-  const stale = qualityStale(quality, head);
+  const shown = quality ?? quick;
+  if (!shown) return <span className="muted" title={t("Not scored yet")}>—</span>;
+  const stale = qualityStale(shown, head);
+  const where = quality
+    ? `${t(quality.kind === "followup" ? "follow-up at" : "review at")} ${quality.sha.slice(0, 7)}${quality.posted ? "" : ` (${t("not posted")})`}`
+    : `${t("quick score from the diff at")} ${shown.sha.slice(0, 7)}`;
   const title = [
-    `${t("Quality")} ${quality.score}/100 · ${t(qualityLabel(quality.band))}`,
-    quality.reason,
-    `${t(quality.kind === "followup" ? "follow-up at" : "review at")} ${quality.sha.slice(0, 7)}${quality.posted ? "" : ` (${t("not posted")})`}`,
-    stale ? t("new commits since this review") : "",
+    `${quality ? t("Quality") : t("Quick score")} ${shown.score}/100 · ${t(qualityLabel(shown.band))}`,
+    shown.reason,
+    where,
+    quality ? "" : t("A review gives the accurate score."),
+    stale ? t("new commits since") : "",
   ]
     .filter(Boolean)
     .join("\n");
   return (
-    <span className={`pill quality q-${quality.band}${stale ? " stale" : ""}`} title={title} aria-label={title}>
+    <span className={`pill quality q-${shown.band}${quality ? "" : " quick"}${stale ? " stale" : ""}`} title={title} aria-label={title}>
       <span className="dot" />
-      {quality.score}
-      {!compact && <span className="q-label">{t(qualityLabel(quality.band))}</span>}
+      {shown.score}
+      {!compact && <span className="q-label">{t(qualityLabel(shown.band))}</span>}
     </span>
   );
 }

@@ -67,7 +67,7 @@ from ..domain.settings import (
     secret_names,
 )
 from ..playbooks.prompts import schema_hint, untrusted
-from ..playbooks.quality import assessed_quality
+from ..playbooks.quality import assessed_quality, quick_quality
 from ..profiles.layers import ProfileError, parse_yaml
 from .api import (
     code_maintainer,
@@ -560,6 +560,13 @@ async def _page_block(
                 f"Internal quality, as the reviewing agent judged it at {quality.sha[:12]} "
                 f"by the repository's quality guide: {quality.score}/100 ({quality.band}). "
                 f"{quality.reason}".rstrip()
+            )
+        quick = await quick_quality(service.store, pr.repo, pr.number)
+        if quick is not None:
+            lines.append(
+                f"Internal quick quality score from the diff at {quick.sha[:12]}, before "
+                f"any review{' (the review score above is the accurate one)' if quality else ''}: "
+                f"{quick.score}/100 ({quick.band}). {quick.reason}".rstrip()
             )
         lines.append(untrusted("pr.title", pr.title, 500))
         lines.append(untrusted("pr.body", pr.body or "(empty)", 6000))

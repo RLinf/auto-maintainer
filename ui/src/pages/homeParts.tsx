@@ -228,7 +228,7 @@ export function ReviewCard({ rows, loading, me, automations }: { rows: PrRow[]; 
                   {p.review_state === "FOLLOWUP_REVIEW" || p.review_state === "APPROVED_NEW_COMMITS" ? ` · ${t("updated since the last review")}` : ""}
                 </span>
               </span>
-              {p.quality && <Quality quality={p.quality} head={p.head} compact />}
+              {(p.quality || p.quick_quality) && <Quality quality={p.quality} quick={p.quick_quality} head={p.head} compact />}
               <span className="small">{activity(p, me, t)}</span>
               <span className="row-actions">
                 <button

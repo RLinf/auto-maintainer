@@ -324,6 +324,7 @@ td.check, th.check { width: 36px; padding-right: 0; }
 .quality { --qc: var(--muted); font-weight: 650; font-variant-numeric: tabular-nums; color: var(--qc); background: color-mix(in srgb, var(--qc) 14%, transparent); min-width: 30px; justify-content: center; }
 .quality .q-label { font-weight: 500; }
 .quality.stale { opacity: 0.6; }
+.quality.quick { background: transparent; border: 1px dashed var(--qc); line-height: 18px; }
 .q-excellent { --qc: var(--q-excellent); }
 .q-good { --qc: var(--q-good); }
 .q-fair { --qc: var(--q-fair); }

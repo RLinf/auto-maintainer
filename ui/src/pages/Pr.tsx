@@ -4,7 +4,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { api, type Evaluation, type Me, type PrDetail, type ReviewQuality, type ReviewStart, type RootCause, type RunCiPlan } from "../api";
+import { api, type Evaluation, type Me, type PrDetail, type QuickQuality, type ReviewQuality, type ReviewStart, type RootCause, type RunCiPlan } from "../api";
 import { useAgent } from "../agent";
 import { agentName, AgentPicker, useAgentChoice } from "../agentPicker";
 import {
@@ -113,7 +113,7 @@ export default function PrPage({ me }: { me: Me }) {
           <span className="row" style={{ gap: 8 }}>
             <Status value={pr.state.toLowerCase()} />
             {pr.is_draft && <Status value="draft" label={t("draft")} />}
-            {d.quality && <Quality quality={d.quality} head={pr.head_sha} />}
+            {(d.quality || d.quick_quality) && <Quality quality={d.quality} quick={d.quick_quality} head={pr.head_sha} />}
             <span>
               {pr.author} {t("wants to merge into")} <code>{pr.base_ref}</code> {t("from")} <code>{pr.head_sha.slice(0, 7)}</code>
             </span>
@@ -232,7 +232,14 @@ export default function PrPage({ me }: { me: Me }) {
         </div>
 
         <aside className="side">
-          <QualityCard repo={full} number={pr.number} quality={d.quality} head={pr.head_sha} reviewed={d.actions.some((a) => a.action.kind === "review.post")} />
+          <QualityCard
+            repo={full}
+            number={pr.number}
+            quality={d.quality}
+            quick={d.quick_quality}
+            head={pr.head_sha}
+            reviewed={d.actions.some((a) => a.action.kind === "review.post")}
+          />
           <EvaluationCard base={base} repo={full} number={pr.number} evaluation={d.evaluation} />
           <Section
             title={t("Merge")}
@@ -554,18 +561,21 @@ function RefreshButton({ base }: { base: string }) {
   );
 }
 
-/** The PR's quality as the reviewing agent judged it: the score, its band, the
- *  agent's reason, and Score again, which has an agent judge it afresh. */
+/** The PR's quality: the accurate score its review gave, and the quick score from its
+ *  diff that reviewers choose by before a review; each with the agent's reason, and a
+ *  button that has an agent score it afresh. */
 function QualityCard({
   repo,
   number,
   quality,
+  quick,
   head,
   reviewed,
 }: {
   repo: string;
   number: number;
   quality: ReviewQuality | null;
+  quick: QuickQuality | null;
   head: string;
   reviewed: boolean;
 }) {
@@ -573,7 +583,8 @@ function QualityCard({
   const toast = useToast();
   const score = useScoreQuality();
   const client = useQueryClient();
-  const scoring = (usePrWork(repo, number).data ?? []).find((j) => j.playbook === "quality" && ACTIVE.has(j.status));
+  const work = usePrWork(repo, number).data ?? [];
+  const scoring = work.find((j) => (j.playbook === "quality" || j.playbook === "quick_quality") && ACTIVE.has(j.status));
   const scoringId = scoring?.id;
   const [watched, setWatched] = useState<string | undefined>();
   useEffect(() => {
@@ -585,37 +596,56 @@ function QualityCard({
       void client.invalidateQueries({ queryKey: ["prs"] });
     }
   }, [scoringId, watched, client]);
-  const start = () => score.mutate([{ repo, number }], { onSuccess: (out) => toast(qualityToast(out, t)) });
+  const start = (quickly: boolean) =>
+    score.mutate({ prs: [{ repo, number }], quick: quickly }, { onSuccess: (out) => toast(qualityToast(out, t)) });
+  const main = quality ?? quick;
   return (
     <Section
       title={t("Quality")}
       hint={t("internal")}
-      aside={quality ? <span className={`pill quality q-${quality.band}`}>{t(qualityLabel(quality.band))}</span> : null}
+      aside={main ? <span className={`pill quality q-${main.band}${quality ? "" : " quick"}`}>{t(qualityLabel(main.band))}</span> : null}
     >
-      {quality ? (
-        <div className={`stack small q-${quality.band}`} style={{ gap: 8 }}>
+      {main ? (
+        <div className={`stack small q-${main.band}`} style={{ gap: 8 }}>
           <div className="row" style={{ gap: 6, alignItems: "baseline" }}>
-            <span style={{ fontSize: 28, fontWeight: 700, lineHeight: 1, color: "var(--qc)", fontVariantNumeric: "tabular-nums" }}>{quality.score}</span>
+            <span style={{ fontSize: 28, fontWeight: 700, lineHeight: 1, color: "var(--qc)", fontVariantNumeric: "tabular-nums" }}>{main.score}</span>
             <span className="muted">/ 100</span>
+            <span className="muted">· {quality ? t("after review") : t("at a glance")}</span>
           </div>
-          <div className="quality-meter" role="img" aria-label={`${quality.score} / 100`}>
-            <span style={{ width: `${quality.score}%` }} />
+          <div className="quality-meter" role="img" aria-label={`${main.score} / 100`}>
+            <span style={{ width: `${main.score}%` }} />
           </div>
-          {quality.reason && <span style={{ fontSize: 13 }}>{quality.reason}</span>}
+          {main.reason && <span style={{ fontSize: 13 }}>{main.reason}</span>}
           <span className="muted">
-            {t(
-              quality.rescored
-                ? quality.kind === "followup"
-                  ? "scored again for the follow-up at"
-                  : "scored again for the review at"
-                : quality.kind === "followup"
-                  ? "judged in the follow-up at"
-                  : "judged in the review at",
-            )}{" "}
-            <code>{quality.sha.slice(0, 7)}</code>
-            {!quality.posted && ` · ${t("not posted")}`}
-            {qualityStale(quality, head) && ` · ${t("new commits since this review")}`}
+            {quality ? (
+              <>
+                {t(
+                  quality.rescored
+                    ? quality.kind === "followup"
+                      ? "scored again for the follow-up at"
+                      : "scored again for the review at"
+                    : quality.kind === "followup"
+                      ? "judged in the follow-up at"
+                      : "judged in the review at",
+                )}{" "}
+                <code>{quality.sha.slice(0, 7)}</code>
+                {!quality.posted && ` · ${t("not posted")}`}
+              </>
+            ) : (
+              <>
+                {t("quick score from the diff at")} <code>{main.sha.slice(0, 7)}</code> · {t("a review gives the accurate score")}
+              </>
+            )}
+            {qualityStale(main, head) && ` · ${t("new commits since")}`}
           </span>
+          {quality && quick && (
+            <span className="muted">
+              {t("At a glance it scored")}{" "}
+              <span className={`pill quality quick q-${quick.band}`} title={quick.reason}>
+                {quick.score}
+              </span>
+            </span>
+          )}
           <span className="row" style={{ gap: 4, flexWrap: "wrap" }}>
             {QUALITY_BANDS.map((b) => (
               <span key={b.band} className={`pill quality q-${b.band}`} style={{ fontSize: 11 }}>
@@ -625,9 +655,7 @@ function QualityCard({
           </span>
         </div>
       ) : (
-        <span className="small muted">
-          {reviewed ? t("This PR's review has no quality score yet.") : t("The reviewing agent scores the PR's quality, by the repository's quality guide.")}
-        </span>
+        <span className="small muted">{t("An agent gives every open PR a quick score from its diff; its review gives the accurate one.")}</span>
       )}
       {scoring ? (
         <button className="ghost sm row" style={{ marginTop: 10, gap: 6 }} onClick={() => openJob(scoring.id)}>
@@ -635,12 +663,19 @@ function QualityCard({
           {t("An agent is scoring its quality")}
         </button>
       ) : (
-        reviewed && (
-          <button className="ghost sm" style={{ marginTop: 10 }} disabled={score.isPending} onClick={start} title={t("An agent judges the PR again by the repository's quality guide")}>
-            <Icon name="sparkles" size={14} />
-            {quality ? t("Score quality again") : t("Score quality")}
-          </button>
-        )
+        <div className="row" style={{ marginTop: 10, gap: 4 }}>
+          {reviewed ? (
+            <button className="ghost sm" disabled={score.isPending} onClick={() => start(false)} title={t("An agent judges the PR again by the repository's quality guide")}>
+              <Icon name="sparkles" size={14} />
+              {quality ? t("Score quality again") : t("Score quality")}
+            </button>
+          ) : (
+            <button className="ghost sm" disabled={score.isPending} onClick={() => start(true)} title={t("An agent scores the PR quickly from its diff")}>
+              <Icon name="sparkles" size={14} />
+              {quick ? t("Quick score again") : t("Quick score")}
+            </button>
+          )}
+        </div>
       )}
       <ErrorBox error={score.error} />
     </Section>

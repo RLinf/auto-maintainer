@@ -21,7 +21,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, computed_field, field_validator
 
 from .actions import ActionKind, ActionStatus, InlineComment
 from .ids import same_commit, short_sha
@@ -485,6 +485,21 @@ def quality_band(score: int) -> QualityBand:
         if score >= floor:
             return band
     return "bad"
+
+
+class QuickQuality(QualityVerdict):
+    """A quick score of a PR from its diff, by the same quality guide, for choosing
+    what to review first. The quality its review judges (``ReviewQuality``) is the
+    accurate one and takes its place once there is one. Internal."""
+
+    sha: str = ""
+    """The head it looked at."""
+    at: datetime
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def band(self) -> QualityBand:
+        return quality_band(self.score)
 
 
 def review_chain(records: Iterable[ActionRecord]) -> list[ActionRecord]:

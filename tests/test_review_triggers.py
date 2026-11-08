@@ -188,7 +188,11 @@ async def test_periodic_scan_reviews_a_bounded_batch_by_priority(
     tmp_path: Path,
 ) -> None:
     layer = {
-        "review": {"trigger": "scan", "scan": {"schedule": "0 */6 * * *", "max_prs": 1}}
+        "review": {
+            "trigger": "scan",
+            "scan": {"schedule": "0 */6 * * *", "max_prs": 1},
+            "quick_quality": False,
+        }
     }
     h = await Harness.create(tmp_path, layer=layer)
     try:

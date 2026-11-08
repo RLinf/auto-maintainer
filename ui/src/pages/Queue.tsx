@@ -6,7 +6,7 @@ import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api, type Me, type PrRow, type ReviewActivity, type ReviewStart } from "../api";
 import { useAgent } from "../agent";
-import { ErrorBox, Labels, PageHead, prPath, Quality, QUALITY_BANDS, qualityLabel, ReviewState, Tier, timeOf, useAct, When } from "../components";
+import { ErrorBox, Labels, PageHead, prPath, Quality, QUALITY_BANDS, qualityLabel, ReviewState, shownQuality, Tier, timeOf, useAct, When } from "../components";
 import { evaluationToast, prKey, qualityToast, REVIEW_ORDER, REVIEW_STATES, TIER_ORDER, usePrs, useReevaluate, useRepos, useScoreQuality, useSyncPrs } from "../data";
 import { RepoTabs, useRepoScope } from "../repoScope";
 import { useT } from "../i18n";
@@ -52,6 +52,11 @@ export default function QueuePage({ me }: { me: Me }) {
             ? rows.filter((p) => p.review_state === "UP_TO_DATE")
             : rows;
 
+  const bandOf = (p: PrRow) => {
+    const shown = shownQuality(p.quality, p.quick_quality);
+    return shown ? t(qualityLabel(shown.band)) : t("Not scored yet");
+  };
+
   const list = useList<PrRow>({
     rows: source,
     key: prKey,
@@ -59,7 +64,8 @@ export default function QueuePage({ me }: { me: Me }) {
     facets: [
       { id: "tier", label: t("Priority"), values: (p) => p.tier ?? t("Not evaluated") },
       { id: "state", label: t("Review state"), values: (p) => t(REVIEW_STATES[p.review_state] ?? p.review_state) },
-      { id: "quality", label: t("Quality"), values: (p) => (p.quality ? t(qualityLabel(p.quality.band)) : t("Not reviewed")) },
+      { id: "quality", label: t("Quality"), values: (p) => bandOf(p) },
+      { id: "scored", label: t("Quality from"), values: (p) => (p.quality ? t("Review") : p.quick_quality ? t("Quick score") : t("Not scored yet")) },
       { id: "author", label: t("Author"), values: (p) => p.author },
       { id: "label", label: t("Label"), values: (p) => p.labels },
       { id: "claimed", label: t("Claimed by"), values: (p) => p.claimed_by ?? t("Unclaimed") },
@@ -67,7 +73,7 @@ export default function QueuePage({ me }: { me: Me }) {
     sorts: [
       { id: "priority", label: t("Priority"), value: (p) => p.total ?? -1, descFirst: true },
       { id: "tier", label: t("Priority"), value: (p) => (p.tier ? TIER_ORDER.indexOf(p.tier) : 99) },
-      { id: "quality", label: t("Quality"), value: (p) => p.quality?.score ?? -1, descFirst: true },
+      { id: "quality", label: t("Quality"), value: (p) => shownQuality(p.quality, p.quick_quality)?.score ?? -1, descFirst: true },
       { id: "updated", label: t("Last updated"), value: (p) => timeOf(p.updated_at), descFirst: true },
       { id: "number", label: t("Number"), value: (p) => p.number, descFirst: true },
       { id: "title", label: t("Title"), value: (p) => p.title.toLowerCase() },
@@ -81,8 +87,8 @@ export default function QueuePage({ me }: { me: Me }) {
       {
         id: "quality",
         label: t("Quality"),
-        value: (p) => (p.quality ? t(qualityLabel(p.quality.band)) : t("Not reviewed")),
-        order: [...QUALITY_BANDS.map((b) => t(b.label)), t("Not reviewed")],
+        value: bandOf,
+        order: [...QUALITY_BANDS.map((b) => t(b.label)), t("Not scored yet")],
       },
       { id: "author", label: t("Author"), value: (p) => p.author },
       { id: "claimed", label: t("Claimed by"), value: (p) => p.claimed_by ?? t("Unclaimed") },
@@ -122,7 +128,7 @@ export default function QueuePage({ me }: { me: Me }) {
     {
       id: "quality",
       header: t("Quality"),
-      cell: (p) => <Quality quality={p.quality} head={p.head} compact />,
+      cell: (p) => <Quality quality={p.quality} quick={p.quick_quality} head={p.head} compact />,
       sort: "quality",
       width: 72,
     },
@@ -301,22 +307,20 @@ export default function QueuePage({ me }: { me: Me }) {
           <Icon name="sparkles" size={14} />
           {`${t("Score again")} ${selected.length}`}
         </button>
-        {selected.some((p) => p.quality || p.reviewed_sha) && (
-          <button
-            className="sm"
-            disabled={quality.isPending}
-            title={t("An agent judges each reviewed PR's quality again by the repository's quality guide")}
-            onClick={() =>
-              quality.mutate(
-                selected.filter((p) => p.quality || p.reviewed_sha).map((p) => ({ repo: p.repo, number: p.number })),
-                { onSuccess: (out) => (toast(qualityToast(out, t)), list.clearSelection()) },
-              )
-            }
-          >
-            <Icon name="sparkles" size={14} />
-            {`${t("Score quality")} ${selected.filter((p) => p.quality || p.reviewed_sha).length}`}
-          </button>
-        )}
+        <button
+          className="sm"
+          disabled={quality.isPending}
+          title={t("An agent scores each PR by the repository's quality guide: a reviewed PR from its review, any other quickly from its diff")}
+          onClick={() =>
+            quality.mutate(
+              { prs: selected.map((p) => ({ repo: p.repo, number: p.number })) },
+              { onSuccess: (out) => (toast(qualityToast(out, t)), list.clearSelection()) },
+            )
+          }
+        >
+          <Icon name="sparkles" size={14} />
+          {`${t("Score quality")} ${selected.length}`}
+        </button>
         <button
           className="sm"
           onClick={() =>

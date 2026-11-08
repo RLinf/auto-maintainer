@@ -500,18 +500,22 @@ function ReviewGuidesSection({ repo }: { repo: string }) {
   const d = view.data;
   const [writing, setWriting] = useState("");
   const [quality, setQuality] = useState("");
+  const [quick, setQuick] = useState(true);
   useEffect(() => {
     if (!d) return;
     setWriting(d.writing_guide ?? d.default_writing_guide);
     setQuality(d.quality_guide ?? d.default_quality_guide);
+    setQuick(d.quick_quality);
   }, [d]);
   const save = useAct(
-    () => api.put<{ applied: boolean; reason: string }>(url, { writing_guide: writing, quality_guide: quality }),
+    () => api.put<{ applied: boolean; reason: string }>(url, { writing_guide: writing, quality_guide: quality, quick_quality: quick }),
     [["profile"], ["memory"]],
   );
   const changed =
     !!d &&
-    (writing.trim() !== (d.writing_guide ?? d.default_writing_guide).trim() || quality.trim() !== (d.quality_guide ?? d.default_quality_guide).trim());
+    (writing.trim() !== (d.writing_guide ?? d.default_writing_guide).trim() ||
+      quality.trim() !== (d.quality_guide ?? d.default_quality_guide).trim() ||
+      quick !== d.quick_quality);
   return (
     <Section title={t("How reviews read and score")} hint={t("every review, follow-up, and revision")}>
       {!d ? (
@@ -536,6 +540,15 @@ function ReviewGuidesSection({ repo }: { repo: string }) {
             onChange={setQuality}
             fallback={d.default_quality_guide}
           />
+          <label className="row" style={{ gap: 8, alignItems: "flex-start" }}>
+            <input type="checkbox" checked={quick} onChange={(e) => setQuick(e.target.checked)} style={{ marginTop: 3 }} />
+            <span className="stack" style={{ gap: 2 }}>
+              <strong>{t("Score every open PR at a glance")}</strong>
+              <span className="small muted">
+                {t("Before its review, an agent gives each open PR a quick score from its diff by this guide, in the background, highest priority first, so reviewers can choose what to take first. The review then gives the accurate score.")}
+              </span>
+            </span>
+          </label>
           <div className="row">
             <span className="spacer" />
             <button
