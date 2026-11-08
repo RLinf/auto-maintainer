@@ -777,3 +777,21 @@ export interface ReviewTalkState {
   /** Whether the draft still waits for a decision, so a revision can be saved on it. */
   draft_pending: boolean;
 }
+
+
+/** Where agents run on this host (agents/container.py): each task in a container of
+ *  its own, or on the host. */
+export interface SandboxView {
+  available: boolean;
+  enabled?: boolean;
+  ready?: boolean;
+  status?: string;
+  docker?: boolean;
+  image?: string;
+  network?: "bridge" | "host";
+  cpus?: number;
+  memory?: string;
+  pids?: number;
+  can_configure?: boolean;
+  reason?: string;
+}

@@ -443,3 +443,46 @@ async def test_the_settings_say_which_agents_are_confined(demo) -> None:
         }
     assert agents["codex"]["confined"] is True
     assert agents["claude-code"]["confined"] is False
+
+
+async def test_the_sandbox_is_a_setting_of_the_services_maintainers(demo) -> None:
+    from auto_maintainer.agents.container import ContainerSandbox, SandboxStarter
+
+    h, app = demo
+
+    class ReadyBox(ContainerSandbox):
+        async def ready(self) -> bool:
+            return True
+
+    runtime = build_runtime("antigravity", RuntimeConfig(adapter="antigravity"))
+    saved: list[dict] = []
+    control = SandboxStarter(
+        ReadyBox("agent:1", docker="sh"),
+        lambda: {"antigravity": runtime},
+        save=saved.append,
+    )
+    await control.start()
+    await control._task  # type: ignore[misc]
+    h.service.a.agent_sandbox = control
+    assert runtime.container_sandbox is not None
+    change = {"enabled": True, "network": "host", "cpus": 4, "memory": "16g"}
+    async with _client(app, "walt") as walt:
+        view = (await walt.get("/api/settings/sandbox")).json()
+        assert view["ready"] and view["network"] == "bridge"
+        assert view["can_configure"] is False
+        refused = await walt.put("/api/settings/sandbox", json=change)
+        assert refused.status_code == 403 and not saved
+    async with _client(app, "maria") as maria:
+        out = (await maria.put("/api/settings/sandbox", json=change)).json()
+        assert (out["network"], out["cpus"], out["memory"]) == ("host", 4, "16g")
+        assert saved == [change], "kept in this host's local.yaml"
+        assert control.sandbox.network == "host", "the next run uses it"
+        bad = await maria.put(
+            "/api/settings/sandbox", json={**change, "network": "none"}
+        )
+        assert bad.status_code == 422
+        off = (
+            await maria.put("/api/settings/sandbox", json={**change, "enabled": False})
+        ).json()
+        assert off["enabled"] is False and "on the host" in off["status"]
+        assert runtime.container_sandbox is None, "agents run on the host at once"

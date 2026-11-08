@@ -64,6 +64,13 @@ class SecretBody(BaseModel):
     value: str = Field(min_length=1, max_length=4096)
 
 
+class SandboxBody(BaseModel):
+    enabled: bool = True
+    network: Literal["bridge", "host"] = "bridge"
+    cpus: float = Field(default=2.0, gt=0, le=128)
+    memory: str = Field(default="8g", pattern=r"^\d+(\.\d+)?[kmgKMG]?$")
+
+
 async def _require_maintainer(service: Service, user: User) -> None:
     decision = await service.service_gate(user.login)
     if not decision.allowed:
@@ -430,6 +437,54 @@ def build_router() -> APIRouter:
             "diff": settings_diff(current, body.yaml),
             "status": service.settings_status.model_dump(mode="json"),
         }
+
+    @r.get("/sandbox")
+    async def sandbox_view(
+        request: Request, user: User = Depends(current_user)
+    ) -> dict[str, Any]:
+        """Where agents run on this host: each task in a container of its own, or on
+        the host; its state, network, and limits."""
+        service = service_of(request)
+        control = service.a.agent_sandbox
+        if control is None:
+            return {"available": False}
+        decision = await service.service_gate(user.login)
+        return {
+            "available": True,
+            **control.describe(),
+            "can_configure": decision.allowed,
+            "reason": decision.reason,
+        }
+
+    @r.put("/sandbox")
+    async def set_sandbox(
+        request: Request, body: SandboxBody, user: User = Depends(current_user)
+    ) -> dict[str, Any]:
+        """Change it for this host (``local.yaml``); a maintainer of the service's
+        repository only. The network and limits apply to the next agent run."""
+        service = service_of(request)
+        await _require_maintainer(service, user)
+        control = service.a.agent_sandbox
+        if control is None:
+            raise HTTPException(409, "this service has no agent sandbox")
+        try:
+            await control.configure(
+                enabled=body.enabled,
+                network=body.network,
+                cpus=body.cpus,
+                memory=body.memory,
+            )
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from e
+        await service.store.add_audit(
+            AuditEntry(
+                kind="config",
+                actor=user.login,
+                summary=f"agent sandbox: {'on' if body.enabled else 'off'}, "
+                f"{body.network} network, {body.cpus:g} CPUs, {body.memory} memory",
+            )
+        )
+        return {"available": True, **control.describe(), "can_configure": True}
 
     @r.put("/secrets/{name}")
     async def set_secret(

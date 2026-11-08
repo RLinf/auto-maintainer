@@ -29,7 +29,7 @@ from .agents.container import ContainerSandbox, SandboxStarter, host_tools, imag
 from .agents.github_proxy import GitHubReadProxy
 from .agents.registry import budgets_of, build_runtimes, merge_configs
 from .agents.router import AgentRouter
-from .config import CONFIG_DIR, HostConfig
+from .config import CONFIG_DIR, HostConfig, load_host_config, save_host_config
 from .domain.clock import SystemClock
 from .domain.profile import Route
 from .domain.records import AgentRunRecord
@@ -86,29 +86,34 @@ async def build_service(cfg: HostConfig, dev: bool = False) -> Service:
     runtimes_cfg = merge_configs((_yaml(op / "runtimes.yaml") or {}).get("runtimes"))
     runtimes = build_runtimes(runtimes_cfg, runs_dir=data / "runs")
 
-    background: list[Any] = []
-    starter: SandboxStarter | None = None
-    if cfg.sandbox.enabled:
-        api_host = urlparse(cfg.github.api_url).hostname or "api.github.com"
-        proxy = GitHubReadProxy(
-            data / "sandbox" / "github.sock",
-            lambda: tokens.token(None),
-            api_host=api_host,
-        )
-        starter = SandboxStarter(
-            ContainerSandbox(
-                cfg.sandbox.image or image_tag(),
-                cpus=cfg.sandbox.cpus,
-                memory=cfg.sandbox.memory,
-                pids=cfg.sandbox.pids,
-                network=cfg.sandbox.network,
-                github_socket=proxy.socket_path,
-                tools=host_tools(),
-                mounts=[Path(os.path.expanduser(m)) for m in cfg.sandbox.mounts],
-            ),
-            lambda: router.runtimes,
-        )
-        background += [proxy, starter]
+    proxy = GitHubReadProxy(
+        data / "sandbox" / "github.sock",
+        lambda: tokens.token(None),
+        api_host=urlparse(cfg.github.api_url).hostname or "api.github.com",
+    )
+
+    def save_sandbox(values: dict[str, Any]) -> None:
+        """The Settings page's sandbox settings, into this host's ``local.yaml``."""
+        host = load_host_config()
+        host.sandbox = host.sandbox.model_copy(update=values)
+        save_host_config(host)
+
+    starter = SandboxStarter(
+        ContainerSandbox(
+            cfg.sandbox.image or image_tag(),
+            cpus=cfg.sandbox.cpus,
+            memory=cfg.sandbox.memory,
+            pids=cfg.sandbox.pids,
+            network=cfg.sandbox.network,
+            github_socket=proxy.socket_path,
+            tools=host_tools(),
+            mounts=[Path(os.path.expanduser(m)) for m in cfg.sandbox.mounts],
+        ),
+        lambda: router.runtimes,
+        enabled=cfg.sandbox.enabled,
+        save=save_sandbox,
+    )
+    background: list[Any] = [proxy, starter]
 
     async def usage_today(runtime: str) -> tuple[int, float]:
         now = clock.now()
@@ -136,8 +141,7 @@ async def build_service(cfg: HostConfig, dev: bool = False) -> Service:
     ) -> None:
         """New service settings: rebuild the runtimes and hand them to the router."""
         built = build_runtimes(agents, runs_dir=data / "runs", providers=providers)
-        if starter is not None:
-            starter.attach(built)
+        starter.attach(built)
         router.reconfigure(built, budgets_of(agents))
 
     user_tokens = FileUserTokens(data / "user-tokens.json")
@@ -237,6 +241,7 @@ async def build_service(cfg: HostConfig, dev: bool = False) -> Service:
         writer_for_user=writer_for_user,
         publisher_for_user=publisher_for_user,
         background=background,
+        agent_sandbox=starter,
     )
     settings = ServiceSettings(
         login=login,

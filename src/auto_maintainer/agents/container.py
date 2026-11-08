@@ -276,15 +276,65 @@ class SandboxStarter:
     """
 
     name = "agent sandbox"
+    NETWORKS = ("bridge", "host")
 
     def __init__(
-        self, sandbox: ContainerSandbox, runtimes: Callable[[], Mapping[str, object]]
+        self,
+        sandbox: ContainerSandbox,
+        runtimes: Callable[[], Mapping[str, object]],
+        *,
+        enabled: bool = True,
+        save: Callable[[dict[str, object]], None] | None = None,
     ) -> None:
         self.sandbox = sandbox
         self._runtimes = runtimes
+        self.enabled = enabled
+        self._save = save
         self.ready = False
         self.status = "not started"
         self._task: asyncio.Task[None] | None = None
+
+    def describe(self) -> dict[str, object]:
+        """What the Settings page shows."""
+        return {
+            "enabled": self.enabled,
+            "ready": self.ready,
+            "status": self.status,
+            "docker": shutil.which(self.sandbox.docker) is not None,
+            "image": self.sandbox.image,
+            "network": self.sandbox.network,
+            "cpus": self.sandbox.cpus,
+            "memory": self.sandbox.memory,
+            "pids": self.sandbox.pids,
+        }
+
+    async def configure(
+        self, *, enabled: bool, network: str, cpus: float, memory: str
+    ) -> None:
+        """Change the sandbox while the service runs: the network and the limits
+        apply to the next agent run; turning it off gives agents back to the host at
+        once, and turning it on readies it (building the image if needed). The
+        settings are saved to the host's ``local.yaml``."""
+        if network not in self.NETWORKS:
+            raise ValueError(f"network must be one of {', '.join(self.NETWORKS)}")
+        self.sandbox.network = network
+        self.sandbox.cpus = cpus
+        self.sandbox.memory = memory
+        if self._save is not None:
+            self._save(
+                {"enabled": enabled, "network": network, "cpus": cpus, "memory": memory}
+            )
+        if not enabled and self.enabled:
+            self.enabled = False
+            await self.stop()
+            self.ready = False
+            for runtime in self._runtimes().values():
+                if hasattr(runtime, "home_paths"):
+                    runtime.container_sandbox = None  # type: ignore[attr-defined]
+            self.status = "off: agents run on the host"
+        elif enabled and not self.enabled:
+            self.enabled = True
+            await self.start()
 
     async def start(self) -> None:
         self._task = asyncio.create_task(self._prepare(), name="agent-sandbox")
@@ -296,6 +346,9 @@ class SandboxStarter:
                 await self._task
 
     async def _prepare(self) -> None:
+        if not self.enabled:
+            self.status = "off: agents run on the host"
+            return
         if shutil.which(self.sandbox.docker) is None:
             self.status = "docker is not installed: agents run on the host"
             log.warning(self.status)
@@ -316,7 +369,7 @@ class SandboxStarter:
 
     def attach(self, runtimes: Mapping[str, object]) -> None:
         """Give the sandbox to the runtimes that can run in it, once it is ready."""
-        if not self.ready:
+        if not (self.ready and self.enabled):
             return
         for runtime in runtimes.values():
             if hasattr(runtime, "home_paths"):

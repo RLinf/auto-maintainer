@@ -147,6 +147,9 @@ class Adapters:
     background: list[Any] = field(default_factory=list)
     """Pieces that run alongside the service, each with ``start`` and ``stop`` (the
     agents' sandbox and its GitHub read proxy)."""
+    agent_sandbox: Any = None
+    """The agents' sandbox control (``describe``, ``configure``) for the Settings
+    page; ``None`` where the composition root gives none."""
 
 
 @dataclass

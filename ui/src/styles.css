@@ -334,6 +334,8 @@ td.check, th.check { width: 36px; padding-right: 0; }
 .q-bad { --qc: var(--q-bad); }
 .md.quality-reason { font-size: 13px; line-height: 1.55; color: var(--text); }
 .md.quality-reason p, .md.quality-reason ul { margin-bottom: 6px; }
+.sandbox-grid { display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 12px; }
+@media (max-width: 640px) { .sandbox-grid { grid-template-columns: 1fr; } }
 .quality-meter { height: 8px; border-radius: 999px; background: var(--border); overflow: hidden; }
 .quality-meter > span { display: block; height: 100%; border-radius: inherit; background: var(--qc); }
 .status-ok { background: var(--ok-bg); color: var(--ok); }

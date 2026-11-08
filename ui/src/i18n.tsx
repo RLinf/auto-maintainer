@@ -1411,6 +1411,21 @@ const zh: Record<string, string> = {
   "Quick scores learn from reviews: when a review scores a PR far from its quick score, the next quick scores take it into account.": "快速评分会从评审中学习：当评审给出的分数与快速评分相差很大时，之后的快速评分会参考这一点。",
   "Learned from reviews": "从评审中学到的规则",
   "Quick scores a review corrected:": "被评审纠正的快速评分：",
+  "Sandbox": "沙箱",
+  "Where agents run on this host": "智能体在这台主机上的运行方式",
+  "In containers": "在容器中",
+  "Getting ready": "准备中",
+  "No docker": "没有 Docker",
+  "Each agent task runs in a fresh container that holds only its checkout, the skills, and the agent's own login: none of the service's settings, keys, or data. Inside it the agent may do anything, and it reads GitHub as the service through a proxy that only reads.": "每个智能体任务都在一个全新的容器中运行，容器里只有它的代码检出、技能和智能体自己的登录信息，没有服务的任何设置、密钥或数据。智能体在容器里可以做任何事，并通过一个只读代理以服务的身份读取 GitHub。",
+  "Run each agent task in a container of its own": "每个智能体任务在独立容器中运行",
+  "Network": "网络",
+  "bridge: Docker's own network": "bridge：Docker 自己的网络",
+  "host: the host's network (never its files)": "host：使用主机网络（不含主机文件）",
+  "Choose host where the host's firewall or proxy lets only the host's own traffic out.": "如果主机的防火墙或代理只放行主机自身的流量，请选择 host。",
+  "CPUs per task": "每个任务的 CPU",
+  "Memory per task": "每个任务的内存",
+  "Image": "镜像",
+  "The next agent task runs this way.": "下一个智能体任务将按此运行。",
 };
 
 const LangContext = createContext<{ lang: Lang; setLang: (l: Lang) => void }>({ lang: "zh", setLang: () => {} });

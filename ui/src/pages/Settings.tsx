@@ -4,9 +4,10 @@
 // go only into their key fields. Only maintainers of the service's repository apply
 // changes; anyone else's wait for one.
 
+import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
-import { api, type AgentChoices, type LabMachine, type MachineCheck, type MachineDraft, type SettingsAgent, type SettingsCheck, type SettingsProvider, type SettingsView } from "../api";
+import { api, type AgentChoices, type LabMachine, type MachineCheck, type MachineDraft, type SettingsAgent, type SettingsCheck, type SandboxView, type SettingsProvider, type SettingsView } from "../api";
 import { useAgent, type AgentContext } from "../agent";
 import { Diff, Empty, ErrorBox, PageHead, Section, Status, useAct, When } from "../components";
 import { useRepos, useSettings } from "../data";
@@ -138,7 +139,12 @@ export default function SettingsPage() {
       )}
 
       <Tabs tabs={tabs} active={tab} onChange={setTab} />
-      {tab === "agents" && <AgentsTab v={v} ask={ask} />}
+      {tab === "agents" && (
+        <div className="stack" style={{ gap: 16 }}>
+          <AgentsTab v={v} ask={ask} />
+          <SandboxCard />
+        </div>
+      )}
       {tab === "providers" && <ProvidersTab v={v} ask={ask} />}
       {tab === "routing" && <RoutingTab v={v} ask={ask} />}
       {tab === "labs" && <LabsTab v={v} ask={ask} />}
@@ -373,6 +379,95 @@ function FromSettings({ on }: { on: boolean }) {
     <span className="pill status-info" title={t("Set in the settings file; otherwise the default applies")}>
       {t("customized")}
     </span>
+  );
+}
+
+/** Where agents run on this host: each task in a fresh container of its own, holding
+ *  none of the service's settings, keys, or data, or on the host. Its network and
+ *  limits apply to the next agent run; a maintainer of the service's repository
+ *  changes them, and they are kept in this host's local.yaml. */
+function SandboxCard() {
+  const t = useT();
+  const toast = useToast();
+  const view = useQuery({
+    queryKey: ["settings", "sandbox"],
+    queryFn: () => api.get<SandboxView>("/api/settings/sandbox"),
+    refetchInterval: (q) => (q.state.data?.enabled && !q.state.data?.ready && q.state.data?.docker ? 5000 : false),
+  });
+  const d = view.data;
+  const [enabled, setEnabled] = useState(true);
+  const [network, setNetwork] = useState<"bridge" | "host">("bridge");
+  const [cpus, setCpus] = useState("2");
+  const [memory, setMemory] = useState("8g");
+  useEffect(() => {
+    if (!d?.available) return;
+    setEnabled(!!d.enabled);
+    setNetwork(d.network ?? "bridge");
+    setCpus(String(d.cpus ?? 2));
+    setMemory(d.memory ?? "8g");
+  }, [d]);
+  const save = useAct(
+    () => api.put<SandboxView>("/api/settings/sandbox", { enabled, network, cpus: Number(cpus), memory }),
+    [["settings", "sandbox"]],
+  );
+  if (!d) return view.isLoading ? <Skeleton rows={3} /> : <ErrorBox error={view.error} />;
+  if (!d.available) return null;
+  const changed = enabled !== d.enabled || network !== d.network || Number(cpus) !== d.cpus || memory !== d.memory;
+  const state = d.ready ? "executed" : d.enabled ? (d.docker ? "pending" : "failed") : "cancelled";
+  const label = d.ready ? t("In containers") : d.enabled ? (d.docker ? t("Getting ready") : t("No docker")) : t("Off");
+  return (
+    <Section title={t("Sandbox")} hint={t("Where agents run on this host")}>
+      <div className="stack" style={{ gap: 12 }}>
+        <div className="row" style={{ gap: 8 }}>
+          <Status value={state} label={label} />
+          {!d.ready && <span className="small muted">{d.status}</span>}
+        </div>
+        <span className="small muted">
+          {t("Each agent task runs in a fresh container that holds only its checkout, the skills, and the agent's own login: none of the service's settings, keys, or data. Inside it the agent may do anything, and it reads GitHub as the service through a proxy that only reads.")}
+        </span>
+        <label className="row" style={{ gap: 8 }}>
+          <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} disabled={!d.can_configure} />
+          <strong>{t("Run each agent task in a container of its own")}</strong>
+        </label>
+        <div className="sandbox-grid">
+          <label className="stack" style={{ gap: 4 }}>
+            <span className="small">{t("Network")}</span>
+            <select value={network} onChange={(e) => setNetwork(e.target.value as "bridge" | "host")} disabled={!d.can_configure}>
+              <option value="bridge">{t("bridge: Docker's own network")}</option>
+              <option value="host">{t("host: the host's network (never its files)")}</option>
+            </select>
+            <span className="small muted">{t("Choose host where the host's firewall or proxy lets only the host's own traffic out.")}</span>
+          </label>
+          <label className="stack" style={{ gap: 4 }}>
+            <span className="small">{t("CPUs per task")}</span>
+            <input type="number" min={0.5} step={0.5} value={cpus} onChange={(e) => setCpus(e.target.value)} disabled={!d.can_configure} />
+          </label>
+          <label className="stack" style={{ gap: 4 }}>
+            <span className="small">{t("Memory per task")}</span>
+            <input value={memory} onChange={(e) => setMemory(e.target.value)} placeholder="8g" disabled={!d.can_configure} />
+          </label>
+        </div>
+        <div className="row" style={{ gap: 8 }}>
+          <span className="small muted">
+            {t("Image")}: <code>{d.image}</code>
+          </span>
+          <span className="spacer" />
+          {!d.can_configure && <span className="small muted">{d.reason}</span>}
+          <button
+            className="primary"
+            disabled={!changed || !d.can_configure || save.isPending}
+            onClick={() =>
+              save.mutate(undefined, {
+                onSuccess: () => toast({ title: t("Saved"), body: t("The next agent task runs this way."), icon: "check" }),
+              })
+            }
+          >
+            {save.isPending ? t("Saving…") : t("Save")}
+          </button>
+        </div>
+        <ErrorBox error={save.error} />
+      </div>
+    </Section>
   );
 }
 
