@@ -1,20 +1,23 @@
 // A repository's People tab (design 2.6): its roles, what each is responsible for,
 // how people move between roles and who decides, who holds each role, and the history
-// of changes. It starts as a skeleton; an agent fills it in from the repository's own
-// process and what reviewers tell it, and checks who should change role. What the
-// agent drafts waits here as a memory change that a maintainer of the repository
-// applies. Roles grant nothing in the service: GitHub permissions still decide.
+// of changes. It starts as a skeleton. Reviewers talk with the agent that keeps it:
+// where the process is written, rules, answers to its questions, members, or a check
+// of who should change role. What the agent drafts waits here as a memory change that
+// a maintainer of the repository applies. Roles grant nothing in the service: GitHub
+// permissions still decide.
 
-import { useQuery } from "@tanstack/react-query";
-import { useState } from "react";
-import { api } from "./api";
-import { Empty, ErrorBox, Section, useAct } from "./components";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Fragment, useEffect, useRef, useState } from "react";
+import { api, type ChatMessage, type JobStep } from "./api";
+import { Empty, ErrorBox, Section } from "./components";
+import { useQuestions } from "./data";
 import { useT } from "./i18n";
 import { Icon } from "./icons";
+import { Steps } from "./jobs";
 import { Markdown } from "./markdown";
-import { openJob } from "./openJob";
+import { QuestionCard } from "./pages/Questions";
 import { ChangeById } from "./settingsChange";
-import { Skeleton, useToast } from "./ui";
+import { Skeleton } from "./ui";
 
 interface Role {
   id: string;
@@ -80,12 +83,10 @@ interface PeopleResponse {
   error: string | null;
   checks: { kind: string; login: string | null; text: string }[];
   permissions: Record<string, string>;
-  pending: { id: string; role_changes: { login: string; from: string | null; to: string | null }[] }[];
+  pending: { id: string; governance: Governance | null; role_changes: { login: string; from: string | null; to: string | null }[] }[];
   can_configure: boolean;
   has_profile: boolean;
 }
-
-const KEYS = [["people"], ["memory"], ["work"]];
 
 export function PeopleTab({ repo }: { repo: string }) {
   const t = useT();
@@ -93,20 +94,33 @@ export function PeopleTab({ repo }: { repo: string }) {
     queryKey: ["people", repo],
     queryFn: () => api.get<PeopleResponse>(`/api/repos/${repo}/governance`),
   });
+  const [showCurrent, setShowCurrent] = useState(false);
   if (data.isLoading) return <Skeleton rows={6} />;
   if (data.error || !data.data) return <ErrorBox error={data.error} />;
   const d = data.data;
-  const gov = d.governance;
+  // The newest draft that waits for approval is what people read and answer first.
+  const draft = [...d.pending].reverse().find((p) => p.governance);
+  const viewingDraft = !!draft && !showCurrent;
+  const gov = viewingDraft && draft?.governance ? draft.governance : d.governance;
   const roles = [...(gov.roles ?? [])].sort((a, b) => b.level - a.level);
   const name = (id: string | null | undefined) => (id ? (roles.find((r) => r.id === id)?.name ?? id) : null);
   const flagged = new Set(d.checks.map((c) => c.login?.toLowerCase()).filter(Boolean));
 
   return (
     <div className="stack people" style={{ gap: 16 }}>
-      {!gov.established && (
+      {draft && (
+        <div className="strip question">
+          <Icon name="shield" />
+          <span>{viewingDraft ? t("Showing the agent's draft, which waits for a maintainer to apply it. Talk with the agent to change it.") : t("Showing the record as it is applied now.")}</span>
+          <button className="sm right" onClick={() => setShowCurrent(!showCurrent)}>
+            {viewingDraft ? t("Show the current record") : t("Show the draft")}
+          </button>
+        </div>
+      )}
+      {!draft && !gov.established && (
         <div className="strip question">
           <Icon name="sparkles" />
-          <span>{t("This is the starting skeleton. Tell the agent where your process is written, or describe it, and it fills this in for a maintainer to approve.")}</span>
+          <span>{t("This is the starting skeleton. Tell the agent below where your process is written, or describe it, and it fills this in for a maintainer to approve.")}</span>
         </div>
       )}
       {d.error && (
@@ -114,7 +128,7 @@ export function PeopleTab({ repo }: { repo: string }) {
           {t("The stored record does not read, so the skeleton is shown")}: {d.error}
         </div>
       )}
-      <AskAgent repo={repo} established={!!gov.established} hasProfile={d.has_profile} />
+      <PeopleTalk repo={repo} questions={(draft?.governance ?? d.governance).open_questions ?? []} established={!!(draft?.governance ?? d.governance).established} hasProfile={d.has_profile} />
       {d.pending.length > 0 && (
         <Section title={t("Changes waiting for a maintainer")} hint={d.can_configure ? t("you can apply them") : t("a maintainer applies them")}>
           <div className="stack" style={{ gap: 12 }}>
@@ -151,7 +165,7 @@ export function PeopleTab({ repo }: { repo: string }) {
           )}
         </Section>
       )}
-      {d.checks.length > 0 && (
+      {!viewingDraft && d.checks.length > 0 && (
         <Section title={t("Where this differs from GitHub")} hint={t("checked now")}>
           <ul className="stack" style={{ gap: 4, margin: 0, paddingLeft: 18 }}>
             {d.checks.map((c) => (
@@ -290,58 +304,171 @@ export function PeopleTab({ repo }: { repo: string }) {
           </ul>
         )}
       </Section>
-      {(gov.open_questions ?? []).length > 0 && (
-        <Section title={t("Open questions")} hint={t("for the maintainers")}>
-          <ul style={{ margin: 0, paddingLeft: 18 }}>
-            {(gov.open_questions ?? []).map((q) => (
-              <li key={q}>{q}</li>
-            ))}
-          </ul>
-        </Section>
-      )}
     </div>
   );
 }
 
-function AskAgent({ repo, established, hasProfile }: { repo: string; established: boolean; hasProfile: boolean }) {
+type TalkState = { thread: string | null; live_run: string | null; listening: boolean; messages: ChatMessage[] };
+type TurnSteps = { run: string | null; live: boolean; steps: JobStep[] };
+
+/** The conversation with the agent that keeps the record, shared by the repository's reviewers. */
+function PeopleTalk({ repo, questions, established, hasProfile }: { repo: string; questions: string[]; established: boolean; hasProfile: boolean }) {
   const t = useT();
-  const toast = useToast();
+  const client = useQueryClient();
+  const box = useRef<HTMLTextAreaElement>(null);
   const [text, setText] = useState("");
-  const ask = useAct((mode: "edit" | "members") => api.post<{ event: string }>(`/api/repos/${repo}/governance/agent`, { instruction: text.trim(), mode }), KEYS);
-  const start = (mode: "edit" | "members") =>
-    ask.mutate(mode, {
-      onSuccess: (out) => {
-        setText("");
-        toast({
-          title: mode === "members" ? t("Checking who should change role") : t("The agent is updating the record"),
-          body: t("Its draft appears here for a maintainer to apply."),
-          icon: "sparkles",
-          action: { label: t("Watch"), onClick: () => openJob(out.event) },
-        });
-      },
-    });
+  const [pendingText, setPendingText] = useState("");
+  const base = `/api/repos/${repo}/governance/talk`;
+  const talk = useQuery({ queryKey: ["people", repo, "talk"], queryFn: () => api.get<TalkState>(base) });
+  const send = useMutation({
+    mutationFn: (said: string) => api.post<ChatMessage>(base, { text: said }),
+    onSettled: () => {
+      setPendingText("");
+      for (const queryKey of [["people"], ["memory"]]) void client.invalidateQueries({ queryKey });
+    },
+  });
+  const running = send.isPending || !!talk.data?.live_run;
+  // While a turn runs, others' messages and whether the agent takes one move too.
+  useEffect(() => {
+    if (!running) return;
+    const timer = window.setInterval(() => void client.invalidateQueries({ queryKey: ["people", repo, "talk"], exact: true }), 2000);
+    return () => window.clearInterval(timer);
+  }, [running, client, repo]);
+  const live = useQuery({
+    queryKey: ["people", repo, "talk", "live"],
+    queryFn: () => api.get<TurnSteps>(`${base}/steps`),
+    enabled: running,
+    refetchInterval: running ? 1500 : false,
+  });
+  const listening = !!talk.data?.listening;
+  const busy = running && !listening;
+  const pendingQuestions = useQuestions("pending");
+  const messages = talk.data?.messages ?? [];
+  const runs = new Set([...messages.map((m) => m.run_id), live.data?.run, talk.data?.live_run].filter((x): x is string => !!x));
+  const waiting = (pendingQuestions.data ?? []).filter((q) => q.job_id && runs.has(q.job_id));
+  const last = messages[messages.length - 1];
+  const showPending = !!pendingText && !(last?.role === "user" && last.text === pendingText);
+
+  const submit = (said: string) => {
+    const clean = said.trim();
+    if (!clean || busy || !hasProfile) return;
+    if (!listening) setPendingText(clean);
+    setText("");
+    send.mutate(clean);
+  };
+  const answer = (q: string) => {
+    setText(`${q}\n→ `);
+    box.current?.focus();
+  };
+
   return (
-    <Section title={t("Ask the agent")} hint={t("in your own words")}>
-      <div className="stack" style={{ gap: 8 }}>
-        <textarea
-          value={text}
-          rows={3}
-          onChange={(e) => setText(e.target.value)}
-          placeholder={t("Where is your process written, or what should change? For example: our roles are in GOVERNANCE.md; reviewers become maintainers after six months and two maintainers' approval; add @alice as a reviewer of docs/.")}
-          aria-label={t("What the agent should do")}
-        />
-        <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
-          <button className="primary" disabled={ask.isPending || !hasProfile || (established && !text.trim())} onClick={() => start("edit")}>
-            <Icon name="sparkles" size={14} />
-            {established ? t("Update with the agent") : t("Fill in with the agent")}
+    <Section title={t("Talk with the agent")} hint={t("shared by this repository's reviewers")}>
+      <div className="stack review-talk" style={{ gap: 10 }}>
+        {!messages.length && !pendingText && (
+          <span className="small muted">
+            {established
+              ? t("Tell it what to change: a rule, a member, a change of role. Ask it to check who should change role. It drafts each change for a maintainer to apply.")
+              : t("Start by telling it where your process is written (a file in the repository or a web page), or describe the roles and how people move between them.")}
+          </span>
+        )}
+        {messages.map((m) => (
+          <Fragment key={m.id}>
+            {m.role === "user" ? (
+              <div className="bubble user">
+                <span className="small" style={{ display: "block", opacity: 0.75 }}>
+                  {m.author}
+                  {m.while_running && ` · ${t("sent while it worked")}`}
+                </span>
+                {m.text}
+              </div>
+            ) : (
+              <div className="bubble assistant">
+                <Markdown text={m.text} className="chat-md" />
+              </div>
+            )}
+            {m.role !== "user" && (m.changes ?? []).length > 0 && (
+              <span className="small" style={{ color: "var(--ok)" }}>
+                <Icon name="check" size={13} /> {t("Drafted a revision; it waits below for a maintainer")}
+              </span>
+            )}
+          </Fragment>
+        ))}
+        {showPending && <div className="bubble user">{pendingText}</div>}
+        {running &&
+          (live.data?.steps.length ? (
+            <div className="agent-live" aria-live="polite">
+              <Steps steps={live.data.steps} active />
+            </div>
+          ) : (
+            <div className="bubble assistant thinking" aria-live="polite">
+              <span className="typing" aria-label={t("The agent is working")}>
+                <span />
+                <span />
+                <span />
+              </span>
+            </div>
+          ))}
+        {waiting.length > 0 && (
+          <section className="stack" style={{ gap: 8 }}>
+            <span className="kind-chip warn">{t("The agent is waiting for an answer")}</span>
+            {waiting.map((q) => (
+              <QuestionCard key={q.id} question={q} compact />
+            ))}
+          </section>
+        )}
+        {questions.length > 0 && (
+          <div className="stack open-questions" style={{ gap: 6 }}>
+            <span className="kind-chip">{t("The agent asks")}</span>
+            {questions.map((q) => (
+              <div key={q} className="row" style={{ gap: 8, alignItems: "flex-start" }}>
+                <span className="small" style={{ flex: 1, minWidth: 0 }}>
+                  {q}
+                </span>
+                <button className="sm" onClick={() => answer(q)}>
+                  {t("Answer")}
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+        <form
+          className="composer"
+          onSubmit={(e) => {
+            e.preventDefault();
+            submit(text);
+          }}
+        >
+          <textarea
+            ref={box}
+            value={text}
+            rows={Math.min(8, Math.max(2, text.split("\n").length))}
+            placeholder={
+              listening
+                ? t("Tell the agent something while it works…")
+                : t("For example: our roles are in GOVERNANCE.md; reviewers become maintainers after six months and two maintainers' approval; add @alice as a reviewer of docs/.")
+            }
+            aria-label={t("Message")}
+            disabled={!hasProfile}
+            onChange={(e) => setText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+                e.preventDefault();
+                submit(text);
+              }
+            }}
+          />
+          <button className="primary icon" disabled={!text.trim() || busy || !hasProfile} aria-label={t("Send")}>
+            <Icon name="send" size={15} />
           </button>
-          <button disabled={ask.isPending || !hasProfile || !established} title={!established ? t("Fill in the process first; the check follows its rules.") : undefined} onClick={() => start("members")}>
-            <Icon name="refresh" size={14} />
+        </form>
+        <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+          <button className="sm" disabled={busy || !established || !hasProfile} title={!established ? t("Fill in the process first; the check follows its rules.") : undefined} onClick={() => submit(t("Check who should change role under our process, from GitHub activity."))}>
+            <Icon name="refresh" size={13} />
             {t("Check who should change role")}
           </button>
           <span className="small muted">{t("Nothing changes until a maintainer applies the draft.")}</span>
         </div>
-        <ErrorBox error={ask.error} />
+        <ErrorBox error={send.error || talk.error} />
       </div>
     </Section>
   );

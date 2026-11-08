@@ -26,13 +26,12 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Literal
 
-import yaml
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from ..domain.codeowners import CODEOWNERS_LOCATIONS, parse_codeowners
 from ..domain.events import Event, EventKind
-from ..domain.governance import Governance, role_changes
+from ..domain.governance import role_changes
 from ..domain.memory import MemoryChangeState
 from ..domain.permissions import Permission
 from ..domain.secrets import redact_secrets
@@ -102,15 +101,11 @@ def build_router() -> APIRouter:
         for c in await service.store.list_memory_changes(MemoryChangeState.OPEN):
             if path not in c.files:
                 continue
-            try:
-                drafted = Governance.model_validate(
-                    {**(yaml.safe_load(c.files[path] or "") or {}), "repo": repo}
-                )
-            except (yaml.YAMLError, ValueError, TypeError):
-                drafted = None
+            drafted = service.governance.drafted(repo, c)
             pending.append(
                 {
                     "id": c.id,
+                    "governance": drafted.dump() if drafted else None,
                     "role_changes": [
                         {"login": login, "from": old, "to": new}
                         for login, old, new in role_changes(gov, drafted)

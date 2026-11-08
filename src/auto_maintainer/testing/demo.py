@@ -731,10 +731,55 @@ DEMO_GOVERNANCE: dict[str, Any] = {
 }
 
 
+def _people_turn(task: AgentTask) -> dict[str, Any]:
+    """The demo agent's answer in the conversation on the People tab."""
+    newest = task.prompt.split("The newest message, from", 1)[-1].lower()
+    if "lead" in newest:
+        return {
+            "reply": "Noted: the project lead also merges like a maintainer. I added "
+            "that to the lead's privileges and closed the question.",
+            "governance": {
+                **DEMO_GOVERNANCE,
+                "roles": [
+                    {**r, "privileges": [*r.get("privileges", []), "Merge PRs."]}
+                    if r["id"] == "lead"
+                    else r
+                    for r in DEMO_GOVERNANCE["roles"]
+                ],
+                "open_questions": [],
+            },
+        }
+    if "check who" in newest:
+        return {
+            "reply": "carol has five merged PRs in src/ui.py this year, which meets "
+            "**become-reviewer**. I drafted her as a reviewer of src/ui.py; nobody "
+            "else qualifies yet.",
+            "governance": _governance(
+                task.model_copy(
+                    update={"prompt": "asked you to check who should change role"}
+                )
+            )["governance"],
+        }
+    if "governance" in newest or "process" in newest:
+        return {
+            "reply": "I read GOVERNANCE.md and CODEOWNERS and filled in the roles, how "
+            "people move between them, and the members. One thing they do not say: "
+            "**does the project lead also count as a maintainer for merges?**",
+            "governance": DEMO_GOVERNANCE,
+        }
+    return {
+        "reply": "maria is the maintainer, and bob reviews docs/. Ask me to change "
+        "anything, or to check who should change role.",
+        "governance": None,
+    }
+
+
 def _governance(task: AgentTask) -> dict[str, Any]:
     """The demo agent's People record: filled in from GOVERNANCE.md, or, when asked
     who should change role, with carol proposed as a reviewer."""
-    if "check who should change role" not in task.prompt:
+    if "talk with you about it" in task.prompt:
+        return _people_turn(task)
+    if "asked you to check who should change role" not in task.prompt:
         return {
             "governance": DEMO_GOVERNANCE,
             "summary": "Filled in the roles, how people move between them, and the "

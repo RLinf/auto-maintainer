@@ -212,6 +212,10 @@ class ChatThread(BaseModel):
     """For a conversation about a review: the review or follow-up job. It is shared by
     everyone who may see the repository, and it lives on that review, not in the
     owner's list of conversations."""
+    topic: str | None = None
+    """For a conversation shared on a repository's page, such as ``people`` for its
+    People record: everyone who may see the repository shares it, and it lives on
+    that page, not in the owner's list of conversations."""
     id: str = Field(default_factory=lambda: new_id("chat"))
     created_at: datetime = Field(default_factory=utc_now)
 

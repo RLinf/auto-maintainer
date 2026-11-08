@@ -175,7 +175,7 @@ def build_router() -> APIRouter:
         return [
             t.model_dump(mode="json")
             for t in await service.store.list_threads(user.login)
-            if t.job_id is None
+            if t.job_id is None and t.topic is None
         ]
 
     @r.post("/threads")

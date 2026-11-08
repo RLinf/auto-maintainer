@@ -328,6 +328,9 @@ class MemoryCommitPayload(_Payload):
 
 class MemoryChangePayload(_Payload):
     change_id: str
+    replaces: str | None = None
+    """An open memory change this one revises, such as a draft revised with a
+    reviewer's answers; it closes as replaced once this one is staged."""
 
 
 class FixPrPayload(_Payload):

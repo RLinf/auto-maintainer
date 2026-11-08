@@ -86,6 +86,18 @@ class GovernanceRecords:
             return Loaded(self.skeleton(repo), stored=True, error=_short(e))
         return Loaded(gov, stored=True)
 
+    def drafted(self, repo: str, change: MemoryChange) -> Governance | None:
+        """The record ``change`` would store for ``repo``, or ``None`` when it does
+        not change the record or does not read."""
+        text = change.files.get(governance_path(repo))
+        if not text:
+            return None
+        try:
+            data = yaml.safe_load(text) or {}
+            return Governance.model_validate({**data, "repo": repo})
+        except (yaml.YAMLError, ValidationError, ValueError, TypeError):
+            return None
+
     def draft(
         self,
         repo: str,

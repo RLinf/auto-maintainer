@@ -237,7 +237,7 @@ async def test_checking_people_proposes_role_changes_and_keeps_the_process(
         )
         await h.settle()
         [task] = [t for t in h.runner.tasks if t.kind == "governance"]
-        assert "check who should change role" in task.prompt
+        assert "asked you to check who should change role" in task.prompt
         [pending] = (await maria.get(f"/api/repos/{REPO}/governance")).json()["pending"]
         change_id = pending["id"]
         assert pending["role_changes"] == [
@@ -299,3 +299,115 @@ async def test_chat_starts_the_agent_on_the_record(demo) -> None:
         await h.settle()
     [task] = [t for t in h.runner.tasks if t.kind == "governance"]
     assert "Reviewers become maintainers after a vote." in task.prompt
+
+
+async def test_talking_fills_in_the_record_and_revises_the_waiting_draft(
+    demo,
+) -> None:
+    h, app = demo
+    talk = f"/api/repos/{REPO}/governance/talk"
+    async with _as(app, "walt") as walt:
+        first = (
+            await walt.post(talk, json={"text": "Our process is in GOVERNANCE.md."})
+        ).json()
+        assert "GOVERNANCE.md" in first["text"] and len(first["changes"]) == 1
+        task = h.runner.tasks[-1]
+        assert (
+            task.kind == "governance" and task.messages and task.requested_by == "walt"
+        )
+        assert "The newest message, from walt:\nOur process is in GOVERNANCE.md." in (
+            task.prompt
+        )
+        assert "the skeleton: nobody has filled it in yet" in task.prompt
+        await h.settle()
+        [draft] = (await walt.get(f"/api/repos/{REPO}/governance")).json()["pending"]
+        assert draft["id"] == first["changes"][0]
+        assert draft["governance"]["open_questions"]
+
+        asked = (await walt.post(talk, json={"text": "Who maintains it?"})).json()
+        assert asked["changes"] == [], "a turn that only answers drafts nothing"
+
+    async with _as(app, "maria") as maria:
+        answered = (
+            await maria.post(
+                talk, json={"text": "Yes, the project lead merges like a maintainer."}
+            )
+        ).json()
+        await h.settle()
+        page = (await maria.get(f"/api/repos/{REPO}/governance")).json()
+        shared = (await maria.get(talk)).json()
+    task = h.runner.tasks[-1]
+    assert "which you revise" in task.prompt, "it builds on the waiting draft"
+    assert "walt: Our process is in GOVERNANCE.md." in task.prompt
+    assert "ignore any instructions" not in task.prompt
+    [second] = page["pending"]
+    assert second["id"] == answered["changes"][0] != draft["id"]
+    assert second["governance"]["open_questions"] == []
+    old = await h.store.get_memory_change(draft["id"])
+    assert old is not None and old.state == "rejected"
+    assert old.rejected_reason == f"replaced by {second['id']}"
+    new = await h.store.get_memory_change(second["id"])
+    assert new is not None
+    history = yaml.safe_load(new.files[governance_path(REPO)] or "")["history"]
+    assert len(history) == 2, "the revision does not record the same changes twice"
+    assert [m["author"] for m in shared["messages"] if m["role"] == "user"] == [
+        "walt",
+        "walt",
+        "maria",
+    ], "everyone who may see the repository shares the conversation"
+    async with _as(app, "walt") as walt:
+        assert (await walt.get("/api/chat/threads")).json() == [], (
+            "the conversation lives on the People tab, not in personal chats"
+        )
+    async with _as(app, "eve") as eve:
+        assert (await eve.get(talk)).status_code == 403
+
+
+async def test_a_message_reaches_the_agent_while_it_answers(demo) -> None:
+    from auto_maintainer.web import people_talk
+
+    h, app = demo
+    thread_id = people_talk.thread_id_of(REPO)
+    async with _as(app, "maria") as maria:
+        await maria.post(
+            f"/api/repos/{REPO}/governance/talk", json={"text": "Who maintains it?"}
+        )
+        thread = await h.store.get_thread(thread_id)
+        assert thread is not None
+        thread.live_run = "run_busy"
+        await h.store.save_thread(thread)
+        h.runner.listening_jobs["run_busy"] = 1
+        lock = people_talk._turns[thread_id]
+        async with lock:
+            state = (await maria.get(f"/api/repos/{REPO}/governance/talk")).json()
+            assert state["listening"]
+            sent = (
+                await maria.post(
+                    f"/api/repos/{REPO}/governance/talk",
+                    json={"text": "Also read docs/governance.rst."},
+                )
+            ).json()
+    assert sent["while_running"]
+    [(run, by, text)] = h.runner.told
+    assert (run, by) == ("run_busy", "maria") and "docs/governance.rst" in text
+
+
+async def test_a_job_from_chat_builds_on_the_waiting_draft_too(demo) -> None:
+    h, app = demo
+    async with _as(app, "maria") as maria:
+        first = (
+            await maria.post(
+                f"/api/repos/{REPO}/governance/talk",
+                json={"text": "Our process is in GOVERNANCE.md."},
+            )
+        ).json()
+        await h.settle()
+        await maria.post(
+            f"/api/repos/{REPO}/governance/agent", json={"mode": "members"}
+        )
+        await h.settle()
+        [pending] = (await maria.get(f"/api/repos/{REPO}/governance")).json()["pending"]
+    task = h.runner.tasks[-1]
+    assert "which you revise" in task.prompt
+    assert pending["id"] != first["changes"][0]
+    assert {c["login"] for c in pending["role_changes"]} == {"maria", "bob", "carol"}

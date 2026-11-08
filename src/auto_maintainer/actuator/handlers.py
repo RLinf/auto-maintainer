@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
@@ -48,12 +49,15 @@ from ..domain.actions import (
 )
 from ..domain.ids import same_commit
 from ..domain.markers import parse_markers
+from ..domain.memory import MemoryChange, MemoryChangeState
 from ..domain.ports import ReviewCommentSpec
 from ..domain.profile import RepoProfile
-from ..domain.records import ChatMessage, ReviewRecord
+from ..domain.records import AuditEntry, ChatMessage, ReviewRecord
 from ..domain.snapshot import PrSnapshot
 from .context import ExecContext
 from .memory_gate import try_merge_memory
+
+log = logging.getLogger(__name__)
 
 
 class Noop(Exception):
@@ -528,8 +532,41 @@ async def _memory_change(
     change = await x.store.get_memory_change(p.change_id)
     if change is None:
         raise RuntimeError(f"memory change {p.change_id} does not exist")
+    if p.replaces:
+        await _close_replaced(x, p.replaces, change)
     change = await try_merge_memory(x, change)
     return {"change_id": change.id, "state": change.state, "branch": change.branch}
+
+
+async def _close_replaced(x: ExecContext, old_id: str, new: MemoryChange) -> None:
+    """Close the open draft ``new`` revises, its staged branch, and its memory PR.
+    Only an unapproved draft for the same repositories is closed: one a maintainer
+    approved stays for them to decide."""
+    old = await x.store.get_memory_change(old_id)
+    if (
+        old is None
+        or old.state != MemoryChangeState.OPEN
+        or old.approvals
+        or sorted(old.repos) != sorted(new.repos)
+    ):
+        return
+    old.state = MemoryChangeState.REJECTED
+    old.rejected_reason = f"replaced by {new.id}"
+    await x.store.save_memory_change(old)
+    await x.memory.drop_change(old)
+    remote = x.memory.remote_repo()
+    if remote and old.pr_number:
+        try:
+            await x.writer.close(remote, old.pr_number)
+        except Exception as e:  # the dashboard already shows it closed
+            log.warning("could not close memory PR #%s: %s", old.pr_number, e)
+    await x.store.add_audit(
+        AuditEntry(
+            kind="memory",
+            summary=f"{old.title}: replaced by {new.id}",
+            data={"change": old.id, "replaced_by": new.id},
+        )
+    )
 
 
 async def _pr_fix(
