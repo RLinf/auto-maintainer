@@ -117,6 +117,7 @@ class SelfImprove(Playbook):
         try:
             work = await ctx.ask(
                 AgentTask(
+                    run_code="any",
                     kind=TaskKind.SELF_IMPROVE,
                     prompt=_prompt(request, by, event.payload.get("context") or ""),
                     workdir=path,
@@ -150,6 +151,7 @@ class SelfImprove(Playbook):
             lint = await ctx.sandbox.run(LINT, cwd=path, timeout=300)
             described = await ctx.ask(
                 AgentTask(
+                    run_code="any",
                     kind=TaskKind.SELF_IMPROVE,
                     prompt=_summary_prompt(request, changes.patch, account),
                     workdir=path,

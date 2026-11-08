@@ -1374,6 +1374,16 @@ const zh: Record<string, string> = {
   "Quick score again": "重新快速评分",
   "Score every open PR at a glance": "为每个打开的 PR 快速评分",
   "Before its review, an agent gives each open PR a quick score from its diff by this guide, in the background, highest priority first, so reviewers can choose what to take first. The review then gives the accurate score.": "在评审前，智能体会在后台按此准则根据差异为每个打开的 PR 快速评分，优先级高的先评，方便评审人决定先看哪个。评审之后会给出准确的分数。",
+  "Score priority": "重新评估优先级",
+  "An agent scores the quality of every PR in this view: a reviewed PR from its review, the rest quickly from their diffs in the background; each PR is one agent run": "智能体为此视图中的每个 PR 评定质量：已评审的依据评审，其余在后台根据差异快速评分；每个 PR 一次智能体运行",
+  "Requirements": "基本要求",
+  "Tests": "测试",
+  "Docs": "文档",
+  "Style": "风格",
+  "Design": "设计",
+  "met": "满足",
+  "not met": "未满足",
+  "does not apply": "不适用",
 };
 
 const LangContext = createContext<{ lang: Lang; setLang: (l: Lang) => void }>({ lang: "zh", setLang: () => {} });

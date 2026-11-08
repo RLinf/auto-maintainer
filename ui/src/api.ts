@@ -180,6 +180,10 @@ export interface ReviewQuality {
   score: number;
   band: QualityBand;
   reason: string;
+  /** The reason by dashboard language; ``reason`` where one is missing. */
+  reasons?: Record<string, string>;
+  /** The basics the agent checked before scoring: met, not met, or null (not applicable). */
+  checks?: Record<string, boolean | null>;
   /** The head the judged review looked at. */
   sha: string;
   kind: "review" | "followup";
@@ -195,6 +199,8 @@ export interface QuickQuality {
   score: number;
   band: QualityBand;
   reason: string;
+  reasons?: Record<string, string>;
+  checks?: Record<string, boolean | null>;
   /** The head it looked at. */
   sha: string;
   at: string;

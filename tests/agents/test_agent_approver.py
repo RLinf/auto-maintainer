@@ -29,8 +29,14 @@ from auto_maintainer.domain.agents import (
 )
 
 
-def _task(tmp_path: Path, mode: str = "read_only") -> AgentTask:
-    return AgentTask(kind=TaskKind.REVIEW, prompt="", workdir=tmp_path, mode=mode)  # type: ignore[arg-type]
+def _task(tmp_path: Path, mode: str = "read_only", run_code: str = "any") -> AgentTask:
+    return AgentTask(
+        kind=TaskKind.REVIEW,
+        prompt="",
+        workdir=tmp_path,
+        mode=mode,  # type: ignore[arg-type]
+        run_code=run_code,  # type: ignore[arg-type]
+    )
 
 
 def _ask(tool: str, detail: str = "", paths: list[str] | None = None) -> AgentQuestion:
@@ -206,7 +212,7 @@ def test_an_agents_approved_commands_reach_its_answers(tmp_path: Path) -> None:
         check_settings,
     )
 
-    script = "python3 .agents/skills/docs-check/check_rst_markup.py"
+    script = "python3 tools/docs/check_rst_markup.py"
     runtime = build_runtime(
         "antigravity",
         RuntimeConfig(adapter="antigravity", approve_commands=[script]),
@@ -228,3 +234,50 @@ def test_an_agents_approved_commands_reach_its_answers(tmp_path: Path) -> None:
     )
     problems = check_settings(config, {"review": Route(primary="antigravity")})
     assert any("approve_commands.0" in p and "needs the script" in p for p in problems)
+
+
+def test_a_repositorys_task_runs_no_code_on_the_host(tmp_path: Path) -> None:
+    """A repository's code runs only on its test machines: its tasks read, lint, and
+    run the scripts of its skill folders; anything else is denied without asking."""
+    skill = tmp_path / ".agents" / "skills" / "review-pr"
+    skill.mkdir(parents=True)
+    (skill / "lint_review.py").write_text("print(1)")
+    task = _task(tmp_path, run_code="skills")
+    for command in (
+        "git log -n 3 --oneline",
+        "python3 .agents/skills/review-pr/lint_review.py template",
+        "cd .agents && ls",
+        "ruff check src",
+        "ruff format --check .",
+    ):
+        answer = auto_answer(task, _ask("execute", command))
+        assert answer is not None and answer.allow, command
+    for command in (
+        "pytest -q",
+        "python3 -m pytest tests",
+        "python3 setup.py build",
+        "python3 -c 'import os'",
+        "uv run pytest",
+        "bash scripts/run.sh",
+        "ruff check --fix src",
+        "curl https://example.com",
+        "rm -rf build",
+    ):
+        answer = auto_answer(task, _ask("execute", command))
+        assert answer is not None and not answer.allow, command
+        assert "test machines" in (answer.message or ""), command
+    outside = auto_answer(task, _ask("read", paths=["/etc/hosts"]))
+    assert outside is not None and not outside.allow, "denied, not asked"
+
+    quick = _task(tmp_path, run_code="none")
+    for command in (
+        "ruff check src",
+        "python3 .agents/skills/review-pr/lint_review.py",
+    ):
+        answer = auto_answer(quick, _ask("execute", command))
+        assert answer is not None and not answer.allow, command
+    assert auto_answer(quick, _ask("execute", "git diff HEAD~1")).allow  # type: ignore[union-attr]
+
+    fixing = _task(tmp_path, "workspace_write", run_code="skills")
+    assert auto_answer(fixing, _ask("execute", "ruff check --fix src")).allow  # type: ignore[union-attr]
+    assert not auto_answer(fixing, _ask("execute", "uv run pytest -q")).allow  # type: ignore[union-attr]

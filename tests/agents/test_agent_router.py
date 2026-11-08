@@ -127,6 +127,15 @@ async def test_model_applies_to_primary_only_effort_and_timeout_to_all() -> None
     assert b.tasks[0].timeout_seconds == 60
 
 
+async def test_a_quick_task_stays_quick_whatever_its_route_says() -> None:
+    a = ScriptedAgentRuntime("a", [{"ok": True}])
+    a.effort = "high"  # type: ignore[attr-defined]
+    router, _ = _router(a)
+    route = Route(primary="a", effort="high", timeout_seconds=3600)
+    await router.run(_task(budget="quick"), route, Verdict)
+    assert (a.tasks[0].effort, a.tasks[0].timeout_seconds) == ("low", 300)
+
+
 async def test_breaker_opens_on_quota_and_closes_after_cooldown() -> None:
     clock = FixedClock()
     a = ScriptedAgentRuntime("a", [_fail("quota")], default={"ok": True})

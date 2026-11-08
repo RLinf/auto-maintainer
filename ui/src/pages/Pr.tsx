@@ -16,8 +16,11 @@ import {
   prPath,
   Quality,
   QUALITY_BANDS,
+  QualityChecks,
   qualityLabel,
+  plainText,
   qualityStale,
+  reasonIn,
   Section,
   Status,
   Tier,
@@ -26,7 +29,7 @@ import {
   When,
 } from "../components";
 import { evaluationToast, qualityToast, REVIEW_STATES, usePrs, useReevaluate, useScoreQuality } from "../data";
-import { useT } from "../i18n";
+import { useLang, useT } from "../i18n";
 import { Icon } from "../icons";
 import { Markdown } from "../markdown";
 import { DataTable, ListToolbar, useList, type Column } from "../list";
@@ -580,6 +583,7 @@ function QualityCard({
   reviewed: boolean;
 }) {
   const t = useT();
+  const { lang } = useLang();
   const toast = useToast();
   const score = useScoreQuality();
   const client = useQueryClient();
@@ -615,7 +619,8 @@ function QualityCard({
           <div className="quality-meter" role="img" aria-label={`${main.score} / 100`}>
             <span style={{ width: `${main.score}%` }} />
           </div>
-          {main.reason && <span style={{ fontSize: 13 }}>{main.reason}</span>}
+          <QualityChecks checks={main.checks} />
+          {reasonIn(main, lang) && <Markdown text={reasonIn(main, lang)} className="quality-reason" />}
           <span className="muted">
             {quality ? (
               <>
@@ -641,7 +646,7 @@ function QualityCard({
           {quality && quick && (
             <span className="muted">
               {t("At a glance it scored")}{" "}
-              <span className={`pill quality quick q-${quick.band}`} title={quick.reason}>
+              <span className={`pill quality quick q-${quick.band}`} title={plainText(reasonIn(quick, lang))}>
                 {quick.score}
               </span>
             </span>

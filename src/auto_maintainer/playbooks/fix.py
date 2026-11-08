@@ -37,11 +37,11 @@ from .prompts import pr_block, review_skill_block, schema_hint, untrusted
 
 FIX = """You are fixing a pull request for {reviewer}, a maintainer, inside an automated maintainer service. The working directory is a checkout of the PR's head commit.
 - Change the code to address the review findings below and nothing else. Keep the PR author's approach; make the smallest change that resolves each finding.
-- Run the repository's quick checks for what you changed when you can (its tests or linters).
+- Check what you changed with the repository's static linters when it has them. Never run its tests, builds, scripts, or the PR's code on this machine: a repository's code runs only on its test machines, so say which tests a run there should cover.
 - Do not commit, push, or post, and never ask whether to: the service shows your changes to {reviewer}, who decides whether to open a PR with them.
 - When something blocks a sound fix (the intended behavior is unclear, two fixes are equally plausible), ask {reviewer} with your tool for asking the user.
 - Write any text in {public_language}: plain and specific.
-- When you are done, end with a short message: what you changed for each finding, what you left and why, and the checks you ran."""
+- When you are done, end with a short message: what you changed for each finding, what you left and why, the checks you ran, and what a test run should cover."""
 
 DESCRIBE = """Describe fixes that an agent made to a pull request, for the PR that proposes them. Read the diff and the findings; do not change any file. Write in {public_language}: plain and specific."""
 

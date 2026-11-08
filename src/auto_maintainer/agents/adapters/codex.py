@@ -160,7 +160,9 @@ class CodexRuntime(ExecRuntime):
         if task.permissions == "bypass":
             return {"sandbox": "danger-full-access", "approvalPolicy": "never"}
         sandbox = "read-only" if task.mode == "read_only" else "workspace-write"
-        if task.permissions == "restricted":
+        if task.permissions == "restricted" or task.run_code != "any":
+            # Below ``any`` nothing escalates past the sandbox; commands inside it
+            # still run, so the prompt's rule is what keeps tests off the host.
             return {"sandbox": sandbox, "approvalPolicy": "never"}
         return {
             "sandbox": sandbox,

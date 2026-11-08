@@ -31,6 +31,9 @@ from __future__ import annotations
 
 import json
 from datetime import timedelta
+from pathlib import Path
+
+from pydantic import BaseModel, Field
 
 from ..domain.actions import ActionKind
 from ..domain.agents import AgentTask, TaskKind
@@ -46,8 +49,18 @@ from ..domain.review import (
     review_quality,
 )
 from ..domain.snapshot import PrSnapshot, PrState
+from ..profiles.layers import content_hash
 from .base import Playbook, PlaybookContext, PlaybookResult, in_scope
-from .prompts import pr_block, quality_block, schema_hint, untrusted
+from .hygiene import hygiene_key
+from .prompts import (
+    DASHBOARD_LANGUAGES,
+    builtin_review_skill,
+    own_review_skill,
+    pr_block,
+    quality_block,
+    schema_hint,
+    untrusted,
+)
 
 QUICK_STATE = "quick_quality:{repo}#{number}"
 """The latest quick score of a PR, from its diff."""
@@ -69,9 +82,243 @@ PROMPT = """You judge the quality of PR #{number} in {repo} for its maintainers,
 
 
 QUICK = """You give PR #{number} in {repo} a quick quality score, so its maintainers can choose which PRs to review first; a full review comes later and gives the accurate score.
-- Read the diff, and only as much of the code around it and of the repository's docs as you need to judge how the change fits this repository's design and style. A few minutes, not more.
-- Do not run tests, builds, or the PR's code, and do not write a review.
+- This is a quick check, not a code review, and it must cost little: read the diff below and judge from it. Open at most three other files, only to see how the change fits the code around it; do not search the whole repository, and do not open the review skill or contributor guide, since the checklist below is drawn from them.
+- Check each item of the checklist that applies at a glance, the facts below, and the design: how well the change fits the repository's design and style, how its docs and code are organized, and its taste.
+- Run nothing: read files and git history only; no tests, builds, scripts, or the PR's code, on this machine or anywhere.
 - Do not ask questions, post, push, or edit files. Return only the structured result."""
+
+CHECKLIST = """Turn the review standard of {repo} below (its review skill and contributor guide) into a checklist for a quick check that only reads a PR's diff and a few files around it.
+- Keep only what can be settled quickly by reading: how docs are organized and written, naming and code style, the design rules and taste the repository asks for, the tests and docs a change must bring, and what every PR must meet (title, commits, description). Leave out what needs running code, a reproduction, or a deep check.
+- At most twelve items, each one line in plain words, each under one area: requirements, tests, docs, style, or design.
+- Do not ask questions, post, push, edit files, or run anything. Return only the structured result."""
+
+GUIDE_FILES = (
+    "CONTRIBUTING.md",
+    ".github/CONTRIBUTING.md",
+    "AGENTS.md",
+    "CLAUDE.md",
+    ".github/PULL_REQUEST_TEMPLATE.md",
+)
+"""Where repositories conventionally keep what a contributor must follow."""
+
+CHECKLIST_STATE = "quick_checklist:{repo}"
+QUICK_DIFF_LIMIT = 24_000
+"""Characters of diff a quick score reads; a review reads up to 120,000."""
+QUICK_FILE_LIMIT = 6_000
+"""Characters of one file's diff a quick score reads."""
+_SKIPPED_DIFFS = (
+    ".lock",
+    "-lock.json",
+    "lock.yaml",
+    ".min.js",
+    ".svg",
+    ".png",
+    ".jpg",
+    ".ipynb",
+    ".csv",
+    ".pkl",
+    ".bin",
+)
+"""Files whose diff tells a quick check nothing: lock files, minified and binary
+files, notebooks, and data. They stay in the file list."""
+
+
+class ChecklistItem(BaseModel):
+    area: str = Field(description="requirements, tests, docs, style, or design")
+    check: str = Field(description="One line in plain words.")
+
+
+class QuickChecklist(BaseModel):
+    items: list[ChecklistItem] = Field(default_factory=list, max_length=12)
+
+
+def condensed_diff(diff: str) -> str:
+    """The part of ``diff`` a quick score reads: each file's diff up to
+    ``QUICK_FILE_LIMIT``, source files before tests, without lock, binary, and data
+    files, up to ``QUICK_DIFF_LIMIT`` in all; what is left out is named."""
+    blocks = [b for b in diff.split("diff --git ") if b.strip()]
+    kept: list[tuple[int, str, str]] = []
+    left: list[str] = []
+    for block in blocks:
+        name = block.split("\n", 1)[0].split(" b/")[-1].strip()
+        if name.lower().endswith(_SKIPPED_DIFFS):
+            left.append(name)
+            continue
+        rank = 1 if "test" in name.lower() else 0
+        text = "diff --git " + block
+        if len(text) > QUICK_FILE_LIMIT:
+            text = (
+                text[:QUICK_FILE_LIMIT]
+                + "\n... (the rest of this file's diff is left out)\n"
+            )
+        kept.append((rank, name, text))
+    kept.sort(key=lambda k: k[0])
+    out: list[str] = []
+    size = 0
+    for _, name, text in kept:
+        if size + len(text) > QUICK_DIFF_LIMIT:
+            left.append(name)
+            continue
+        out.append(text)
+        size += len(text)
+    if left:
+        out.append("Left out of this diff: " + ", ".join(left[:40]))
+    return "".join(out)
+
+
+async def quick_checklist(
+    ctx: PlaybookContext, profile: RepoProfile, workdir: Path
+) -> list[ChecklistItem]:
+    """What the repository's review standard asks that a quick check can settle by
+    reading: drawn once by an agent from its review skill and contributor guide, and
+    kept until they change, so each quick score reads a dozen lines, not the skill."""
+    skill = own_review_skill(profile, workdir)
+    path = workdir / skill if skill else None
+    if path is None:
+        builtin = builtin_review_skill(profile, ctx.service.skills_dir)
+        path = Path(builtin) if builtin else None
+    sources: dict[str, str] = {}
+    for name, file in [("review skill", path)] + [
+        (g, workdir / g) for g in GUIDE_FILES
+    ]:
+        if file is not None and file.is_file():
+            sources[name] = file.read_text(encoding="utf-8", errors="replace")[:20_000]
+    if not sources:
+        return []
+    digest = content_hash(sources)
+    key = CHECKLIST_STATE.format(repo=profile.repo)
+    cached = await ctx.store.get_state(key)
+    if isinstance(cached, dict) and cached.get("digest") == digest:
+        return [ChecklistItem.model_validate(i) for i in cached.get("items") or []]
+    prompt = "\n\n".join(
+        [
+            CHECKLIST.format(repo=profile.repo),
+            *(
+                untrusted(f"standard.{name}", text, 20_000)
+                for name, text in sources.items()
+            ),
+            schema_hint(QuickChecklist.model_json_schema()),
+        ]
+    )
+    answer = await ctx.ask(
+        AgentTask(
+            kind=TaskKind.EVALUATE,
+            prompt=prompt,
+            workdir=workdir,
+            mode="read_only",
+            run_code="none",
+            budget="quick",
+            output_schema=QuickChecklist.model_json_schema(),
+            repo=profile.repo,
+        ),
+        QuickChecklist,
+    )
+    if not answer.ok or answer.structured is None:
+        return []
+    items = QuickChecklist.model_validate(answer.structured).items[:12]
+    await ctx.store.set_state(
+        key, {"digest": digest, "items": [i.model_dump() for i in items]}
+    )
+    return items
+
+
+def checklist_block(items: list[ChecklistItem]) -> str:
+    if not items:
+        return ""
+    return (
+        "The repository's checklist for a quick check (from its review standard):\n"
+        + "\n".join(f"- [{i.area}] {i.check}" for i in items)
+    )
+
+
+def quick_facts(pr: PrSnapshot, hygiene: dict | None) -> str:
+    """What the service knows about ``pr`` that bears on its basics: its size, whether
+    it touches tests and docs, its CI, and the repository's hygiene checks on it."""
+    adds = sum(f.additions for f in pr.files)
+    dels = sum(f.deletions for f in pr.files)
+    paths = [f.path.lower() for f in pr.files]
+    tests = [p for p in paths if "test" in p]
+    docs = [p for p in paths if p.endswith((".md", ".rst")) or "docs/" in p]
+    lines = [
+        f"Size: {len(pr.files)} files, +{adds}/-{dels}, {len(pr.commits)} commits.",
+        f"Files that look like tests: {len(tests)}. Files that look like docs: {len(docs)}.",
+    ]
+    failing = [c.name for c in pr.checks if (c.conclusion or "").lower() == "failure"]
+    pending = [c.name for c in pr.checks if not c.conclusion]
+    lines.append(
+        f"CI: {len(pr.checks)} checks"
+        + (f"; failing: {', '.join(failing[:10])}" if failing else "")
+        + (f"; still running: {len(pending)}" if pending else "")
+        + "."
+        if pr.checks
+        else "CI: no checks ran on this head."
+    )
+    results = (hygiene or {}).get("results") or []
+    if results and (hygiene or {}).get("sha") == pr.head_sha:
+        failed = [
+            r.get("summary") or r.get("id")
+            for r in results
+            if not r.get("passed") and not r.get("skipped")
+        ]
+        lines.append(
+            "The repository's hygiene checks at this head: "
+            + (
+                "all passed."
+                if not failed
+                else "failed: " + "; ".join(str(f) for f in failed[:10]) + "."
+            )
+        )
+    return "Facts the service collected:\n" + "\n".join(f"- {line}" for line in lines)
+
+
+async def calibration_block(ctx: PlaybookContext, repo: str) -> str:
+    """Reference points for the score: PRs of ``repo`` a full review scored, from low
+    to high, and how the quick scores given so far are spread."""
+    by_pr: dict[int, list[ActionRecord]] = {}
+    for record in await ctx.store.list_actions(
+        repo=repo, kinds=[ActionKind.REVIEW_POST], limit=2000
+    ):
+        if record.action.number is not None:
+            by_pr.setdefault(record.action.number, []).append(record)
+    reviewed = []
+    for number, records in by_pr.items():
+        quality = review_quality(
+            records, await assessed_quality(ctx.store, repo, number)
+        )
+        if quality is not None:
+            reviewed.append((quality.score, number, quality))
+    reviewed.sort()
+    if len(reviewed) > 6:
+        step = (len(reviewed) - 1) / 5
+        reviewed = [reviewed[round(i * step)] for i in range(6)]
+    quick = []
+    for pr in await ctx.store.list_snapshots(repo, open_only=True):
+        q = await quick_quality(ctx.store, repo, pr.number)
+        if q is not None:
+            quick.append(q.score)
+    parts = []
+    if reviewed:
+        parts.append(
+            "For calibration, PRs of this repository a full review scored:\n"
+            + untrusted(
+                "calibration.reviewed",
+                "\n".join(
+                    f"#{n}: {q.score} ({q.band}). {(q.reasons.get('en') or q.reason)[:240]}"
+                    for _, n, q in reviewed
+                ),
+                6_000,
+            )
+        )
+    if len(quick) >= 5:
+        quick.sort()
+        high = sum(1 for q in quick if q >= 90)
+        parts.append(
+            f"Quick scores given so far in this repository: {len(quick)}, from "
+            f"{quick[0]} to {quick[-1]}, median {quick[len(quick) // 2]}, {high} at 90 "
+            "or above. Score this PR on the guide's scale against these, so the scores "
+            "tell reviewers which PRs are better."
+        )
+    return "\n\n".join(parts)
 
 
 async def quick_quality(store: Store, repo: str, number: int) -> QuickQuality | None:
@@ -101,15 +348,21 @@ async def score_quickly(
             workdir, f"origin/{info.default_branch}", pr.head_sha
         )
         lessons = await ctx.knowledge.review_lessons(pr.repo, profile)
+        checklist = await quick_checklist(ctx, profile, workdir)
         prompt = "\n\n".join(
             part
             for part in [
                 QUICK.format(number=pr.number, repo=pr.repo),
                 quality_block(profile),
-                f"Review lessons from this repository's maintainers:\n{lessons}"
+                checklist_block(checklist),
+                f"Review lessons from this repository's maintainers:\n{lessons[:3000]}"
                 if lessons
                 else "",
-                pr_block(pr, diff, 60_000),
+                quick_facts(
+                    pr, await ctx.store.get_state(hygiene_key(pr.repo, pr.number))
+                ),
+                await calibration_block(ctx, pr.repo),
+                pr_block(pr, condensed_diff(diff), QUICK_DIFF_LIMIT + 2_000),
                 schema_hint(QualityVerdict.model_json_schema()),
             ]
             if part
@@ -120,6 +373,8 @@ async def score_quickly(
                 prompt=prompt,
                 workdir=workdir,
                 mode="read_only",
+                run_code="none",
+                budget="quick",
                 output_schema=QualityVerdict.model_json_schema(),
                 repo=pr.repo,
             ),
@@ -131,7 +386,12 @@ async def score_quickly(
         raise RuntimeError(f"the quality agent failed: {answer.error}")
     verdict = QualityVerdict.model_validate(answer.structured)
     quick = QuickQuality(
-        score=verdict.score, reason=verdict.reason, sha=pr.head_sha, at=ctx.clock.now()
+        score=verdict.score,
+        reason=verdict.reason,
+        reasons=verdict.reasons,
+        checks=verdict.checks,
+        sha=pr.head_sha,
+        at=ctx.clock.now(),
     )
     await ctx.store.set_state(
         QUICK_STATE.format(repo=pr.repo, number=pr.number), quick.model_dump_json()
@@ -245,6 +505,8 @@ class QualityPlaybook(Playbook):
         assessment = QualityAssessment(
             score=verdict.score,
             reason=verdict.reason,
+            reasons=verdict.reasons,
+            checks=verdict.checks,
             action_id=review.action.id,
             sha=head,
             at=ctx.clock.now(),
@@ -274,14 +536,21 @@ def _review_data(review: ActionRecord) -> dict[str, object]:
 
 class QuickQualityPlaybook(Playbook):
     """Gives one PR nobody reviewed yet a quick score from its diff, in the
-    background (``quality.quick``, from the scan)."""
+    background (``quality.quick``): from the scan, or for a person who asked for many
+    PRs at once (``by``), which scores it again even at the same head."""
 
     name = "quick_quality"
     triggers = (EventKind.QUICK_QUALITY,)
     pool = "quality"
 
     def accepts(self, event: Event, profile: RepoProfile | None) -> bool:
-        return profile is not None and profile.review.quick_quality
+        asked = bool(event.payload.get("by"))
+        return profile is not None and (asked or profile.review.quick_quality)
+
+    def key(self, event: Event) -> str:
+        """One quick score per head, unless a person asks for it again."""
+        base = super().key(event)
+        return f"{base}:{event.id}" if event.payload.get("by") else base
 
     async def run(self, ctx: PlaybookContext, event: Event) -> PlaybookResult:
         profile = ctx.require_profile()
@@ -294,8 +563,11 @@ class QuickQualityPlaybook(Playbook):
         )
         if review_quality(records) is not None:
             return PlaybookResult(result={"skipped": "its review scored it"})
+        by = event.payload.get("by")
+        if by:
+            ctx.requested_by = str(by)
         quick = await quick_quality(ctx.store, pr.repo, pr.number)
-        if quick is not None and quick.sha == pr.head_sha:
+        if not by and quick is not None and quick.sha == pr.head_sha:
             return PlaybookResult(result={"skipped": "scored at this head already"})
         return _quick_result(await score_quickly(ctx, pr, profile))
 
@@ -305,7 +577,8 @@ class QualityScan(Playbook):
     open PR that has none, ``SCAN_BATCH`` at a time and once per review; and, unless
     the repository turns it off, for a quick score of the PRs nobody reviewed,
     ``QUICK_BATCH`` at a time once the last batch is done, highest priority first:
-    those never scored, then those scored at an older head ``QUICK_REFRESH`` ago."""
+    those never scored, then those scored at an older head ``QUICK_REFRESH`` ago or
+    without a reason in every dashboard language."""
 
     name = "quality_scan"
     triggers = ()
@@ -383,8 +656,11 @@ class QualityScan(Playbook):
             if pr.is_draft and not profile.scope.include_drafts:
                 continue
             quick = await quick_quality(ctx.store, pr.repo, pr.number)
-            if quick is not None and (
-                quick.sha == pr.head_sha or now - quick.at < QUICK_REFRESH
+            if (
+                quick is not None
+                and set(DASHBOARD_LANGUAGES) <= set(quick.reasons)
+                and quick.checks
+                and (quick.sha == pr.head_sha or now - quick.at < QUICK_REFRESH)
             ):
                 continue
             evaluation = await ctx.store.get_evaluation(pr.repo, pr.number)

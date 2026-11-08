@@ -28,6 +28,9 @@ it would ask a person arrives as a ``control_request`` of subtype ``can_use_tool
 (tool name, input, description, blocked path), which a reviewer answers on the
 dashboard with ``allow`` or ``deny``. Standard input closes after the ``result``.
 
+A task that may not run code on the host (``AgentTask.run_code`` below ``any``) also
+gets ``--disallowedTools`` for the common code runners (``CODE_RUNNERS``).
+
 ``restricted`` runs keep ``--permission-prompts none``: read-only tasks use
 ``--permission-mode dontAsk``, writing tasks ``acceptEdits``, each with an
 ``--allowedTools`` list, and anything else is denied without a prompt. Read-only
@@ -58,6 +61,15 @@ from ...domain.agents import (
 )
 from ..exec import Ask, Conversation, ExecRuntime, Invocation, RunFiles, Step
 from . import loads_object, partial, short
+
+CODE_RUNNERS = (
+    "python", "python3", "pytest", "uv", "uvx", "pip", "pip3", "bash", "sh", "zsh",
+    "make", "npm", "npx", "node", "torchrun", "ray", "docker", "cargo", "go",
+    "curl", "wget",
+)  # fmt: skip
+"""Commands that run code or fetch it; a task that may not run code on the host gets
+each as ``--disallowedTools Bash(<command> *)``, since Claude Code's own auto mode
+would otherwise approve some of them without asking."""
 
 READ_ONLY_TOOLS = ("Read", "Grep", "Glob", "Bash")
 READ_ONLY_ALLOWED = (
@@ -200,6 +212,8 @@ class ClaudeCodeRuntime(ExecRuntime):
                 argv += ["--allowedTools", *self.read_only_allowed]
             else:
                 argv += ["--allowedTools", *self.write_allowed]
+            if task.run_code != "any":
+                argv += ["--disallowedTools", *(f"Bash({c} *)" for c in CODE_RUNNERS)]
         argv += ["--setting-sources", self.setting_sources]
         argv.append("--strict-mcp-config")
         if task.output_schema is not None:

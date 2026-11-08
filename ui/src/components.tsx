@@ -83,6 +83,60 @@ export const QUALITY_BANDS: { band: QualityBand; floor: number; label: string }[
 ];
 export const qualityLabel = (band: QualityBand) => QUALITY_BANDS.find((b) => b.band === band)?.label ?? band;
 
+/** The agent's reason for a score in the dashboard's language, else as it was given
+ *  (Markdown). */
+export function reasonIn(q: { reason: string; reasons?: Record<string, string> }, lang: Lang): string {
+  return q.reasons?.[lang] || q.reason;
+}
+
+/** The basics an agent checks before scoring, in order (playbooks/prompts.py: QUALITY_CHECKS). */
+export const QUALITY_CHECKS: [string, string][] = [
+  ["requirements", "Requirements"],
+  ["tests", "Tests"],
+  ["docs", "Docs"],
+  ["style", "Style"],
+  ["design", "Design"],
+];
+
+/** The basics the agent checked, each met (✓), not met (✗), or not applicable (—). */
+export function QualityChecks({ checks }: { checks?: Record<string, boolean | null> }) {
+  const t = useT();
+  if (!checks || !Object.keys(checks).length) return null;
+  return (
+    <span className="row" style={{ gap: 4, flexWrap: "wrap" }}>
+      {QUALITY_CHECKS.filter(([area]) => area in checks).map(([area, label]) => {
+        const ok = checks[area];
+        return (
+          <span
+            key={area}
+            className={`pill ${ok === true ? "status-ok" : ok === false ? "status-bad" : ""}`}
+            title={ok === true ? t("met") : ok === false ? t("not met") : t("does not apply")}
+          >
+            {ok === null ? <span aria-hidden>—</span> : <Icon name={ok ? "check" : "x"} size={12} />}
+            {t(label)}
+          </span>
+        );
+      })}
+    </span>
+  );
+}
+
+/** The checks a score's PR missed, for a tooltip. */
+export function missedChecks(checks: Record<string, boolean | null> | undefined, t: (s: string) => string): string {
+  const missed = QUALITY_CHECKS.filter(([area]) => checks?.[area] === false).map(([, label]) => t(label));
+  return missed.length ? `✗ ${missed.join(" · ")}` : "";
+}
+
+/** Markdown as plain text, for a tooltip: no emphasis marks, code ticks, or link URLs. */
+export function plainText(markdown: string): string {
+  return markdown
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/[*_`]+/g, "")
+    .replace(/^\s*[-+]\s+/gm, "• ")
+    .replace(/^#+\s*/gm, "")
+    .trim();
+}
+
 /** Whether a score was given at an older commit than ``head``. */
 export function qualityStale(q: { sha: string }, head: string | null | undefined): boolean {
   if (!head || !q.sha) return false;
@@ -110,6 +164,7 @@ export function Quality({
   compact?: boolean;
 }) {
   const t = useT();
+  const { lang } = useLang();
   const shown = quality ?? quick;
   if (!shown) return <span className="muted" title={t("Not scored yet")}>—</span>;
   const stale = qualityStale(shown, head);
@@ -118,7 +173,8 @@ export function Quality({
     : `${t("quick score from the diff at")} ${shown.sha.slice(0, 7)}`;
   const title = [
     `${quality ? t("Quality") : t("Quick score")} ${shown.score}/100 · ${t(qualityLabel(shown.band))}`,
-    shown.reason,
+    plainText(reasonIn(shown, lang)),
+    missedChecks(shown.checks, t),
     where,
     quality ? "" : t("A review gives the accurate score."),
     stale ? t("new commits since") : "",

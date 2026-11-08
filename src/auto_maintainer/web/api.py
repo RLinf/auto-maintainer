@@ -65,7 +65,12 @@ from ..domain.merge_gate import MergeArm, evaluate_merge_gate
 from ..domain.permissions import Permission
 from ..domain.profile import Conditions, RepoProfile
 from ..domain.records import ActionRecord, AuditEntry, JobStatus
-from ..domain.review import ReviewQuality, classify_review_state, review_quality
+from ..domain.review import (
+    ReviewQuality,
+    classify_review_state,
+    review_chain,
+    review_quality,
+)
 from ..domain.run_ci import plan_run_ci
 from ..domain.scoring import Evaluation, recompute
 from ..domain.secrets import redact_secrets
@@ -1098,8 +1103,12 @@ def build_router() -> APIRouter:
             for job in await service.store.list_jobs(
                 [JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.WAITING], limit=5000
             )
-            if job.playbook == "quality"
+            if job.playbook in ("quality", "quick_quality")
         }
+        # One PR is scored at once in the agent pool, for the person waiting on it;
+        # many go to the background pool when they need only a quick score, so a
+        # whole view never holds up the reviews in the agent pool.
+        many = len(targets) > 1
         out = []
         for target in targets:
             job = running.get((target.repo, target.number))
@@ -1114,8 +1123,18 @@ def build_router() -> APIRouter:
                     }
                 )
                 continue
+            quickly = body.quick or not review_chain(
+                await service.store.list_actions(
+                    repo=target.repo,
+                    number=target.number,
+                    kinds=[ActionKind.REVIEW_POST],
+                    limit=500,
+                )
+            )
             event = Event(
-                kind=EventKind.QUALITY_REQUESTED,
+                kind=EventKind.QUICK_QUALITY
+                if many and quickly
+                else EventKind.QUALITY_REQUESTED,
                 repo=target.repo,
                 number=target.number,
                 payload={"by": user.login, "quick": body.quick},

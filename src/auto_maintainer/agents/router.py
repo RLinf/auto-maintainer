@@ -38,6 +38,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from ..domain.agents import (
+    QUICK_TIMEOUT_SECONDS,
     AgentEvent,
     AgentEventType,
     AgentResult,
@@ -83,13 +84,17 @@ class BreakerState:
 
 def effective_permissions(route: Route, runtime: AgentRuntime, task: AgentTask) -> str:
     """The agent's own mode when the service settings give it one, else the route's;
-    ``bypass`` falls back to ``auto`` unless it is allowed on this runtime (by
-    ``allow_bypass`` or by the agent's own ``bypass``), the CLI has a bypass mode, and
-    the input is trusted or the route sets ``bypass_untrusted``."""
+    ``bypass`` falls back to ``auto`` unless the task may run any code (only the
+    service's own code may: a repository's code runs only on its test machines), it
+    is allowed on this runtime (by ``allow_bypass`` or by the agent's own ``bypass``),
+    the CLI has a bypass mode, and the input is trusted or the route sets
+    ``bypass_untrusted``."""
     own = getattr(runtime, "own_permissions", None)
     mode = own or route.permissions
     if mode != "bypass":
         return mode
+    if task.run_code != "any":
+        return "auto"
     allowed = own == "bypass" or getattr(runtime, "allow_bypass", False)
     if not (allowed and runtime.capabilities().bypass):
         return "auto"
@@ -206,10 +211,14 @@ class AgentRouter:
                     "model": (route.model or task.model) if index == 0 else None,
                     # An agent's own reasoning level wins over the route's, as its
                     # own permission mode does.
-                    "effort": getattr(runtime, "effort", None)
+                    "effort": "low"
+                    if task.budget == "quick"
+                    else getattr(runtime, "effort", None)
                     or route.effort
                     or task.effort,
-                    "timeout_seconds": route.timeout_seconds,
+                    "timeout_seconds": min(route.timeout_seconds, QUICK_TIMEOUT_SECONDS)
+                    if task.budget == "quick"
+                    else route.timeout_seconds,
                     "question_timeout_seconds": route.question_timeout_seconds,
                     "permissions": effective_permissions(route, runtime, task),
                 }

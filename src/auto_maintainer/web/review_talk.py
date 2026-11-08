@@ -71,7 +71,8 @@ _turns: dict[str, asyncio.Lock] = {}
 
 TALK = """You wrote the {what} of PR #{number} in {repo} given below, and {user}, a reviewer, is talking with you about it. They may ask why you found something, disagree with a finding, ask you to change the draft, or ask you to check more: other files, a test, the docs, a scenario.
 - Answer in `reply`, plainly and briefly, in the language {user} writes in; point to code as `path:line`.
-- Check before you answer: read the code in the working directory and run what helps (tests, scripts). Never post, push, or change the repository's files, and do not run the PR's workflow to reproduce it.
+- Check before you answer: read the code in the working directory and its git history. Never post, push, or change the repository's files.
+- Never run code on this machine: not the PR's code, its tests, builds, installs, or its workflow, and do not ask to. A repository's code runs only on its test machines, through the service's reproduction; when a run would settle the question, say what it should check (the reviewer can start one with Reproduce).
 - When {user} asks for a change to the {what}, or what you check changes it, return the whole revised {what} in `{field}`: every finding, section, and line that should stay, word for word, including edits the reviewers made to the draft by hand. Leave `{field}` null when it stays as it is.
 - When only {user} can settle something that would change your answer, ask them with your tool for asking the user.
 - Put a rule in `lessons` only when {user} states one for future reviews of this repository or agrees to one.

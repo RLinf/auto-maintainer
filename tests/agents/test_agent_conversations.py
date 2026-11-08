@@ -68,6 +68,9 @@ def _task(tmp_path: Path, **kw: object) -> AgentTask:
         "pr": 42,
         # A review someone asked for: its questions go to people.
         "requested_by": "maria",
+        # The flows of questions to people; a repository's own tasks deny what the
+        # rules do not allow (test_a_repositorys_task_asks_people_nothing_about_code).
+        "run_code": "any",
     }
     data.update(kw)
     return AgentTask.model_validate(data)
@@ -576,3 +579,28 @@ async def test_a_background_read_only_task_is_not_left_waiting_on_people(
     assert desk.questions == []
     requested = await runtime.resolve(_task(tmp_path), question)
     assert requested.allow is True and len(desk.questions) == 1
+
+
+async def test_a_repositorys_task_asks_people_nothing_about_code(
+    tmp_path: Path,
+) -> None:
+    """A permission the rules do not settle is denied at once for a task that may
+    not run code; a question to the person who asked still reaches them."""
+    from auto_maintainer.agents.adapters.antigravity import AntigravityRuntime
+    from auto_maintainer.domain.agents import AgentQuestion
+
+    runtime = AntigravityRuntime(runs_dir=tmp_path / "runs")
+    desk = FakeDesk(AgentAnswer(allow=True, by="maria"))
+    runtime.questions = desk
+    task = _task(tmp_path, run_code="skills")
+    run = AgentQuestion(
+        kind=QuestionKind.PERMISSION, title="run", tool="execute", detail="pytest -q"
+    )
+    answer = await runtime.resolve(task, run)
+    assert answer.allow is False and "test machines" in (answer.message or "")
+    fetch = AgentQuestion(kind=QuestionKind.PERMISSION, title="fetch", tool="fetch")
+    assert (await runtime.resolve(task, fetch)).allow is False
+    assert desk.questions == []
+    intent = AgentQuestion(kind=QuestionKind.INPUT, title="Which design is wanted?")
+    assert (await runtime.resolve(task, intent)).allow is True
+    assert len(desk.questions) == 1

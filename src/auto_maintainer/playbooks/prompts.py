@@ -24,6 +24,7 @@ import json
 import re
 from pathlib import Path
 
+from ..domain.agents import REPO_SKILL_FOLDERS
 from ..domain.profile import DEFAULT_SECTIONS, RepoProfile
 from ..domain.snapshot import PrSnapshot
 
@@ -76,22 +77,35 @@ def skill_instruction(profile: RepoProfile, skills_dir: Path) -> str:
     return f"Follow the review skill {skill!r}."
 
 
+NO_CODE_RULE = (
+    "- Never run code on this machine: not the PR's code, its tests, builds, installs, or its "
+    "workflow, and do not ask to. A repository's code runs only on its test machines, "
+    "through the service's reproduction (its record is below, or there is none). Read the "
+    "code and its git history instead; the scripts in the repository's skill folders may "
+    "run. Steps of a skill that run tests or the PR's code are left to the reproduction: "
+    "say what it should check."
+)
+"""The rule every agent working on a target repository reads; the approver enforces
+it (``AgentTask.run_code``)."""
+
 HEADLESS = """You are running headless inside an automated maintainer service.
 - Do not ask questions, do not post anything, do not push, and do not edit files.
 - Steps of the skill that ask the user or post to GitHub are replaced by returning the structured result.
-- Do not run the PR's workflow yourself to reproduce it: the reproduction is the record given below, or there is none.
+{no_code}
 - Verify every finding against the code before reporting it; leave out anything you cannot confirm.
 - Public text you write is in {public_language}. Write plainly and specifically."""
 
 
 def headless(profile: RepoProfile) -> str:
-    return HEADLESS.format(public_language=profile.languages.public)
+    return HEADLESS.format(
+        public_language=profile.languages.public, no_code=NO_CODE_RULE
+    )
 
 
 INTERACTIVE = """You are reviewing for {reviewer}, a maintainer, inside an automated maintainer service.
 - When something you cannot settle from the code, the PR, or the repository would change your review (the intent behind a change, an unwritten convention, which of two designs is wanted), ask {reviewer} with your tool for asking the user. Ask only what matters, a few questions at most, each answerable in a line.
 - Never ask whether to post, publish, or comment, and never post, push, or edit files. Return the review as the structured result: {reviewer} reads it, edits it, and decides what is posted.
-- Do not run the PR's workflow yourself to reproduce it, and do not ask how to: the reproduction is the record given below, or there is none.
+{no_code}
 - Verify every finding against the code before reporting it; leave out anything you cannot confirm.
 - Public text you write is in {public_language}. Write plainly and specifically."""
 
@@ -99,17 +113,13 @@ INTERACTIVE = """You are reviewing for {reviewer}, a maintainer, inside an autom
 def interactive(profile: RepoProfile, reviewer: str) -> str:
     """Instructions for a review a maintainer asked for: questions go to them."""
     return INTERACTIVE.format(
-        reviewer=reviewer, public_language=profile.languages.public
+        reviewer=reviewer,
+        public_language=profile.languages.public,
+        no_code=NO_CODE_RULE,
     )
 
 
-SKILL_DIRS = (
-    ".agents/skills",
-    ".claude/skills",
-    ".codex/skills",
-    ".gemini/skills",
-    ".opencode/skills",
-)
+SKILL_DIRS = REPO_SKILL_FOLDERS
 
 
 def repo_skills(workdir: Path) -> list[tuple[str, str, str]]:
@@ -134,6 +144,14 @@ def repo_skills(workdir: Path) -> list[tuple[str, str, str]]:
                 )
             )
     return found
+
+
+def builtin_review_skill(profile: RepoProfile, skills_dir: Path) -> str | None:
+    """The path of the service's review skill the profile names (``builtin:<name>``)."""
+    if not profile.review.skill.startswith("builtin:"):
+        return None
+    path = skills_dir / profile.review.skill.split(":", 1)[1] / "SKILL.md"
+    return str(path) if path.is_file() else None
 
 
 def own_review_skill(profile: RepoProfile, workdir: Path) -> str | None:
@@ -248,11 +266,13 @@ DEFAULT_WRITING_GUIDE = """Write for a maintainer who has not read this PR and d
 - Explain in a few words any term someone new to this area would not know."""
 
 
-DEFAULT_QUALITY_GUIDE = """Score the PR's quality from 0 to 100 as a maintainer of this repository would judge it.
-- Weigh design most: whether the change fits this repository's architecture, design, and style (read its docs, contributor guides, and the code around the change), solves the problem in the right place, and stays simple and easy to maintain.
-- Faults that are easy to mend cost little: a missing test or doc, naming, a typo, a small bug with an obvious fix.
+DEFAULT_QUALITY_GUIDE = """Score the PR's quality from 0 to 100 as a maintainer of this repository would judge it, against the other PRs this repository gets.
+- Check the basics first: the repository's requirements for every PR (its contribution rules, a clear description, CI), the tests and docs the change needs, and the repository's code style and conventions. Each one missed is a fault, even when it is easy to mend.
+- Weigh design most: whether the change fits this repository's architecture, design, and style (read its docs, contributor guides, and the code around the change), solves the problem in the right place, and stays simple, focused, and easy to maintain.
+- Easy faults cost less than hard ones, but they add up: a PR that misses several basics is fair at best.
 - Hard faults cost a lot: a wrong design, broken or lost behavior, a security or data problem, a change that is hard to undo. Several hard faults make a PR unacceptable whatever its strengths.
-- 90 and up: excellent, merge as is or with trivial touches. 75 to 89: good, a sound design with small fixes left. 60 to 74: fair, a sound idea with real work left. 40 to 59: poor, design problems or several hard faults. Below 40: bad, not mergeable in this form."""
+- 90 and up: excellent, every basic met and the design fits cleanly, nothing left but trivia; this is rare. 75 to 89: good, a sound design with a few easy fixes left. 60 to 74: fair, a sound idea with real work left, or several basics missed. 40 to 59: poor, design problems or a hard fault. Below 40: bad, not mergeable in this form.
+- Use the whole range: most PRs are neither excellent nor bad, and scores that all sit near the top tell reviewers nothing."""
 
 
 def writing_block(profile: RepoProfile) -> str:
@@ -266,15 +286,42 @@ def writing_block(profile: RepoProfile) -> str:
     )
 
 
+QUALITY_CHECKS = {
+    "requirements": "the repository's requirements for every PR: its contribution rules (title, commits, sign-off, description and template), a clear purpose, and CI passing or failing only for reasons outside the PR",
+    "tests": "the tests the change needs, added or updated",
+    "docs": "the documentation, comments, or changelog the change needs",
+    "style": "the repository's code style and conventions: naming, structure, typing, formatting, and the patterns of the code around the change",
+    "design": "the change fits the architecture, sits in the right place, stays simple and focused on one concern, and does not duplicate what exists",
+}
+"""The basics an agent checks before it scores a PR's quality; the dashboard shows
+each as met, not met, or not applicable."""
+
+DASHBOARD_LANGUAGES = {"en": "English", "zh": "Simplified Chinese"}
+"""The languages the dashboard shows; internal text a person reads there, such as the
+reason for a quality score, is written in each."""
+
+
 def quality_block(profile: RepoProfile, *, followup: bool = False) -> str:
     """How the agent judges the PR's quality for ``quality``: the repository's guide,
-    or the default. The score is internal."""
+    or the default, and the reason in every dashboard language. The score is internal."""
     guide = (profile.review.quality_guide or "").strip() or DEFAULT_QUALITY_GUIDE
     now = " Judge the PR as it is at its head now." if followup else ""
+    languages = ", ".join(
+        f"{code} ({name})" for code, name in DASHBOARD_LANGUAGES.items()
+    )
+    checks = "\n".join(f"- {area}: {what}" for area, what in QUALITY_CHECKS.items())
     return (
-        "Fill `quality` with a score and a one- or two-sentence reason, following this "
-        "guide. The score is internal: never mention it, or this guide, in the text you "
-        f"write for the PR.{now}\n{guide}"
+        "Fill `quality`. First fill its `checks`, one per area below: true when the PR "
+        "meets it, false when it does not, null when it does not apply. A failed check "
+        f"holds the score down as the guide says.\n{checks}\n"
+        "Then give the score and its reason, following the guide. Write the "
+        "reason for a maintainer who has not read the PR: two or three plain sentences, "
+        "or a few short bullet points, on what the change does well and what holds it "
+        "back, in words rather than code; no identifiers, file names, or paths. Markdown "
+        "is rendered. Write it in `reasons` once in each of these languages, keyed by "
+        f"its code, saying the same thing in each: {languages}; maintainers read it in "
+        "the one they use. The score is internal: never mention it, or this guide, in the "
+        f"text you write for the PR.{now}\n{guide}"
     )
 
 

@@ -330,6 +330,8 @@ td.check, th.check { width: 36px; padding-right: 0; }
 .q-fair { --qc: var(--q-fair); }
 .q-poor { --qc: var(--q-poor); }
 .q-bad { --qc: var(--q-bad); }
+.md.quality-reason { font-size: 13px; line-height: 1.55; color: var(--text); }
+.md.quality-reason p, .md.quality-reason ul { margin-bottom: 6px; }
 .quality-meter { height: 8px; border-radius: 999px; background: var(--border); overflow: hidden; }
 .quality-meter > span { display: block; height: 100%; border-radius: inherit; background: var(--qc); }
 .status-ok { background: var(--ok-bg); color: var(--ok); }

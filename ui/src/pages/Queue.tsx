@@ -100,7 +100,7 @@ export default function QueuePage({ me }: { me: Me }) {
   const again = useReevaluate();
   const quality = useScoreQuality();
   const sync = useSyncPrs();
-  const [confirmAll, setConfirmAll] = useState(false);
+  const [confirmAll, setConfirmAll] = useState<"priority" | "quality" | null>(null);
   const review = useAct(
     (prs: PrRow[]) => api.post<ReviewStart[]>("/api/reviews", { prs: prs.map((r) => ({ repo: r.repo, number: r.number })), agent: reviewer || null }),
     [["prs"], ["proposals"]],
@@ -215,6 +215,16 @@ export default function QueuePage({ me }: { me: Me }) {
 
   const selected = list.selected;
   const inView = list.all;
+  const scoreQuality = (prs: PrRow[], done?: () => void) =>
+    quality.mutate(
+      { prs: prs.map((p) => ({ repo: p.repo, number: p.number })) },
+      {
+        onSuccess: (out) => {
+          done?.();
+          toast(qualityToast(out, t));
+        },
+      },
+    );
   const scoreAgain = (prs: PrRow[], done?: () => void) =>
     again.mutate(
       prs.map((p) => ({ repo: p.repo, number: p.number })),
@@ -256,22 +266,42 @@ export default function QueuePage({ me }: { me: Me }) {
             </button>
             {confirmAll ? (
               <>
-                <button className="primary" disabled={again.isPending} onClick={() => scoreAgain(inView, () => setConfirmAll(false))}>
-                  {again.isPending ? t("Starting…") : `${t("Score again")}: ${inView.length} PR`}
+                <button
+                  className="primary"
+                  disabled={again.isPending || quality.isPending}
+                  onClick={() =>
+                    confirmAll === "priority"
+                      ? scoreAgain(inView, () => setConfirmAll(null))
+                      : scoreQuality(inView, () => setConfirmAll(null))
+                  }
+                >
+                  {again.isPending || quality.isPending
+                    ? t("Starting…")
+                    : `${confirmAll === "priority" ? t("Score priority") : t("Score quality")}: ${inView.length} PR`}
                 </button>
-                <button className="ghost" onClick={() => setConfirmAll(false)}>
+                <button className="ghost" onClick={() => setConfirmAll(null)}>
                   {t("Cancel")}
                 </button>
               </>
             ) : (
-              <button
-                disabled={!inView.length}
-                title={t("An agent scores every PR in this view again, with the repository's lessons as they are now; each PR is one agent run")}
-                onClick={() => setConfirmAll(true)}
-              >
-                <Icon name="sparkles" />
-                {t("Score again")}
-              </button>
+              <>
+                <button
+                  disabled={!inView.length}
+                  title={t("An agent scores every PR in this view again, with the repository's lessons as they are now; each PR is one agent run")}
+                  onClick={() => setConfirmAll("priority")}
+                >
+                  <Icon name="sparkles" />
+                  {t("Score priority")}
+                </button>
+                <button
+                  disabled={!inView.length}
+                  title={t("An agent scores the quality of every PR in this view: a reviewed PR from its review, the rest quickly from their diffs in the background; each PR is one agent run")}
+                  onClick={() => setConfirmAll("quality")}
+                >
+                  <Icon name="sparkles" />
+                  {t("Score quality")}
+                </button>
+              </>
             )}
             <button className="agent" onClick={() => agent.open()}>
               <Icon name="sparkles" />
@@ -284,7 +314,7 @@ export default function QueuePage({ me }: { me: Me }) {
       <ScoringProgress key={scope} repo={scope} me={me.login} />
       <Tabs tabs={views} active={view} onChange={setView} />
       <ListToolbar list={list} placeholder={t("Search by title, number, author, label…")} />
-      <ErrorBox error={all.error || review.error || again.error || sync.error} />
+      <ErrorBox error={all.error || review.error || again.error || quality.error || sync.error} />
       {all.isLoading || (view === "mine" && mine.isLoading) ? (
         <div className="card">
           <Skeleton rows={8} />
@@ -305,18 +335,13 @@ export default function QueuePage({ me }: { me: Me }) {
         </button>
         <button className="sm" disabled={again.isPending} onClick={() => scoreAgain(selected, list.clearSelection)}>
           <Icon name="sparkles" size={14} />
-          {`${t("Score again")} ${selected.length}`}
+          {`${t("Score priority")} ${selected.length}`}
         </button>
         <button
           className="sm"
           disabled={quality.isPending}
           title={t("An agent scores each PR by the repository's quality guide: a reviewed PR from its review, any other quickly from its diff")}
-          onClick={() =>
-            quality.mutate(
-              { prs: selected.map((p) => ({ repo: p.repo, number: p.number })) },
-              { onSuccess: (out) => (toast(qualityToast(out, t)), list.clearSelection()) },
-            )
-          }
+          onClick={() => scoreQuality(selected, list.clearSelection)}
         >
           <Icon name="sparkles" size={14} />
           {`${t("Score quality")} ${selected.length}`}

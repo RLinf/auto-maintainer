@@ -95,7 +95,7 @@ The service runs your setup and script on test machine {lab}, in a fresh folder 
 - The script must not need credentials, change anything outside its folder, or stop other people's work on the machine. Install what it needs in a throwaway environment inside its folder when the machine's environment lacks it.
 - Set needs_gpu only when the run cannot happen without a GPU.
 - When the machine cannot run it at all (it lacks the hardware, such as GPUs, an accelerator, or a robot, or assets or access the documented steps need), say so in blocked: what is missing and what a run would need; leave the script empty.
-- You may read the code and run quick, read-only commands here. Do not commit, push, or post, and never ask whether to run it: {decides}
+- Read the code and its git history here, and run nothing else on this machine: the script runs on the test machine, never here. Do not commit, push, or post, and never ask whether to run it: {decides}
 - {unclear}
 {machine}"""
 

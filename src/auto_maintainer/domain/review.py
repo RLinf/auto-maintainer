@@ -21,7 +21,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, computed_field, field_validator
+from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
 
 from .actions import ActionKind, ActionStatus, InlineComment
 from .ids import same_commit, short_sha
@@ -173,8 +173,29 @@ class QualityVerdict(BaseModel):
     )
     reason: str = Field(
         default="",
-        description="One or two plain sentences on what most decides the score.",
+        description="What most decides the score, in plain words (Markdown).",
     )
+    reasons: dict[str, str] = Field(
+        default_factory=dict,
+        description="The reason in each language you were asked for, keyed by its "
+        "code: plain words for a maintainer new to the PR, no code or file names "
+        "(Markdown).",
+    )
+    """The dashboard shows each person the reason in their language, else ``reason``."""
+    checks: dict[str, bool | None] = Field(
+        default_factory=dict,
+        description="Each check you were asked for: true when the PR meets it, false "
+        "when it does not, null when it does not apply.",
+    )
+    """The basics the agent checked before scoring, by area (``playbooks.prompts.
+    QUALITY_CHECKS``), for reviewers to see at a glance."""
+
+    @field_validator("checks", mode="before")
+    @classmethod
+    def _flags(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return {}
+        return {str(k): v for k, v in value.items() if v is None or isinstance(v, bool)}
 
     @field_validator("score", mode="before")
     @classmethod
@@ -182,6 +203,19 @@ class QualityVerdict(BaseModel):
         if isinstance(value, float):
             return round(value)
         return value
+
+    @field_validator("reasons", mode="before")
+    @classmethod
+    def _texts(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return {}
+        return {str(k): v.strip() for k, v in value.items() if isinstance(v, str)}
+
+    @model_validator(mode="after")
+    def _one_reason(self) -> QualityVerdict:
+        if not self.reason and self.reasons:
+            self.reason = self.reasons.get("en") or next(iter(self.reasons.values()))
+        return self
 
 
 def _lenient_quality(value: Any) -> Any:
@@ -204,6 +238,8 @@ def _lenient_quality(value: Any) -> Any:
     return {
         "score": max(0, min(100, round(raw))),
         "reason": str(value.get("reason") or ""),
+        "reasons": value.get("reasons") or {},
+        "checks": value.get("checks") or {},
     }
 
 
@@ -219,7 +255,11 @@ class ReviewResult(BaseModel):
     summary: str
     findings: list[Finding] = Field(default_factory=list)
     dismissed: list[DismissedFinding] = Field(default_factory=list)
-    tests_run: list[TestRun] = Field(default_factory=list)
+    tests_run: list[TestRun] = Field(
+        default_factory=list,
+        description="Tests a reproduction ran on a test machine, from its record; "
+        "never tests you ran yourself on this machine.",
+    )
     sections: dict[str, str] = Field(default_factory=dict)
     recommendation: str
     remaining_actions: list[str] = Field(default_factory=list)
@@ -469,6 +509,9 @@ class ReviewQuality(BaseModel):
     score: int = Field(ge=0, le=100)
     band: QualityBand
     reason: str = ""
+    reasons: dict[str, str] = Field(default_factory=dict)
+    """The reason by language code; ``reason`` where a language is missing."""
+    checks: dict[str, bool | None] = Field(default_factory=dict)
     sha: str = ""
     """The head the judged review looked at."""
     kind: Literal["review", "followup"] = "review"
@@ -544,6 +587,8 @@ def review_quality(
             score=verdict.score,
             band=quality_band(verdict.score),
             reason=verdict.reason,
+            reasons=verdict.reasons,
+            checks=verdict.checks,
             sha=record.action.head_sha or "",
             kind="followup"
             if record.action.payload.get("kind") == "followup"

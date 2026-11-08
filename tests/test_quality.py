@@ -21,13 +21,25 @@ from pathlib import Path
 
 from auto_maintainer.domain.actions import ActionKind
 from auto_maintainer.domain.events import Event, EventKind
-from auto_maintainer.domain.review import review_quality
-from auto_maintainer.domain.snapshot import Commit, PrFile
+from auto_maintainer.domain.review import QualityVerdict, review_quality
+from auto_maintainer.domain.snapshot import (
+    CheckConclusion,
+    CheckRun,
+    CheckStatus,
+    Commit,
+    PrFile,
+)
 from auto_maintainer.playbooks.prompts import (
     DEFAULT_QUALITY_GUIDE,
     DEFAULT_WRITING_GUIDE,
 )
-from auto_maintainer.playbooks.quality import assessed_quality, quick_quality
+from auto_maintainer.playbooks.quality import (
+    QUICK_DIFF_LIMIT,
+    assessed_quality,
+    condensed_diff,
+    quick_facts,
+    quick_quality,
+)
 from auto_maintainer.testing.fakes import make_pr
 from auto_maintainer.testing.harness import Harness
 
@@ -104,6 +116,7 @@ async def test_the_review_scores_quality_by_the_guides_it_is_given(
         assert "Two sentences at most, no code." in task.prompt
         assert DEFAULT_WRITING_GUIDE not in task.prompt, "the repository's guide wins"
         assert DEFAULT_QUALITY_GUIDE in task.prompt
+        assert "en (English), zh (Simplified Chinese)" in task.prompt
         q = await _quality(h)
         assert q is not None and (q.score, q.band, q.rescored) == (
             91,
@@ -157,7 +170,11 @@ async def test_every_open_pr_gets_a_quick_score_until_its_review_scores_it(
     h.runner.on(
         "evaluate",
         lambda t: (
-            {"score": 72, "reason": "Fits the loader's design; small gaps."}
+            {
+                "score": 72,
+                "reasons": {"en": "Fits the loader's design.", "zh": "符合设计。"},
+                "checks": {"requirements": True, "tests": False, "docs": None},
+            }
             if t.prompt.startswith(QUICK)
             else {"scores": {}, "summary": "s", "rationale": "r"}
         ),
@@ -184,6 +201,13 @@ async def test_every_open_pr_gets_a_quick_score_until_its_review_scores_it(
         assert quick[42] is not None and quick[42].band == "fair"
         asked = [t for t in h.runner.tasks if t.prompt.startswith(QUICK)]
         assert len(asked) == 2 and "PR: #4" in asked[0].prompt
+        assert "First fill its `checks`" in asked[0].prompt
+        assert "Facts the service collected" in asked[0].prompt
+        assert quick[42] is not None and quick[42].checks == {
+            "requirements": True,
+            "tests": False,
+            "docs": None,
+        }
 
         await h.emit(tick.model_copy(update={"id": "evt_again"}))
         assert len([t for t in h.runner.tasks if t.prompt.startswith(QUICK)]) == 2
@@ -206,6 +230,8 @@ async def test_every_open_pr_gets_a_quick_score_until_its_review_scores_it(
         await h.emit(tick.model_copy(update={"id": "evt_later"}))
         rescored = await quick_quality(h.store, REPO, 43)
         assert rescored is not None and rescored.sha == "c" * 40
+        last = [t for t in h.runner.tasks if t.prompt.startswith(QUICK)][-1]
+        assert "#42: 61 (fair)" in last.prompt, "a reviewed PR calibrates quick scores"
         assert not [
             t
             for t in h.runner.tasks
@@ -224,5 +250,103 @@ async def test_quick_scores_can_be_turned_off(tmp_path: Path) -> None:
             Event(kind=EventKind.SCHEDULE_TICK, payload={"name": "review_scan"})
         )
         assert await quick_quality(h.store, REPO, 43) is None
+    finally:
+        await h.close()
+
+
+def test_the_reason_comes_in_each_dashboard_language() -> None:
+    verdict = QualityVerdict.model_validate(
+        {"score": 70, "reasons": {"en": " Sound design. ", "zh": "设计合理。", "x": 3}}
+    )
+    assert verdict.reasons == {"en": "Sound design.", "zh": "设计合理。"}
+    assert verdict.reason == "Sound design.", "the first reason stands in for others"
+    assert QualityVerdict.model_validate({"score": 70, "reasons": "no"}).reasons == {}
+
+
+def test_quick_facts_name_the_basics_the_service_checked() -> None:
+    pr = make_pr(
+        number=7,
+        sha="d" * 40,
+        files=[PrFile(path="src/a.py", additions=30), PrFile(path="tests/test_a.py")],
+        checks=[
+            CheckRun(
+                id=1,
+                name="unit",
+                status=CheckStatus.COMPLETED,
+                conclusion=CheckConclusion.FAILURE,
+            )
+        ],
+    )
+    hygiene = {
+        "sha": "d" * 40,
+        "results": [
+            {"id": "title", "passed": False, "summary": "PR title needs changes"},
+            {"id": "owners", "passed": True, "summary": "every file has an owner"},
+        ],
+    }
+    facts = quick_facts(pr, hygiene)
+    assert "2 files, +30/-0" in facts and "look like tests: 1" in facts
+    assert "failing: unit" in facts and "failed: PR title needs changes" in facts
+    stale = quick_facts(pr, {**hygiene, "sha": "e" * 40})
+    assert "hygiene" not in stale, "results for another head are left out"
+    verdict = QualityVerdict.model_validate(
+        {"score": 60, "checks": {"tests": False, "docs": None, "style": "yes"}}
+    )
+    assert verdict.checks == {"tests": False, "docs": None}
+
+
+def test_a_quick_score_reads_a_condensed_diff() -> None:
+    def block(path: str, size: int) -> str:
+        return f"diff --git a/{path} b/{path}\n+" + "x" * size + "\n"
+
+    diff = (
+        block("tests/test_a.py", 100)
+        + block("uv.lock", 50_000)
+        + block("src/a.py", 20_000)
+        + "".join(block(f"src/m{i}.py", 5_000) for i in range(8))
+    )
+    out = condensed_diff(diff)
+    assert len(out) < QUICK_DIFF_LIMIT + 1_000
+    assert out.index("src/a.py") < out.index("tests/test_a.py") or (
+        "tests/test_a.py" in out.split("Left out of this diff:")[1]
+    ), "source before tests"
+    assert "uv.lock" in out.split("Left out of this diff:")[1]
+    assert "the rest of this file's diff is left out" in out
+
+
+async def test_the_review_standard_is_drawn_into_a_checklist_once(
+    tmp_path: Path,
+) -> None:
+    h = await Harness.create(tmp_path)
+    checklists: list[str] = []
+
+    def evaluate(t):
+        if "into a checklist for a quick check" in t.prompt:
+            checklists.append(t.prompt)
+            return {
+                "items": [
+                    {"area": "docs", "check": "New features get a page in the docs."},
+                    {"area": "style", "check": "Public functions have type hints."},
+                ]
+            }
+        if t.prompt.startswith(QUICK):
+            return {"score": 70, "reasons": {"en": "a", "zh": "b"}, "checks": {}}
+        return {"scores": {}, "summary": "s", "rationale": "r"}
+
+    h.runner.on("triage", lambda t: {"summary": "s", "labels": []})
+    h.runner.on("evaluate", evaluate)
+    for number in (42, 43):
+        h.forge.put_pr(make_pr(number=number, sha=f"{number:040x}"))
+    try:
+        await h.poll()
+        await h.emit(
+            Event(kind=EventKind.SCHEDULE_TICK, payload={"name": "review_scan"})
+        )
+        quick = [t for t in h.runner.tasks if t.prompt.startswith(QUICK)]
+        assert len(quick) == 2 and len(checklists) == 1, "drawn once, then kept"
+        assert "- [style] Public functions have type hints." in quick[1].prompt
+        assert all(t.budget == "quick" and t.run_code == "none" for t in quick), (
+            "quick and reading only"
+        )
     finally:
         await h.close()

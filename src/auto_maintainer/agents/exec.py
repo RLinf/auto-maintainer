@@ -51,6 +51,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from ..domain.agents import (
+    NO_CODE_ANSWER,
     AgentAnswer,
     AgentChoices,
     AgentEvent,
@@ -59,6 +60,7 @@ from ..domain.agents import (
     AgentResult,
     AgentTask,
     Capabilities,
+    QuestionKind,
     RuntimeHealth,
     Usage,
     denial,
@@ -429,6 +431,15 @@ class ExecRuntime:
         automatic = self.auto_answer(task, question)
         if automatic is not None:
             return automatic
+        if question.kind == QuestionKind.PERMISSION and task.run_code != "any":
+            # A repository's code runs only on its test machines: what the CLI's
+            # own rules did not allow is not put to anyone.
+            return denial(
+                NO_CODE_ANSWER
+                if question.tool in (None, "", "execute", "Bash")
+                else "Only the run's own folders and reading commands are open to "
+                "this task; continue without it."
+            )
         if task.requested_by is None and task.mode == "read_only":
             return denial(BACKGROUND_ANSWER)
         if task.permissions == "restricted":

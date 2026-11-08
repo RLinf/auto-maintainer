@@ -388,13 +388,37 @@ def _quality(task: AgentTask) -> dict[str, Any]:
     if "progress bar" in task.prompt:
         return {
             "score": 64,
-            "reason": "A useful feature, but every worker drawing its own bar is a "
-            "design problem to settle before the smaller fixes.",
+            "reasons": {
+                "en": "A useful feature, but **every worker draws its own bar**, so "
+                "the output gets mixed up when work runs in parallel.\n\n"
+                "- Settle where the bar is drawn first.\n"
+                "- The missing documentation is a small fix.",
+                "zh": "功能有用，但**每个工作进程各画一个进度条**，并行运行时输出会混在一起。\n\n"
+                "- 先确定进度条由谁来画。\n"
+                "- 缺少文档是小问题。",
+            },
+            "checks": {
+                "requirements": True,
+                "tests": True,
+                "docs": False,
+                "style": True,
+                "design": False,
+            },
         }
     return {
         "score": 88,
-        "reason": "A focused fix that follows the loader's existing checks; only a "
-        "boundary test is missing.",
+        "reasons": {
+            "en": "A focused fix that follows the loader's existing checks; only a "
+            "boundary test is missing.",
+            "zh": "修复聚焦，沿用了加载器已有的检查方式；只缺一个边界测试。",
+        },
+        "checks": {
+            "requirements": True,
+            "tests": False,
+            "docs": None,
+            "style": True,
+            "design": True,
+        },
     }
 
 
@@ -402,12 +426,21 @@ def _answer(task: AgentTask) -> dict[str, Any]:
     kind = str(task.kind)
     if kind == "review" and task.prompt.startswith("You judge the quality of PR"):
         return _quality(task)
+    if kind == "evaluate" and "into a checklist for a quick check" in task.prompt:
+        return {
+            "items": [
+                {"area": "tests", "check": "A behavior change comes with a test."},
+                {"area": "docs", "check": "A new option is documented."},
+                {
+                    "area": "style",
+                    "check": "Code follows the loader's existing checks.",
+                },
+            ]
+        }
     if kind == "evaluate" and task.prompt.startswith("You give PR"):
         quick = _quality(task)
-        return {
-            **quick,
-            "score": quick["score"] - 6 if "docs:" not in task.prompt else 93,
-        }
+        docs = "docs: explain batching" in task.prompt
+        return {**quick, "score": 93 if docs else quick["score"] - 6}
     if kind == "chat" and "You turn the description" in task.prompt:
         return _machine_rules(task.prompt)
     if kind in ("review", "followup") and TALKING in task.prompt:

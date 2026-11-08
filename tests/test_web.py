@@ -338,6 +338,21 @@ async def test_approve_and_edit_a_proposal(demo) -> None:
         await h.settle()
         rows = {r["number"]: r for r in (await maria.get("/api/prs")).json()}
         assert rows[44]["quality"] is None and rows[44]["quick_quality"]["score"] == 93
+        assert rows[44]["quick_quality"]["reasons"]["zh"], "a reason per language"
+
+        many = [{"repo": "acme/widget", "number": n} for n in (43, 44)]
+        await maria.post("/api/quality", json={"prs": many})
+        await h.settle()
+        jobs = {
+            j.number: j.playbook
+            for j in await h.store.list_jobs(repo="acme/widget", limit=500)
+            if j.playbook in ("quality", "quick_quality")
+            and (j.events[0].get("payload") or {}).get("by") == "maria"
+            and j.number in (43, 44)
+        }
+        assert jobs == {43: "quality", 44: "quick_quality"}, (
+            "many at once: a reviewed PR from its review, the rest in the background"
+        )
         proposals = (await maria.get("/api/proposals")).json()
         review = next(
             p
