@@ -529,7 +529,9 @@ async def test_a_review_posts_in_the_format_of_the_repositorys_skill(demo) -> No
     headings = [
         line[4:] for line in payload["body"].splitlines() if line.startswith("### ")
     ]
-    assert headings == QUESTIONS, "the skill's sections, in its order, word for word"
+    assert headings == [*QUESTIONS, "Findings"], (
+        "the skill's sections, in its order, word for word, then the findings by id"
+    )
     assert "### Summary" not in payload["body"]
     [comment] = payload["comments"]
     assert comment["path"] == "src/loader.py"

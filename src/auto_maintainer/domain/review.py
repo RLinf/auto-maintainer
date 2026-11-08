@@ -335,7 +335,8 @@ def render_review(
     section names are filled from the result's fields, and any other section from
     ``result.sections``. With ``own_format`` (the repository's review skill sets
     the format) the main comment is ``result.sections`` as the agent returned them,
-    in its order, when it returned any.
+    in its order, when it returned any, followed by the findings listed by id, so a
+    section that refers to ``F1`` can be looked up.
     """
     inline_findings = [
         f for f in result.findings if f.path in diff_paths and f.line is not None
@@ -388,11 +389,17 @@ def render_review(
         "recommendation": recommendation_text,
     }
     if own_format and any(text.strip() for text in result.sections.values()):
-        body = "\n\n".join(
-            f"### {heading.strip().lstrip('#').strip()}\n\n{text.strip()}"
+        headings = [
+            (heading.strip().lstrip("#").strip(), text.strip())
             for heading, text in result.sections.items()
             if text.strip()
+        ]
+        listed = next(
+            (s for s in profile.review.template if s.lower() == "findings"), "Findings"
         )
+        if result.findings and listed.lower() not in {h.lower() for h, _ in headings}:
+            headings.append((listed, findings_text()))
+        body = "\n\n".join(f"### {heading}\n\n{text}" for heading, text in headings)
         return RenderedReview(body=body, comments=comments)
     blocks = []
     for section in profile.review.template:

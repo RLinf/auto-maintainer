@@ -284,6 +284,45 @@ def test_a_skills_own_headings_are_not_doubled() -> None:
     assert out.body.startswith("### 1. What settings did you use?\n\nA800")
 
 
+def test_a_skills_own_format_lists_the_findings_its_sections_refer_to() -> None:
+    finding = {"severity": "minor", "category": "docs", "title": "t"}
+    result = ReviewResult.model_validate(
+        {
+            "summary": "s",
+            "recommendation": "Changes requested",
+            "sections": {"### 9. What is your recommendation?": "Fix `F1` and `F2`."},
+            "findings": [
+                {**finding, "id": "F1", "severity": "major", "body": "Push it."},
+                {
+                    **finding,
+                    "id": "F2",
+                    "body": "Rename it.",
+                    "path": "a.py",
+                    "line": 3,
+                },
+            ],
+        }
+    )
+    profile = RepoProfile(repo="acme/widget")
+    out = render_review(result, profile, {"a.py"}, own_format=True)
+    assert out.body == (
+        "### 9. What is your recommendation?\n\nFix `F1` and `F2`.\n\n"
+        "### Findings\n\n"
+        "- **F1 · major · docs: t**\n  Push it.\n"
+        "- **F2 · minor · docs: t** (`a.py:3`)"
+    )
+    assert out.comments[0].body == "Rename it.", "inline text keeps the skill's form"
+
+    own_list = result.model_copy(
+        update={"sections": {**result.sections, "Findings": "- F1, F2"}}
+    )
+    out = render_review(own_list, profile, {"a.py"}, own_format=True)
+    assert out.body.count("Findings") == 1, "a skill's own findings section stays"
+    clean = result.model_copy(update={"findings": []})
+    out = render_review(clean, profile, set(), own_format=True)
+    assert "Findings" not in out.body
+
+
 def test_scoring_boosts_are_capped_and_expire() -> None:
     goals = [
         StageGoal(id="A", title="a", keywords=["ascend"], boost=4),
