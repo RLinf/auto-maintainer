@@ -1384,6 +1384,10 @@ const zh: Record<string, string> = {
   "met": "满足",
   "not met": "未满足",
   "does not apply": "不适用",
+  "After review it scored": "评审时评分为",
+  "new commits since the review; a follow-up gives the accurate score": "评审后有新提交；跟进评审会给出准确的分数",
+  "An agent scores the commits since the review quickly from the diff": "智能体根据差异快速为评审后的新提交评分",
+  "Score the new commits": "为新提交评分",
 };
 
 const LangContext = createContext<{ lang: Lang; setLang: (l: Lang) => void }>({ lang: "zh", setLang: () => {} });

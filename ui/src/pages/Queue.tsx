@@ -6,7 +6,7 @@ import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api, type Me, type PrRow, type ReviewActivity, type ReviewStart } from "../api";
 import { useAgent } from "../agent";
-import { ErrorBox, Labels, PageHead, prPath, Quality, QUALITY_BANDS, qualityLabel, ReviewState, shownQuality, Tier, timeOf, useAct, When } from "../components";
+import { ErrorBox, Labels, PageHead, prPath, Quality, QUALITY_BANDS, qualityLabel, ReviewState, shownQuality, showsQuick, Tier, timeOf, useAct, When } from "../components";
 import { evaluationToast, prKey, qualityToast, REVIEW_ORDER, REVIEW_STATES, TIER_ORDER, usePrs, useReevaluate, useRepos, useScoreQuality, useSyncPrs } from "../data";
 import { RepoTabs, useRepoScope } from "../repoScope";
 import { useT } from "../i18n";
@@ -53,7 +53,7 @@ export default function QueuePage({ me }: { me: Me }) {
             : rows;
 
   const bandOf = (p: PrRow) => {
-    const shown = shownQuality(p.quality, p.quick_quality);
+    const shown = shownQuality(p.quality, p.quick_quality, p.head);
     return shown ? t(qualityLabel(shown.band)) : t("Not scored yet");
   };
 
@@ -65,15 +65,15 @@ export default function QueuePage({ me }: { me: Me }) {
       { id: "tier", label: t("Priority"), values: (p) => p.tier ?? t("Not evaluated") },
       { id: "state", label: t("Review state"), values: (p) => t(REVIEW_STATES[p.review_state] ?? p.review_state) },
       { id: "quality", label: t("Quality"), values: (p) => bandOf(p) },
-      { id: "scored", label: t("Quality from"), values: (p) => (p.quality ? t("Review") : p.quick_quality ? t("Quick score") : t("Not scored yet")) },
+      { id: "scored", label: t("Quality from"), values: (p) => (showsQuick(p.quality, p.quick_quality, p.head) ? t("Quick score") : p.quality ? t("Review") : t("Not scored yet")) },
       { id: "author", label: t("Author"), values: (p) => p.author },
       { id: "label", label: t("Label"), values: (p) => p.labels },
       { id: "claimed", label: t("Claimed by"), values: (p) => p.claimed_by ?? t("Unclaimed") },
     ],
     sorts: [
-      { id: "priority", label: t("Priority"), value: (p) => p.total ?? -1, descFirst: true },
-      { id: "tier", label: t("Priority"), value: (p) => (p.tier ? TIER_ORDER.indexOf(p.tier) : 99) },
-      { id: "quality", label: t("Quality"), value: (p) => shownQuality(p.quality, p.quick_quality)?.score ?? -1, descFirst: true },
+      { id: "priority", label: t("Priority"), value: (p) => p.total, descFirst: true },
+      { id: "tier", label: t("Priority"), value: (p) => (p.tier ? TIER_ORDER.indexOf(p.tier) : null) },
+      { id: "quality", label: t("Quality"), value: (p) => shownQuality(p.quality, p.quick_quality, p.head)?.score, descFirst: true },
       { id: "updated", label: t("Last updated"), value: (p) => timeOf(p.updated_at), descFirst: true },
       { id: "number", label: t("Number"), value: (p) => p.number, descFirst: true },
       { id: "title", label: t("Title"), value: (p) => p.title.toLowerCase() },

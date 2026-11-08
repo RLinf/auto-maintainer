@@ -48,6 +48,7 @@ function asList(v: string | string[] | null | undefined): string[] {
   return Array.isArray(v) ? v : [v];
 }
 
+/** Ascending order, with missing values last. */
 function compare(a: string | number | null | undefined, b: string | number | null | undefined): number {
   if (a == null && b == null) return 0;
   if (a == null) return 1;
@@ -107,8 +108,13 @@ export function useList<T>(config: ListConfig<T>) {
 
   const sorted = useMemo(() => {
     if (!sortDef) return filtered;
-    const out = [...filtered].sort((a, b) => compare(sortDef.value(a), sortDef.value(b)));
-    return sortDesc ? out.reverse() : out;
+    // Rows without a value stay last in either direction.
+    return [...filtered].sort((a, b) => {
+      const x = sortDef.value(a);
+      const y = sortDef.value(b);
+      if (x == null || y == null) return compare(x, y);
+      return sortDesc ? compare(y, x) : compare(x, y);
+    });
   }, [filtered, sortDef, sortDesc]);
 
   const grouped = useMemo(() => {

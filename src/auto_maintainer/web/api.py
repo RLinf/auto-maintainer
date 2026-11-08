@@ -50,7 +50,7 @@ from ..domain.actions import (
 )
 from ..domain.agents import AgentAnswer, AgentQuestion, QuestionState
 from ..domain.events import Event, EventKind
-from ..domain.ids import check_repo, new_id
+from ..domain.ids import check_repo, new_id, same_commit
 from ..domain.memory import (
     MemoryChange,
     MemoryChangeState,
@@ -1123,7 +1123,7 @@ def build_router() -> APIRouter:
                     }
                 )
                 continue
-            quickly = body.quick or not review_chain(
+            chain = review_chain(
                 await service.store.list_actions(
                     repo=target.repo,
                     number=target.number,
@@ -1131,13 +1131,20 @@ def build_router() -> APIRouter:
                     limit=500,
                 )
             )
+            snapshot = await service.store.get_snapshot(target.repo, target.number)
+            moved = bool(chain) and (
+                snapshot is not None
+                and not same_commit(chain[-1].action.head_sha, snapshot.head_sha)
+            )
+            # No review, or new commits since it: the new head gets a quick score.
+            quickly = body.quick or not chain or moved
             event = Event(
                 kind=EventKind.QUICK_QUALITY
                 if many and quickly
                 else EventKind.QUALITY_REQUESTED,
                 repo=target.repo,
                 number=target.number,
-                payload={"by": user.login, "quick": body.quick},
+                payload={"by": user.login, "quick": quickly},
                 source="dashboard",
             )
             await service.bus.publish(event)

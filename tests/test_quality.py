@@ -236,7 +236,42 @@ async def test_every_open_pr_gets_a_quick_score_until_its_review_scores_it(
             t
             for t in h.runner.tasks
             if t.prompt.startswith(QUICK) and "PR: #42" in t.prompt
-        ][1:], "a reviewed PR is not scored quickly again"
+        ][1:], "a PR whose review covers its head is not scored quickly again"
+
+        def quick_42() -> list:
+            return [
+                t
+                for t in h.runner.tasks
+                if t.prompt.startswith(QUICK) and "PR: #42" in t.prompt
+            ]
+
+        pr42 = await h.forge.get_pr(REPO, 42)
+        h.forge.put_pr(
+            pr42.model_copy(update={"head_sha": "d" * 40, "updated_at": h.clock.now()})
+        )
+        await h.poll()
+        await h.emit(tick.model_copy(update={"id": "evt_pushed"}))
+        assert len(quick_42()) == 1, "new commits settle for an hour first"
+        h.clock.advance(minutes=61)
+        await h.emit(tick.model_copy(update={"id": "evt_settled"}))
+        moved = await quick_quality(h.store, REPO, 42)
+        assert moved is not None and moved.sha == "d" * 40, "new commits since review"
+        q = await _quality(h)
+        assert q is not None and q.score == 61 and q.sha != "d" * 40
+
+        before = len(h.runner.tasks)
+        await h.emit(
+            Event(
+                kind=EventKind.QUALITY_REQUESTED,
+                repo=REPO,
+                number=42,
+                payload={"by": "maria"},
+            )
+        )
+        asked = h.runner.tasks[before:]
+        assert [t.prompt.startswith(QUICK) for t in asked] == [True], (
+            "Score again on a PR past its review scores the new commits"
+        )
     finally:
         await h.close()
 

@@ -21,6 +21,7 @@ import {
   plainText,
   qualityStale,
   reasonIn,
+  showsQuick,
   Section,
   Status,
   Tier,
@@ -602,19 +603,23 @@ function QualityCard({
   }, [scoringId, watched, client]);
   const start = (quickly: boolean) =>
     score.mutate({ prs: [{ repo, number }], quick: quickly }, { onSuccess: (out) => toast(qualityToast(out, t)) });
-  const main = quality ?? quick;
+  // The quick score leads before a review, and after new commits the review did not see.
+  const isQuick = showsQuick(quality, quick, head);
+  const main = isQuick ? quick : (quality ?? quick);
+  const other = isQuick ? quality : quick;
+  const moved = !!quality && qualityStale(quality, head);
   return (
     <Section
       title={t("Quality")}
       hint={t("internal")}
-      aside={main ? <span className={`pill quality q-${main.band}${quality ? "" : " quick"}`}>{t(qualityLabel(main.band))}</span> : null}
+      aside={main ? <span className={`pill quality q-${main.band}${isQuick ? " quick" : ""}`}>{t(qualityLabel(main.band))}</span> : null}
     >
       {main ? (
         <div className={`stack small q-${main.band}`} style={{ gap: 8 }}>
           <div className="row" style={{ gap: 6, alignItems: "baseline" }}>
             <span style={{ fontSize: 28, fontWeight: 700, lineHeight: 1, color: "var(--qc)", fontVariantNumeric: "tabular-nums" }}>{main.score}</span>
             <span className="muted">/ 100</span>
-            <span className="muted">· {quality ? t("after review") : t("at a glance")}</span>
+            <span className="muted">· {isQuick ? t("at a glance") : t("after review")}</span>
           </div>
           <div className="quality-meter" role="img" aria-label={`${main.score} / 100`}>
             <span style={{ width: `${main.score}%` }} />
@@ -622,7 +627,7 @@ function QualityCard({
           <QualityChecks checks={main.checks} />
           {reasonIn(main, lang) && <Markdown text={reasonIn(main, lang)} className="quality-reason" />}
           <span className="muted">
-            {quality ? (
+            {!isQuick && quality ? (
               <>
                 {t(
                   quality.rescored
@@ -638,17 +643,24 @@ function QualityCard({
               </>
             ) : (
               <>
-                {t("quick score from the diff at")} <code>{main.sha.slice(0, 7)}</code> · {t("a review gives the accurate score")}
+                {t("quick score from the diff at")} <code>{main.sha.slice(0, 7)}</code> ·{" "}
+                {moved ? t("new commits since the review; a follow-up gives the accurate score") : t("a review gives the accurate score")}
               </>
             )}
             {qualityStale(main, head) && ` · ${t("new commits since")}`}
           </span>
-          {quality && quick && (
+          {other && (
             <span className="muted">
-              {t("At a glance it scored")}{" "}
-              <span className={`pill quality quick q-${quick.band}`} title={plainText(reasonIn(quick, lang))}>
-                {quick.score}
+              {isQuick ? t("After review it scored") : t("At a glance it scored")}{" "}
+              <span className={`pill quality q-${other.band}${isQuick ? "" : " quick"}`} title={plainText(reasonIn(other, lang))}>
+                {other.score}
               </span>
+              {isQuick && quality && (
+                <>
+                  {" "}
+                  {t("at")} <code>{quality.sha.slice(0, 7)}</code>
+                </>
+              )}
             </span>
           )}
           <span className="row" style={{ gap: 4, flexWrap: "wrap" }}>
@@ -669,10 +681,15 @@ function QualityCard({
         </button>
       ) : (
         <div className="row" style={{ marginTop: 10, gap: 4 }}>
-          {reviewed ? (
+          {reviewed && !moved ? (
             <button className="ghost sm" disabled={score.isPending} onClick={() => start(false)} title={t("An agent judges the PR again by the repository's quality guide")}>
               <Icon name="sparkles" size={14} />
               {quality ? t("Score quality again") : t("Score quality")}
+            </button>
+          ) : moved ? (
+            <button className="ghost sm" disabled={score.isPending} onClick={() => start(true)} title={t("An agent scores the commits since the review quickly from the diff")}>
+              <Icon name="sparkles" size={14} />
+              {t("Score the new commits")}
             </button>
           ) : (
             <button className="ghost sm" disabled={score.isPending} onClick={() => start(true)} title={t("An agent scores the PR quickly from its diff")}>

@@ -30,7 +30,7 @@ export default function AgentsPage() {
     ],
     sorts: [
       { id: "when", label: t("Time"), value: (r) => timeOf(r.created_at), descFirst: true },
-      { id: "cost", label: t("Cost"), value: (r) => r.cost_usd ?? -1, descFirst: true },
+      { id: "cost", label: t("Cost"), value: (r) => r.cost_usd, descFirst: true },
       { id: "duration", label: t("Duration"), value: (r) => r.duration_seconds, descFirst: true },
       { id: "tokens", label: t("Tokens"), value: (r) => r.input_tokens + r.output_tokens, descFirst: true },
     ],

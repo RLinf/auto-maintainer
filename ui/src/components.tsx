@@ -144,9 +144,22 @@ export function qualityStale(q: { sha: string }, head: string | null | undefined
   return q.sha.slice(0, n) !== head.slice(0, n);
 }
 
-/** The score a PR shows: the review's (accurate) when it has one, else the quick one. */
-export function shownQuality(quality: ReviewQuality | null | undefined, quick: QuickQuality | null | undefined): { score: number; band: QualityBand } | null {
-  return quality ?? quick ?? null;
+/** Whether a PR shows its quick score: it has no review score, or new commits came
+ *  after its review and the quick score covers them. */
+export function showsQuick(quality: ReviewQuality | null | undefined, quick: QuickQuality | null | undefined, head?: string | null): boolean {
+  if (!quick) return false;
+  if (!quality) return true;
+  return !!head && qualityStale(quality, head) && !qualityStale(quick, head);
+}
+
+/** The score a PR shows: the review's (accurate) one, or the quick one before a
+ *  review or after new commits (``showsQuick``). */
+export function shownQuality(
+  quality: ReviewQuality | null | undefined,
+  quick: QuickQuality | null | undefined,
+  head?: string | null,
+): { score: number; band: QualityBand } | null {
+  return showsQuick(quality, quick, head) ? (quick ?? null) : (quality ?? quick ?? null);
 }
 
 /** A PR's quality as a colored pill: the review's score, or else the quick score at a
@@ -165,24 +178,27 @@ export function Quality({
 }) {
   const t = useT();
   const { lang } = useLang();
-  const shown = quality ?? quick;
+  const isQuick = showsQuick(quality, quick, head);
+  const shown = isQuick ? quick : (quality ?? quick);
   if (!shown) return <span className="muted" title={t("Not scored yet")}>—</span>;
   const stale = qualityStale(shown, head);
-  const where = quality
-    ? `${t(quality.kind === "followup" ? "follow-up at" : "review at")} ${quality.sha.slice(0, 7)}${quality.posted ? "" : ` (${t("not posted")})`}`
-    : `${t("quick score from the diff at")} ${shown.sha.slice(0, 7)}`;
+  const where =
+    quality && !isQuick
+      ? `${t(quality.kind === "followup" ? "follow-up at" : "review at")} ${quality.sha.slice(0, 7)}${quality.posted ? "" : ` (${t("not posted")})`}`
+      : `${t("quick score from the diff at")} ${shown.sha.slice(0, 7)}`;
   const title = [
-    `${quality ? t("Quality") : t("Quick score")} ${shown.score}/100 · ${t(qualityLabel(shown.band))}`,
+    `${isQuick ? t("Quick score") : t("Quality")} ${shown.score}/100 · ${t(qualityLabel(shown.band))}`,
     plainText(reasonIn(shown, lang)),
     missedChecks(shown.checks, t),
     where,
-    quality ? "" : t("A review gives the accurate score."),
+    isQuick && quality ? `${t("After review it scored")} ${quality.score} ${t("at")} ${quality.sha.slice(0, 7)}` : "",
+    isQuick ? t("A review gives the accurate score.") : "",
     stale ? t("new commits since") : "",
   ]
     .filter(Boolean)
     .join("\n");
   return (
-    <span className={`pill quality q-${shown.band}${quality ? "" : " quick"}${stale ? " stale" : ""}`} title={title} aria-label={title}>
+    <span className={`pill quality q-${shown.band}${isQuick ? " quick" : ""}${stale ? " stale" : ""}`} title={title} aria-label={title}>
       <span className="dot" />
       {shown.score}
       {!compact && <span className="q-label">{t(qualityLabel(shown.band))}</span>}

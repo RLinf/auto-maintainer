@@ -30,7 +30,7 @@ quality, or whose agent left it out), once per review. Scores are kept in the st
 from __future__ import annotations
 
 import json
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -38,6 +38,7 @@ from pydantic import BaseModel, Field
 from ..domain.actions import ActionKind
 from ..domain.agents import AgentTask, TaskKind
 from ..domain.events import Event, EventKind
+from ..domain.ids import same_commit
 from ..domain.ports import Store
 from ..domain.profile import RepoProfile
 from ..domain.records import ActionRecord, JobStatus
@@ -66,8 +67,13 @@ QUICK_STATE = "quick_quality:{repo}#{number}"
 """The latest quick score of a PR, from its diff."""
 QUICK_BATCH = 6
 """PRs the scan sends for a quick score per repository, once the last batch is done."""
+QUICK_SETTLE = timedelta(hours=1)
+"""A PR whose head moved past its score is scored again once it has been quiet this
+long, so a burst of pushes gets one score."""
 QUICK_REFRESH = timedelta(hours=6)
-"""A quick score at an older head is scored again once it is at least this old."""
+"""A busy PR is scored again anyway once its head moved past its score this long ago."""
+QUICK_MOVED = "quick_moved:{repo}#{number}"
+"""When the scan first saw a PR's head past the commit its score covers."""
 QUALITY_STATE = "quality:{repo}#{number}"
 """The latest quality an agent gave a PR's review after it was written."""
 QUALITY_TRIED = "quality_tried:{action_id}"
@@ -427,7 +433,8 @@ async def assessed_quality(
 
 class QualityPlaybook(Playbook):
     """Scores one PR on request (``quality.requested``): its latest review again, or
-    quickly from its diff when it has no review or ``quick`` is asked for."""
+    quickly from its diff at its head when it has no review, its head moved past the
+    latest review, or ``quick`` is asked for."""
 
     name = "quality"
     triggers = (EventKind.QUALITY_REQUESTED,)
@@ -453,7 +460,14 @@ class QualityPlaybook(Playbook):
                 limit=500,
             )
         )
-        if not chain or event.payload.get("quick"):
+        if (
+            not chain
+            or event.payload.get("quick")
+            or (
+                event.payload.get("by")
+                and not same_commit(chain[-1].action.head_sha, pr.head_sha)
+            )
+        ):
             return _quick_result(await score_quickly(ctx, pr, profile))
         review = chain[-1]
         head = review.action.head_sha or pr.head_sha
@@ -561,8 +575,11 @@ class QuickQualityPlaybook(Playbook):
         records = await ctx.store.list_actions(
             repo=pr.repo, number=pr.number, kinds=[ActionKind.REVIEW_POST], limit=500
         )
-        if review_quality(records) is not None:
-            return PlaybookResult(result={"skipped": "its review scored it"})
+        reviewed = review_quality(
+            records, await assessed_quality(ctx.store, pr.repo, pr.number)
+        )
+        if reviewed is not None and same_commit(reviewed.sha, pr.head_sha):
+            return PlaybookResult(result={"skipped": "its review scored this head"})
         by = event.payload.get("by")
         if by:
             ctx.requested_by = str(by)
@@ -575,10 +592,12 @@ class QuickQualityPlaybook(Playbook):
 class QualityScan(Playbook):
     """On the review scan's tick: asks for the quality of the latest review of each
     open PR that has none, ``SCAN_BATCH`` at a time and once per review; and, unless
-    the repository turns it off, for a quick score of the PRs nobody reviewed,
+    the repository turns it off, for a quick score of each PR whose head no score
+    covers (nobody reviewed it, or new commits came after its review),
     ``QUICK_BATCH`` at a time once the last batch is done, highest priority first:
-    those never scored, then those scored at an older head ``QUICK_REFRESH`` ago or
-    without a reason in every dashboard language."""
+    those never scored, then those whose head moved once they have been quiet for
+    ``QUICK_SETTLE`` (or their score is ``QUICK_REFRESH`` old), then those without a
+    reason in every dashboard language or without checks."""
 
     name = "quality_scan"
     triggers = ()
@@ -599,19 +618,22 @@ class QualityScan(Playbook):
             if record.action.number is not None:
                 by_pr.setdefault(record.action.number, []).append(record)
         events: list[Event] = []
-        unreviewed: list[PrSnapshot] = []
+        unscored: list[tuple[PrSnapshot, str | None]] = []
         for pr in await ctx.store.list_snapshots(profile.repo, open_only=True):
             if not in_scope(pr, profile):
                 continue
             chain = review_chain(by_pr.get(pr.number, []))
             if not chain:
-                unreviewed.append(pr)
-                continue
-            if len(events) >= SCAN_BATCH:
+                unscored.append((pr, None))
                 continue
             latest = chain[-1]
             assessed = await assessed_quality(ctx.store, pr.repo, pr.number)
             quality = review_quality(chain, assessed)
+            if quality is None or not same_commit(quality.sha, pr.head_sha):
+                # New commits since the review: the new head gets a quick score.
+                unscored.append((pr, quality.sha if quality else None))
+            if len(events) >= SCAN_BATCH:
+                continue
             if quality is not None and quality.action_id == latest.action.id:
                 continue
             tried = QUALITY_TRIED.format(action_id=latest.action.id)
@@ -628,7 +650,7 @@ class QualityScan(Playbook):
                 )
             )
         quick = (
-            await self._quick(ctx, profile, unreviewed)
+            await self._quick(ctx, profile, unscored)
             if profile.review.quick_quality
             else []
         )
@@ -641,8 +663,12 @@ class QualityScan(Playbook):
         )
 
     async def _quick(
-        self, ctx: PlaybookContext, profile: RepoProfile, prs: list[PrSnapshot]
+        self,
+        ctx: PlaybookContext,
+        profile: RepoProfile,
+        prs: list[tuple[PrSnapshot, str | None]],
     ) -> list[Event]:
+        """``prs`` with the commit their review's score covers, when they have one."""
         active = await ctx.store.list_jobs(
             [JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.WAITING],
             repo=profile.repo,
@@ -652,25 +678,26 @@ class QualityScan(Playbook):
             return []
         now = ctx.clock.now()
         due: list[tuple[int, float, PrSnapshot]] = []
-        for pr in prs:
+        for pr, reviewed in prs:
             if pr.is_draft and not profile.scope.include_drafts:
                 continue
             quick = await quick_quality(ctx.store, pr.repo, pr.number)
-            if (
-                quick is not None
-                and set(DASHBOARD_LANGUAGES) <= set(quick.reasons)
-                and quick.checks
-                and (quick.sha == pr.head_sha or now - quick.at < QUICK_REFRESH)
-            ):
-                continue
-            evaluation = await ctx.store.get_evaluation(pr.repo, pr.number)
-            due.append(
-                (
-                    0 if quick is None else 1,
-                    -(evaluation.total if evaluation else 0),
-                    pr,
-                )
+            complete = quick is not None and (
+                set(DASHBOARD_LANGUAGES) <= set(quick.reasons) and bool(quick.checks)
             )
+            scored = quick.sha if quick is not None else reviewed
+            if quick is not None and same_commit(quick.sha, pr.head_sha):
+                if complete:
+                    continue
+                rank = 2
+            elif scored is not None:
+                if not await self._settled(ctx, pr, scored, now):
+                    continue
+                rank = 1
+            else:
+                rank = 0
+            evaluation = await ctx.store.get_evaluation(pr.repo, pr.number)
+            due.append((rank, -(evaluation.total if evaluation else 0), pr))
         due.sort(key=lambda d: (d[0], d[1], -d[2].number))
         return [
             Event(
@@ -682,3 +709,17 @@ class QualityScan(Playbook):
             )
             for _, _, pr in due[:QUICK_BATCH]
         ]
+
+    async def _settled(
+        self, ctx: PlaybookContext, pr: PrSnapshot, scored: str, now: datetime
+    ) -> bool:
+        """Whether ``pr``, whose head moved past ``scored``, is due a new quick score:
+        quiet for ``QUICK_SETTLE``, or moved past it ``QUICK_REFRESH`` ago."""
+        key = QUICK_MOVED.format(repo=pr.repo, number=pr.number)
+        seen = await ctx.store.get_state(key)
+        if not isinstance(seen, dict) or seen.get("scored") != scored:
+            seen = {"scored": scored, "at": now.isoformat()}
+            await ctx.store.set_state(key, seen)
+        moved = datetime.fromisoformat(seen["at"])
+        quiet = now - (pr.updated_at or moved) >= QUICK_SETTLE
+        return quiet or now - moved >= QUICK_REFRESH
