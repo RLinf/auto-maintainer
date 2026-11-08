@@ -94,6 +94,7 @@ class CodexRuntime(ExecRuntime):
 
     known_choices = AgentChoices(efforts=["minimal", "low", "medium", "high", "xhigh"])
 
+    home_paths = (".codex",)
     default_name = "codex"
     default_binary = "codex"
     default_env_allow = ("OPENAI_*", "CODEX_HOME", "AZURE_OPENAI_*")
@@ -160,9 +161,7 @@ class CodexRuntime(ExecRuntime):
         if task.permissions == "bypass":
             return {"sandbox": "danger-full-access", "approvalPolicy": "never"}
         sandbox = "read-only" if task.mode == "read_only" else "workspace-write"
-        if task.permissions == "restricted" or task.run_code != "any":
-            # Below ``any`` nothing escalates past the sandbox; commands inside it
-            # still run, so the prompt's rule is what keeps tests off the host.
+        if task.permissions == "restricted":
             return {"sandbox": sandbox, "approvalPolicy": "never"}
         return {
             "sandbox": sandbox,

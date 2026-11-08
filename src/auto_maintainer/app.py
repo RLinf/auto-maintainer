@@ -17,12 +17,16 @@
 from __future__ import annotations
 
 import logging
+import os
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import yaml
 
+from .agents.container import ContainerSandbox, SandboxStarter, host_tools, image_tag
+from .agents.github_proxy import GitHubReadProxy
 from .agents.registry import budgets_of, build_runtimes, merge_configs
 from .agents.router import AgentRouter
 from .config import CONFIG_DIR, HostConfig
@@ -82,15 +86,29 @@ async def build_service(cfg: HostConfig, dev: bool = False) -> Service:
     runtimes_cfg = merge_configs((_yaml(op / "runtimes.yaml") or {}).get("runtimes"))
     runtimes = build_runtimes(runtimes_cfg, runs_dir=data / "runs")
 
-    def with_github(built: dict[str, Any]) -> dict[str, Any]:
-        """Runtimes whose commands the service gates may read GitHub with its own
-        login (``ExecRuntime.github_env``); no separate login is needed."""
-        for runtime in built.values():
-            if getattr(runtime, "gates_commands", False):
-                runtime.github_token = tokens.token
-        return built
-
-    runtimes = with_github(runtimes)
+    background: list[Any] = []
+    starter: SandboxStarter | None = None
+    if cfg.sandbox.enabled:
+        api_host = urlparse(cfg.github.api_url).hostname or "api.github.com"
+        proxy = GitHubReadProxy(
+            data / "sandbox" / "github.sock",
+            lambda: tokens.token(None),
+            api_host=api_host,
+        )
+        starter = SandboxStarter(
+            ContainerSandbox(
+                cfg.sandbox.image or image_tag(),
+                cpus=cfg.sandbox.cpus,
+                memory=cfg.sandbox.memory,
+                pids=cfg.sandbox.pids,
+                network=cfg.sandbox.network,
+                github_socket=proxy.socket_path,
+                tools=host_tools(),
+                mounts=[Path(os.path.expanduser(m)) for m in cfg.sandbox.mounts],
+            ),
+            lambda: router.runtimes,
+        )
+        background += [proxy, starter]
 
     async def usage_today(runtime: str) -> tuple[int, float]:
         now = clock.now()
@@ -117,12 +135,10 @@ async def build_service(cfg: HostConfig, dev: bool = False) -> Service:
         agents: dict[str, RuntimeConfig], providers: dict[str, ProviderBinding]
     ) -> None:
         """New service settings: rebuild the runtimes and hand them to the router."""
-        router.reconfigure(
-            with_github(
-                build_runtimes(agents, runs_dir=data / "runs", providers=providers)
-            ),
-            budgets_of(agents),
-        )
+        built = build_runtimes(agents, runs_dir=data / "runs", providers=providers)
+        if starter is not None:
+            starter.attach(built)
+        router.reconfigure(built, budgets_of(agents))
 
     user_tokens = FileUserTokens(data / "user-tokens.json")
 
@@ -220,6 +236,7 @@ async def build_service(cfg: HostConfig, dev: bool = False) -> Service:
         user_tokens=user_tokens,
         writer_for_user=writer_for_user,
         publisher_for_user=publisher_for_user,
+        background=background,
     )
     settings = ServiceSettings(
         login=login,

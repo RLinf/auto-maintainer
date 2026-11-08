@@ -17,16 +17,11 @@
 The rules approve what is clearly safe for the task and nothing else: reading and
 searching inside the run's directories, read-only shell commands there (also several
 joined with ``&&``, ``||``, ``;``, or ``|`` when each one is), and, for tasks that
-may write, edits inside the worktree. What a task may execute follows its
-``run_code``: ``none`` reads only; ``skills`` (every task on a target repository) also
-runs static linters, the scripts in the repository's skill folders, and ``gh``'s
-reading commands (``GH_READ``, or ``gh api`` as a GET) with the service's own GitHub
-login; ``any`` (the service's own code) also runs tests. Below ``any``, everything else is denied at once
-(``NO_CODE_ANSWER`` for commands), since a repository's code runs only on its test
-machines; for ``any``, it goes to a reviewer. That includes any path outside the
-run's directories, network access, and shell syntax that can hide a command
-(substitution, redirection other than discarding output to ``/dev/null`` or ``2>&1``,
-subshells, a background ``&``).
+may write, edits inside the worktree and running tests or linters. Edits in a
+read-only task are refused. Everything else, including any path outside the run's
+directories, network access, and shell syntax that can hide a command (substitution,
+redirection other than discarding output to ``/dev/null`` or ``2>&1``, subshells, a
+background ``&``), goes to a reviewer.
 """
 
 from __future__ import annotations
@@ -37,20 +32,13 @@ import shlex
 from collections.abc import Sequence
 from pathlib import Path
 
-from ..domain.agents import (
-    NO_CODE_ANSWER,
-    REPO_SKILL_FOLDERS,
-    AgentAnswer,
-    AgentQuestion,
-    AgentTask,
-    QuestionKind,
-)
+from ..domain.agents import AgentAnswer, AgentQuestion, AgentTask, QuestionKind
 
 READ_COMMANDS = frozenset(
     {
         "ls", "cat", "head", "tail", "wc", "grep", "rg", "find", "fd", "tree",
         "pwd", "stat", "file", "du", "sort", "uniq", "cut", "diff", "jq", "realpath",
-        "basename", "dirname", "nl", "which", "true", "echo", "printf", "cd",
+        "basename", "dirname", "nl", "which", "true", "echo", "printf",
     }
 )  # fmt: skip
 GIT_READ = frozenset(
@@ -62,34 +50,10 @@ GIT_READ = frozenset(
 GIT_WRITE = frozenset(
     {"add", "commit", "checkout", "switch", "restore", "stash", "apply", "mv", "rm"}
 )
-TEST_COMMANDS = frozenset({"pytest"})
-SCRIPT_RUNNERS = frozenset({"python", "python3", "bash", "sh"})
-"""Interpreters that may run a script from a skill folder, given the script's path."""
-OUTSIDE_ANSWER = (
-    "Only the run's own folders and reading commands are open to this task; continue "
-    "without it."
-)
+TEST_COMMANDS = frozenset({"pytest", "ruff"})
 _FIND_ACTIONS = frozenset({"-exec", "-execdir", "-delete", "-ok", "-okdir", "-fprint"})
 _SHELL_META = ("$(", "`", "\n", "\\")
 """Text that can hide a command anywhere in a command line."""
-_EXPANSION = re.compile(r"\$[A-Za-z_{]")
-"""A variable expansion, which could print the GitHub token an agent holds."""
-GH_READ: dict[str, frozenset[str]] = {
-    "pr": frozenset({"view", "diff", "list", "checks", "status"}),
-    "issue": frozenset({"view", "list", "status"}),
-    "run": frozenset({"view", "list"}),
-    "workflow": frozenset({"view", "list"}),
-    "repo": frozenset({"view"}),
-    "release": frozenset({"view", "list"}),
-    "label": frozenset({"list"}),
-    "search": frozenset({"prs", "issues", "code", "commits", "repos"}),
-}
-"""The ``gh`` commands that only read; everything else ``gh`` can do is refused."""
-_GH_REFUSED = frozenset({"--web", "-w", "--hostname"})
-_GH_API_WRITES = frozenset(
-    {"-f", "-F", "--field", "--raw-field", "--input", "--hostname"}
-)
-"""``gh api`` flags that send data (and so make the request a POST) or change host."""
 _JOINS = frozenset({"&&", "||", ";", "|"})
 """Operators that run one command after another; each command is checked alone."""
 _HARMLESS_REDIRECTS = re.compile(
@@ -140,38 +104,27 @@ def auto_answer(
 ) -> AgentAnswer | None:
     """An automatic answer for ``question``, or ``None`` when a reviewer must decide.
     ``approved`` are the leading words of commands the agent's settings approve
-    (``RuntimeConfig.approve_commands``); they count only for a task that may run
-    any code. Below that, what the rules do not allow is denied without asking."""
+    (``RuntimeConfig.approve_commands``)."""
     if question.kind != QuestionKind.PERMISSION:
         return None
     roots = [task.workdir, *task.skill_dirs, *task.extra_dirs]
-    skills = [task.workdir / folder for folder in REPO_SKILL_FOLDERS]
-    skills += list(task.skill_dirs)
     kind = question.tool
     paths = question.paths
-    undecided = None if task.run_code == "any" else _deny(OUTSIDE_ANSWER)
     if kind in ("edit", "delete", "move"):
         if task.mode == "read_only":
             return _deny("This is a read-only task, so it may not change files.")
         if paths and all(_inside(p, [task.workdir]) for p in paths):
             return _allow()
-        return undecided
+        return None
     if kind in ("read", "search", "think"):
         if all(_inside(p, roots) for p in paths):
             return _allow()
-        return undecided
+        return None
     if kind == "execute" and question.detail:
-        if safe_command(
-            question.detail,
-            task.mode,
-            roots,
-            approved if task.run_code == "any" else (),
-            run_code=task.run_code,
-            skill_roots=skills,
-        ):
+        if safe_command(question.detail, task.mode, roots, approved):
             return _allow()
-        return None if task.run_code == "any" else _deny(NO_CODE_ANSWER)
-    return undecided
+        return None
+    return None
 
 
 def _commands(command: str) -> list[list[str]] | None:
@@ -200,15 +153,11 @@ def safe_command(
     mode: str,
     roots: list[Path],
     approved: Sequence[Sequence[str]] = (),
-    *,
-    run_code: str = "any",
-    skill_roots: Sequence[Path] = (),
 ) -> bool:
-    """Whether ``command`` only does what ``run_code`` allows inside ``roots``: reads;
-    with ``skills`` or more, static linters and scripts inside ``skill_roots``; with
-    ``any``, tests too (for writing tasks), or one of ``approved`` (leading words)
-    with any further arguments. Paths among the arguments stay inside ``roots``."""
-    if any(token in command for token in _SHELL_META) or _EXPANSION.search(command):
+    """Whether ``command`` only reads (or, for writing tasks, tests) inside ``roots``,
+    each of its commands either such a command or one of ``approved`` (leading words)
+    with any further arguments; paths among the arguments stay inside ``roots``."""
+    if any(token in command for token in _SHELL_META):
         return False
     commands = _commands(_HARMLESS_REDIRECTS.sub(" ", command))
     if commands is None:
@@ -216,13 +165,8 @@ def safe_command(
     for words in commands:
         if not words or "=" in words[0]:
             return False
-        if not (
-            _safe_words(words, mode, run_code, skill_roots, roots[0])
-            or _approved(words, approved)
-        ):
+        if not (_safe_words(words, mode) or _approved(words, approved)):
             return False
-        if os.path.basename(words[0]) == "gh":
-            continue  # its arguments name GitHub objects, not local paths
         for word in words[1:]:
             value = _path_value(word)
             if value is None:
@@ -239,13 +183,7 @@ def _approved(words: list[str], approved: Sequence[Sequence[str]]) -> bool:
     )
 
 
-def _safe_words(
-    words: list[str],
-    mode: str,
-    run_code: str = "any",
-    skill_roots: Sequence[Path] = (),
-    cwd: Path | None = None,
-) -> bool:
+def _safe_words(words: list[str], mode: str) -> bool:
     name = os.path.basename(words[0])
     if name == "git":
         if any(
@@ -263,71 +201,13 @@ def _safe_words(
         return not any(w in _FIND_ACTIONS for w in words)
     if name in READ_COMMANDS:
         return True
-    if run_code == "none":
-        return False
-    if name == "gh":
-        return _gh_reads(words[1:])
-    if name == "ruff" and _static_ruff(words[1:], mode):
-        return True
-    if cwd is not None and _skill_script(words, skill_roots, cwd):
-        return True
-    if run_code != "any" or mode != "workspace_write":
+    if mode != "workspace_write":
         return False
     if name in TEST_COMMANDS:
         return True
-    return name == "uv" and words[1:2] == ["run"] and words[2:3] == ["pytest"]
-
-
-def _gh_reads(args: list[str]) -> bool:
-    """Whether ``gh args`` only reads from GitHub: one of ``GH_READ``, or ``gh api``
-    as a GET without data, input, or another host."""
-    if any(a in _GH_REFUSED or a.startswith("--hostname=") for a in args):
-        return False
-    group = args[0] if args else ""
-    if group == "api":
-        for i, arg in enumerate(args):
-            flag = arg.split("=", 1)[0]
-            if flag in _GH_API_WRITES or (
-                len(arg) > 2 and arg[:2] in ("-f", "-F") and not arg.startswith("--")
-            ):
-                return False
-            if flag in ("-X", "--method"):
-                value = (
-                    arg.split("=", 1)[1]
-                    if "=" in arg
-                    else (args[i + 1] if i + 1 < len(args) else "")
-                )
-                if value.upper() != "GET":
-                    return False
-            if arg.startswith("-X") and len(arg) > 2 and arg[2:].upper() != "GET":
-                return False
-        return True
-    sub = args[1] if len(args) > 1 else ""
-    return sub in GH_READ.get(group, frozenset())
-
-
-def _static_ruff(args: list[str], mode: str) -> bool:
-    """Ruff that only reads: ``check`` without ``--fix``, ``format`` with ``--check``
-    or ``--diff``; in a writing task, also the fixes, which stay in the worktree."""
-    sub = args[0] if args else ""
-    if mode == "workspace_write":
-        return sub in ("check", "format")
-    if sub == "check":
-        return not any(a.startswith(("--fix", "--unsafe-fixes")) for a in args)
-    return sub == "format" and any(a in ("--check", "--diff") for a in args)
-
-
-def _skill_script(words: list[str], skill_roots: Sequence[Path], cwd: Path) -> bool:
-    """A script inside a skill folder, run by path or through an interpreter; a
-    relative path is taken from ``cwd``, where the command runs."""
-    if not skill_roots:
-        return False
-    roots = list(skill_roots)
-    if os.path.basename(words[0]) in SCRIPT_RUNNERS:
-        script = next((w for w in words[1:] if not w.startswith("-")), None)
-        flags = words[1 : words.index(script)] if script else []
-        return script is not None and not flags and _inside(str(cwd / script), roots)
-    return "/" in words[0] and _inside(str(cwd / words[0]), roots)
+    return (
+        name == "uv" and words[1:2] == ["run"] and words[2:3] in (["pytest"], ["ruff"])
+    )
 
 
 def _path_value(word: str) -> str | None:

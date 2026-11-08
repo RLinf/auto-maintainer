@@ -358,7 +358,10 @@ async def test_an_agent_resolves_conflicts_and_the_merge_is_pushed_as_the_approv
 
     def resolve(task: Any) -> Any:
         assert "resolving merge conflicts for maria" in task.prompt
-        assert "src/loader.py" in task.prompt and "Never run code" in task.prompt
+        assert (
+            "src/loader.py" in task.prompt
+            and "Do not run the PR's tests" in task.prompt
+        )
         (Path(task.workdir) / "src" / "loader.py").write_text("mine and theirs\n")
         return AgentResult(runtime="scripted", ok=True, text="Kept both changes.")
 

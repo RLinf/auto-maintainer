@@ -87,8 +87,6 @@ person to say what to do instead; nobody will, so the conversation says it."""
 class AcpRuntime(ExecRuntime):
     """Base class for CLIs that speak ACP; subclasses build the command line."""
 
-    gates_commands = True
-
     def capabilities(self) -> Capabilities:
         return Capabilities(
             schema_flag=False,

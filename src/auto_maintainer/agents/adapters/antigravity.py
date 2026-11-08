@@ -51,6 +51,7 @@ class AntigravityRuntime(AcpRuntime):
         **kwargs: Passed to ``ExecRuntime``.
     """
 
+    home_paths = (".gemini",)
     default_name = "antigravity"
     default_binary = "agy"
     default_env_allow = ("GEMINI_*", "GOOGLE_*", "ANTIGRAVITY_*", "AGY_*")

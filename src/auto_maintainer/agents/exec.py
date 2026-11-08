@@ -45,13 +45,12 @@ import shutil
 import signal
 import tempfile
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
+from collections.abc import AsyncIterator, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar
 
 from ..domain.agents import (
-    NO_CODE_ANSWER,
     AgentAnswer,
     AgentChoices,
     AgentEvent,
@@ -60,7 +59,6 @@ from ..domain.agents import (
     AgentResult,
     AgentTask,
     Capabilities,
-    QuestionKind,
     RuntimeHealth,
     Usage,
     denial,
@@ -68,7 +66,7 @@ from ..domain.agents import (
 from ..domain.ports import AgentQuestions
 from ..domain.settings import ProviderBinding
 from .approver import POSTING_ANSWER, posting_request
-from .sandbox import build_env, register_secret, scrub
+from .sandbox import build_env, scrub
 from .structured import extract_json
 
 log = logging.getLogger(__name__)
@@ -262,6 +260,16 @@ class Conversation:
         return []
 
 
+def _gh_through_proxy(config_dir: Path) -> None:
+    """``gh`` settings that send its requests through the GitHub read proxy."""
+    from .container import SOCKET
+
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.yml").write_text(
+        f"http_unix_socket: {SOCKET}\nprompt: disabled\n", encoding="utf-8"
+    )
+
+
 def isolation_env(run_dir: Path) -> dict[str, str]:
     """Keep ``gh`` and ``git`` from finding the host's stored credentials.
 
@@ -404,31 +412,13 @@ class ExecRuntime:
         """Settle a question without a reviewer, or return ``None``; adapters override."""
         return None
 
-    gates_commands: ClassVar[bool] = False
-    """Every command the CLI runs passes the service's automatic rules first (the ACP
-    runtimes, outside bypass mode), so it may hold the service's GitHub login: the
-    rules let only ``gh``'s reading commands use it."""
+    container_sandbox: Any = None
+    """A ``ContainerSandbox`` to run every task in a container of its own, where the
+    agent runs in bypass mode; set by the composition root once its image is ready."""
 
-    github_token: Callable[[str], Awaitable[str | None]] | None = None
-    """The service's GitHub token for a repository; set by the composition root."""
-
-    async def github_env(self, task: AgentTask) -> dict[str, str]:
-        """``GH_TOKEN`` for a task on a repository whose commands this runtime gates,
-        so ``gh``'s reading commands work with the service's own login (no separate
-        login); nothing for any other task or runtime, or in bypass mode."""
-        if (
-            not self.gates_commands
-            or self.github_token is None
-            or not task.repo
-            or task.run_code != "skills"
-            or task.permissions in ("bypass", "restricted")
-        ):
-            return {}
-        token = await self.github_token(task.repo)
-        if not token:
-            return {}
-        register_secret(token)
-        return {"GH_TOKEN": token}
+    home_paths: ClassVar[tuple[str, ...]] = ()
+    """The CLI's own login and settings, relative to the home folder, that its
+    container mounts (nothing else of the home folder is there)."""
 
     async def resolve(self, task: AgentTask, question: AgentQuestion) -> AgentAnswer:
         """Answer a question the CLI is blocked on.
@@ -457,15 +447,6 @@ class ExecRuntime:
         automatic = self.auto_answer(task, question)
         if automatic is not None:
             return automatic
-        if question.kind == QuestionKind.PERMISSION and task.run_code != "any":
-            # A repository's code runs only on its test machines: what the CLI's
-            # own rules did not allow is not put to anyone.
-            return denial(
-                NO_CODE_ANSWER
-                if question.tool in (None, "", "execute", "Bash")
-                else "Only the run's own folders and reading commands are open to "
-                "this task; continue without it."
-            )
         if task.requested_by is None and task.mode == "read_only":
             return denial(BACKGROUND_ANSWER)
         if task.permissions == "restricted":
@@ -591,13 +572,17 @@ class ExecRuntime:
         if not task.effort and self.effort:
             task = task.model_copy(update={"effort": self.effort})
         if task.permissions == "bypass" and not (
-            (self.allow_bypass or self.own_permissions == "bypass")
+            (
+                self.container_sandbox is not None
+                or self.allow_bypass
+                or self.own_permissions == "bypass"
+            )
             and self.capabilities().bypass
         ):
             task = task.model_copy(update={"permissions": "restricted"})
         invocation = self.build_invocation(task, files, binary)
         talk = self.conversation(task, files)
-        if self.command_prefix:
+        if self.command_prefix and self.container_sandbox is None:
             fill = {"workdir": str(task.workdir), "run_dir": str(files.dir)}
             prefix = [part.format(**fill) for part in self.command_prefix]
             invocation = Invocation(
@@ -605,7 +590,6 @@ class ExecRuntime:
             )
         env = build_env(task, self.env_allow)
         env.update(isolation_env(files.dir))
-        env.update(await self.github_env(task))
         env.update(self.task_env(task))
         for name, value in self.provider_env().items():
             if value is None:
@@ -614,6 +598,24 @@ class ExecRuntime:
                 env[name] = value
         if task.permissions == "bypass":
             env.update(self.bypass_env())
+        container: str | None = None
+        if self.container_sandbox is not None:
+            if self.container_sandbox.github_socket is not None:
+                _gh_through_proxy(files.dir / "gh-config")
+            prepared = self.container_sandbox.prepare(
+                task.id,
+                Path(task.workdir),
+                files.dir,
+                binary,
+                invocation.argv,
+                env,
+                rw=task.extra_dirs,
+                ro=task.skill_dirs,
+                home_paths=self.home_paths,
+            )
+            invocation = Invocation(argv=prepared.argv, stdin=invocation.stdin)
+            env = prepared.env
+            container = prepared.name
         try:
             proc = await asyncio.create_subprocess_exec(
                 *invocation.argv,
@@ -732,6 +734,10 @@ class ExecRuntime:
         finally:
             if proc.returncode is None:
                 await self._terminate(proc)
+            if container is not None and self.container_sandbox is not None:
+                # Stopping ``docker run`` leaves its container running.
+                with contextlib.suppress(Exception):
+                    await self.container_sandbox.stop(container)
             if stdin_task is not None:
                 stdin_task.cancel()
                 with contextlib.suppress(BaseException):

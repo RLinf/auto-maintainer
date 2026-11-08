@@ -576,7 +576,8 @@ def doctor(
         False, help="Also run a tiny structured task on each agent CLI."
     ),
 ) -> None:
-    """Check agent CLIs, forge access, the memory repo, and labs."""
+    """Check agent CLIs, forge access, the memory repo, the sandbox, and labs."""
+    cfg_sandbox = _cfg().sandbox
 
     async def main() -> None:
         async with _service() as service:
@@ -587,6 +588,18 @@ def doctor(
                 typer.echo(
                     f"{mark} agent {health.name}: {health.version or ''} {health.detail}"
                 )
+            if cfg_sandbox.enabled:
+                from .agents.container import ContainerSandbox, image_tag
+
+                box = ContainerSandbox(cfg_sandbox.image or image_tag())
+                typer.echo(
+                    f"ok  sandbox: agents run in containers of {box.image}"
+                    if await box.ready()
+                    else f"--  sandbox: {box.image} is missing; it builds when the "
+                    "service starts, or run `am sandbox` (needs docker)"
+                )
+            else:
+                typer.echo("--  sandbox: off; agents run on the host")
             for name, host in service.a.labs.items():
                 gpus = await host.gpu_status()
                 typer.echo(
@@ -613,6 +626,27 @@ def doctor(
                         typer.echo(
                             f"live {name}: {'ok' if result.ok else result.error}"
                         )
+
+    asyncio.run(main())
+
+
+@app.command("sandbox")
+def sandbox_build(
+    force: bool = typer.Option(False, help="Build again even if the image is there."),
+) -> None:
+    """Build the image agents run in, one fresh container per task (design 5.7)."""
+    from .agents.container import ContainerSandbox, image_tag
+
+    cfg = _cfg()
+
+    async def main() -> None:
+        sandbox = ContainerSandbox(cfg.sandbox.image or image_tag())
+        if not force and await sandbox.ready():
+            typer.echo(f"{sandbox.image} is there")
+            return
+        typer.echo(f"building {sandbox.image} ...")
+        typer.echo(await sandbox.build())
+        typer.echo(f"built {sandbox.image}")
 
     asyncio.run(main())
 

@@ -25,8 +25,6 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .ids import new_id
 
-RunCode = Literal["none", "skills", "any"]
-
 QUICK_TIMEOUT_SECONDS = 300
 """The longest a ``quick`` task may run."""
 
@@ -38,14 +36,6 @@ REPO_SKILL_FOLDERS = (
     ".opencode/skills",
 )
 """Where a repository keeps skills for coding agents, relative to its root."""
-
-NO_CODE_ANSWER = (
-    "Running code, tests, builds, scripts, or installs on the service's machine is not "
-    "allowed: a repository's code runs only on its test machines, through the "
-    "service's reproduction. Continue from reading the code and its history, and say "
-    "what a run on a test machine should check."
-)
-"""The answer to an agent that tries to run code its task does not allow."""
 
 
 class TaskKind(StrEnum):
@@ -103,14 +93,6 @@ class AgentTask(BaseModel):
     prompt: str
     workdir: Path
     mode: Literal["read_only", "workspace_write"] = "read_only"
-    run_code: RunCode = "skills"
-    """What the agent may execute on the service's machine. A target repository's
-    code, tests, builds, and reproductions run only on its test machines, so its tasks
-    get ``skills`` (reading commands, git history, static linters, and the scripts in
-    the repository's skill folders, which come from its default branch) or ``none``
-    (reading only); ``any`` is for the service's own code (self-improvement). Below
-    ``any``, bypass mode does not apply and what the rules do not allow is denied
-    without asking anyone."""
     permissions: PermissionMode = "auto"
     """The router sets this for every attempt from the route and the runtime."""
     question_timeout_seconds: int = 1800

@@ -95,6 +95,25 @@ class SelfUpdateConfig(_Cfg):
     """Run in a staging worktree before a deploy; defaults to the unit tests."""
 
 
+class SandboxConfig(_Cfg):
+    """Where agents run: each task in a fresh container of its own (design 5.7)."""
+
+    enabled: bool = True
+    """Run agents in containers when docker answers; ``false`` runs them on the host,
+    under the automatic rules."""
+    image: str = ""
+    """The image; empty builds and uses ``auto-maintainer-agent:<hash>``."""
+    cpus: float = 2.0
+    memory: str = "8g"
+    pids: int = 1024
+    network: str = "bridge"
+    """The docker network: ``bridge`` gives open outbound access through docker's NAT;
+    ``host`` shares the host's network (no files), for hosts whose firewall or proxy
+    passes only the host's own traffic. The image builds on the same network."""
+    mounts: list[str] = Field(default_factory=list)
+    """More host paths to mount read-only, such as another CLI's installation."""
+
+
 class HostConfig(_Cfg):
     host: str = "0.0.0.0"
     """Address the dashboard and API listen on; ``0.0.0.0`` is every interface."""
@@ -130,6 +149,7 @@ class HostConfig(_Cfg):
     actions follow its profile; every other repository is refused. Without it, dev
     mode serves every repository but holds all their actions at shadow."""
     cookie_secure: bool = False
+    sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
 
     @property
     def data_path(self) -> Path:

@@ -144,6 +144,9 @@ class Adapters:
         Callable[[str, UserToken], Awaitable[BranchPublisher | None]] | None
     ) = None
     """A branch publisher pushing as a person with their token, for fix PRs."""
+    background: list[Any] = field(default_factory=list)
+    """Pieces that run alongside the service, each with ``start`` and ``stop`` (the
+    agents' sandbox and its GitHub read proxy)."""
 
 
 @dataclass
@@ -443,6 +446,8 @@ class Service:
         )
 
     async def start(self) -> None:
+        for piece in self.a.background:
+            await piece.start()
         await self.reload_settings()
         await self.actuator.reconcile_intents()
         await self.questions.cancel_orphans()
@@ -464,6 +469,8 @@ class Service:
         await self.engine.stop()
         await self.actuator.stop()
         await self.bus.stop()
+        for piece in reversed(self.a.background):
+            await piece.stop()
 
     async def _question_channel(self, repo: str | None) -> str | None:
         """The notification channel for agents' questions about ``repo``."""

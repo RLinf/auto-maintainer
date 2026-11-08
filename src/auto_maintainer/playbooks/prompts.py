@@ -78,18 +78,17 @@ def skill_instruction(profile: RepoProfile, skills_dir: Path) -> str:
 
 
 NO_CODE_RULE = (
-    "- Never run code on this machine: not the PR's code, its tests, builds, installs, or its "
-    "workflow, and do not ask to. A repository's code runs only on its test machines, "
-    "through the service's reproduction (its record is below, or there is none). Read the "
-    "code and its git history instead; the scripts in the repository's skill folders may "
-    "run. Steps of a skill that run tests or the PR's code are left to the reproduction: "
-    "say what it should check. To read GitHub (this PR's reviews and comments, other "
-    "PRs, issues, CI runs), use gh's reading commands, such as gh pr view --comments, "
-    "gh pr diff, gh issue view, gh run view, or gh api as a GET, when gh is logged in; "
-    "nothing else reaches the network (no curl or wget), and gh never writes."
+    "- Do not run the PR's tests, builds, or workflow here: its code is reproduced on "
+    "the repository's test machines, through the service's reproduction (its record is "
+    "below, or there is none). Read the code and its git history instead, and say what "
+    "a run on a test machine should check; the scripts in the repository's skill folders "
+    "may run. To read GitHub (this PR's reviews and comments, other PRs, issues, CI "
+    "runs), use gh, such as gh pr view --comments, gh pr diff, gh issue view, gh run "
+    "view, or gh api; it reads only."
 )
-"""The rule every agent working on a target repository reads; the approver enforces
-it (``AgentTask.run_code``)."""
+"""What every agent working on a target repository reads about running code. It is
+guidance: the agent runs in its own container (design 5.7), where nothing it does
+reaches the service, and a reproduction runs on a test machine."""
 
 HEADLESS = """You are running headless inside an automated maintainer service.
 - Do not ask questions, do not post anything, do not push, and do not edit files.

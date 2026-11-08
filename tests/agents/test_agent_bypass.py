@@ -39,7 +39,6 @@ def _task(tmp_path: Path, **kw: object) -> AgentTask:
         "kind": TaskKind.REVIEW,
         "prompt": "Review it.",
         "workdir": tmp_path,
-        "run_code": "any",
     }
     data.update(kw)
     return AgentTask.model_validate(data)

@@ -37,6 +37,7 @@ from ..exec import RunFiles
 class OpenCodeRuntime(AcpRuntime):
     """OpenCode's ACP server."""
 
+    home_paths = (".config/opencode", ".local/share/opencode")
     default_name = "opencode"
     default_binary = "opencode"
     default_env_allow = (

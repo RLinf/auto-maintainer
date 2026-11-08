@@ -115,17 +115,6 @@ def test_claude_auto_mode_hands_prompts_to_the_service(tmp_path: Path) -> None:
     assert inv.stdin is None
 
 
-def test_claude_keeps_code_runners_from_a_repositorys_tasks(tmp_path: Path) -> None:
-    rt = ClaudeCodeRuntime()
-    repo_task = rt.build_invocation(_task(tmp_path), _files(tmp_path), "claude").argv
-    assert "Bash(pytest *)" in repo_task and "Bash(python3 *)" in repo_task
-    assert _after(repo_task, "--disallowedTools") == "Bash(python *)"
-    own = rt.build_invocation(
-        _task(tmp_path, run_code="any"), _files(tmp_path), "claude"
-    ).argv
-    assert "--disallowedTools" not in own
-
-
 def test_claude_restricted_and_bypass_modes(tmp_path: Path) -> None:
     rt = ClaudeCodeRuntime()
     restricted = rt.build_invocation(
@@ -155,16 +144,12 @@ def test_codex_runs_the_app_server(tmp_path: Path) -> None:
     rt = CodexRuntime(extra_args=["-c", "x=1"])
     inv = rt.build_invocation(_task(tmp_path), _files(tmp_path), "codex")
     assert inv.argv == ["codex", "app-server", "-c", "x=1"] and inv.stdin is None
-    auto = rt.thread_settings(_task(tmp_path, run_code="any"))
+    auto = rt.thread_settings(_task(tmp_path))
     assert auto == {
         "sandbox": "read-only",
         "approvalPolicy": "on-request",
         "approvalsReviewer": "auto_review",
     }
-    assert rt.thread_settings(_task(tmp_path)) == {
-        "sandbox": "read-only",
-        "approvalPolicy": "never",
-    }, "a repository's task escalates nothing past the sandbox"
     write = rt.thread_settings(_task(tmp_path, mode="workspace_write"))
     assert write["sandbox"] == "workspace-write"
     assert rt.thread_settings(_task(tmp_path, permissions="restricted")) == {
@@ -175,9 +160,9 @@ def test_codex_runs_the_app_server(tmp_path: Path) -> None:
         "danger-full-access"
     )
     assert (
-        CodexRuntime(approvals_reviewer="user").thread_settings(
-            _task(tmp_path, run_code="any")
-        )["approvalsReviewer"]
+        CodexRuntime(approvals_reviewer="user").thread_settings(_task(tmp_path))[
+            "approvalsReviewer"
+        ]
         == "user"
     )
 

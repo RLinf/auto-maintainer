@@ -382,9 +382,7 @@ async def test_the_review_standard_is_drawn_into_a_checklist_once(
         quick = [t for t in h.runner.tasks if t.prompt.startswith(QUICK)]
         assert len(quick) == 2 and len(checklists) == 1, "drawn once, then kept"
         assert "- [style] Public functions have type hints." in quick[1].prompt
-        assert all(t.budget == "quick" and t.run_code == "none" for t in quick), (
-            "quick and reading only"
-        )
+        assert all(t.budget == "quick" for t in quick), "quick"
     finally:
         await h.close()
 

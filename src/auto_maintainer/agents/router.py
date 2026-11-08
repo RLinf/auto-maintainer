@@ -83,18 +83,21 @@ class BreakerState:
 
 
 def effective_permissions(route: Route, runtime: AgentRuntime, task: AgentTask) -> str:
-    """The agent's own mode when the service settings give it one, else the route's;
-    ``bypass`` falls back to ``auto`` unless the task may run any code (only the
-    service's own code may: a repository's code runs only on its test machines), it
+    """``bypass`` for a runtime that runs each task in its own container (it holds
+    nothing worth taking; design 5.7). Otherwise the agent's own mode when the service
+    settings give it one, else the route's; ``bypass`` falls back to ``auto`` unless it
     is allowed on this runtime (by ``allow_bypass`` or by the agent's own ``bypass``),
     the CLI has a bypass mode, and the input is trusted or the route sets
     ``bypass_untrusted``."""
+    if (
+        getattr(runtime, "container_sandbox", None) is not None
+        and runtime.capabilities().bypass
+    ):
+        return "bypass"  # in its own container everything is permitted
     own = getattr(runtime, "own_permissions", None)
     mode = own or route.permissions
     if mode != "bypass":
         return mode
-    if task.run_code != "any":
-        return "auto"
     allowed = own == "bypass" or getattr(runtime, "allow_bypass", False)
     if not (allowed and runtime.capabilities().bypass):
         return "auto"

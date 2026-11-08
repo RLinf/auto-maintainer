@@ -33,6 +33,7 @@ from ..exec import RunFiles
 class GeminiRuntime(AcpRuntime):
     """Gemini CLI's ACP server."""
 
+    home_paths = (".gemini",)
     default_name = "gemini"
     default_binary = "gemini"
     default_env_allow = ("GEMINI_*", "GOOGLE_*")
