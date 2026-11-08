@@ -248,6 +248,7 @@ async def build_service(cfg: HostConfig, dev: bool = False) -> Service:
         identities={login},
         routing=routing,
         defaults_profile=defaults,
+        defaults_governance=_yaml(defaults_dir() / "governance.yaml") or {},
         skills_dir=data_dir("skills"),
         scratch_dir=data / "scratch",
         pack_dirs=[data_dir("packs")],

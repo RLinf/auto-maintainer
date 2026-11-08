@@ -55,6 +55,7 @@ from ..domain.records import Job
 from ..domain.review import ReviewClassification, classify_review_state
 from ..domain.settings import LabMachine
 from ..domain.snapshot import PrSnapshot, RunnerInfo
+from ..profiles.governance import GovernanceRecords
 from ..profiles.knowledge import Knowledge
 from ..profiles.service import ProfileService
 
@@ -191,6 +192,8 @@ class PlaybookContext:
     own_reviews: frozenset[str] = frozenset()
     """This service's review actions that maintainers posted as themselves."""
     drafts: DraftEditor | None = None
+    governance: GovernanceRecords | None = None
+    """The repository's governance record and its skeleton (design 2.6)."""
     """Revises the service's own pending drafts, such as a review a reproduction
     finished after."""
     _codeowners: list[OwnerRule] | None = None

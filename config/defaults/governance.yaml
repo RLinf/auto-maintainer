@@ -1,0 +1,118 @@
+# The starting record of a repository's roles and how people move between them
+# (design 2.6). It is a skeleton: an agent replaces it with the repository's own
+# process, from its governance documents and what its maintainers say, and a
+# maintainer approves the result. Nothing here grants anything in the service.
+schema: 1
+established: false
+summary: >-
+  A starting skeleton with three levels of responsibility and common ways to move
+  between them. Replace it with this repository's own process.
+sources: []
+roles:
+  - id: reviewer
+    name: Reviewer
+    level: 1
+    scoped: true
+    github_permission: write
+    description: Reviews pull requests in the areas they know.
+    responsibilities:
+      - Review pull requests in their areas within the expected response time.
+      - Check design, tests, and documentation, not only correctness.
+    privileges:
+      - Approve pull requests in their areas.
+  - id: maintainer
+    name: Maintainer
+    level: 2
+    github_permission: maintain
+    description: Owns the direction and quality of the whole repository.
+    responsibilities:
+      - Review and merge pull requests.
+      - Triage issues and keep the backlog moving.
+      - Mentor reviewers and nominate new ones.
+    privileges:
+      - Merge pull requests.
+      - Change labels, milestones, and the repository's settings in the service.
+  - id: owner
+    name: Owner
+    level: 3
+    github_permission: admin
+    description: Accountable for the project; settles what maintainers cannot agree on.
+    responsibilities:
+      - Decide the project's direction and its governance.
+      - Appoint and remove maintainers.
+    privileges:
+      - Administer the repository.
+  - id: emeritus
+    name: Emeritus
+    level: 0
+    description: A former reviewer or maintainer, thanked and listed, with no duties.
+transitions:
+  - id: become-reviewer
+    to_role: reviewer
+    criteria:
+      - text: Several merged pull requests in the area.
+        measure: merged_prs
+        threshold: 5
+        window_months: 12
+      - text: Helpful reviews of others' pull requests.
+        measure: reviews
+        threshold: 10
+        window_months: 12
+    process:
+      - A maintainer nominates the contributor.
+      - The maintainers agree.
+    decided_by: [maintainer]
+    approvals: 1
+  - id: reviewer-to-maintainer
+    from_role: reviewer
+    to_role: maintainer
+    criteria:
+      - text: Has been a reviewer for a while.
+        measure: months_in_role
+        threshold: 6
+      - text: Reviews regularly across the repository.
+        measure: reviews
+        threshold: 30
+        window_months: 12
+    process:
+      - A maintainer nominates the reviewer.
+      - The other maintainers agree, with no objection for a week.
+    decided_by: [maintainer, owner]
+    approvals: 2
+  - id: maintainer-to-owner
+    from_role: maintainer
+    to_role: owner
+    process:
+      - The owners decide.
+    decided_by: [owner]
+    approvals: 1
+  - id: retire-maintainer
+    from_role: maintainer
+    to_role: emeritus
+    criteria:
+      - text: Inactive for months, or asks to step down.
+        measure: inactive_months
+        threshold: 6
+    process:
+      - A maintainer asks the person first; they may step down or stay.
+    decided_by: [maintainer]
+    approvals: 1
+  - id: retire-reviewer
+    from_role: reviewer
+    to_role: emeritus
+    criteria:
+      - text: Inactive for months, or asks to step down.
+        measure: inactive_months
+        threshold: 6
+    process:
+      - A maintainer asks the person first; they may step down or stay.
+    decided_by: [maintainer]
+    approvals: 1
+members: []
+history: []
+open_questions:
+  - Where does the repository write down its roles and how people change them?
+  - Which roles does it have, and what is each responsible for?
+  - Who holds each role now, and for which areas?
+  - How does someone become a reviewer or a maintainer, and who decides?
+  - When does someone step down or lose a role?

@@ -10,6 +10,7 @@ calibrate:    {primary: antigravity, fallback: [claude-code, codex, opencode, ge
 ci_diagnose:  {primary: codex, fallback: [claude-code, antigravity, opencode, gemini], timeout_seconds: 1200}
 ci_root_cause: {primary: claude-code, fallback: [codex, antigravity, opencode, gemini], timeout_seconds: 1800}
 hygiene:      {primary: claude-code, fallback: [codex, antigravity, opencode, gemini], effort: low, timeout_seconds: 600}
+governance:   {primary: claude-code, fallback: [codex, antigravity, opencode, gemini], timeout_seconds: 1800}
 onboard:      {primary: claude-code, fallback: [codex, antigravity, opencode, gemini], timeout_seconds: 2400}
 learn:        {primary: claude-code, fallback: [codex, antigravity, opencode, gemini], timeout_seconds: 1200}
 chat:         {primary: claude-code, fallback: [codex, antigravity, opencode, gemini], timeout_seconds: 900}

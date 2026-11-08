@@ -49,7 +49,7 @@ pre-commit run --all-files
 - `src/auto_maintainer/domain/` – types (`RepoProfile`, `Event`, `Action`, `Proposal`, `PrSnapshot`, `Visibility`, `Rubric`, `MemoryChange`, `ServiceConfig`), pure rules (review state, scoring, merge gate, markers, CODEOWNERS, calendar), and ports (`ForgeReader`, `ForgeWriter`, `CiProvider`, `AgentRuntime`, `AgentRunner`, `MemoryStore`, `Workspace`, `Sandbox`, `LabHost`, `Store`, `SecretStore`, `Notifier`, `EventSink`). No I/O.
 - `src/auto_maintainer/service.py` – application wiring over a set of adapters (`Adapters`, `ServiceSettings`, `Service`); imports no adapter.
 - `src/auto_maintainer/app.py` – composition root that builds the real adapters; with `cli.py`, the only code that imports adapters.
-- `profiles/` – layer merging, packs, locks, the configuration gate (`ConfigGate`), knowledge reads, hygiene checks, the profile doctor.
+- `profiles/` – layer merging, packs, locks, the configuration gate (`ConfigGate`), knowledge reads, each repository's People record (`governance.py`), hygiene checks, the profile doctor.
 - `policy/` – `decide()` over `PolicyFacts`, hard limits, the leak guard.
 - `playbooks/` – one module per playbook, `base.py` (contract and context), `prompts.py` (`untrusted()` and prompt blocks).
 - `actuator/` – `pipeline.py` (policy, proposals, approvals), `executor.py` (per-repository queues, intents, staleness), `handlers.py` (one per action kind), `memory_gate.py`.

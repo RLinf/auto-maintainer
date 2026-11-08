@@ -94,6 +94,7 @@ class ProposedAction(BaseModel):
         "improve",
         "add_repo",
         "configure",
+        "governance",
     ]
     repo: str = Field(
         default="",
@@ -115,7 +116,15 @@ class ProposedAction(BaseModel):
         default="",
         description=(
             "For kind=improve: the new behavior or fix the service's own code needs, "
-            "precise enough to implement and test."
+            "precise enough to implement and test. For kind=governance: what to change "
+            "in the repository's People record, or where its process is written."
+        ),
+    )
+    people_mode: Literal["edit", "members"] = Field(
+        default="edit",
+        description=(
+            "For kind=governance: edit the record, or check who should change role "
+            "under it (members)."
         ),
     )
     settings_yaml: str = Field(
@@ -433,6 +442,10 @@ def build_router() -> APIRouter:
             if p.kind == "evaluate":
                 if p.repo in repos:
                     notes.append(await _evaluate(service, user, p))
+                continue
+            if p.kind == "governance":
+                if p.repo in repos:
+                    jobs.append(await _governance(service, user, p))
                 continue
             if p.kind == "configure":
                 change_id, problem = await _configure(service, user, p, repos)
@@ -883,6 +896,25 @@ async def _start_improve(
             "thread_id": thread_id,
             "context": context[-8000:],
             "request_id": f"{thread_id}:{service.clock.now().timestamp()}",
+        },
+        source="chat",
+    )
+    await service.bus.publish(event)
+    return event.id
+
+
+async def _governance(service: Any, user: User, p: ProposedAction) -> str:
+    """Start the agent on ``p.repo``'s People record; returns the request event's id,
+    which the jobs API resolves to the job. What it drafts waits for a maintainer."""
+    instruction, _ = redact_secrets(p.request.strip())
+    event = Event(
+        kind=EventKind.DASHBOARD_COMMAND,
+        repo=p.repo,
+        payload={
+            "command": "governance",
+            "by": user.login,
+            "mode": p.people_mode,
+            "instruction": instruction,
         },
         source="chat",
     )

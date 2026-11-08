@@ -616,7 +616,150 @@ def _answer(task: AgentTask) -> dict[str, Any]:
             "profile": {"extends": ["conventional-commits"]},
             "questions": ["Which label means a PR needs review?"],
         }
+    if kind == "governance":
+        return _governance(task)
     return {}
+
+
+DEMO_GOVERNANCE: dict[str, Any] = {
+    "schema": 1,
+    "established": True,
+    "summary": "Reviewers own areas of the code; maintainers own the repository; the "
+    "project lead settles disputes. From GOVERNANCE.md.",
+    "sources": [
+        {"kind": "file", "where": "GOVERNANCE.md"},
+        {"kind": "file", "where": ".github/CODEOWNERS"},
+    ],
+    "roles": [
+        {
+            "id": "reviewer",
+            "name": "Reviewer",
+            "level": 1,
+            "scoped": True,
+            "github_permission": "write",
+            "description": "Reviews PRs in the areas they know.",
+            "responsibilities": [
+                "Review PRs in their areas within two business days.",
+                "Check that docs change with behavior.",
+            ],
+            "privileges": ["Approve PRs in their areas."],
+        },
+        {
+            "id": "maintainer",
+            "name": "Maintainer",
+            "level": 2,
+            "github_permission": "maintain",
+            "description": "Owns the quality and direction of the repository.",
+            "responsibilities": [
+                "Merge PRs once a reviewer of the area approves.",
+                "Triage new issues every week.",
+                "Nominate reviewers.",
+            ],
+            "privileges": ["Merge PRs.", "Change labels and releases."],
+        },
+        {
+            "id": "lead",
+            "name": "Project lead",
+            "level": 3,
+            "github_permission": "admin",
+            "description": "Settles what the maintainers cannot agree on.",
+            "responsibilities": ["Decide the roadmap with the maintainers."],
+            "privileges": ["Appoint and remove maintainers."],
+        },
+        {"id": "emeritus", "name": "Emeritus", "level": 0},
+    ],
+    "transitions": [
+        {
+            "id": "become-reviewer",
+            "to_role": "reviewer",
+            "criteria": [
+                {
+                    "text": "Five merged PRs in the area in the last year.",
+                    "measure": "merged_prs",
+                    "threshold": 5,
+                    "window_months": 12,
+                }
+            ],
+            "process": [
+                "A maintainer nominates the contributor in a discussion.",
+                "No maintainer objects for a week.",
+            ],
+            "decided_by": ["maintainer"],
+        },
+        {
+            "id": "reviewer-to-maintainer",
+            "from_role": "reviewer",
+            "to_role": "maintainer",
+            "criteria": [
+                {
+                    "text": "Six months as a reviewer.",
+                    "measure": "months_in_role",
+                    "threshold": 6,
+                },
+                {
+                    "text": "Thirty reviews in the last year.",
+                    "measure": "reviews",
+                    "threshold": 30,
+                    "window_months": 12,
+                },
+            ],
+            "process": ["A maintainer nominates them.", "Two maintainers agree."],
+            "decided_by": ["maintainer"],
+            "approvals": 2,
+        },
+        {
+            "id": "step-down",
+            "from_role": "reviewer",
+            "to_role": "emeritus",
+            "criteria": [
+                {
+                    "text": "No reviews for six months.",
+                    "measure": "inactive_months",
+                    "threshold": 6,
+                }
+            ],
+            "process": ["A maintainer asks them first."],
+            "decided_by": ["maintainer"],
+        },
+    ],
+    "members": [
+        {"login": "maria", "role": "maintainer", "since": "2025-01-10"},
+        {"login": "bob", "role": "reviewer", "areas": ["docs/"], "since": "2025-09-01"},
+    ],
+    "history": [],
+    "open_questions": ["Does the project lead also count as a maintainer for merges?"],
+}
+
+
+def _governance(task: AgentTask) -> dict[str, Any]:
+    """The demo agent's People record: filled in from GOVERNANCE.md, or, when asked
+    who should change role, with carol proposed as a reviewer."""
+    if "check who should change role" not in task.prompt:
+        return {
+            "governance": DEMO_GOVERNANCE,
+            "summary": "Filled in the roles, how people move between them, and the "
+            "current members from GOVERNANCE.md and CODEOWNERS.",
+            "questions": DEMO_GOVERNANCE["open_questions"],
+        }
+    carol = {"login": "carol", "role": "reviewer", "areas": ["src/ui.py"]}
+    return {
+        "governance": {
+            **DEMO_GOVERNANCE,
+            "members": [*DEMO_GOVERNANCE["members"], carol],
+            "history": [
+                {
+                    "login": "carol",
+                    "to_role": "reviewer",
+                    "on": "2026-01-06",
+                    "by": "maria",
+                    "reason": "become-reviewer: five merged PRs in src/ui.py this year",
+                    "evidence": ["#31, #33, #36, #39, #40 merged since 2025-06"],
+                }
+            ],
+        },
+        "summary": "Propose carol as a reviewer of src/ui.py: five merged PRs there "
+        "in the last year. Nobody else qualifies yet.",
+    }
 
 
 async def build_demo(root: Path) -> Harness:
@@ -643,9 +786,20 @@ async def build_demo(root: Path) -> Harness:
         "hygiene",
         "fix",
         "reproduce",
+        "governance",
     ):
         h.runner.on(kind, _answer)
     h.forge.put_file(DEMO_REPO, ".github/CODEOWNERS", "* @maria\n/docs/ @bob\n")
+    h.forge.put_file(
+        DEMO_REPO,
+        "GOVERNANCE.md",
+        "# Governance\n\nReviewers own areas; maintainers own the repository.\n",
+    )
+    h.forge.put_file(
+        DEMO_REPO,
+        "GOVERNANCE.md",
+        "# Governance\n\nReviewers own areas; maintainers own the repository.\n",
+    )
     signed = "\n\nSigned-off-by: Alice <alice@example.com>"
     h.forge.put_pr(
         make_pr(

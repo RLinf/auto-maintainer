@@ -8,6 +8,7 @@ import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom"
 import { api, type Agreement, type GateDecision, type MemoryChange, type ProfileResponse, type RepoRow, type ReviewGuides } from "../api";
 import { useAgent } from "../agent";
 import { RepoMachinesSection, useRepoMachines } from "../machines";
+import { PeopleTab } from "../people";
 import { ProfileChanges, type Profile } from "../profileView";
 import { kindLabel } from "../proposal";
 import { Empty, ErrorBox, PageHead, Section, Status, timeOf, useAct, When } from "../components";
@@ -224,6 +225,7 @@ export function RepoDetailPage() {
   const usedMachines = labs.data?.machines.filter((m) => m.used).length;
   const tabs = [
     { id: "overview", label: t("Overview") },
+    { id: "people", label: t("People") },
     { id: "labs", label: t("Test machines"), count: usedMachines },
     { id: "candidate", label: t("Profile change"), count: candidateHash ? 1 : 0 },
     { id: "settings", label: t("Settings") },
@@ -384,6 +386,8 @@ export function RepoDetailPage() {
           <ErrorBox error={approve.error} />
         </Section>
       )}
+
+      {tab === "people" && <PeopleTab repo={full} />}
 
       {tab === "labs" && <RepoMachinesSection repo={full} />}
 

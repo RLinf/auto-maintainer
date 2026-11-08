@@ -93,6 +93,7 @@ from .playbooks.base import (
     ServiceInfo,
 )
 from .profiles.gate import ConfigGate, GateDecision
+from .profiles.governance import GovernanceRecords
 from .profiles.knowledge import Knowledge
 from .profiles.layers import ProfileError, content_hash
 from .profiles.loader import ProfileLoader
@@ -160,6 +161,9 @@ class ServiceSettings:
     defaults_profile: dict[str, Any]
     skills_dir: Path
     scratch_dir: Path
+    defaults_governance: dict[str, Any] = field(default_factory=dict)
+    """The skeleton of a repository's governance record
+    (``config/defaults/governance.yaml``)."""
     pack_dirs: list[Path] = field(default_factory=list)
     extra_packs: dict[str, str] = field(default_factory=dict)
     host_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -197,6 +201,9 @@ class Service:
         self.store = adapters.store
         self.clock = adapters.clock
         self.knowledge = Knowledge(adapters.memory)
+        self.governance = GovernanceRecords(
+            adapters.memory, settings.defaults_governance
+        )
         self.packs = PackLibrary.from_dirs(
             *settings.pack_dirs, extra=settings.extra_packs
         )
@@ -370,6 +377,7 @@ class Service:
             knowledge=self.knowledge,
             profiles=self.profiles,
             store=self.a.store,
+            governance=self.governance,
             workspace=self.a.workspace,
             sandbox=self.a.sandbox,
             labs=LabStatus(self.a.labs),

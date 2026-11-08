@@ -767,3 +767,14 @@ details.pv-section[open] > summary { margin-bottom: 6px; }
   .list-row.pr-row > .small { flex: 1 1 auto; }
   .page-head h1 { font-size: 20px; overflow-wrap: anywhere; }
 }
+
+/* People: a repository's roles, how they change, and their history */
+.people .role-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr)); gap: 12px; }
+.people .role-card, .people .transition { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--r); background: var(--surface); min-width: 0; }
+.people .role-card ul, .people .transition ul, .people .transition ol { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 2px; }
+.people .pill.tag { background: var(--surface-2); color: var(--text-2); }
+.people .member { font-size: 13px; padding: 2px 8px; border-radius: 999px; background: var(--accent-soft); color: var(--text); overflow-wrap: anywhere; }
+.people .member.flagged { background: var(--warn-bg); color: var(--warn); }
+.people .history, .people .role-changes { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.people .role-changes li { padding: 6px 10px; border-radius: var(--r); background: var(--accent-soft); }
+.people textarea { width: 100%; }

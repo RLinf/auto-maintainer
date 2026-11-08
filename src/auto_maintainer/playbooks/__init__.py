@@ -23,6 +23,7 @@ from .commands import Commands
 from .evaluate import EvaluatePlaybook
 from .fix import FixPlaybook
 from .followup import Followup
+from .governance import GovernancePlaybook
 from .housekeeping import Journal, LabTest, Stale
 from .hygiene import Hygiene
 from .merge import MergePlaybook
@@ -61,6 +62,7 @@ def all_playbooks() -> list[Playbook]:
         SelfImprove(),
         FixPlaybook(),
         MergeBasePlaybook(),
+        GovernancePlaybook(),
         ReproducePlaybook(),
         QualityPlaybook(),
         QuickQualityPlaybook(),

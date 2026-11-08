@@ -55,6 +55,7 @@ class TaskKind(StrEnum):
     FIX = "fix"
     REPRODUCE = "reproduce"
     PROBE = "probe"
+    GOVERNANCE = "governance"
 
 
 class Capabilities(BaseModel):

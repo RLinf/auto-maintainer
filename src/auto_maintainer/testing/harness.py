@@ -185,6 +185,9 @@ class Harness:
             identities=set(),
             routing=routing,
             defaults_profile=defaults,
+            defaults_governance=yaml.safe_load(
+                (defaults_dir() / "governance.yaml").read_text(encoding="utf-8")
+            ),
             skills_dir=data_dir("skills"),
             scratch_dir=tmp / "scratch",
             pack_dirs=[data_dir("packs")],
