@@ -778,3 +778,19 @@ details.pv-section[open] > summary { margin-bottom: 6px; }
 .people .history, .people .role-changes { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
 .people .role-changes li { padding: 6px 10px; border-radius: var(--r); background: var(--accent-soft); }
 .people textarea { width: 100%; }
+
+/* ---- conversations and live views: nothing an agent writes pushes past its box ---------- */
+.bubble { min-width: 0; overflow-wrap: anywhere; }
+.bubble .md { white-space: normal; }
+.agent-live, .review-talk, .steps-live { min-width: 0; max-width: 100%; }
+.step-tool { overflow: hidden; }
+.step-tool > strong { flex: 0 1 auto; min-width: 0; }
+.step-tool > code.ellipsis { flex: 1 1 0; min-width: 0; }
+.md th, .md td { overflow-wrap: normal; word-break: normal; }
+.md th { white-space: nowrap; }
+.md-table { max-width: 100%; }
+.q-title { font-size: 14.5px; min-width: 0; flex: 0 1 auto; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; white-space: pre-line; }
+
+/* The People conversation: the latest exchange by default; history scrolls in its box. */
+.talk-log.all { max-height: 60vh; overflow-y: auto; padding-right: 4px; }
+.clamped { max-height: 15em; overflow: hidden; -webkit-mask-image: linear-gradient(to bottom, #000 65%, transparent); mask-image: linear-gradient(to bottom, #000 65%, transparent); }

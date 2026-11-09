@@ -48,13 +48,15 @@ from ..domain.actions import (
     make_action,
 )
 from ..domain.agents import AgentTask, TaskKind
+from ..domain.events import Event, EventKind
 from ..domain.ids import new_id
+from ..domain.labs import unusable
 from ..domain.profile import RepoProfile, Route
 from ..domain.records import ActionRecord, ChatMessage, ChatThread, Job
 from ..domain.secrets import redact_secrets
 from ..domain.snapshot import PrSnapshot
 from ..playbooks.base import author_is_team
-from ..playbooks.prompts import reproduction_block, schema_hint, told_block, untrusted
+from ..playbooks.prompts import reproduction_block, schema_hint, told_block
 from ..playbooks.review import reproduction_record
 from ..playbooks.review_revise import (
     answer_model,
@@ -73,6 +75,10 @@ from .jobs import _job
 log = logging.getLogger(__name__)
 
 TALKS_ON = {"review", "followup"}
+
+TALK_DIFF_LIMIT = 40_000
+"""The diff a turn carries; the agent reads the rest in its checkout. A turn's
+prompt stays far below what any agent CLI takes in one message."""
 """Playbooks whose jobs have a conversation."""
 
 _turns: dict[str, asyncio.Lock] = {}
@@ -82,7 +88,7 @@ _turns: dict[str, asyncio.Lock] = {}
 TALK = """You wrote the {what} of PR #{number} in {repo} given below, and {user}, a reviewer, is talking with you about it. They may ask why you found something, disagree with a finding, ask you to change the draft, or ask you to check more: other files, a test, the docs, a scenario.
 - Answer in `reply`, plainly and briefly, in the language {user} writes in; point to code as `path:line`.
 - Check before you answer: read the code in the working directory and its git history. Never post, push, or change the repository's files.
-- Never run code on this machine: not the PR's code, its tests, builds, installs, or its workflow, and do not ask to. A repository's code runs only on its test machines, through the service's reproduction; when a run would settle the question, say what it should check (the reviewer can start one with Reproduce).
+- Never run code on this machine: not the PR's code, its tests, builds, installs, or its workflow. A repository's code runs only on its test machines, through the service's reproduction. When {user} asks for a run, or agrees to one that would settle the question, put what it should check in `reproduce`: the service starts a reproduction on the repository's test machine, and its script comes back to {user} to approve before it runs. Say so in `reply`.
 - When {user} asks for a change to the {what}, or what you check changes it, return the whole revised {what} in `{field}`: every finding, section, and line that should stay, word for word, including edits the reviewers made to the draft by hand. Leave `{field}` null when it stays as it is.
 - When only {user} can settle something that would change your answer, ask them with your tool for asking the user.
 - Put a rule in `lessons` only when {user} states one for future reviews of this repository or agrees to one.
@@ -358,6 +364,19 @@ async def _turn(
                 field=field,
                 public_language=profile.languages.public,
             ),
+            # The reviewers' words come first: they are the task, and a CLI that
+            # cuts a long prompt short keeps its start.
+            "The conversation so far:\n"
+            + (
+                "\n".join(
+                    f"{m.author or 'a reviewer'}: {m.text[:4_000]}"
+                    if m.role == "user"
+                    else f"you (the agent): {m.text[:4_000]}"
+                    for m in history[-20:-1]
+                )
+                or "(this is the first message)"
+            ),
+            f"The newest message, from {user.login}, which you answer:\n{text}",
             *revision_blocks(
                 kind=kind,
                 profile=profile,
@@ -372,18 +391,10 @@ async def _turn(
                 default_branch=default_branch,
                 diff=diff,
                 payload=payload,
-            ),
-            untrusted(
-                "conversation",
-                "\n".join(
-                    f"{m.author or 'a reviewer'}: {m.text}"
-                    if m.role == "user"
-                    else f"you (the agent): {m.text}"
-                    for m in history[-20:]
-                ),
-                30_000,
+                diff_limit=TALK_DIFF_LIMIT,
             ),
             schema_hint(model.model_json_schema()),
+            f"Answer the newest message, from {user.login}, above.",
         ]
         if part
     )
@@ -463,16 +474,64 @@ async def _turn(
         for lesson in answer.lessons
         if lesson.strip()
     ]
+    jobs: list[str] = []
+    if answer.reproduce and answer.reproduce.strip():
+        started, note = await _reproduce(
+            service, user, profile, pr, answer.reproduce.strip()
+        )
+        jobs += [started] if started else []
+        notes.append(note)
     message = ChatMessage(
         thread_id=thread.id,
         role="assistant",
         text="\n\n".join([answer.reply, *notes]),
         proposals=revised,
         changes=changes,
+        jobs=jobs,
         run_id=run,
     )
     await service.store.add_message(message)
     return message.model_dump(mode="json")
+
+
+async def _reproduce(
+    service: Service, user: User, profile: RepoProfile, pr: PrSnapshot, focus: str
+) -> tuple[str | None, str]:
+    """Start a reproduction of ``pr`` for ``user``, as the Reproduce button does, on
+    the first test machine the repository uses, checking ``focus``. Returns the
+    request event's id (the jobs API resolves it) and a note for the reply."""
+    lab = next(
+        (
+            name
+            for name, binding in profile.labs.items()
+            if binding.use
+            and unusable(pr.repo, name, service.machines.get(name), binding) is None
+        ),
+        None,
+    )
+    if lab is None:
+        return None, (
+            "No test machine is in use for this repository, so no reproduction "
+            "started; a maintainer turns one on in the repository's Test machines."
+        )
+    event = Event(
+        kind=EventKind.DASHBOARD_COMMAND,
+        repo=pr.repo,
+        number=pr.number,
+        sha=pr.head_sha,
+        payload={
+            "command": "reproduce",
+            "by": user.login,
+            "lab": lab,
+            "note": focus[:2_000],
+        },
+        source="review-talk",
+    )
+    await service.bus.publish(event)
+    return event.id, (
+        f"Started a reproduction on {lab}, checking: {focus[:500]} Its script comes "
+        f"back to {user.login} to approve before it runs."
+    )
 
 
 async def _revise_posted(

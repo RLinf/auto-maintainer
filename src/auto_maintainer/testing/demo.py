@@ -255,15 +255,8 @@ TALKING = "is talking with you about it"
 def _talk(task: AgentTask, kind: str) -> dict[str, Any]:
     """A reviewer's turn in the conversation about a review: the demo agent explains
     its finding, and drops it when the reviewer asks it to."""
-    block = task.prompt.split("source='conversation'", 1)[-1].split(
-        "</untrusted-data>"
-    )[0]
-    said = [
-        line
-        for line in block.splitlines()
-        if ": " in line and not line.startswith("you (the agent)")
-    ]
-    last = said[-1].lower() if said else ""
+    newest = task.prompt.split("which you answer:\n", 1)[-1]
+    last = newest.split("\n\n", 1)[0].lower()
     field = "review" if kind == "review" else "followup"
     if any(word in last for word in ("drop", "remove", "not needed")):
         revised: dict[str, Any] = (
@@ -733,7 +726,7 @@ DEMO_GOVERNANCE: dict[str, Any] = {
 
 def _people_turn(task: AgentTask) -> dict[str, Any]:
     """The demo agent's answer in the conversation on the People tab."""
-    newest = task.prompt.split("The newest message, from", 1)[-1].lower()
+    newest = task.prompt.split("which you answer:\n", 1)[-1].split("\n\n", 1)[0].lower()
     if "lead" in newest:
         return {
             "reply": "Noted: the project lead also merges like a maintainer. I added "

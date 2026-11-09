@@ -761,3 +761,100 @@ async def test_a_task_that_does_not_listen_takes_no_message(
     task = _task(tmp_path, output_schema=SCHEMA, job_id="job1")
     _, result, told = await _run_telling(rt, task, inbox, "check the docs too")
     assert result.ok and not told, "only a task with messages set opens a box"
+
+
+# -- long prompts and the agent's own question tool ------------------------------------
+
+
+def test_a_prompt_longer_than_the_cli_takes_points_at_the_whole_task(
+    tmp_path: Path,
+) -> None:
+    from auto_maintainer.agents.acp import AcpConversation
+    from auto_maintainer.agents.exec import RunFiles
+
+    runtime = AntigravityRuntime(runs_dir=tmp_path)
+    runtime.max_prompt_bytes = 2_000  # type: ignore[misc]
+    files = RunFiles.create(tmp_path / "runs", "run_long")
+    prompt = "Answer the newest message: run the tests.\n" + "context line\n" * 1_000
+    talk = AcpConversation(runtime, _task(tmp_path, prompt=prompt), files)
+    talk.session_id = "s1"
+    [line] = talk._next_setup()
+    sent = json.loads(line)["params"]["prompt"][0]["text"]
+    assert len(sent.encode()) <= 2_000 and sent.startswith("Answer the newest message")
+    assert str(files.dir / "task.md") in sent
+    assert (files.dir / "task.md").read_text() == prompt
+    short = AcpConversation(runtime, _task(tmp_path, prompt="Short."), files)
+    short.session_id = "s1"
+    assert json.loads(short._next_setup()[0])["params"]["prompt"][0]["text"] == "Short."
+
+
+async def test_a_question_the_agent_asks_with_its_own_tool_reaches_a_person(
+    tmp_path: Path, talking_cli
+) -> None:
+    """Antigravity asks with its own ``ask_question`` tool, which ends its turn; the
+    question goes to the desk, even in bypass mode, and the answer starts the next
+    turn of the same session."""
+    ask = {
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {
+            "sessionId": "s1",
+            "update": {
+                "sessionUpdate": "tool_call",
+                "toolCallId": "call-1",
+                "name": "ask_question",
+                "title": "Run ask_question",
+                "args": {
+                    "questions": [
+                        {
+                            "question": "Which machine should run it?",
+                            "options": ["a800", "none"],
+                            "is_multi_select": False,
+                        }
+                    ]
+                },
+            },
+        },
+    }
+    cli = talking_cli(
+        [
+            {
+                "wait": '"initialize"',
+                "emit": [{"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": 1}}],
+            },
+            {
+                "wait": '"session/new"',
+                "emit": [{"jsonrpc": "2.0", "id": 2, "result": {"sessionId": "s1"}}],
+            },
+            {
+                "wait": '"session/prompt"',
+                "emit": [
+                    ask,
+                    _chunk("Which machine should run it?"),
+                    {"jsonrpc": "2.0", "id": 3, "result": {"stopReason": "end_turn"}},
+                ],
+            },
+            {
+                "wait": "maria answered your question",
+                "emit": [
+                    _chunk('{"ok": true}'),
+                    {"jsonrpc": "2.0", "id": 4, "result": {"stopReason": "end_turn"}},
+                ],
+            },
+        ]
+    )
+    desk = FakeDesk(AgentAnswer(allow=True, answers={"0": ["a800"]}, by="maria"))
+    rt = AntigravityRuntime(
+        binary=str(cli.path),
+        runs_dir=tmp_path / "runs",
+        questions=desk,
+        allow_bypass=True,
+    )
+    task = _task(tmp_path, output_schema=SCHEMA, permissions="bypass")
+    _, result = await _run(rt, task)
+    assert result.ok and result.structured == {"ok": True}, result.error
+    [question] = desk.questions
+    assert question.kind == QuestionKind.INPUT and question.asked_for == "maria"
+    assert question.inputs[0].options == ["a800", "none"]
+    answer = _sent(cli, "method", "session/prompt")[-1]["params"]["prompt"][0]["text"]
+    assert "Q: Which machine should run it?\nA: a800" in answer

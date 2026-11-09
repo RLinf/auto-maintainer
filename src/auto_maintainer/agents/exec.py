@@ -63,6 +63,7 @@ from ..domain.agents import (
     AgentResult,
     AgentTask,
     Capabilities,
+    QuestionKind,
     RuntimeHealth,
     Usage,
     denial,
@@ -93,6 +94,12 @@ BACKGROUND_ANSWER = (
 
 MAX_ARG_PROMPT_BYTES = 100_000
 """Prompts longer than this are passed through a file; Linux limits one argument to 128 KiB."""
+
+PROMPT_CONTINUES = (
+    "\n\n[This task is {size} KB, more than this agent takes in one message, so it "
+    "is cut here. The whole task, this part included, is in the file {path}: read the "
+    "rest of it before you start, and answer in the format it asks for.]"
+)
 
 _STDERR_KEEP = 1_000_000
 _LINE_LIMIT = 64 * 1024 * 1024
@@ -367,6 +374,10 @@ class ExecRuntime:
     default_env_allow: ClassVar[tuple[str, ...]] = ()
     line_mode: ClassVar[bool] = True
     """Parse output line by line; otherwise the whole output is parsed at the end."""
+    max_prompt_bytes: ClassVar[int | None] = None
+    """The longest prompt the CLI takes whole in one message, when it cuts longer
+    ones silently; ``fitted_prompt`` keeps a longer prompt's start and points at the
+    whole of it in the run folder."""
     known_choices: ClassVar[AgentChoices | None] = None
     """The models and reasoning levels this CLI accepts, for CLIs that cannot list
     them; adapters set it."""
@@ -501,7 +512,13 @@ class ExecRuntime:
         )
         if posting_request(question):
             return denial(POSTING_ANSWER)
-        automatic = self.auto_answer(task, question)
+        # What the agent asks a person (an input question) is never answered by a
+        # rule or by bypass mode; only who may run what is.
+        automatic = (
+            None
+            if question.kind == QuestionKind.INPUT
+            else self.auto_answer(task, question)
+        )
         if automatic is not None:
             return automatic
         if task.requested_by is None and task.mode == "read_only":
@@ -532,6 +549,21 @@ class ExecRuntime:
             return None
         files.schema.write_text(json.dumps(data, indent=2), encoding="utf-8")
         return files.schema
+
+    def fitted_prompt(self, text: str, files: RunFiles) -> str:
+        """``text`` as one message the CLI takes whole: itself, or, past
+        ``max_prompt_bytes``, its start up to a line break and where the whole of it
+        is. Prompts put what the agent must act on first, so the start carries it."""
+        raw = text.encode("utf-8")
+        limit = self.max_prompt_bytes
+        if limit is None or len(raw) <= limit:
+            return text
+        whole = files.dir / "task.md"
+        whole.write_text(text, encoding="utf-8")
+        head = raw[: max(0, limit - 1_000)].decode("utf-8", "ignore")
+        cut = head.rfind("\n")
+        head = head[:cut] if cut > len(head) // 2 else head
+        return head + PROMPT_CONTINUES.format(size=len(raw) // 1024, path=whole)
 
     def argv_prompt(self, task: AgentTask, files: RunFiles) -> str:
         """The prompt to put on the command line, pointing at the prompt file when it is too long."""

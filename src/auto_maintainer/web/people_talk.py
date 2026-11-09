@@ -222,7 +222,6 @@ async def _turn(
                 no_code=NO_CODE_RULE,
                 language=profile.languages.internal,
             ),
-            record_block(current, draft=replaced is not None, loaded=loaded),
             # Reviewers' messages are the task, earlier ones included; the
             # repository's documents are what the agent reads for it.
             "The conversation so far:\n"
@@ -235,8 +234,10 @@ async def _turn(
                 )
                 or "(this is the first message)"
             ),
-            f"The newest message, from {user.login}:\n{text}",
+            f"The newest message, from {user.login}, which you answer:\n{text}",
+            record_block(current, draft=replaced is not None, loaded=loaded),
             schema_hint(PeopleTurn.model_json_schema()),
+            f"Answer the newest message, from {user.login}, above.",
         ]
     )
     run = new_id("run")

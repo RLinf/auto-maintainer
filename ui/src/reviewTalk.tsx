@@ -18,6 +18,7 @@ import { Steps } from "./jobs";
 import { Markdown } from "./markdown";
 import { QuestionCard } from "./pages/Questions";
 import { ProposalCard } from "./proposal";
+import { openJob } from "./openJob";
 import { ChangeById } from "./settingsChange";
 
 type TurnSteps = { run: string | null; live: boolean; steps: JobStep[] };
@@ -115,6 +116,12 @@ export function ReviewTalk({ job, me, active }: { job: AgentJob; me: string; act
           {(m.changes ?? []).map((id) => (
             <ChangeById key={id} id={id} />
           ))}
+          {m.role !== "user" &&
+            (m.jobs ?? []).map((id) => (
+              <button key={id} className="ghost sm" style={{ alignSelf: "flex-start" }} onClick={() => openJob(id)}>
+                <Icon name="server" size={13} /> {t("Watch the reproduction")}
+              </button>
+            ))}
           {m.run_id && m.role !== "user" && <TurnStepsLink jobId={job.id} run={m.run_id} />}
         </Fragment>
       ))}

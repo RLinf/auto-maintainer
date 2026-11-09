@@ -315,8 +315,9 @@ async def test_talking_fills_in_the_record_and_revises_the_waiting_draft(
         assert (
             task.kind == "governance" and task.messages and task.requested_by == "walt"
         )
-        assert "The newest message, from walt:\nOur process is in GOVERNANCE.md." in (
-            task.prompt
+        assert (
+            "The newest message, from walt, which you answer:\nOur process is in GOVERNANCE.md."
+            in (task.prompt)
         )
         assert "the skeleton: nobody has filled it in yet" in task.prompt
         await h.settle()

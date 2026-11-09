@@ -51,6 +51,10 @@ class AntigravityRuntime(AcpRuntime):
         **kwargs: Passed to ``ExecRuntime``.
     """
 
+    max_prompt_bytes = 150_000
+    """Antigravity 1.5 cuts a prompt past about 200 KB without saying so, losing its
+    end; seen on a review conversation whose diff was large."""
+
     home_paths = (".gemini",)
     default_name = "antigravity"
     default_binary = "agy"

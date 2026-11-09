@@ -34,6 +34,7 @@ import os
 import signal
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +46,7 @@ from ..domain.agents import (
     AgentQuestion,
     AgentTask,
     Capabilities,
+    InputQuestion,
     ModelChoice,
     QuestionKind,
     QuestionOption,
@@ -74,6 +76,28 @@ _OK_STOPS = {"end_turn", "max_tokens", "max_turn_requests"}
 
 MAX_CONTINUATIONS = 3
 """Turns an agent may be asked to go on after one ended on a refused request."""
+
+MAX_ASKS = 3
+"""Questions an agent may ask with its own question tool in one run."""
+
+ANSWERED = (
+    "{by} answered your question:\n{answers}\n\nGo on with your task from where you "
+    "are and finish with the result your task asks for, in its format."
+)
+UNANSWERED = (
+    "Nobody can answer your question now ({why}). Decide on your own from what you "
+    "have read, say in your answer what you assumed, and finish with the result your "
+    "task asks for, in its format."
+)
+
+
+@dataclass
+class _Asked:
+    """A question the agent asked with its own tool (Antigravity's ``ask_question``),
+    which ends its turn: a person's answer starts the next turn."""
+
+    questions: list[dict[str, Any]]
+
 
 CONTINUE = (
     "The service refused what you asked to do: {refused}. That is final; do not try it "
@@ -154,7 +178,7 @@ class AcpRuntime(ExecRuntime):
         return Invocation(argv=[*self.acp_argv(task, files, binary), *self.extra_args])
 
     def conversation(self, task: AgentTask, files: RunFiles) -> Conversation:
-        return AcpConversation(self, task)
+        return AcpConversation(self, task, files)
 
     def auto_answer(
         self, task: AgentTask, question: AgentQuestion
@@ -282,9 +306,15 @@ class AcpConversation(Conversation):
 
     takes_messages = True
 
-    def __init__(self, runtime: AcpRuntime, task: AgentTask) -> None:
+    def __init__(
+        self, runtime: AcpRuntime, task: AgentTask, files: RunFiles | None = None
+    ) -> None:
         self.runtime = runtime
         self.task = task
+        self.files = files
+        self.asking: list[dict[str, Any]] = []
+        """Questions the agent asked with its own tool during the current turn."""
+        self.asks = 0
         self.next_id = 0
         self.pending: dict[str, str] = {}
         self.setup: list[tuple[str, dict[str, Any]]] = []
@@ -334,6 +364,8 @@ class AcpConversation(Conversation):
         return Step()
 
     def answer(self, ask: Ask, answer: AgentAnswer) -> list[str]:
+        if isinstance(ask.token, _Asked):
+            return [self._prompt(_answer_text(ask.token, answer))]
         request_id, options = ask.token
         wanted = {"allow", "allow_session"} if answer.allow else {"deny"}
         chosen = (
@@ -410,6 +442,19 @@ class AcpConversation(Conversation):
             # The turn ended, cancelled for a message or not: the message goes next.
             self._flush()
             return self._told_turn()
+        if (
+            method == "session/prompt"
+            and "error" not in msg
+            and self.asking
+            and self.asks < MAX_ASKS
+        ):
+            # The agent ended its turn to ask with its own tool: a person answers,
+            # and the answer starts the next turn of the same session.
+            self._flush()
+            self.asks += 1
+            asked = _Asked(self.asking)
+            self.asking = []
+            return Step(asks=[Ask(question=_input_question(asked), token=asked)])
         if "error" in msg:
             error = msg.get("error") or {}
             text = str(error.get("message") or error)
@@ -498,14 +543,17 @@ class AcpConversation(Conversation):
         ):
             first = "\n\n".join([self.runtime.prompt_text(self.task), *self.told])
             self.told = []
+            if self.files is not None:
+                first = self.runtime.fitted_prompt(first, self.files)
             return [self._prompt(first)]
         return []
 
     def _prompt(self, text: str) -> str:
-        """A turn of the session; what the service refused and whether the agent
-        spoke are counted per turn."""
+        """A turn of the session; what the service refused, whether the agent
+        spoke, and what it asked are counted per turn."""
         self.refused = []
         self.spoke = False
+        self.asking = []
         return self._request(
             "session/prompt",
             {"sessionId": self.session_id, "prompt": [{"type": "text", "text": text}]},
@@ -583,6 +631,9 @@ class AcpConversation(Conversation):
             )
         if kind == "tool_call":
             self._flush()
+            asked = _asked_questions(update)
+            if asked:
+                self.asking = asked
             return [
                 AgentEvent(
                     type=AgentEventType.TOOL_CALL,
@@ -633,3 +684,49 @@ def _kind_of(options: list[dict[str, Any]], option_id: str) -> str:
 
 def _line(obj: dict[str, Any]) -> str:
     return json.dumps(obj, ensure_ascii=False)
+
+
+def _asked_questions(update: dict[str, Any]) -> list[dict[str, Any]]:
+    """The questions in a call of the agent's own question tool, if it is one."""
+    name = str(update.get("name") or update.get("title") or "")
+    if not name.endswith("ask_question"):
+        return []
+    args = update.get("args") or update.get("rawInput") or {}
+    questions = args.get("questions") if isinstance(args, dict) else None
+    return [
+        q
+        for q in questions or []
+        if isinstance(q, dict) and str(q.get("question") or "").strip()
+    ]
+
+
+def _input_question(asked: _Asked) -> AgentQuestion:
+    inputs = [
+        InputQuestion(
+            id=str(i),
+            question=short(q.get("question"), 2_000),
+            options=[short(o, 300) for o in q.get("options") or [] if str(o).strip()],
+            free_text=True,
+        )
+        for i, q in enumerate(asked.questions)
+    ]
+    return AgentQuestion(
+        kind=QuestionKind.INPUT,
+        title=short(inputs[0].question, 200),
+        inputs=inputs,
+        tool="ask_question",
+    )
+
+
+def _answer_text(asked: _Asked, answer: AgentAnswer) -> str:
+    if not answer.allow and not answer.answers:
+        return UNANSWERED.format(why=answer.message or "no answer")
+    lines = []
+    for i, q in enumerate(asked.questions):
+        given = answer.answers.get(str(i)) or []
+        lines.append(
+            f"Q: {q.get('question')}\nA: {'; '.join(given) if given else '(no answer)'}"
+        )
+    if answer.message:
+        lines.append(answer.message)
+    return ANSWERED.format(by=answer.by or "a reviewer", answers="\n\n".join(lines))

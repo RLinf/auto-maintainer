@@ -66,6 +66,11 @@ class ReviewRevision(BaseModel):
         default_factory=list,
         description="Rules for future reviews of this repository that the reviewer stated or agreed to.",
     )
+    reproduce: str | None = Field(
+        default=None,
+        description="When the reviewer asks for a run on a test machine, or agrees to one: "
+        "what it should check, in one or two sentences. Null otherwise.",
+    )
 
 
 class FollowupRevision(BaseModel):
@@ -79,6 +84,11 @@ class FollowupRevision(BaseModel):
     lessons: list[str] = Field(
         default_factory=list,
         description="Rules for future reviews of this repository that the reviewer stated or agreed to.",
+    )
+    reproduce: str | None = Field(
+        default=None,
+        description="When the reviewer asks for a run on a test machine, or agrees to one: "
+        "what it should check, in one or two sentences. Null otherwise.",
     )
 
 
@@ -127,6 +137,7 @@ def revision_blocks(
     default_branch: str,
     diff: str,
     payload: ReviewPostPayload,
+    diff_limit: int = 120_000,
 ) -> list[str]:
     """Everything a revising agent reads after its instructions: the skill and the
     format, ``reproduction`` (a ``reproduction_block``), the lessons, the checkout, the
@@ -158,7 +169,11 @@ def revision_blocks(
             if pr.head_sha != head
             else ""
         ),
-        pr_block(pr, diff),
+        pr_block(pr, diff, diff_limit),
+        f"The diff above may be cut; the checkout has the whole change: "
+        f"`git diff origin/{default_branch}...{head}`."
+        if len(diff) > diff_limit
+        else "",
         untrusted(
             f"{field}.structured",
             json.dumps(payload.result or {}, ensure_ascii=False, indent=1),

@@ -509,26 +509,32 @@ function Step({ step, result }: { step: JobStep; result: JobStep | null }) {
           </div>
         </li>
       );
-    case "tool":
+    case "tool": {
+      // Some CLIs title a tool call with the whole command, several lines long: the
+      // line shows its first line, and the full text when opened.
+      const title = (step.text || t("Tool")).trim().split("\n")[0];
+      const shown = step.detail?.trim().split("\n")[0] ?? "";
+      const full = step.detail || (step.text.includes("\n") ? step.text : "");
       return (
         <li className="step">
           <span className={`sdot tool ${result?.ok === false ? "bad" : ""}`} />
           <div className="stack" style={{ gap: 4, minWidth: 0 }}>
-            <button className="step-tool" onClick={() => setOpen(!open)} aria-expanded={open}>
+            <button className="step-tool" onClick={() => setOpen(!open)} aria-expanded={open} title={title}>
               <Icon name={open ? "chevronDown" : "chevronRight"} size={12} />
-              <strong>{step.text || t("Tool")}</strong>
-              {step.detail && <code className="ellipsis">{step.detail.split("\n")[0]}</code>}
+              <strong className="ellipsis">{title}</strong>
+              {shown && !step.text.includes("\n") && !title.includes(shown.slice(0, 40)) && <code className="ellipsis">{shown}</code>}
               {result?.ok === false && <span className="pill status-bad">{t("failed")}</span>}
             </button>
             {open && (
               <>
-                {step.detail && <pre className="pre">{step.detail}</pre>}
+                {full && <pre className="pre">{full}</pre>}
                 {result?.detail && <pre className="pre muted">{result.detail}</pre>}
               </>
             )}
           </div>
         </li>
       );
+    }
     case "question":
       return (
         <li className="step">

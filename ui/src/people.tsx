@@ -308,6 +308,29 @@ export function PeopleTab({ repo }: { repo: string }) {
   );
 }
 
+const MESSAGES_SHOWN = 2;
+const QUESTIONS_SHOWN = 3;
+const CLAMP_CHARS = 700;
+
+/** A long answer, cut to a few lines until the reader opens it. */
+function Clamped({ text }: { text: string }) {
+  const t = useT();
+  const [open, setOpen] = useState(false);
+  const long = text.length > CLAMP_CHARS || text.split("\n").length > 12;
+  return (
+    <>
+      <div className={long && !open ? "clamped" : undefined}>
+        <Markdown text={text} className="chat-md" />
+      </div>
+      {long && (
+        <button className="ghost sm" style={{ marginTop: 4 }} onClick={() => setOpen(!open)}>
+          {open ? t("Show less") : t("Show more")}
+        </button>
+      )}
+    </>
+  );
+}
+
 type TalkState = { thread: string | null; live_run: string | null; listening: boolean; messages: ChatMessage[] };
 type TurnSteps = { run: string | null; live: boolean; steps: JobStep[] };
 
@@ -318,6 +341,9 @@ function PeopleTalk({ repo, questions, established, hasProfile }: { repo: string
   const box = useRef<HTMLTextAreaElement>(null);
   const [text, setText] = useState("");
   const [pendingText, setPendingText] = useState("");
+  const [allMessages, setAllMessages] = useState(false);
+  const [allQuestions, setAllQuestions] = useState(false);
+  const log = useRef<HTMLDivElement>(null);
   const base = `/api/repos/${repo}/governance/talk`;
   const talk = useQuery({ queryKey: ["people", repo, "talk"], queryFn: () => api.get<TalkState>(base) });
   const send = useMutation({
@@ -347,6 +373,12 @@ function PeopleTalk({ repo, questions, established, hasProfile }: { repo: string
   const runs = new Set([...messages.map((m) => m.run_id), live.data?.run, talk.data?.live_run].filter((x): x is string => !!x));
   const waiting = (pendingQuestions.data ?? []).filter((q) => q.job_id && runs.has(q.job_id));
   const last = messages[messages.length - 1];
+  // The latest exchange shows; earlier messages open on request, in a box of their own.
+  const latest = messages.length - Math.max(0, messages.map((m) => m.role).lastIndexOf("user"));
+  const earlier = Math.max(0, messages.length - Math.max(MESSAGES_SHOWN, latest));
+  useEffect(() => {
+    if (allMessages && log.current) log.current.scrollTop = log.current.scrollHeight;
+  }, [allMessages, messages.length]);
   const showPending = !!pendingText && !(last?.role === "user" && last.text === pendingText);
 
   const submit = (said: string) => {
@@ -371,7 +403,14 @@ function PeopleTalk({ repo, questions, established, hasProfile }: { repo: string
               : t("Start by telling it where your process is written (a file in the repository or a web page), or describe the roles and how people move between them.")}
           </span>
         )}
-        {messages.map((m) => (
+        {earlier > 0 && (
+          <button className="ghost sm" style={{ alignSelf: "flex-start" }} onClick={() => setAllMessages(!allMessages)}>
+            <Icon name={allMessages ? "chevronDown" : "chevronRight"} size={13} />
+            {allMessages ? t("Show only the latest") : `${t("Show earlier messages")} (${earlier})`}
+          </button>
+        )}
+        <div ref={log} className={`stack talk-log ${allMessages ? "all" : ""}`} style={{ gap: 10 }}>
+        {(allMessages ? messages : messages.slice(earlier)).map((m) => (
           <Fragment key={m.id}>
             {m.role === "user" ? (
               <div className="bubble user">
@@ -383,7 +422,7 @@ function PeopleTalk({ repo, questions, established, hasProfile }: { repo: string
               </div>
             ) : (
               <div className="bubble assistant">
-                <Markdown text={m.text} className="chat-md" />
+                <Clamped text={m.text} />
               </div>
             )}
             {m.role !== "user" && (m.changes ?? []).length > 0 && (
@@ -393,6 +432,7 @@ function PeopleTalk({ repo, questions, established, hasProfile }: { repo: string
             )}
           </Fragment>
         ))}
+        </div>
         {showPending && <div className="bubble user">{pendingText}</div>}
         {running &&
           (live.data?.steps.length ? (
@@ -419,7 +459,7 @@ function PeopleTalk({ repo, questions, established, hasProfile }: { repo: string
         {questions.length > 0 && (
           <div className="stack open-questions" style={{ gap: 6 }}>
             <span className="kind-chip">{t("The agent asks")}</span>
-            {questions.map((q) => (
+            {(allQuestions ? questions : questions.slice(0, QUESTIONS_SHOWN)).map((q) => (
               <div key={q} className="row" style={{ gap: 8, alignItems: "flex-start" }}>
                 <span className="small" style={{ flex: 1, minWidth: 0 }}>
                   {q}
@@ -429,6 +469,11 @@ function PeopleTalk({ repo, questions, established, hasProfile }: { repo: string
                 </button>
               </div>
             ))}
+            {questions.length > QUESTIONS_SHOWN && (
+              <button className="ghost sm" style={{ alignSelf: "flex-start" }} onClick={() => setAllQuestions(!allQuestions)}>
+                {allQuestions ? t("Show fewer questions") : `${t("Show all questions")} (${questions.length})`}
+              </button>
+            )}
           </div>
         )}
         <form

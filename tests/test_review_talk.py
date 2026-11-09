@@ -84,6 +84,9 @@ async def test_a_reviewer_talks_the_agent_out_of_a_finding(demo) -> None:
         turn = h.runner.tasks[-1]
         assert turn.requested_by == "maria" and turn.job_id == asked["run_id"]
         assert "Why is F1 a finding?" in turn.prompt
+        assert turn.prompt.index("Why is F1 a finding?") < turn.prompt.index(
+            "<untrusted-data"
+        ), "the reviewer's words come first, outside the untrusted-data fences"
         assert "inline comment on tests/test_loader.py:20" in turn.prompt, (
             "the agent sees the draft as it would be posted"
         )
@@ -324,3 +327,34 @@ async def test_a_message_reaches_the_agent_while_it_reviews(demo) -> None:
     steps = {str(t.kind): t.messages for t in h.runner.tasks if t.job_id == job["id"]}
     assert steps["review"], "the agent writing the review takes messages"
     assert not any(v for k, v in steps.items() if k != "review"), steps
+
+
+async def test_asking_for_a_run_in_the_conversation_starts_a_reproduction(demo) -> None:
+    h, app = demo
+    async with _as(app, "maria") as maria:
+        job = await _reviewed(h, maria, 42)
+        h.runner.on(
+            "review",
+            lambda task: {
+                "reply": "I asked for a run on the test machine.",
+                "review": None,
+                "reproduce": "Load a batch of one item on the base and the head.",
+            },
+        )
+        said = (
+            await maria.post(
+                f"/api/jobs/{job['id']}/talk", json={"text": "Please reproduce it."}
+            )
+        ).json()
+        assert (
+            len(said["jobs"]) == 1
+            and "Started a reproduction on gpu-01" in said["text"]
+        )
+        await h.settle()
+        work = (
+            await maria.get(f"/api/work?repo={REPO}&number=42&playbook=reproduce")
+        ).json()
+    assert work, "the reproduction runs for the reviewer who asked"
+    [task] = [t for t in h.runner.tasks if t.kind == "reproduce"][-1:]
+    assert "Load a batch of one item on the base and the head." in task.prompt
+    assert task.requested_by == "maria"

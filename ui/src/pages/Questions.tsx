@@ -163,7 +163,9 @@ export function QuestionCard({ question: q, compact = false }: { question: Agent
     <article className="card stack" style={{ gap: 10 }}>
       <div className="row">
         <Icon name={q.kind === "input" ? "question" : "shield"} />
-        <strong style={{ fontSize: 14.5 }}>{q.title}</strong>
+        <strong className="q-title" title={q.title}>
+          {q.title}
+        </strong>
         {q.asked_for && (
           <span className={`pill ${me && q.asked_for.toLowerCase() === me.login.toLowerCase() ? "status-warn" : ""}`}>
             {me && q.asked_for.toLowerCase() === me.login.toLowerCase() ? t("asks you") : `${t("for")} ${q.asked_for}`}
