@@ -532,6 +532,7 @@ async def _lab_reproduce(
         holder=action.id,
         binding=profile.labs.get(p.lab) if profile else None,
         progress=progress,
+        job=job_id,
     )
     return {**out, "base_sha": base, "head_sha": pr.head_sha}
 

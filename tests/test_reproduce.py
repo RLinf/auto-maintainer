@@ -225,20 +225,58 @@ async def test_a_session_ends_at_its_time_limit_and_after_a_restart(
     assert await executor.expire_sessions() == 1
     assert host.commands[-1][0].startswith("rm -rf ")
     host.results = [CommandResult(exit_code=0, stdout="/home/ci")]
-    await executor.open_session(
-        _payload(sides=["head"]),
+    kept = await executor.open_session(
+        _payload(sides=["head"], timeout_seconds=600),
         REPO,
         43,
         {"head": ""},
         "act_bbbbbbbb",
         binding=LabBinding(),
+        job="job_1",
     )
-    # A new process finds the session the last one left open and cleans it up.
+    old_token = executor.session_token(kept["session"])
+    assert old_token
+    host.results = [CommandResult(exit_code=0, stdout="built")]
+    await executor.run_in_session(old_token, "make build")
+
+    # A restart: a new process adopts the session that has time left, under a new
+    # token, with its folder and what ran in it; its output still reaches the job.
+    seen: list[tuple[str, str]] = []
+
+    async def sink(job: str, repo: str, number: Any, lab: str, step: Any) -> None:
+        seen.append((job, step.phase or step.line))
+
     again = LabExecutor({}, {}, executor.store, executor.clock)
     again.configure({"gpu-01": LabMachine()})
     again.hosts["gpu-01"] = host
-    assert await again.recover_sessions() == 1
-    assert host.commands[-1][0] == "rm -rf /home/ci/am-labs/acme__widget-43-bbbbbbbb"
+    again.progress_sink = sink
+    assert await again.recover_sessions() == 0, "nothing to clean up"
+    token = again.session_token(kept["session"])
+    assert token and token != old_token
+    assert "error" in await again.run_in_session(old_token, "ls"), "the old token"
+    host.results = [CommandResult(exit_code=0)]
+    await again.run_in_session(token, "make test")
+    assert host.commands[-1][1] == "/home/ci/am-labs/acme__widget-43-bbbbbbbb/head"
+    assert seen and seen[0][0] == "job_1"
+    closed = await again.close_session(kept["session"])
+    assert [c["command"] for c in closed["commands"]] == ["make build", "make test"]
+
+    # A session whose time ran out by the restart is cleaned up instead.
+    host.results = [CommandResult(exit_code=0, stdout="/home/ci")]
+    await again.open_session(
+        _payload(sides=["head"], timeout_seconds=120),
+        REPO,
+        44,
+        {"head": ""},
+        "act_cccccccc",
+        binding=LabBinding(),
+    )
+    again.clock.advance(seconds=90)  # type: ignore[attr-defined]
+    third = LabExecutor({}, {}, executor.store, executor.clock)
+    third.configure({"gpu-01": LabMachine()})
+    third.hosts["gpu-01"] = host
+    assert await third.recover_sessions() == 1, "under a minute left"
+    assert host.commands[-1][0] == "rm -rf /home/ci/am-labs/acme__widget-44-cccccccc"
 
 
 # -- the flow --------------------------------------------------------------------------

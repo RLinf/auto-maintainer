@@ -258,6 +258,9 @@ class AgentEventType(StrEnum):
     USAGE = "usage"
     PERMISSION_REQUEST = "permission_request"
     ERROR = "error"
+    SESSION = "session"
+    """The CLI's own session id (``data["session"]``), as soon as the run has one:
+    a job the service restarted resumes its agent from it."""
     FINAL = "final"
 
 

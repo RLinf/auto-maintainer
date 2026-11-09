@@ -174,6 +174,18 @@ class ContainerSandbox:
         """Remove the container ``name`` if it still runs."""
         await run([self.docker, "rm", "-f", name], timeout=60)
 
+    async def remove_leftovers(self) -> int:
+        """Remove agent containers a previous process left running (it was killed
+        before it could): their agents would go on beside the ones that resume their
+        work. Returns how many."""
+        listed = await run(
+            [self.docker, "ps", "-aq", "--filter", "name=^am-run_"], timeout=60
+        )
+        ids = listed.stdout.split() if listed.ok else []
+        if ids:
+            await run([self.docker, "rm", "-f", *ids], timeout=120)
+        return len(ids)
+
     def prepare(
         self,
         run_id: str,
@@ -375,6 +387,10 @@ class SandboxStarter:
                 self.status = f"the agent image did not build: {exc}"
                 log.error(self.status)
                 return
+        with contextlib.suppress(Exception):
+            left = await self.sandbox.remove_leftovers()
+            if left:
+                log.info("removed %d agent containers a previous process left", left)
         self.ready = True
         self.attach(self._runtimes())
         self.status = f"agents run in containers of {self.sandbox.image}"

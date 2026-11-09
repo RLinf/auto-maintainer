@@ -951,6 +951,7 @@ class FakeLabRunner:
         holder: str,
         binding: Any = None,
         progress: Any = None,
+        job: str | None = None,
     ) -> dict[str, Any]:
         """Open a session at once; the agent's commands are not run here."""
         if self.cannot_open:

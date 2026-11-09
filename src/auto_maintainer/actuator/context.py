@@ -76,6 +76,7 @@ class LabRunner(Protocol):
         holder: str,
         binding: LabBinding | None = None,
         progress: Callable[[LabProgress], Awaitable[None]] | None = None,
+        job: str | None = None,
     ) -> dict[str, Any]: ...
 
     def session_token(self, session_id: str) -> str | None: ...

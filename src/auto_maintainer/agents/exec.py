@@ -976,7 +976,15 @@ class ExecRuntime:
         visible = []
         for event in events:
             if event.type == AgentEventType.FINAL and event.result is None:
+                known = state.session
                 state.merge(event.data)
+                if state.session and state.session != known:
+                    visible.append(
+                        AgentEvent(
+                            type=AgentEventType.SESSION,
+                            data={"session": state.session},
+                        )
+                    )
                 continue
             if event.type == AgentEventType.MESSAGE and event.text:
                 state.messages.append(event.text)

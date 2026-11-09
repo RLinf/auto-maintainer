@@ -231,3 +231,23 @@ async def test_the_sandbox_is_given_to_runtimes_once_ready(tmp_path: Path) -> No
     await missing.start()
     await missing._task  # type: ignore[misc]
     assert not missing.ready and "not installed" in missing.status
+
+
+async def test_agent_containers_a_killed_service_left_are_removed(
+    tmp_path: Path,
+) -> None:
+    """A service killed before it could stop its agents leaves their containers: the
+    next start removes them, so they do not go on beside the agents that resume."""
+    calls = tmp_path / "calls"
+    docker = tmp_path / "docker"
+    docker.write_text(
+        f'#!/bin/sh\necho "$@" >> {calls}\n'
+        'if [ "$1" = ps ]; then printf "c1\\nc2\\n"; fi\n'
+    )
+    docker.chmod(0o755)
+    box = ContainerSandbox("agent:1", docker=str(docker))
+    assert await box.remove_leftovers() == 2
+    assert calls.read_text().splitlines() == [
+        "ps -aq --filter name=^am-run_",
+        "rm -f c1 c2",
+    ]

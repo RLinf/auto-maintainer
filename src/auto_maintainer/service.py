@@ -287,6 +287,11 @@ class Service:
             publisher_as=self.user_publisher,
             lab_progress=self.progress.lab,
         )
+        if adapters.lab_runner is not None and hasattr(
+            adapters.lab_runner, "progress_sink"
+        ):
+            # A session adopted after a restart still shows its output to its job.
+            adapters.lab_runner.progress_sink = self.progress.lab
         self.actuator = Actuator(self.exec)
         self.pipeline = ActionPipeline(
             adapters.store,

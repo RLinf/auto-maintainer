@@ -32,7 +32,7 @@ from ..domain.clock import Clock
 from ..domain.events import Event, EventKind
 from ..domain.labs import LabProgress
 from ..domain.ports import Store
-from ..domain.progress import JobStep, step_from_event
+from ..domain.progress import JobStep, agent_session_key, step_from_event
 from ..domain.secrets import redact_secrets
 
 MAX_STEPS = 300
@@ -68,9 +68,25 @@ class JobProgress:
         self._lock = asyncio.Lock()
 
     async def observe(self, task: AgentTask, runtime: str, event: AgentEvent) -> None:
-        """``ProgressObserver``: add the step ``event`` makes to the task's job."""
+        """``ProgressObserver``: add the step ``event`` makes to the task's job, and
+        keep the agent's session while its run is unfinished."""
         if not task.job_id:
             return
+        key = agent_session_key(task.job_id, str(task.kind))
+        if event.type == AgentEventType.SESSION:
+            await self.store.set_state(
+                key,
+                {
+                    "runtime": runtime,
+                    "session": str(event.data.get("session") or ""),
+                    "run": task.id,
+                    "lab_session": bool(task.lab_session),
+                    "at": self.clock.now().isoformat(),
+                },
+            )
+            return
+        if event.type == AgentEventType.FINAL:
+            await self.store.set_state(key, None)
         step = step_from_event(event, runtime, str(task.kind))
         if step is None:
             return

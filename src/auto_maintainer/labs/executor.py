@@ -115,6 +115,30 @@ class LabSession:
     source: str | None = None
     """The checkout on the service host that the agent edits, when it changes the
     code (fixing CI): ``sync_session`` copies it to the head side."""
+    job: str | None = None
+    """The job whose agent works in the session, for its live view after a restart."""
+    ready: bool = False
+    """Its code is on the machine; a session a restart finds before that is removed."""
+
+    def record(self) -> dict[str, Any]:
+        """What survives a restart: everything but its token and its callbacks."""
+        return {
+            "id": self.id,
+            "lab": self.lab,
+            "repo": self.repo,
+            "number": self.number,
+            "holder": self.holder,
+            "run_dir": self.run_dir,
+            "sides": self.sides,
+            "gpu": self.gpu,
+            "env": self.env,
+            "before": self.before,
+            "forbid": self.forbid,
+            "deadline": self.deadline.isoformat(),
+            "job": self.job,
+            "ready": self.ready,
+            "log": [{k: v for k, v in e.items() if k != "tail"} for e in self.log],
+        }
 
     async def tell(
         self, side: str | None = None, phase: str = "", line: str = ""
@@ -189,6 +213,11 @@ class LabExecutor:
         self._fixed = dict(hosts)
         self._sessions: dict[str, LabSession] = {}
         self._opening: dict[str, LabSession] = {}
+        self.progress_sink: (
+            Callable[[str, str, int | None, str, LabProgress], Awaitable[None]] | None
+        ) = None
+        """Where an adopted session's output goes (the job's live view), as the
+        actuator sends it for the sessions it opens."""
         self._fixed_thresholds = dict(thresholds)
 
     def configure(self, machines: dict[str, LabMachine]) -> None:
@@ -255,6 +284,7 @@ class LabExecutor:
         holder: str,
         binding: LabBinding | None = None,
         progress: Callable[[LabProgress], Awaitable[None]] | None = None,
+        job: str | None = None,
     ) -> dict[str, Any]:
         """Open an approved reproduction's session: lease a GPU when it needs one,
         copy each side's code (base64 tar.gz) into a run folder of its own on the
@@ -315,6 +345,7 @@ class LabExecutor:
             forbid=forbidden(machine, binding),
             deadline=self.clock.now() + timedelta(seconds=limit),
             progress=progress,
+            job=job,
         )
         await self._remember(session)
         for side in payload.sides:
@@ -334,6 +365,8 @@ class LabExecutor:
                 }
         self._sessions[session.id] = session
         self._opening.pop(session.id, None)
+        session.ready = True
+        await self._save(session)
         await tell(
             phase=f"The agent works on {payload.lab} for at most "
             f"{round(limit / 60)} minutes"
@@ -432,6 +465,7 @@ class LabExecutor:
             phase=("timed out" if result.timed_out else f"exit code {result.exit_code}")
             + f" after {round(result.duration_seconds)} s",
         )
+        await self._save(session)
         return outcome
 
     def allow_sync(self, session_id: str, source: str) -> None:
@@ -484,6 +518,7 @@ class LabExecutor:
                 put.stdout + "\n" + put.stderr
             )
         session.log.append({"command": "lab --sync", "side": side, **outcome})
+        await self._save(session)
         await session.tell(
             side,
             phase=f"Copied {len(files)} files"
@@ -516,10 +551,21 @@ class LabExecutor:
         return len(late)
 
     async def recover_sessions(self) -> int:
-        """After a restart: clean up the sessions the last process left open (their
-        agents are gone); how many."""
+        """After a restart: keep the sessions the last process left open that are
+        ready and have time left, with new tokens, for their jobs' agents to resume
+        in (the folders, environments, and GPU stay theirs); clean up the rest.
+        Returns how many were cleaned up."""
         left = await self.store.get_state(SESSIONS_KEY) or {}
-        for record in left.values():
+        now = self.clock.now()
+        kept: dict[str, Any] = {}
+        cleaned = 0
+        for session_id, record in left.items():
+            session = self._adopted(session_id, record, now)
+            if session is not None:
+                self._sessions[session.id] = session
+                kept[session.id] = session.record()
+                continue
+            cleaned += 1
             with contextlib.suppress(Exception):
                 await self._clean(
                     record["lab"],
@@ -527,8 +573,47 @@ class LabExecutor:
                     record.get("gpu"),
                     record["holder"],
                 )
-        await self.store.set_state(SESSIONS_KEY, {})
-        return len(left)
+        await self.store.set_state(SESSIONS_KEY, kept)
+        return cleaned
+
+    def _adopted(
+        self, session_id: str, record: dict[str, Any], now: datetime
+    ) -> LabSession | None:
+        """The session ``record`` describes, under a new token, when it can go on:
+        its code was on the machine and it has a minute or more left."""
+        try:
+            deadline = datetime.fromisoformat(str(record["deadline"]))
+            if not record.get("ready") or deadline <= now + timedelta(minutes=1):
+                return None
+            session = LabSession(
+                id=str(record.get("id") or session_id),
+                token=secrets.token_urlsafe(32),
+                lab=str(record["lab"]),
+                repo=str(record["repo"]),
+                number=int(record["number"]),
+                holder=str(record["holder"]),
+                run_dir=str(record["run_dir"]),
+                sides=list(record["sides"]),
+                gpu=record.get("gpu"),
+                env=dict(record.get("env") or {}),
+                before=list(record.get("before") or []),
+                forbid=list(record.get("forbid") or []),
+                deadline=deadline,
+                job=record.get("job"),
+                ready=True,
+                log=list(record.get("log") or []),
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
+        sink, job = self.progress_sink, session.job
+        if sink is not None and job:
+            repo, number, lab = session.repo, session.number, session.lab
+
+            async def progress(step: LabProgress) -> None:
+                await sink(job, repo, number, lab, step)
+
+            session.progress = progress
+        return session
 
     def _by_token(self, token: str) -> LabSession | None:
         for session in self._sessions.values():
@@ -547,13 +632,14 @@ class LabExecutor:
 
     async def _remember(self, session: LabSession) -> None:
         self._opening[session.id] = session
+        await self._save(session)
+
+    async def _save(self, session: LabSession) -> None:
+        """Record the open session, so a restart can adopt or clean it up."""
+        if session.closed:
+            return
         open_ = await self.store.get_state(SESSIONS_KEY) or {}
-        open_[session.id] = {
-            "lab": session.lab,
-            "run_dir": session.run_dir,
-            "gpu": session.gpu,
-            "holder": session.holder,
-        }
+        open_[session.id] = session.record()
         await self.store.set_state(SESSIONS_KEY, open_)
 
     async def _forget(self, session_id: str) -> None:

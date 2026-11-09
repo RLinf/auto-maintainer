@@ -51,6 +51,7 @@ from ..domain.ports import (
     Workspace,
 )
 from ..domain.profile import RepoProfile, Route
+from ..domain.progress import agent_session_key
 from ..domain.records import Job
 from ..domain.review import ReviewClassification, classify_review_state
 from ..domain.settings import LabMachine
@@ -185,6 +186,19 @@ class DraftEditor(Protocol):
     ) -> Any: ...
 
 
+RESUMED = """The service restarted while you were working on this task. This is the same session: go on from where you were. Whatever was still running when the service stopped was stopped; run it again if you need its result.{lab} Finish the task; it follows as it was first given."""
+
+LAB_KEPT = " Your session on the test machine is still open: its folders, environments, and files are as you left them, and `lab` works as before."
+
+STARTED_OVER = """An earlier agent worked on this task in this session on the test machine until the service restarted. The session's folders keep what it made (environments, downloads, builds): look at what is there before you repeat a step."""
+
+
+def resumed_failed(result: AgentResult) -> bool:
+    """Whether a resumed run failed in a way a fresh one may not: it could not get
+    going at all, rather than running out of time or quota."""
+    return result.error_kind not in ("timeout", "quota")
+
+
 @dataclass
 class PlaybookContext:
     job: Job
@@ -282,7 +296,44 @@ class PlaybookContext:
         ):
             # The requester chose the agent; verification keeps its own route.
             route = route.model_copy(update={"primary": self.agent, "fallback": []})
+        earlier = await self._cut_off(task.kind)
+        if earlier is not None:
+            kept = LAB_KEPT if task.lab_session else ""
+            resumed = await self.agents.run(
+                task.model_copy(
+                    update={
+                        "resume_session": earlier["session"],
+                        "prompt": RESUMED.format(lab=kept) + "\n\n" + task.prompt,
+                    }
+                ),
+                route.model_copy(
+                    update={"primary": str(earlier["runtime"]), "fallback": []}
+                ),
+                output_model,
+            )
+            if resumed.ok or resumed.text.strip() or not resumed_failed(resumed):
+                return resumed
+            # Nothing came back: the agent could not go on; start afresh.
+            if task.lab_session:
+                task = task.model_copy(
+                    update={"prompt": STARTED_OVER + "\n\n" + task.prompt}
+                )
         return await self.agents.run(task, route, output_model)
+
+    async def _cut_off(self, kind: TaskKind) -> dict[str, Any] | None:
+        """The agent session of this job's run of ``kind`` that a restart cut off,
+        when there is one to resume: runtime and session id."""
+        try:
+            saved = await self.store.get_state(
+                agent_session_key(self.job.id, str(kind))
+            )
+        except Exception:  # resuming helps; a run goes on without it
+            return None
+        if not isinstance(saved, dict) or not saved.get("session"):
+            return None
+        if not saved.get("runtime"):
+            return None
+        return saved
 
     async def _earlier_answers(self) -> str:
         """What people already answered agents' questions in this job, for a run

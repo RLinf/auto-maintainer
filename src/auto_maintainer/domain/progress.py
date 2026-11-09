@@ -88,6 +88,13 @@ def _input_summary(data: dict[str, Any]) -> str:
     return ""
 
 
+def agent_session_key(job_id: str, kind: str) -> str:
+    """Where the agent session of a job's unfinished run of ``kind`` is kept: its
+    runtime and the CLI's session id, from the moment it has one until the run ends.
+    One that is still there when the job runs again was cut off (a restart)."""
+    return f"agent-session:{job_id}:{kind}"
+
+
 def step_from_event(event: AgentEvent, runtime: str, task_kind: str) -> JobStep | None:
     """The step ``event`` adds to a job's progress, or ``None`` for events that add
     nothing a person would read (usage counters)."""

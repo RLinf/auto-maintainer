@@ -115,7 +115,7 @@ class AcpRuntime(ExecRuntime):
         return Capabilities(
             schema_flag=False,
             read_only_mode=False,
-            sessions=False,
+            sessions=True,  # ``session/load``, in a new process
             acp=True,
             streaming=True,
             skill_dirs=False,
@@ -330,6 +330,9 @@ class AcpConversation(Conversation):
         """Reviewers' messages waiting for the next turn."""
         self.cancelling = False
         """Whether the turn in progress was cancelled for a message."""
+        self.loading = False
+        """Whether ``session/load`` is under way: the agent replays the session's
+        history, which is not this run's work and is not reported again."""
 
     # -- Conversation ------------------------------------------------------------------
 
@@ -354,6 +357,8 @@ class AcpConversation(Conversation):
         if "method" in msg and "id" in msg:
             return self._agent_request(msg)
         if "method" in msg:
+            if msg["method"] == "session/update" and self.loading:
+                return Step()
             if msg["method"] == "session/update":
                 return Step(
                     events=self._update((msg.get("params") or {}).get("update") or {})
@@ -455,6 +460,35 @@ class AcpConversation(Conversation):
             asked = _Asked(self.asking)
             self.asking = []
             return Step(asks=[Ask(question=_input_question(asked), token=asked)])
+        if method == "session/load":
+            self.loading = False
+            if "error" in msg:
+                # The agent cannot resume that session: start afresh with the task.
+                error = msg.get("error") or {}
+                return Step(
+                    events=[
+                        AgentEvent(
+                            type=AgentEventType.MESSAGE,
+                            text="[the earlier session could not be resumed: "
+                            f"{str(error.get('message') or error)[:200]}; starting a "
+                            "new one]",
+                        )
+                    ],
+                    send=[self._new_session()],
+                )
+            result = msg.get("result") or {}
+            self.session_id = str(result.get("sessionId") or self.task.resume_session)
+            self.setup = list(self.runtime.session_setup(self.task, result))
+            return Step(
+                events=[
+                    AgentEvent(
+                        type=AgentEventType.MESSAGE,
+                        text="[resumed the agent's earlier session]",
+                    ),
+                    partial(session=self.session_id),
+                ],
+                send=self._next_setup(),
+            )
         if "error" in msg:
             error = msg.get("error") or {}
             text = str(error.get("message") or error)
@@ -481,8 +515,22 @@ class AcpConversation(Conversation):
             )
         result = msg.get("result") or {}
         if method == "initialize":
-            params: dict[str, Any] = {"cwd": str(self.task.workdir), "mcpServers": []}
-            return Step(send=[self._request("session/new", params)])
+            can_load = bool((result.get("agentCapabilities") or {}).get("loadSession"))
+            if self.task.resume_session and can_load:
+                self.loading = True
+                return Step(
+                    send=[
+                        self._request(
+                            "session/load",
+                            {
+                                "sessionId": self.task.resume_session,
+                                "cwd": str(self.task.workdir),
+                                "mcpServers": [],
+                            },
+                        )
+                    ]
+                )
+            return Step(send=[self._new_session()])
         if method == "session/new":
             self.session_id = str(result.get("sessionId") or "")
             self.setup = list(self.runtime.session_setup(self.task, result))
@@ -532,6 +580,11 @@ class AcpConversation(Conversation):
                 done=True,
             )
         return Step(send=self._next_setup())
+
+    def _new_session(self) -> str:
+        return self._request(
+            "session/new", {"cwd": str(self.task.workdir), "mcpServers": []}
+        )
 
     def _next_setup(self) -> list[str]:
         if self.setup:

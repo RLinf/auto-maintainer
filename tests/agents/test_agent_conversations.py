@@ -923,3 +923,128 @@ async def test_a_question_is_withdrawn_when_its_agent_stops_waiting(
     assert desk.withdrawn, "the question is withdrawn from the desk"
     assert not result.ok and result.error_kind == "crash"
     assert "stopped while it waited for an answer to: Which scope?" in result.error
+
+
+def _replayed(text: str) -> dict:
+    return {
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {
+            "sessionId": "s0",
+            "update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": text},
+            },
+        },
+    }
+
+
+async def test_an_acp_agent_resumes_its_session_after_a_restart(
+    tmp_path: Path, talking_cli
+) -> None:
+    """A job that a restart cut off runs again with the agent's own session: the
+    ACP server loads it (replaying its history, which is not this run's work) and
+    the prompt continues it."""
+    cli = talking_cli(
+        [
+            {
+                "wait": '"initialize"',
+                "emit": [
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "result": {
+                            "protocolVersion": 1,
+                            "agentCapabilities": {"loadSession": True},
+                        },
+                    }
+                ],
+            },
+            {
+                "wait": '"session/load"',
+                "emit": [
+                    _replayed("Installing the environment, as before the restart."),
+                    {"jsonrpc": "2.0", "id": 2, "result": {}},
+                ],
+            },
+            {
+                "wait": '"session/set_mode"',
+                "emit": [{"jsonrpc": "2.0", "id": 3, "result": {}}],
+            },
+            {
+                "wait": '"session/prompt"',
+                "emit": [
+                    _replayed('{"ok": true}'),
+                    {"jsonrpc": "2.0", "id": 4, "result": {"stopReason": "end_turn"}},
+                ],
+            },
+        ]
+    )
+    rt = AntigravityRuntime(binary=str(cli.path), runs_dir=tmp_path / "runs")
+    events, result = await _run(
+        rt, _task(tmp_path, output_schema=SCHEMA, resume_session="s0")
+    )
+    assert result.ok and result.structured == {"ok": True} and result.session == "s0"
+    [load] = _sent(cli, "method", "session/load")
+    assert load["params"]["sessionId"] == "s0"
+    assert not _sent(cli, "method", "session/new")
+    texts = " ".join(e.text for e in events)
+    assert "as before the restart" not in texts, "the replayed history is not reported"
+    assert [e.data["session"] for e in events if e.type == "session"] == ["s0"]
+
+
+async def test_an_acp_session_that_cannot_load_starts_afresh(
+    tmp_path: Path, talking_cli
+) -> None:
+    cli = talking_cli(
+        [
+            {
+                "wait": '"initialize"',
+                "emit": [
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "result": {
+                            "protocolVersion": 1,
+                            "agentCapabilities": {"loadSession": True},
+                        },
+                    }
+                ],
+            },
+            {
+                "wait": '"session/load"',
+                "emit": [
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 2,
+                        "error": {"code": -32602, "message": "no such session"},
+                    }
+                ],
+            },
+            {
+                "wait": '"session/new"',
+                "emit": [{"jsonrpc": "2.0", "id": 3, "result": {"sessionId": "s1"}}],
+            },
+            {
+                "wait": '"session/set_mode"',
+                "emit": [{"jsonrpc": "2.0", "id": 4, "result": {}}],
+            },
+            {
+                "wait": '"session/prompt"',
+                "emit": [
+                    _replayed('{"ok": true}'),
+                    {"jsonrpc": "2.0", "id": 5, "result": {"stopReason": "end_turn"}},
+                ],
+            },
+        ]
+    )
+    rt = AntigravityRuntime(binary=str(cli.path), runs_dir=tmp_path / "runs")
+    events, result = await _run(
+        rt, _task(tmp_path, output_schema=SCHEMA, resume_session="s0")
+    )
+    assert result.ok and result.session == "s1"
+    assert any("could not be resumed" in e.text for e in events)
+    [prompt] = _sent(cli, "method", "session/prompt")
+    assert prompt["params"]["prompt"][0]["text"].startswith("Review it."), (
+        "the fresh session gets the whole task"
+    )
