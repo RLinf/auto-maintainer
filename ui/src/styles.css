@@ -821,6 +821,7 @@ details.pv-section[open] > summary { margin-bottom: 6px; }
 .skill-option { display: flex; gap: 8px; align-items: flex-start; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--r); cursor: pointer; min-width: 0; }
 .skill-option input { margin-top: 3px; }
 .skill-option.on { border-color: var(--accent); background: var(--accent-soft); }
+.translation { padding: 10px 14px; border-left: 3px solid var(--accent); border-radius: var(--r); background: var(--surface-2); min-width: 0; overflow-wrap: anywhere; }
 .assignee { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .assignee .main { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .chip-person { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px 2px 3px; border-radius: 999px; font-size: 12px; background: var(--surface-2); border: 1px solid var(--border); color: var(--text); }

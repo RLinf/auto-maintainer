@@ -436,8 +436,40 @@ def _quality(task: AgentTask) -> dict[str, Any]:
     }
 
 
+def _translated(task: AgentTask) -> dict[str, Any]:
+    """The demo's translation: the review's text, marked as translated."""
+    import re
+
+    from ..playbooks.prompts import _FENCE
+
+    language = "中文" if "Simplified Chinese" in task.prompt else "English"
+    texts = dict(
+        re.findall(
+            r"<untrusted-data source='([^']+)'>.*?"
+            + re.escape(_FENCE)
+            + r"\n(.*?)\n"
+            + re.escape(_FENCE),
+            task.prompt,
+            re.S,
+        )
+    )
+    comments = [
+        part.split("\n", 1)[1]
+        for part in re.split(
+            r"\n\n(?=\[\d+\]\n)", texts.get("review.inline_comments", "")
+        )
+        if part.strip() and "\n" in part
+    ]
+    return {
+        "body": f"*({language})*\n\n" + texts.get("review.body", ""),
+        "comments": [f"*({language})* {c}" for c in comments],
+    }
+
+
 def _answer(task: AgentTask) -> dict[str, Any]:
     kind = str(task.kind)
+    if kind == "translate":
+        return _translated(task)
     if kind == "review" and task.prompt.startswith("You judge the quality of PR"):
         return _quality(task)
     if kind == "evaluate" and "into a checklist for a quick check" in task.prompt:
@@ -858,6 +890,7 @@ async def build_demo(root: Path) -> Harness:
         "fix",
         "reproduce",
         "governance",
+        "translate",
     ):
         h.runner.on(kind, _answer)
     h.forge.put_file(DEMO_REPO, ".github/CODEOWNERS", "* @maria\n/docs/ @bob\n")

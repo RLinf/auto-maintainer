@@ -16,6 +16,7 @@ import { Icon } from "./icons";
 import { Markdown } from "./markdown";
 import { openJob } from "./openJob";
 import { MenuItem, Popover, useToast } from "./ui";
+import { TranslateReview } from "./translate";
 
 export const PROPOSAL_KEYS = [["proposals"], ["pr"], ["prs"], ["repos"], ["audit"], ["work"], ["job"]];
 
@@ -267,6 +268,12 @@ export function ProposalCard({
             <button className="ghost sm" style={{ alignSelf: "flex-start" }} onClick={() => setRaw(!raw)}>
               {raw ? t("Show as it will look") : t("Show the Markdown")}
             </button>
+          )}
+          {(kind === "review.post" || kind === "review.update") && typeof payload.body === "string" && !editing && (
+            <TranslateReview
+              actionId={action.id}
+              places={Array.isArray(payload.comments) ? (payload.comments as InlineComment[]).map((c) => `${c.path}:${c.line}`) : []}
+            />
           )}
         </>
       )}

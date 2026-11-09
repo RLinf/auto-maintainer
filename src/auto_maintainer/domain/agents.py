@@ -87,6 +87,8 @@ class TaskKind(StrEnum):
     REPRODUCE = "reproduce"
     PROBE = "probe"
     GOVERNANCE = "governance"
+    TRANSLATE = "translate"
+    """A review translated into the dashboard's language, for reading only."""
 
 
 class Capabilities(BaseModel):

@@ -42,6 +42,7 @@ import { ReviewersCard } from "../assignees";
 import { ACTIVE, PrWork, usePrWork } from "../jobs";
 import { openJob } from "../openJob";
 import { Skeleton, Tabs, useTab, useToast } from "../ui";
+import { TranslateReview } from "../translate";
 
 const TIERS = ["P0", "P1", "P2", "P3"];
 type TimelineRow = PrDetail["actions"][number];
@@ -374,6 +375,9 @@ function ReviewsTab({ d, repo, number }: { d: PrDetail; repo: string; number: nu
                   <Markdown text={reviewBody(r.result.body)} className="posted" />
                 ) : (
                   <Pre text={JSON.stringify(r.result, null, 2)} />
+                )}
+                {typeof r.result.body === "string" && (
+                  <TranslateReview actionId={r.action_id} places={comments.map((c) => `${c.path}:${c.line}`)} />
                 )}
                 {comments.map((c, j) => (
                   <CommentOnDiff

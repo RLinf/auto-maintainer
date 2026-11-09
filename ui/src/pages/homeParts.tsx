@@ -258,6 +258,18 @@ export function ReviewCard({ rows, all, loading, me, automations }: { rows: PrRo
                 </Link>
                 <span className="meta">
                   {p.repo}#{p.number} · <Person login={p.author} /> · <When at={p.updated_at} />
+                  {p.assignees.length > 0 && (
+                    <>
+                      {" · "}
+                      {t("reviewing:")}{" "}
+                      <AvatarStack
+                        logins={p.assignees.map((a) => a.login)}
+                        me={me.login}
+                        size={16}
+                        title={p.assignees.map((a) => `${a.login} (${a.kind === "assigned" ? `${t("assigned by")} ${a.by}` : t("claimed")})`).join("\n")}
+                      />
+                    </>
+                  )}
                 </span>
               </span>
               {(p.quality || p.quick_quality) && <Quality quality={p.quality} quick={p.quick_quality} head={p.head} compact />}
@@ -267,9 +279,6 @@ export function ReviewCard({ rows, all, loading, me, automations }: { rows: PrRo
                 </span>
               )}
               {searching && !waiting.has(prKey(p)) && <span className="pill tag">{t(REVIEW_STATES[p.review_state] ?? p.review_state)}</span>}
-              {p.assignees.length > 0 && (
-                <AvatarStack logins={p.assignees.map((a) => a.login)} me={me.login} size={20} title={`${t("Reviewers")}: ${p.assignees.map((a) => a.login).join(", ")}`} />
-              )}
               <span className="small">{activity(p, me, t)}</span>
               <span className="row-actions">
                 <button

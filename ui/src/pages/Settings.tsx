@@ -43,6 +43,7 @@ const TASKS: Record<string, string> = {
   chat: "Answers in conversations",
   self_improve: "Changes the service's own code",
   probe: "Health checks",
+  translate: "Translates reviews for reading on the dashboard",
 };
 
 const PROTOCOL: Record<string, string> = {
