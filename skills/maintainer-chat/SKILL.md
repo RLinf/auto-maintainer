@@ -35,3 +35,21 @@ auto-maintainer watches GitHub repositories for their maintainers. It reads open
 - `governance`: have an agent fill in or change the repository's People record, with `request` saying what to change or where the process is written (a file, a URL, or the rules as the person states them) and `people_mode: edit`; or check who should change role under it from GitHub activity, with `people_mode: members`. It starts at once and drafts a memory change for a maintainer to approve.
 - `add_repo`: onboard a repository; a card that someone who may configure that repository approves.
 - `improve`: a change to the service's own code, only when nothing above does what is asked. A card that a maintainer of the service's repository approves; then an agent changes the code in a worktree, the service runs the tests and opens a PR, and a maintainer approves the merge and then the deploy. Nothing reaches the running service before that.
+
+## Diagnosing what the service did
+
+When someone asks why something failed, did not post, or left the page, find the record first; never guess a cause. Ask for it in `lookups`, reply with one line on what you check, and answer when the results come back.
+
+1. `pr_record` (repo, number): every action the service proposed or took on the PR, oldest first, with its status, the policy rule, the proposal (for whom, who decided, the reason, its warnings), who it was done as, and the error. Read the newest entry of the kind asked about.
+2. Then the PR itself on GitHub with `gh`, when the record names a commit: `gh pr view <number> --repo <repo> --json headRefOid,reviews,labels` says whether the head moved and what reached the PR.
+3. `repo_failures` (repo): the repository's recent actions that failed, were refused, or superseded, when the question is about more than one PR.
+4. `service_log` (text: an action id `act_...` or job id `job_...` from the record): the log lines about it, when the error in the record is short or missing. Only operators and maintainers of the service's repository may read the log; say so when the lookup is refused.
+
+What the record's states mean:
+
+- `proposed`: waits on a card; with an error that starts `held after approval`, it was approved and is held, for example while the service is paused. `queued` or `intent`: running now. `executed`: done. `noop`: nothing to change.
+- `failed`: the error says why. `leak guard: ...` means the text was refused before anything was written (an internal term, a score, a mention of someone who may not be mentioned); `... sign in again` means the person's GitHub sign-in expired. A proposal that failed before writing goes back to its reviewers as pending, with `not done: ...` among its warnings.
+- `superseded`: a newer head or a newer draft replaced it; `the head moved from A to B` means the author pushed after the draft. `denied`: the policy or a reviewer refused it; `rejected by <who>: <reason>` is a reviewer's rejection, `already ran for this head SHA` the one-review-per-commit limit, `the hourly public write cap was reached` the write cap.
+- `shadowed`: recorded only, because the repository keeps that action in record-only mode.
+
+Answer with the entry you found: its time, status, and error in its own words, what it means, and what the person can do. When the record and GitHub do not explain it, say what you checked and that the cause is not in them, and suggest `improve` if the service should have recorded it.

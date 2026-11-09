@@ -475,3 +475,77 @@ async def test_the_agent_knows_the_page_it_is_asked_from(demo) -> None:
         assert hidden.status_code == 403
     assert "looking at acme/widget#42" in seen[0] and "'this PR'" in seen[0]
     assert "Internal quality" in seen[0] and "88/100" in seen[0]
+
+
+async def test_the_agent_looks_up_why_a_post_failed(demo) -> None:
+    """The chat agent reads the PR's record when it asks for it, with the asker's
+    permissions, and answers from it; nothing is put in its first prompt."""
+    from auto_maintainer.domain.actions import (
+        ActionKind,
+        ActionStatus,
+        ReviewPostPayload,
+        make_action,
+    )
+    from auto_maintainer.domain.records import ActionRecord
+
+    h, app = demo
+    action = make_action(
+        ActionKind.REVIEW_POST,
+        "acme/widget",
+        ReviewPostPayload(body="Review."),
+        number=42,
+        head_sha="a" * 40,
+    )
+    await h.store.add_action(
+        ActionRecord(
+            action=action,
+            status=ActionStatus.FAILED,
+            error="leak guard: mentions the priority tier 'P2'",
+        )
+    )
+    prompts: list[str] = []
+
+    def answer(task):
+        prompts.append(task.prompt)
+        if "Results of your lookups" not in task.prompt:
+            return {
+                "reply": "Checking the PR's record.",
+                "lookups": [
+                    {"kind": "pr_record", "repo": "acme/widget", "number": 42},
+                    {"kind": "pr_record", "repo": "other/secret", "number": 1},
+                    {"kind": "service_log", "text": action.id},
+                ],
+            }
+        return {"reply": "The leak guard refused it.", "proposals": []}
+
+    h.runner.on("chat", answer)
+    context = {"page": "pr", "repo": "acme/widget", "number": 42}
+    async with _client(app, "walt") as walt:
+        thread = (
+            await walt.post("/api/chat/threads", json={"text": "x", "context": context})
+        ).json()
+        prompts.clear()
+        reply = await walt.post(
+            f"/api/chat/threads/{thread['id']}/messages",
+            json={"text": "Why did the review not post?", "context": context},
+        )
+    assert reply.json()["text"] == "The leak guard refused it."
+    first, second = prompts
+    assert "tier 'P2'" not in first, "the record is looked up, not put in up front"
+    assert "Diagnosing what the service did" in first
+    assert "review.post at aaaaaaa: failed" in second and "priority tier" in second
+    assert "other/secret#1: not a repository walt can see" in second
+    assert "only operators and maintainers" in second
+
+
+def test_a_log_lookup_returns_the_latest_lines_about_it(tmp_path: Path) -> None:
+    from auto_maintainer.web.chat import LOG_MATCHES, _log_lines
+
+    log = tmp_path / "service.log"
+    log.write_text(
+        "".join(f"line {i} job_x\n" for i in range(LOG_MATCHES + 5)) + "other\n"
+    )
+    found = _log_lines(log, "JOB_X").splitlines()
+    assert len(found) == LOG_MATCHES and found[-1] == f"line {LOG_MATCHES + 4} job_x"
+    assert "no recent line" in _log_lines(log, "act_missing")
+    assert "cannot be read" in _log_lines(tmp_path / "none.log", "x")
