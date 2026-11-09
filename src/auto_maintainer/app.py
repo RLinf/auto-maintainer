@@ -45,6 +45,7 @@ from .notify.webhook import ChannelConfig, WebhookNotifier
 from .resources import data_dir, defaults_dir
 from .selfupdate import GitServiceUpdater
 from .service import Adapters, Service, ServiceSettings
+from .store.people import PeopleAgents
 from .store.secrets import FileSecretStore, FileUserTokens
 from .store.sqlite import SqliteStore
 from .workspace.git import GitWorkspace, LocalSandbox
@@ -131,6 +132,7 @@ async def build_service(cfg: HostConfig, dev: bool = False) -> Service:
     async def record_run(run: AgentRunRecord) -> None:
         await store.add_agent_run(run)
 
+    people = PeopleAgents(data / "people")
     router = AgentRouter(
         runtimes,
         clock=clock,
@@ -138,6 +140,7 @@ async def build_service(cfg: HostConfig, dev: bool = False) -> Service:
         usage_today=usage_today,
         record_run=record_run,
     )
+    router.people = people
 
     async def reconfigure(
         agents: dict[str, RuntimeConfig], providers: dict[str, ProviderBinding]
@@ -245,6 +248,7 @@ async def build_service(cfg: HostConfig, dev: bool = False) -> Service:
         reconfigure=reconfigure,
         user_tokens=user_tokens,
         installer=AgentInstaller(data),
+        people=people,
         writer_for_user=writer_for_user,
         publisher_for_user=publisher_for_user,
         background=background,

@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from ...domain.agents import AgentQuota, AgentTask, Capabilities, QuotaBucket
@@ -58,6 +59,25 @@ class AntigravityRuntime(AcpRuntime):
     end; seen on a review conversation whose diff was large."""
 
     home_paths = (".gemini",)
+    login_args = ("acp", "--login")
+    """Antigravity's sign-in with Google (checked against 1.5.3): without a browser
+    it prints a page, then reads the code (or the page's address) it ends on from
+    standard input. Over ACP it refuses to sign in without a browser."""
+
+    async def signed_in(self, home: Path | None = None) -> bool | None:
+        """Whether ``agy -p /usage`` answers, which needs a sign-in and spends nothing."""
+        out = await self.cli_output(
+            "-p", "/usage", "--output-format", "json", home=home, check=False
+        )
+        if out is None:
+            return None
+        if "authentication required" in out:
+            return False
+        try:
+            return json.loads(out).get("status") == "SUCCESS"
+        except ValueError:
+            return None
+
     default_name = "antigravity"
     default_binary = "agy"
     default_env_allow = ("GEMINI_*", "GOOGLE_*", "ANTIGRAVITY_*", "AGY_*")

@@ -204,9 +204,12 @@ class ContainerSandbox:
         rw: Sequence[Path] = (),
         ro: Sequence[Path] = (),
         home_paths: Sequence[str] = (),
+        home_source: Path | None = None,
     ) -> Prepared:
         """The ``docker run`` that runs ``argv`` (whose first word is ``binary``) for
-        one agent run, with ``env`` inside the container."""
+        one agent run, with ``env`` inside the container. ``home_paths`` come from
+        ``home_source`` (a person's own home folder for the CLI) instead of the
+        host's home when it is set; inside, they are where the CLI looks."""
         name = f"am-{run_id}"
         home_dir = run_dir / "home"
         home_dir.mkdir(parents=True, exist_ok=True)
@@ -219,7 +222,7 @@ class ContainerSandbox:
         binds.append((run_dir, str(run_dir), False))
         binds.append((home_dir, str(self.home), False))
         for rel in home_paths:
-            source = self.home / rel
+            source = (home_source or self.home) / rel
             if source.exists():
                 binds.append((source, str(self.home / rel), False))
         binds += [(p, str(p), False) for p in rw if p.exists()]

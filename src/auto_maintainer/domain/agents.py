@@ -280,6 +280,8 @@ class AgentResult(BaseModel):
     structured: dict[str, Any] | None = None
     session: str | None = None
     usage: Usage = Field(default_factory=Usage)
+    account: str | None = None
+    """The person whose own agent account ran it; ``None`` for the service's."""
     error: str | None = None
     error_kind: (
         Literal["auth", "quota", "crash", "timeout", "invalid_output", "other"] | None
@@ -336,6 +338,45 @@ class InstalledAgent(BaseModel):
     path: str
     source: str
     """Where it came from, such as ``npm @openai/codex``."""
+
+
+class AgentLogin(BaseModel):
+    """A sign-in to an agent CLI in progress, run on the host for one account: the
+    service's own (``account`` is ``None``) or a person's (their login)."""
+
+    id: str = Field(default_factory=lambda: new_id("login"))
+    agent: str
+    account: str | None = None
+    by: str
+    state: Literal["starting", "waiting", "done", "failed", "cancelled"] = "starting"
+    url: str = ""
+    """The page the person opens to sign in."""
+    code: str = ""
+    """A one-time code the CLI shows for the person to enter on that page."""
+    needs_code: bool = False
+    """The CLI waits for the code the sign-in page shows, pasted back."""
+    message: str = ""
+    started_at: datetime
+
+
+class PersonalProvider(BaseModel):
+    """A person's own model API for one agent; its key is kept apart, write-only."""
+
+    protocol: str
+    base_url: str
+    models: list[str] = Field(default_factory=list)
+
+
+class PersonalAgent(BaseModel):
+    """How one person runs one agent for the work they ask for."""
+
+    agent: str
+    use_own: bool = False
+    """Run what this person asks on their own account: their CLI sign-in, or their
+    model API when ``provider`` is set. Only on hosts that run agents in containers."""
+    provider: PersonalProvider | None = None
+    has_key: bool = False
+    """Whether a key for ``provider`` is stored (the key itself never leaves)."""
 
 
 class AgentInstall(BaseModel):

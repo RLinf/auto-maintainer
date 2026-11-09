@@ -2064,13 +2064,16 @@ def build_router() -> APIRouter:
         request: Request,
         days: int = Query(default=7, ge=1, le=365),
         fresh: bool = False,
+        mine: bool = False,
         user: User = Depends(current_user),
     ) -> dict[str, Any]:
         """Each agent installed and turned on here: its tokens in the last ``days``, and
         what its CLI says is left of its account's limits (``fresh`` asks the CLI
         again). Tokens count the runs in
         repositories the user may view; operators and maintainers of the service's
-        repository see every run, also those outside any repository."""
+        repository see every run, also those outside any repository. ``mine``
+        counts only the runs on the user's own agent accounts, and reads their own
+        accounts' limits."""
         service = service_of(request)
         since = service.clock.now() - timedelta(days=days)
         runs = await service.store.list_agent_runs(USAGE_RUNS, since=since)
@@ -2080,8 +2083,12 @@ def build_router() -> APIRouter:
         )
         visible: dict[str, bool] = {}
         rows: dict[str, dict[str, Any]] = {}
+        me = user.login.lower()
         for run in runs:
-            if not everything:
+            if mine:
+                if run.account != me:
+                    continue
+            elif not everything:
                 if run.repo is None:
                     continue
                 if run.repo not in visible:
@@ -2091,14 +2098,21 @@ def build_router() -> APIRouter:
             _add_usage(rows.setdefault(run.runtime, _usage_row(None)), run)
         known = getattr(service.a.agents, "runtimes", None) or {}
         names = sorted(n for n in set(known) | set(rows) if service.agent_ready(n))
-        quotas = await asyncio.gather(
-            *(service.agent_quota(n, fresh=fresh) for n in names)
-        )
+
+        async def quota(name: str) -> Any:
+            if not mine:
+                return await service.agent_quota(name, fresh=fresh)
+            if await service.signed_in(name, me) is not True:
+                return None
+            return await service.agent_quota(name, fresh=fresh, account=me)
+
+        quotas = await asyncio.gather(*(quota(n) for n in names))
         return {
             "days": days,
             "since": since.isoformat(),
             "complete": len(runs) < USAGE_RUNS,
-            "everything": everything,
+            "everything": everything and not mine,
+            "mine": mine,
             "agents": [
                 {
                     **rows.get(name, _usage_row(None)),

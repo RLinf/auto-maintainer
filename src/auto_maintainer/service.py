@@ -21,9 +21,11 @@ This module never imports an adapter. ``app.py`` builds real adapters and
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -32,7 +34,7 @@ from .actuator.executor import Actuator
 from .actuator.lab_sessions import LabSessions
 from .actuator.pipeline import ActionPipeline
 from .domain.actions import ActionKind, ActionStatus, MemoryChangePayload, make_action
-from .domain.agents import AgentInstall, AgentQuota
+from .domain.agents import AgentInstall, AgentLogin, AgentQuota
 from .domain.clock import Clock
 from .domain.events import Event, EventKind
 from .domain.memory import (
@@ -54,6 +56,7 @@ from .domain.ports import (
     LabHost,
     MemoryStore,
     Notifier,
+    PersonalAgents,
     Sandbox,
     SecretStore,
     ServiceUpdater,
@@ -108,6 +111,8 @@ log = logging.getLogger(__name__)
 
 INSTALL_LINES = 12
 """How many of an installer's last lines of output the Settings page shows."""
+SIGNED_IN_SECONDS = 60
+"""How long whether an agent CLI is signed in is shown before it is asked again."""
 QUOTA_SECONDS = 300
 """How long an agent's quota reading is shown before its CLI is asked again."""
 QUOTA_FRESH_SECONDS = 30
@@ -156,6 +161,8 @@ class Adapters:
         Callable[[str, UserToken], Awaitable[BranchPublisher | None]] | None
     ) = None
     """A branch publisher pushing as a person with their token, for fix PRs."""
+    people: PersonalAgents | None = None
+    """Each person's own agent accounts (``store/people.py``)."""
     installer: AgentInstaller | None = None
     """Installs agent CLIs on this host when maintainers of the service ask."""
     background: list[Any] = field(default_factory=list)
@@ -214,6 +221,9 @@ class Service:
         self.a = adapters
         self._quotas: dict[str, AgentQuota] = {}
         """Each agent's last quota reading (``agent_quota``)."""
+        self.logins: dict[str, Any] = {}
+        """Agent sign-ins started from the dashboard, by id (``agents/login.py``)."""
+        self._signed_in: dict[tuple[str, str | None], tuple[datetime, bool | None]] = {}
         self.installs: dict[str, AgentInstall] = {}
         """The latest install of each agent CLI asked for since the service started."""
         self._install_tasks: set[asyncio.Task[None]] = set()
@@ -785,23 +795,107 @@ class Service:
             )
         )
 
-    async def agent_quota(self, name: str, fresh: bool = False) -> AgentQuota | None:
-        """What agent ``name``'s CLI says is left of its account's limits; ``None``
-        when it cannot report them. A reading is kept for ``QUOTA_SECONDS``, or
-        ``QUOTA_FRESH_SECONDS`` when ``fresh``."""
-        runtimes = getattr(self.a.agents, "runtimes", None) or {}
-        read = getattr(runtimes.get(name), "quota", None)
+    def runtime(self, name: str, account: str | None = None) -> Any:
+        """Agent ``name``'s runtime, or a copy of it on ``account``'s own home folder
+        (a person's login); ``None`` when there is no such agent."""
+        runtime = (getattr(self.a.agents, "runtimes", None) or {}).get(name)
+        if runtime is None or account is None:
+            return runtime
+        if self.a.people is None or not hasattr(runtime, "account_home"):
+            return None
+        mine = copy.copy(runtime)
+        mine.account = account.lower()
+        mine.account_home = self.a.people.home(account)
+        mine.provider = None
+        return mine
+
+    def account_home(self, account: str | None) -> Path:
+        """The home folder agent CLIs sign in to for ``account``: the service user's
+        own for the service's account, else the person's own (``store/people.py``)."""
+        if account is None:
+            return Path.home()
+        if self.a.people is None:
+            raise ValueError("this host keeps no personal agent accounts")
+        return self.a.people.home(account)
+
+    def agents_isolated(self, name: str) -> bool:
+        """Whether agent ``name``'s runs each get a container of their own, which a
+        person's own account needs: on the host, every run could read every
+        person's sign-in."""
+        runtime = self.runtime(name)
+        return getattr(runtime, "container_sandbox", None) is not None
+
+    def start_login(self, name: str, account: str | None, by: str) -> AgentLogin:
+        """Start agent ``name``'s own sign-in for ``account`` (``None``: the service's,
+        which ``by`` may change only past ``service_gate``; else ``by``'s own),
+        replacing one still waiting for the same account."""
+        runtime = self.runtime(name)
+        if runtime is None or not getattr(runtime, "login_args", ()):
+            raise ValueError(f"{name} has no sign-in of its own")
+        for key, process in list(self.logins.items()):
+            st = process.state
+            if (st.agent, st.account) == (name, account) and st.state == "waiting":
+                task = asyncio.create_task(process.cancel())
+                self._install_tasks.add(task)
+                task.add_done_callback(self._install_tasks.discard)
+                del self.logins[key]
+        state = AgentLogin(
+            agent=name, account=account, by=by, started_at=self.clock.now()
+        )
+        self.logins[state.id] = runtime.start_login(self.account_home(account), state)
+        self._signed_in.pop((name, account), None)
+        return state
+
+    def forget_signed_in(self, name: str, account: str | None) -> None:
+        """Ask the CLI again next time, after a sign-in or sign-out."""
+        self._signed_in.pop((name, account), None)
+
+    async def signed_in(self, name: str, account: str | None = None) -> bool | None:
+        """Whether agent ``name``'s CLI is signed in for ``account``; ``None`` when it
+        cannot tell. Kept for ``SIGNED_IN_SECONDS``."""
+        kept = self._signed_in.get((name, account))
+        now = self.clock.now()
+        signed_since = any(
+            p.state.agent == name
+            and p.state.account == account
+            and p.state.state == "done"
+            and kept is not None
+            and p.state.started_at >= kept[0]
+            for p in self.logins.values()
+        )
+        if (
+            kept is not None
+            and not signed_since
+            and (now - kept[0]).total_seconds() < SIGNED_IN_SECONDS
+        ):
+            return kept[1]
+        runtime = self.runtime(name)
+        check = getattr(runtime, "signed_in", None)
+        if check is None or not self.agent_ready(name):
+            return None
+        found = await check(self.account_home(account))
+        self._signed_in[(name, account)] = (now, found)
+        return found
+
+    async def agent_quota(
+        self, name: str, fresh: bool = False, account: str | None = None
+    ) -> AgentQuota | None:
+        """What agent ``name``'s CLI says is left of ``account``'s limits (the
+        service's own by default); ``None`` when it cannot report them. A reading is
+        kept for ``QUOTA_SECONDS``, or ``QUOTA_FRESH_SECONDS`` when ``fresh``."""
+        read = getattr(self.runtime(name, account), "quota", None)
         if read is None or not self.agent_ready(name):
             return None
-        kept = self._quotas.get(name)
+        key = name if account is None else f"{name}@{account.lower()}"
+        kept = self._quotas.get(key)
         now = self.clock.now()
         age = (now - kept.read_at).total_seconds() if kept else None
         if age is not None and age < (QUOTA_FRESH_SECONDS if fresh else QUOTA_SECONDS):
             return kept
         found = await read()
         if found is not None:
-            self._quotas[name] = found.model_copy(update={"read_at": now})
-        return self._quotas.get(name)
+            self._quotas[key] = found.model_copy(update={"read_at": now})
+        return self._quotas.get(key)
 
     def agent_ready(self, name: str) -> bool:
         """Whether agent ``name`` is enabled and installed on this host; ``True`` for

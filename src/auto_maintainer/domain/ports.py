@@ -24,6 +24,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
@@ -37,6 +38,7 @@ from .agents import (
     AgentTask,
     Capabilities,
     InstalledAgent,
+    PersonalAgent,
     QuestionState,
     RuntimeHealth,
 )
@@ -572,6 +574,18 @@ class AgentInstaller(Protocol):
     async def install(
         self, name: str, on_line: Callable[[str], Awaitable[None]] | None = None
     ) -> InstalledAgent: ...
+
+
+class PersonalAgents(Protocol):
+    """Each person's own agent accounts on the host (``store/people.py``): the home
+    folder their CLIs sign in to, how they run each agent, and their own keys."""
+
+    def home(self, login: str) -> Path: ...
+    async def get(self, login: str) -> dict[str, PersonalAgent]: ...
+    async def put(self, login: str, setup: PersonalAgent) -> None: ...
+    async def key(self, login: str, agent: str) -> str | None: ...
+    async def set_key(self, login: str, agent: str, value: str | None) -> None: ...
+    async def sign_out(self, login: str, paths: tuple[str, ...]) -> None: ...
 
 
 class UserTokens(Protocol):

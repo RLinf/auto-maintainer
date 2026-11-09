@@ -41,6 +41,7 @@ prompt instead; the read-only sandbox can read them anyway.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 from ...domain.agents import (
@@ -95,6 +96,21 @@ class CodexRuntime(ExecRuntime):
     known_choices = AgentChoices(efforts=["minimal", "low", "medium", "high", "xhigh"])
 
     home_paths = (".codex",)
+    login_args = ("login", "--device-auth")
+    """Codex's device login (checked against 0.162.1): it prints a page and a
+    one-time code to enter there, and waits."""
+
+    async def signed_in(self, home: Path | None = None) -> bool | None:
+        """``codex login status``: ``Logged in using ...`` or ``Not logged in``."""
+        out = await self.cli_output(
+            "login", "status", home=home, check=False, stderr=True
+        )
+        if out is None:
+            return None
+        if "Not logged in" in out:
+            return False
+        return True if "Logged in" in out else None
+
     default_name = "codex"
     default_binary = "codex"
     default_env_allow = ("OPENAI_*", "CODEX_HOME", "AZURE_OPENAI_*")

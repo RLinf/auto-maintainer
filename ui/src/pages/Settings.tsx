@@ -16,6 +16,7 @@ import { Icon, type IconName } from "../icons";
 import { agentName } from "../agentPicker";
 import { useAgentsData } from "./Agents";
 import { SettingsChangeCard } from "../settingsChange";
+import { MyAgentsTab, ServiceSignIn } from "../agentAccounts";
 import { Popover, Skeleton, Tabs, useTab, useToast } from "../ui";
 
 const CONTEXT: AgentContext = { page: "settings", repo: null, number: null, label: "Settings" };
@@ -58,6 +59,7 @@ export default function SettingsPage() {
   const view = useSettings();
   const tabs = [
     { id: "agents", label: t("Agents"), count: view.data?.agents.filter((a) => a.enabled).length },
+    { id: "mine", label: t("My agents") },
     { id: "providers", label: t("Model providers"), count: view.data?.providers.length },
     { id: "routing", label: t("Task routing") },
     { id: "labs", label: t("Test machines"), count: view.data?.labs.length },
@@ -146,6 +148,7 @@ export default function SettingsPage() {
           <SandboxCard />
         </div>
       )}
+      {tab === "mine" && <MyAgentsTab />}
       {tab === "providers" && <ProvidersTab v={v} ask={ask} />}
       {tab === "routing" && <RoutingTab v={v} ask={ask} />}
       {tab === "labs" && <LabsTab v={v} ask={ask} />}
@@ -589,6 +592,7 @@ function AgentsTab({ v, ask }: { v: SettingsView; ask: (p: string, send?: boolea
                     <ModelControls agent={a} choices={choices} canChange={v.access.allowed} />
                   )}
                   {a.can_bypass && <AgentModeSwitch agent={a} canChange={v.access.allowed} />}
+                  {a.enabled && a.installed !== false && <ServiceSignIn name={a.name} canChange={v.access.allowed} />}
                   {v.installable[a.name] && (a.installed === false || v.installs[a.name]?.state === "running") && (
                     <InstallButton name={a.name} source={v.installable[a.name]} state={v.installs[a.name]} canInstall={v.access.allowed} />
                   )}

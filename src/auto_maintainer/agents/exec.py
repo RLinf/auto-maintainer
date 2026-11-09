@@ -59,6 +59,7 @@ from ..domain.agents import (
     AgentChoices,
     AgentEvent,
     AgentEventType,
+    AgentLogin,
     AgentQuestion,
     AgentQuota,
     AgentResult,
@@ -72,6 +73,7 @@ from ..domain.agents import (
 from ..domain.ports import AgentQuestions
 from ..domain.settings import ProviderBinding
 from .approver import POSTING_ANSWER, posting_request
+from .login import LoginProcess
 from .sandbox import build_env, scrub
 from .structured import NO_JSON, extract_json
 
@@ -492,6 +494,40 @@ class ExecRuntime:
     """The CLI's own login and settings, relative to the home folder, that its
     container mounts (nothing else of the home folder is there)."""
 
+    login_args: ClassVar[tuple[str, ...]] = ()
+    """The arguments that start the CLI's own sign-in on a host without a browser
+    (``agents/login.py``); empty for a CLI that has none and runs on a model API."""
+
+    account: str | None = None
+    """The person whose own agent account this runtime runs on; ``None`` for the
+    service's. Set on a copy made for that person's tasks (``AgentRouter``)."""
+    account_home: Path | None = None
+    """That person's home folder for the CLI: what the container mounts as
+    ``home_paths`` instead of the service's own."""
+
+    def start_login(self, home: Path, state: AgentLogin) -> LoginProcess:
+        """Start the CLI's sign-in for the account whose home folder is ``home``.
+
+        Raises:
+            RuntimeError: The CLI is missing or has no sign-in.
+        """
+        binary = resolve_binary(self.binary, self.search_dirs)
+        if binary is None or not self.login_args:
+            raise RuntimeError(f"{self.name} cannot sign in here")
+        home.mkdir(parents=True, exist_ok=True)
+        env = build_env(
+            AgentTask(kind="probe", prompt="", workdir=home), self.env_allow
+        )
+        env["HOME"] = str(home)
+        process = LoginProcess([binary, *self.login_args], env, state)
+        process.start(home)
+        return process
+
+    async def signed_in(self, home: Path | None = None) -> bool | None:
+        """Whether the CLI is signed in for the account whose home folder is ``home``
+        (the service's own by default); ``None`` when it cannot tell."""
+        return None
+
     async def resolve(self, task: AgentTask, question: AgentQuestion) -> AgentAnswer:
         """Answer a question the CLI is blocked on.
 
@@ -595,10 +631,20 @@ class ExecRuntime:
         shows; ``None`` for a CLI that cannot report them without running a task."""
         return None
 
-    async def cli_output(self, *args: str, timeout: float = 30) -> str | None:
+    async def cli_output(
+        self,
+        *args: str,
+        timeout: float = 30,
+        home: Path | None = None,
+        check: bool = True,
+        stderr: bool = False,
+    ) -> str | None:
         """Run the CLI on this host with ``args`` and the agent's own environment, in
         an empty folder, and return what it printed; ``None`` when it is missing or
-        fails. For quick questions that run no task, such as ``/usage``."""
+        fails (or, with ``check`` off, only when it is missing). ``home`` is the
+        account's home folder, this runtime's account's by default; ``stderr`` keeps
+        what the CLI writes there too. For quick questions that run no task, such
+        as ``/usage``."""
         binary = resolve_binary(self.binary, self.search_dirs)
         if binary is None:
             return None
@@ -607,6 +653,8 @@ class ExecRuntime:
                 AgentTask(kind="probe", prompt="", workdir=Path(folder)),
                 self.env_allow,
             )
+            if (home or self.account_home) is not None:
+                env["HOME"] = str(home or self.account_home)
             proc: asyncio.subprocess.Process | None = None
             try:
                 proc = await asyncio.create_subprocess_exec(
@@ -615,7 +663,9 @@ class ExecRuntime:
                     cwd=folder,
                     stdin=asyncio.subprocess.DEVNULL,
                     stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.STDOUT
+                    if stderr
+                    else asyncio.subprocess.DEVNULL,
                     env=env,
                     start_new_session=True,
                 )
@@ -625,7 +675,7 @@ class ExecRuntime:
                     _kill_group(proc.pid, signal.SIGKILL)
                 log.warning("%s %s failed: %r", self.name, " ".join(args), exc)
                 return None
-        if proc.returncode != 0:
+        if check and proc.returncode != 0:
             return None
         return out.decode("utf-8", "replace")
 
@@ -756,6 +806,7 @@ class ExecRuntime:
                 rw=task.extra_dirs,
                 ro=task.skill_dirs,
                 home_paths=self.home_paths,
+                home_source=self.account_home,
             )
             invocation = Invocation(argv=prepared.argv, stdin=invocation.stdin)
             env = prepared.env
@@ -1064,6 +1115,7 @@ class ExecRuntime:
                 )
         result = AgentResult(
             runtime=self.name,
+            account=self.account,
             ok=ok,
             text=text,
             structured=structured,

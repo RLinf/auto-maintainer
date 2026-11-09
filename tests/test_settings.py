@@ -526,3 +526,77 @@ async def test_only_maintainers_of_the_service_install_agents(demo) -> None:
     )
     audit = await h.store.list_audit(limit=5)
     assert any("installed codex 9.9.9" in a.summary for a in audit)
+
+
+async def test_people_run_agents_on_their_own_accounts_and_nobody_elses(
+    demo, tmp_path: Path
+) -> None:
+    from auto_maintainer.agents.adapters.claude_code import ClaudeCodeRuntime
+    from auto_maintainer.store.people import PeopleAgents
+
+    h, app = demo
+    cli = tmp_path / "claude"
+    cli.write_text(
+        "#!/bin/sh\necho 'visit: https://sign.example/a'\n"
+        "printf 'Paste code here > '\nread code\n[ \"$code\" = ok ]\n"
+    )
+    cli.chmod(0o755)
+    runtime = ClaudeCodeRuntime(binary=str(cli))
+    h.runner.runtimes = {"claude-code": runtime}
+    h.service.a.people = PeopleAgents(tmp_path / "people")
+    own = {
+        "use_own": True,
+        "provider": {
+            "protocol": "anthropic",
+            "base_url": "https://gw.example",
+            "models": ["m1"],
+        },
+    }
+    async with _client(app, "walt") as walt:
+        [row] = (await walt.get("/api/me/agents")).json()["agents"]
+        assert (row["name"], row["can_sign_in"], row["isolated"]) == (
+            "claude-code",
+            True,
+            False,
+        )
+        refused = await walt.put("/api/me/agents/claude-code", json=own)
+        assert refused.status_code == 409 and "on the host" in refused.json()["detail"]
+        runtime.container_sandbox = object()
+        wrong = {**own, "provider": {**own["provider"], "protocol": "openai"}}
+        assert (
+            await walt.put("/api/me/agents/claude-code", json=wrong)
+        ).status_code == 422
+        assert (
+            await walt.put("/api/me/agents/claude-code", json=own)
+        ).status_code == 200
+        keyed = await walt.put("/api/me/agents/claude-code/key", json={"value": "sk-w"})
+        assert keyed.json()["setup"]["has_key"] and "sk-w" not in keyed.text
+        assert (
+            await walt.post("/api/settings/agents/claude-code/sign-in")
+        ).status_code == 403
+        mine = (await walt.post("/api/me/agents/claude-code/sign-in")).json()
+        assert mine["account"] == "walt"
+    async with _client(app, "maria") as maria:
+        assert (await maria.get(f"/api/agent-logins/{mine['id']}")).status_code == 404
+        assert (
+            await maria.post(f"/api/agent-logins/{mine['id']}/code", json={"code": "x"})
+        ).status_code == 404
+        [row] = (await maria.get("/api/me/agents")).json()["agents"]
+        assert row["setup"]["use_own"] is False, "walt's setup is walt's alone"
+        service_login = await maria.post("/api/settings/agents/claude-code/sign-in")
+        assert service_login.status_code == 200
+        assert service_login.json()["account"] is None
+        await maria.delete(f"/api/agent-logins/{service_login.json()['id']}")
+    async with _client(app, "walt") as walt:
+        for _ in range(100):
+            state = (await walt.get(f"/api/agent-logins/{mine['id']}")).json()
+            if state["needs_code"]:
+                break
+            await asyncio.sleep(0.05)
+        assert state["url"] == "https://sign.example/a"
+        await walt.post(f"/api/agent-logins/{mine['id']}/code", json={"code": "ok"})
+        await h.service.logins[mine["id"]].wait()
+        assert (await walt.get(f"/api/agent-logins/{mine['id']}")).json()[
+            "state"
+        ] == "done"
+    assert await h.service.a.people.key("walt", "claude-code") == "sk-w"

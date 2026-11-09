@@ -29,6 +29,7 @@ model names differ between CLIs; ``route.effort`` (unless the agent has its own
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
@@ -47,10 +48,15 @@ from ..domain.agents import (
 )
 from ..domain.clock import Clock, SystemClock
 from ..domain.ids import new_id
-from ..domain.ports import AgentQuestions, AgentRuntime, ProgressObserver
+from ..domain.ports import (
+    AgentQuestions,
+    AgentRuntime,
+    PersonalAgents,
+    ProgressObserver,
+)
 from ..domain.profile import Route
 from ..domain.records import AgentRunRecord
-from ..domain.settings import Budget
+from ..domain.settings import Budget, ProviderBinding
 from .exec import Inbox, Told
 from .sandbox import scrub
 from .structured import extract_json, repair_prompt, schema_instructions, validate
@@ -134,6 +140,9 @@ class AgentRouter:
         disabled: Iterable[str] = (),
     ) -> None:
         self.runtimes = dict(runtimes)
+        self.people: PersonalAgents | None = None
+        """Each person's own agent accounts; a task someone asked for runs on theirs
+        when they turned it on for that agent (``_account``)."""
         self.clock = clock or SystemClock()
         self.budgets = dict(budgets or {})
         self.usage_today = usage_today
@@ -426,7 +435,48 @@ class AgentRouter:
             }
         ), None
 
+    async def _account(self, runtime: AgentRuntime, task: AgentTask) -> AgentRuntime:
+        """``runtime``, or a copy of it on the account of the person who asked for
+        ``task``, when they turned their own account on for this agent. Only where
+        each run gets a container of its own, which mounts only that person's
+        sign-in: on the host, every run could read every person's."""
+        login = task.requested_by
+        if (
+            self.people is None
+            or not login
+            or getattr(runtime, "container_sandbox", None) is None
+            or not hasattr(runtime, "account_home")
+        ):
+            return runtime
+        try:
+            setup = (await self.people.get(login)).get(runtime.name)
+        except ValueError:
+            return runtime
+        if setup is None or not setup.use_own:
+            return runtime
+        mine = copy.copy(runtime)
+        mine.account = login.lower()  # type: ignore[attr-defined]
+        mine.account_home = self.people.home(login)  # type: ignore[attr-defined]
+        if setup.provider is not None:
+            p = setup.provider
+            mine.provider = ProviderBinding(  # type: ignore[attr-defined]
+                id=f"own-{login.lower()}",
+                name=f"{login}'s own",
+                protocol=p.protocol,
+                base_url=p.base_url,
+                models=tuple(p.models),
+                api_key=await self.people.key(login, runtime.name),
+            )
+            mine.model = p.models[0] if p.models else None  # type: ignore[attr-defined]
+        else:
+            if getattr(runtime, "provider", None) is not None:
+                # The service's model belongs to its provider, not to this sign-in.
+                mine.model = None  # type: ignore[attr-defined]
+            mine.provider = None  # type: ignore[attr-defined]
+        return mine
+
     async def _attempt(self, runtime: AgentRuntime, task: AgentTask) -> AgentResult:
+        runtime = await self._account(runtime, task)
         result: AgentResult | None = None
         await self._report(task, runtime.name, AgentEvent(type=AgentEventType.STARTED))
         try:
@@ -475,6 +525,7 @@ class AgentRouter:
                     transcript_path=result.transcript_path,
                     duration_seconds=result.duration_seconds,
                     requested_by=task.requested_by,
+                    account=result.account,
                     created_at=self.clock.now(),
                 )
             )

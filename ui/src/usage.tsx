@@ -156,19 +156,25 @@ export function UsageTab({ repo }: { repo: string }) {
 
 /** Each agent's tokens in a period, and what its CLI's own /usage says is left of its
  * account's limits. */
-export function AgentsUsageSection() {
+export function AgentsUsageSection({ mine = false }: { mine?: boolean }) {
   const t = useT();
   const [days, setDays] = useState(7);
   const [fresh, setFresh] = useState(false);
   const q = useQuery({
-    queryKey: ["agents-usage", days, fresh],
-    queryFn: () => api.get<AgentsUsage>(`/api/agents/usage?days=${days}${fresh ? "&fresh=true" : ""}`),
+    queryKey: ["agents-usage", days, fresh, mine],
+    queryFn: () => api.get<AgentsUsage>(`/api/agents/usage?days=${days}${fresh ? "&fresh=true" : ""}${mine ? "&mine=true" : ""}`),
   });
   const u = q.data;
   return (
     <Section
-      title={t("Usage and limits")}
-      hint={u?.everything ? t("Tokens of every agent run, and what each CLI says is left.") : t("Tokens of runs in the repositories you see, and what each CLI says is left.")}
+      title={mine ? t("My usage and limits") : t("Usage and limits")}
+      hint={
+        mine
+          ? t("Tokens of the runs on your own accounts, and what each CLI says is left of them.")
+          : u?.everything
+            ? t("Tokens of every agent run, and what each CLI says is left.")
+            : t("Tokens of runs in the repositories you see, and what each CLI says is left.")
+      }
       aside={
         <span className="row" style={{ gap: 6 }}>
           <select value={days} onChange={(e) => setDays(Number(e.target.value))} aria-label={t("Period")}>

@@ -612,6 +612,8 @@ export interface AgentsUsage {
   complete: boolean;
   /** Whether the tokens count every run, or only those in repositories the viewer sees. */
   everything: boolean;
+  /** Only the runs on the viewer's own agent accounts. */
+  mine: boolean;
   agents: AgentUsageRow[];
 }
 
@@ -759,6 +761,39 @@ export interface SettingsRoute {
   from_settings: boolean;
   /** The agent the task runs on now: the first in its order that is installed. */
   runs_on: string | null;
+}
+
+export interface AgentLogin {
+  id: string;
+  agent: string;
+  /** null: the service's own account. */
+  account: string | null;
+  by: string;
+  state: "starting" | "waiting" | "done" | "failed" | "cancelled";
+  url: string;
+  /** A one-time code to enter on the sign-in page. */
+  code: string;
+  /** The CLI waits for the code the sign-in page shows, pasted back. */
+  needs_code: boolean;
+  message: string;
+  started_at: string;
+}
+
+export interface PersonalProvider {
+  protocol: string;
+  base_url: string;
+  models: string[];
+}
+
+export interface MyAgent {
+  name: string;
+  can_sign_in: boolean;
+  signed_in: boolean | null;
+  protocols: string[];
+  /** Whether each run gets a container of its own here, which a personal account needs. */
+  isolated: boolean;
+  setup: { agent: string; use_own: boolean; provider: PersonalProvider | null; has_key: boolean };
+  login: AgentLogin | null;
 }
 
 export interface AgentInstall {

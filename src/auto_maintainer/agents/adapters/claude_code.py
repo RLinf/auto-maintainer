@@ -44,6 +44,7 @@ import os
 import re
 from collections.abc import Iterable
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from ...domain.agents import (
@@ -113,6 +114,18 @@ class ClaudeCodeRuntime(ExecRuntime):
     )
 
     home_paths = (".claude", ".claude.json")
+    login_args = ("auth", "login")
+    """Claude Code's sign-in (checked against 2.1.319): without a browser it prints
+    a page whose result is a code, and reads that code from standard input."""
+
+    async def signed_in(self, home: Path | None = None) -> bool | None:
+        """``claude auth status``: JSON with ``loggedIn``."""
+        out = await self.cli_output("auth", "status", home=home, check=False)
+        try:
+            return bool(json.loads(out or "")["loggedIn"])
+        except (ValueError, KeyError, TypeError):
+            return None
+
     default_name = "claude-code"
     default_binary = "claude"
     default_env_allow = (

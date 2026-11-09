@@ -124,6 +124,8 @@ class AgentRunRecord(BaseModel):
     transcript_path: str | None = None
     duration_seconds: float = 0.0
     requested_by: str | None = None
+    account: str | None = None
+    """The person whose own agent account ran it; ``None`` for the service's."""
     """The person whose request the run worked for; None for the service's own work."""
     created_at: datetime = Field(default_factory=utc_now)
 
