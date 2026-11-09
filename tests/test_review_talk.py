@@ -96,15 +96,25 @@ async def test_a_reviewer_talks_the_agent_out_of_a_finding(demo) -> None:
         assert [m["author"] for m in shared["messages"] if m["role"] == "user"] == [
             "maria"
         ]
+        refused = await walt.post(
+            f"/api/jobs/{job['id']}/talk",
+            json={"text": "test_one_item covers it; please drop F1."},
+        )
+        assert refused.status_code == 403, (
+            "a turn can revise the draft, so only its asker and the maintainers talk"
+        )
+
+    # maria asked for the review (and maintains acme/widget in the harness).
+    async with _as(app, "maria") as maria:
         dropped = (
-            await walt.post(
+            await maria.post(
                 f"/api/jobs/{job['id']}/talk",
                 json={"text": "test_one_item covers it; please drop F1."},
             )
         ).json()
         assert dropped["proposals"] == [draft]
         steps = (
-            await walt.get(f"/api/jobs/{job['id']}/talk/steps?run={dropped['run_id']}")
+            await maria.get(f"/api/jobs/{job['id']}/talk/steps?run={dropped['run_id']}")
         ).json()
         assert [s["kind"] for s in steps["steps"]][-1] == "done"
     record = await h.store.get_action(draft)
@@ -118,7 +128,7 @@ async def test_a_reviewer_talks_the_agent_out_of_a_finding(demo) -> None:
     proposal = await h.store.proposal_for_action(draft)
     assert proposal is not None and proposal.edited and proposal.state == "pending"
     edits = [s for s in await h.store.list_signals() if s.kind == "draft_edited"]
-    assert edits and edits[-1].source == "walt", "the edit is the reviewer's"
+    assert edits and edits[-1].source == "maria", "the edit is the reviewer's"
     assert "maria: Why is F1 a finding?" in h.runner.tasks[-1].prompt
 
     async with _as(app, "eve") as eve:

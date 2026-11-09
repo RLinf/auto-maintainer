@@ -80,6 +80,8 @@ class FakeForge:
 
     def __init__(self, login: str = "auto-maintainer[bot]") -> None:
         self.login = login
+        self.acting_as: str | None = None
+        """The person an ``ActingAs`` writer is writing as, while it does."""
         self.repos: dict[str, RepoInfo] = {}
         self.prs: dict[tuple[str, int], PrSnapshot] = {}
         self.issues: dict[tuple[str, int], IssueSnapshot] = {}
@@ -320,6 +322,37 @@ class FakeForge:
                 reviews=[*pr.reviews, review],
                 threads=[*pr.threads, *threads],
             )
+        return CommentRef(
+            id=rid,
+            url=f"https://example.test/{repo}/pull/{number}#pullrequestreview-{rid}",
+        )
+
+    async def approve_pr(
+        self, repo: str, number: int, commit_sha: str, body: PublicText
+    ) -> CommentRef:
+        if self.acting_as is None:
+            raise PermissionError("the service's own account never approves a PR")
+        rid = next(self._ids)
+        text = self._text(body)
+        self._record(
+            "approve_pr",
+            repo=repo,
+            number=number,
+            commit_sha=commit_sha,
+            body=text,
+            id=rid,
+        )
+        pr = self.prs.get((repo, number))
+        if pr:
+            review = Review(
+                id=rid,
+                author=self.login,
+                state=ReviewEventState.APPROVED,
+                body=text,
+                submitted_at=utc_now(),
+                commit_sha=commit_sha,
+            )
+            self._update_pr(repo, number, reviews=[*pr.reviews, review])
         return CommentRef(
             id=rid,
             url=f"https://example.test/{repo}/pull/{number}#pullrequestreview-{rid}",
@@ -783,10 +816,12 @@ class ActingAs:
 
         async def call(*args: Any, **kwargs: Any) -> Any:
             saved, self._forge.login = self._forge.login, self._login
+            self._forge.acting_as = self._login
             try:
                 return await attr(*args, **kwargs)
             finally:
                 self._forge.login = saved
+                self._forge.acting_as = None
 
         return call
 

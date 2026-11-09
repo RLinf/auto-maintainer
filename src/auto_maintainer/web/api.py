@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from collections import deque
 from collections.abc import Awaitable
 from datetime import timedelta
@@ -39,19 +40,23 @@ from ..domain.actions import (
     Action,
     ActionKind,
     ActionStatus,
+    ApprovePrPayload,
     Autonomy,
     CodeMergePayload,
     LabelPayload,
     MemoryChangePayload,
+    Proposal,
     ProposalState,
+    Provenance,
+    RequestReviewersPayload,
     RerunPayload,
     ServiceDeployPayload,
     UpdateBranchPayload,
     make_action,
 )
-from ..domain.agents import AgentAnswer, AgentQuestion, QuestionState
+from ..domain.agents import AgentAnswer, AgentQuestion, QuestionState, SkillInfo
 from ..domain.events import Event, EventKind
-from ..domain.ids import check_repo, new_id, same_commit
+from ..domain.ids import check_login, check_repo, new_id, same_commit
 from ..domain.memory import (
     MemoryChange,
     MemoryChangeState,
@@ -64,8 +69,15 @@ from ..domain.memory import (
 )
 from ..domain.merge_gate import MergeArm, evaluate_merge_gate
 from ..domain.permissions import Permission
-from ..domain.profile import Conditions, RepoProfile
-from ..domain.records import ActionRecord, AuditEntry, JobStatus
+from ..domain.profile import Conditions, RepoProfile, Review
+from ..domain.records import (
+    ActionRecord,
+    AgentRunRecord,
+    AuditEntry,
+    Job,
+    JobStatus,
+    PrAssignee,
+)
 from ..domain.review import (
     ReviewQuality,
     classify_review_state,
@@ -75,7 +87,7 @@ from ..domain.review import (
 from ..domain.run_ci import plan_run_ci
 from ..domain.scoring import Evaluation, recompute
 from ..domain.secrets import redact_secrets
-from ..domain.snapshot import Mergeable, PrState
+from ..domain.snapshot import Mergeable, PrState, ReviewEventState
 from ..playbooks.evaluate import haystack, rubric_of
 from ..playbooks.hygiene import hygiene_key
 from ..playbooks.prompts import DEFAULT_QUALITY_GUIDE, DEFAULT_WRITING_GUIDE
@@ -87,6 +99,12 @@ from ..playbooks.quality import (
 )
 from ..profiles.layers import ProfileError, parse_yaml
 from ..profiles.lock import parse_lock, profile_diff
+from ..profiles.skills import (
+    check_skill_choice,
+    repository_skills,
+    review_skill_in_use,
+    service_skills,
+)
 from ..service import Service
 from .auth import User, current_user
 
@@ -178,6 +196,57 @@ async def _merge_memory(merge: Awaitable[T]) -> T:
         raise HTTPException(502, _memory_write_failed(str(e))) from e
 
 
+SKILLS_TTL = 600.0
+"""How long a repository's skills, read from its default branch, are kept (seconds)."""
+_SKILLS: dict[str, tuple[float, list[SkillInfo]]] = {}
+
+
+async def repo_skills_of(
+    service: Service, repo: str, *, refresh: bool = False
+) -> list[SkillInfo]:
+    """The repository's own skills on its default branch, kept for ``SKILLS_TTL``."""
+    now = time.monotonic()
+    kept = _SKILLS.get(repo)
+    if kept and not refresh and now - kept[0] < SKILLS_TTL:
+        return kept[1]
+    try:
+        found = await repository_skills(service.a.forge, repo)
+    except Exception:
+        log.exception("reading %s's skills failed", repo)
+        return kept[1] if kept else []
+    _SKILLS[repo] = (now, found)
+    return found
+
+
+async def review_setup(
+    service: Service, repo: str, profile: RepoProfile, *, refresh: bool = False
+) -> dict[str, Any]:
+    """How the repository's PRs are reviewed: the skill the profile names, what a
+    review follows under it, the skills to choose from, the maintainers' own
+    instructions, and whether nobody chose yet while the repository has no review
+    skill of its own (``needs_choice``)."""
+    own = await repo_skills_of(service, repo, refresh=refresh)
+    ours = service_skills(Path(service.settings.skills_dir))
+    kind, skill = review_skill_in_use(profile, own)
+    default = Review.model_fields["skill"].default
+    named = profile.review.skill.split(":", 1)[1]
+    return {
+        "skill": profile.review.skill,
+        "default_skill": default,
+        "instructions": profile.review.instructions,
+        "in_use": {
+            "kind": kind,
+            "name": skill.name if skill else named,
+            "path": skill.path if skill else "",
+        },
+        "repo_skills": [{**s.model_dump(), "reviews": s.reviews} for s in own],
+        "service_skills": [s.model_dump() for s in ours],
+        "needs_choice": profile.review.skill == default
+        and kind == "service"
+        and not (profile.review.instructions or "").strip(),
+    }
+
+
 MAX_DIFF = 2_000_000
 _DIFFS: dict[tuple[str, int, str], str] = {}
 """Recent PR diffs by (repo, number, head SHA); a head never changes its diff."""
@@ -210,6 +279,59 @@ async def _run_now(
             except ValueError as e:
                 raise HTTPException(409, str(e)) from e
     return await service.store.get_action(record.action.id) or record
+
+
+USAGE_RUNS = 20_000
+"""The most runs a usage summary reads; the answer says when it hit this."""
+
+
+def _job_requester(job: Job) -> str | None:
+    """Who asked for a job: ``by`` in the payload of the event that started it."""
+    first = job.events[0] if job.events else {}
+    payload = (first.get("payload") if isinstance(first, dict) else None) or {}
+    by = payload.get("by")
+    return str(by) if by else None
+
+
+def _usage_row(login: str | None) -> dict[str, Any]:
+    return {
+        "login": login,
+        "runs": 0,
+        "failed": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cost_usd": None,
+        "seconds": 0.0,
+        "last_at": None,
+        "by_kind": {},
+        "by_runtime": {},
+    }
+
+
+def _add_usage(row: dict[str, Any], run: AgentRunRecord) -> None:
+    """Count ``run`` into a usage row; a cost adds up only from runs that report one."""
+    row["runs"] += 1
+    row["failed"] += 0 if run.ok else 1
+    row["input_tokens"] += run.input_tokens
+    row["output_tokens"] += run.output_tokens
+    row["seconds"] += run.duration_seconds
+    if run.cost_usd is not None:
+        row["cost_usd"] = (row["cost_usd"] or 0.0) + run.cost_usd
+    at = run.created_at.isoformat()
+    if row["last_at"] is None or at > row["last_at"]:
+        row["last_at"] = at
+    for key, value in (("by_kind", run.task_kind), ("by_runtime", run.runtime)):
+        part = row[key].setdefault(value, {"runs": 0, "tokens": 0})
+        part["runs"] += 1
+        part["tokens"] += run.input_tokens + run.output_tokens
+
+
+def assignee_row(a: PrAssignee) -> dict[str, Any]:
+    return {"login": a.login, "kind": a.kind, "by": a.by, "at": a.at.isoformat()}
+
+
+async def _assignees(service: Service, repo: str, number: int) -> list[dict[str, Any]]:
+    return [assignee_row(a) for a in await service.store.list_assignees(repo, number)]
 
 
 async def _merge_queue(service: Service, repo: str) -> dict[str, Any]:
@@ -259,16 +381,31 @@ async def permission(service: Service, user: User, repo: str) -> Permission:
     return perm
 
 
+async def may_view(service: Service, user: User, repo: str) -> bool:
+    """Whether ``user`` may use the dashboard for ``repo`` (design 2.3): write access
+    on GitHub, or a place in its People record with access to it."""
+    perm = await permission(service, user, repo)
+    if perm.at_least(Permission.WRITE):
+        return True
+    return perm.at_least(Permission.READ) and (
+        user.login.lower() in await service.governance.members_of(repo)
+    )
+
+
 async def require_view(service: Service, user: User, repo: str) -> None:
     check_repo(repo)
-    if not (await permission(service, user, repo)).at_least(Permission.WRITE):
-        raise HTTPException(403, f"you need write access to {repo} to see it here")
+    if not await may_view(service, user, repo):
+        raise HTTPException(
+            403,
+            f"you need write access to {repo}, or a place in its People record, "
+            "to see it here",
+        )
 
 
 async def visible_repos(service: Service, user: User) -> list[str]:
     out = []
     for record in await service.store.list_repos():
-        if (await permission(service, user, record.repo)).at_least(Permission.WRITE):
+        if await may_view(service, user, record.repo):
             out.append(record.repo)
     return out
 
@@ -322,6 +459,18 @@ class PauseBody(BaseModel):
     reason: str = ""
 
 
+class ApprovePrBody(BaseModel):
+    body: str = Field(default="", max_length=20_000)
+    head: str | None = None
+    """The head the person looked at; a newer one refuses the approval."""
+
+
+class AssignBody(BaseModel):
+    logins: list[str] = Field(min_length=1, max_length=10)
+    request_review: bool = True
+    """Also request their review on GitHub, under the repository's rule."""
+
+
 class AnswerBody(BaseModel):
     allow: bool = True
     option_id: str | None = None
@@ -329,11 +478,63 @@ class AnswerBody(BaseModel):
     message: str = Field(default="", max_length=4000)
 
 
+async def is_maintainer(service: Service, user: User, repo: str) -> bool:
+    """Whether ``user`` maintains ``repo`` (``ConfigGate``: its People record's
+    maintainers, else its GitHub admins), checked live."""
+    profile = await service.profiles.active(repo)
+    decision = await service.gate.check(repo, user.login, profile, person=True)
+    return decision.allowed
+
+
+def proposal_requester(proposal: Proposal, record: ActionRecord | None) -> str | None:
+    """Who asked for a proposal's action: the reviewer a draft is for, or the person
+    whose request on the dashboard or in chat produced it; None for the service's
+    own work."""
+    if proposal.requested_by:
+        return proposal.requested_by
+    return record.action.provenance.requested_by if record else None
+
+
+async def may_decide(
+    service: Service,
+    user: User,
+    proposal: Proposal,
+    record: ActionRecord | None,
+    *,
+    maintainer: bool | None = None,
+) -> bool:
+    """Whether ``user`` approves, edits, or rejects ``proposal`` (design 2.3): its
+    repository's maintainers decide every proposal, and a reviewer decides the ones
+    they asked for. ``maintainer`` passes a status already checked."""
+    requester = proposal_requester(proposal, record)
+    if requester and requester.lower() == user.login.lower():
+        return True
+    if maintainer is None:
+        maintainer = await is_maintainer(service, user, proposal.repo)
+    return maintainer
+
+
+async def require_decide(service: Service, user: User, proposal: Proposal) -> None:
+    await require_view(service, user, proposal.repo)
+    record = await service.store.get_action(proposal.action_id)
+    if not await may_decide(service, user, proposal, record):
+        raise HTTPException(
+            403,
+            f"a maintainer of {proposal.repo} decides this; you did not ask for it",
+        )
+
+
 async def may_answer(service: Service, user: User, question: AgentQuestion) -> bool:
-    """Maintainers answer for their repositories; operators for everything else."""
+    """Who answers an agent's question: the person who asked for its work, if they
+    may see the repository, or one of its maintainers; operators answer for work
+    outside a repository."""
     if question.repo is None:
         return user.login in service.settings.operators
-    return (await permission(service, user, question.repo)).at_least(Permission.WRITE)
+    if not await may_view(service, user, question.repo):
+        return False
+    if question.asked_for and question.asked_for.lower() == user.login.lower():
+        return True
+    return await is_maintainer(service, user, question.repo)
 
 
 class DeployBody(BaseModel):
@@ -378,6 +579,10 @@ class ReviewGuidesBody(BaseModel):
     quality_guide: str | None = Field(default=None, max_length=8000)
     """Empty, or the service's default, restores the default."""
     quick_quality: bool = True
+    skill: str | None = Field(default=None, max_length=300)
+    """The review skill (``review.skill``); None leaves it as it is."""
+    instructions: str | None = Field(default=None, max_length=8000)
+    """The maintainers' review instructions; None leaves them, empty removes them."""
 
 
 def cron_every(hours: int) -> str:
@@ -761,11 +966,17 @@ def build_router() -> APIRouter:
 
     @r.get("/repos/{owner}/{name}/review-guides")
     async def review_guides(
-        request: Request, owner: str, name: str, user: User = Depends(current_user)
+        request: Request,
+        owner: str,
+        name: str,
+        refresh: bool = False,
+        user: User = Depends(current_user),
     ) -> dict[str, Any]:
-        """How the repository's reviews are written and how their agent judges a PR's
-        quality: each guide as the repository sets it (``None`` for the default),
-        and the defaults."""
+        """How the repository's PRs are reviewed (``review_setup``: the skill and the
+        maintainers' instructions), how reviews are written, and how their agent
+        judges a PR's quality: each guide as the repository sets it (``None`` for
+        the default), and the defaults. ``refresh`` reads the repository's skills
+        from GitHub again."""
         service = service_of(request)
         repo = _repo(owner, name)
         await require_view(service, user, repo)
@@ -775,6 +986,7 @@ def build_router() -> APIRouter:
         gate = await service.gate.check(repo, user.login, profile, person=True)
         return {
             "repo": repo,
+            **await review_setup(service, repo, profile, refresh=refresh),
             "writing_guide": profile.review.writing_guide,
             "quality_guide": profile.review.quality_guide,
             "quick_quality": profile.review.quick_quality,
@@ -806,6 +1018,25 @@ def build_router() -> APIRouter:
             await service.a.memory.read_text(profile_path(repo)) or "", "settings"
         )
         review = dict(layer.get("review") or {})
+        if body.skill is not None:
+            choice = body.skill.strip()
+            problem = check_skill_choice(
+                choice,
+                await repo_skills_of(service, repo, refresh=True),
+                service_skills(Path(service.settings.skills_dir)),
+            )
+            if problem:
+                raise HTTPException(422, problem)
+            if choice == Review.model_fields["skill"].default:
+                review.pop("skill", None)
+            else:
+                review["skill"] = choice
+        if body.instructions is not None:
+            told = body.instructions.strip()
+            if told:
+                review["instructions"] = told + "\n"
+            else:
+                review.pop("instructions", None)
         for key, text, default in (
             ("writing_guide", body.writing_guide, DEFAULT_WRITING_GUIDE),
             ("quality_guide", body.quality_guide, DEFAULT_QUALITY_GUIDE),
@@ -828,7 +1059,7 @@ def build_router() -> APIRouter:
                 repo,
                 layer,
                 user.login,
-                "review: writing and quality guides, quick scores",
+                "review: how PRs are reviewed, written, and scored",
             )
         except ProfileError as e:
             raise HTTPException(422, str(e)) from e
@@ -975,7 +1206,10 @@ def build_router() -> APIRouter:
         repos_ = [repo] if repo else await visible_repos(service, user)
         if repo:
             await require_view(service, user, repo)
-        claims = await service.store.get_claims()
+        on_pr: dict[tuple[str, int], list[PrAssignee]] = {}
+        for a in await service.store.list_assignees(repo):
+            on_pr.setdefault((a.repo, a.number), []).append(a)
+        me = user.login.lower()
         rows = []
         for name in repos_:
             profile = await service.profiles.active(name)
@@ -994,15 +1228,15 @@ def build_router() -> APIRouter:
                     own_actions=own,
                 )
                 ev = await service.store.get_evaluation(name, pr.number)
-                claim = claims.get(f"{name}#{pr.number}")
+                assignees = on_pr.get((name, pr.number), [])
                 if tier and (ev is None or ev.tier != tier):
                     continue
                 if state and cls.state != state:
                     continue
                 if (
                     mine
-                    and claim != user.login
-                    and user.login not in pr.requested_reviewers
+                    and all(a.login.lower() != me for a in assignees)
+                    and me not in {r.lower() for r in pr.requested_reviewers}
                 ):
                     continue
                 rows.append(
@@ -1018,7 +1252,7 @@ def build_router() -> APIRouter:
                         "updated_at": pr.updated_at,
                         "review_state": cls.state,
                         "reviewed_sha": (cls.reviewed_sha or "")[:7],
-                        "claimed_by": claim,
+                        "assignees": [assignee_row(a) for a in assignees],
                         "tier": ev.tier if ev else None,
                         "total": ev.total if ev else None,
                         "summary": ev.summary if ev else "",
@@ -1232,6 +1466,7 @@ def build_router() -> APIRouter:
         )
         return {
             "pr": pr.model_dump(mode="json"),
+            "assignees": await _assignees(service, repo, number),
             "review_state": cls.model_dump(mode="json"),
             "evaluation": ev.model_dump(mode="json") if ev else None,
             "quality": quality.model_dump(mode="json") if quality else None,
@@ -1263,6 +1498,74 @@ def build_router() -> APIRouter:
             "run_ci": plan_run_ci(
                 pr, profile.label_for("ci_gate") if profile else None
             ).model_dump(mode="json"),
+        }
+
+    @r.post("/prs/{owner}/{name}/{number}/approve")
+    async def approve_pr(
+        request: Request,
+        owner: str,
+        name: str,
+        number: int,
+        body: ApprovePrBody,
+        user: User = Depends(current_user),
+    ) -> dict[str, Any]:
+        """Approve the PR on GitHub as the person who pressed the button, with their
+        own sign-in; the press is the approval, under the repository's
+        ``pr.approve`` rule. The service's account never approves (hard limit), and
+        whether the approval counts is GitHub's rule for that person."""
+        service = service_of(request)
+        repo = _repo(owner, name)
+        await require_view(service, user, repo)
+        if not await service.can_post_as(user.login):
+            raise HTTPException(
+                403, "sign in with GitHub, so the approval comes from you"
+            )
+        pr = await service.a.forge.get_pr(repo, number)
+        if pr is None or pr.state != PrState.OPEN:
+            raise HTTPException(409, f"{repo}#{number} is not open")
+        if pr.author.lower() == user.login.lower():
+            raise HTTPException(409, "GitHub does not let you approve your own PR")
+        if body.head and not same_commit(pr.head_sha, body.head):
+            raise HTTPException(
+                409,
+                f"the PR moved to {pr.head_sha[:7]} since you looked; read the new "
+                "commits, then approve",
+            )
+        # A comment after an approval leaves the approval standing, as on GitHub.
+        mine = [
+            r_
+            for r_ in pr.reviews
+            if r_.author.lower() == user.login.lower()
+            and r_.state != ReviewEventState.COMMENTED
+        ]
+        if (
+            mine
+            and mine[-1].state == ReviewEventState.APPROVED
+            and same_commit(mine[-1].commit_sha, pr.head_sha)
+        ):
+            raise HTTPException(409, "you already approved this head")
+        record = await _run_now(
+            service,
+            user,
+            make_action(
+                ActionKind.PR_APPROVE,
+                repo,
+                ApprovePrPayload(body=body.body),
+                number=number,
+                head_sha=pr.head_sha,
+                discriminator=f"approve:{user.login.lower()}:{new_id('req')}",
+                rationale=f"{user.login} pressed Approve",
+                draft_for=user.login,
+                provenance=Provenance(requested_by=user.login),
+            ),
+            as_them=True,
+        )
+        return {
+            "status": record.status,
+            "error": record.error,
+            "reason": record.decision.reason if record.decision else None,
+            "rule": record.decision.rule if record.decision else None,
+            "action": record.action.id,
         }
 
     @r.post("/prs/{owner}/{name}/{number}/merge-base")
@@ -1522,11 +1825,14 @@ def build_router() -> APIRouter:
         number: int,
         user: User = Depends(current_user),
     ) -> dict[str, Any]:
+        """Join the reviewers working on the PR; others who claimed it stay."""
         service = service_of(request)
         repo = _repo(owner, name)
         await require_view(service, user, repo)
-        await service.store.set_claim(repo, number, user.login)
-        return {"claimed_by": user.login}
+        await service.store.add_assignee(
+            PrAssignee(repo=repo, number=number, login=user.login, by=user.login)
+        )
+        return {"assignees": await _assignees(service, repo, number)}
 
     @r.delete("/prs/{owner}/{name}/{number}/claim")
     async def unclaim(
@@ -1536,11 +1842,207 @@ def build_router() -> APIRouter:
         number: int,
         user: User = Depends(current_user),
     ) -> dict[str, Any]:
+        """Leave the PR's reviewers, whether you claimed it or were assigned."""
         service = service_of(request)
         repo = _repo(owner, name)
         await require_view(service, user, repo)
-        await service.store.set_claim(repo, number, None)
-        return {"claimed_by": None}
+        await service.store.remove_assignee(repo, number, user.login)
+        return {"assignees": await _assignees(service, repo, number)}
+
+    @r.post("/prs/{owner}/{name}/{number}/assignees")
+    async def assign(
+        request: Request,
+        owner: str,
+        name: str,
+        number: int,
+        body: AssignBody,
+        user: User = Depends(current_user),
+    ) -> dict[str, Any]:
+        """Assign reviewers to the PR, for maintainers of the repository (design
+        2.3). A login need not have signed in here, but it must be a GitHub user who
+        can see the repository. With ``request_review``, their review is also
+        requested on GitHub, as the repository's ``pr.request_reviewers`` rule
+        allows."""
+        service = service_of(request)
+        repo = _repo(owner, name)
+        await require_view(service, user, repo)
+        if not await is_maintainer(service, user, repo):
+            raise HTTPException(403, f"only maintainers of {repo} assign reviewers")
+        pr = await service.store.get_snapshot(repo, number)
+        if pr is None:
+            raise HTTPException(404, f"{repo}#{number} is not known yet")
+        logins: list[str] = []
+        for raw in body.logins:
+            try:
+                login = check_login(raw)
+            except ValueError as e:
+                raise HTTPException(422, str(e)) from e
+            if not (await service.a.forge.get_permission(repo, login)).at_least(
+                Permission.READ
+            ):
+                raise HTTPException(
+                    422, f"{login} is not a GitHub user who can see {repo}"
+                )
+            if login.lower() not in {x.lower() for x in logins}:
+                logins.append(login)
+        for login in logins:
+            await service.store.add_assignee(
+                PrAssignee(
+                    repo=repo,
+                    number=number,
+                    login=login,
+                    kind="assigned",
+                    by=user.login,
+                )
+            )
+        await service.store.add_audit(
+            AuditEntry(
+                kind="assign",
+                repo=repo,
+                number=number,
+                actor=user.login,
+                summary=f"assigned {', '.join(logins)}",
+            )
+        )
+        requested: dict[str, Any] | None = None
+        ask = [
+            lg
+            for lg in logins
+            if lg.lower() != pr.author.lower()
+            and lg.lower() not in {r.lower() for r in pr.requested_reviewers}
+        ]
+        if body.request_review and ask and pr.state == PrState.OPEN:
+            record = await _run_now(
+                service,
+                user,
+                make_action(
+                    ActionKind.PR_REQUEST_REVIEWERS,
+                    repo,
+                    RequestReviewersPayload(logins=ask),
+                    number=number,
+                    head_sha=pr.head_sha,
+                    discriminator=f"assign:{','.join(sorted(x.lower() for x in ask))}",
+                    rationale=f"{user.login} assigned {', '.join(ask)}",
+                    draft_for=user.login,
+                    provenance=Provenance(requested_by=user.login),
+                ),
+            )
+            requested = {
+                "status": record.status,
+                "error": record.error,
+                "reason": record.decision.reason if record.decision else None,
+                "action": record.action.id,
+            }
+        return {
+            "assignees": await _assignees(service, repo, number),
+            "requested": requested,
+        }
+
+    @r.delete("/prs/{owner}/{name}/{number}/assignees/{login}")
+    async def unassign(
+        request: Request,
+        owner: str,
+        name: str,
+        number: int,
+        login: str,
+        user: User = Depends(current_user),
+    ) -> dict[str, Any]:
+        """Take a reviewer off the PR: maintainers take anyone off, and everyone
+        themselves. A review requested on GitHub stays requested there."""
+        service = service_of(request)
+        repo = _repo(owner, name)
+        await require_view(service, user, repo)
+        if login.lower() != user.login.lower() and not await is_maintainer(
+            service, user, repo
+        ):
+            raise HTTPException(
+                403, f"only maintainers of {repo} take other reviewers off a PR"
+            )
+        await service.store.remove_assignee(repo, number, login)
+        return {"assignees": await _assignees(service, repo, number)}
+
+    @r.get("/repos/{owner}/{name}/usage")
+    async def usage(
+        request: Request,
+        owner: str,
+        name: str,
+        days: int = Query(default=30, ge=1, le=365),
+        user: User = Depends(current_user),
+    ) -> dict[str, Any]:
+        """What agents spent on the repository in the last ``days``, per person whose
+        request they worked for (``login`` null for the service's own work, such as
+        scans). Maintainers see everyone; others see the total and their own row."""
+        service = service_of(request)
+        repo = _repo(owner, name)
+        await require_view(service, user, repo)
+        since = service.clock.now() - timedelta(days=days)
+        runs = await service.store.list_agent_runs(USAGE_RUNS, repo=repo, since=since)
+        jobs: dict[str, Job | None] = {}
+        people: dict[str | None, dict[str, Any]] = {}
+        total = _usage_row(None)
+        for run in runs:
+            who = run.requested_by
+            if who is None and run.job_id:
+                if run.job_id not in jobs:
+                    jobs[run.job_id] = await service.store.get_job(run.job_id)
+                job = jobs[run.job_id]
+                who = _job_requester(job) if job else None
+            _add_usage(total, run)
+            key = who.lower() if who else None
+            row = people.setdefault(key, _usage_row(who))
+            _add_usage(row, run)
+        everyone = await is_maintainer(service, user, repo)
+        rows = sorted(
+            people.values(),
+            key=lambda r_: -(r_["input_tokens"] + r_["output_tokens"]),
+        )
+        if not everyone:
+            rows = [
+                r_ for r_ in rows if (r_["login"] or "").lower() == user.login.lower()
+            ]
+        return {
+            "days": days,
+            "since": since.isoformat(),
+            "complete": len(runs) < USAGE_RUNS,
+            "everyone": everyone,
+            "total": total,
+            "people": rows,
+        }
+
+    @r.get("/repos/{owner}/{name}/assignable")
+    async def assignable(
+        request: Request, owner: str, name: str, user: User = Depends(current_user)
+    ) -> dict[str, Any]:
+        """Whether the user assigns reviewers in the repository, and the people to
+        suggest: its People record's members, with their roles, then the logins
+        assigned or claiming there before."""
+        service = service_of(request)
+        repo = _repo(owner, name)
+        await require_view(service, user, repo)
+        people: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        loaded = await service.governance.load(repo)
+        if loaded.stored and not loaded.error:
+            roles = {r.id: r.name for r in loaded.governance.roles}
+            for m in loaded.governance.members:
+                if m.login.lower() in seen:
+                    continue
+                seen.add(m.login.lower())
+                people.append(
+                    {
+                        "login": m.login,
+                        "role": roles.get(m.role, m.role),
+                        "areas": m.areas,
+                    }
+                )
+        for a in await service.store.list_assignees(repo):
+            if a.login.lower() not in seen:
+                seen.add(a.login.lower())
+                people.append({"login": a.login, "role": None, "areas": []})
+        return {
+            "can_assign": await is_maintainer(service, user, repo),
+            "people": people,
+        }
 
     @r.post("/prs/{owner}/{name}/{number}/merge")
     async def arm(
@@ -1703,15 +2205,22 @@ def build_router() -> APIRouter:
     ) -> list[dict[str, Any]]:
         service = service_of(request)
         visible = set(await visible_repos(service, user))
+        maintains: dict[str, bool] = {}
         out = []
         for p in await service.store.list_proposals(state, repo):
             if p.repo not in visible:
                 continue
             record = await service.store.get_action(p.action_id)
+            if p.repo not in maintains:
+                maintains[p.repo] = await is_maintainer(service, user, p.repo)
             out.append(
                 {
                     **p.model_dump(mode="json"),
                     "action": record.model_dump(mode="json") if record else None,
+                    "requester": proposal_requester(p, record),
+                    "can_decide": await may_decide(
+                        service, user, p, record, maintainer=maintains[p.repo]
+                    ),
                 }
             )
         return out
@@ -1727,7 +2236,7 @@ def build_router() -> APIRouter:
         proposal = await service.store.get_proposal(proposal_id)
         if proposal is None:
             raise HTTPException(404, "unknown proposal")
-        await require_view(service, user, proposal.repo)
+        await require_decide(service, user, proposal)
         if body.as_me and not await service.can_post_as(user.login):
             raise HTTPException(
                 409, "sign in again with GitHub so the service can post as you"
@@ -1755,7 +2264,7 @@ def build_router() -> APIRouter:
         proposal = await service.store.get_proposal(proposal_id)
         if proposal is None:
             raise HTTPException(404, "unknown proposal")
-        await require_view(service, user, proposal.repo)
+        await require_decide(service, user, proposal)
         try:
             proposal = await service.pipeline.save_edits(
                 proposal_id, user.login, body.payload
@@ -1779,7 +2288,7 @@ def build_router() -> APIRouter:
         proposal = await service.store.get_proposal(proposal_id)
         if proposal is None:
             raise HTTPException(404, "unknown proposal")
-        await require_view(service, user, proposal.repo)
+        await require_decide(service, user, proposal)
         try:
             proposal = await service.pipeline.reject(
                 proposal_id, user.login, body.reason

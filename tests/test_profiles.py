@@ -57,7 +57,7 @@ def _layers(*extra: Layer) -> list[Layer]:
 
 def test_defaults_keep_repository_actions_in_shadow() -> None:
     profile = build_profile(REPO, _layers()).profile
-    assert profile.access.configure == Permission.MAINTAIN
+    assert profile.access.configure == Permission.ADMIN
     for kind, rule in profile.policy.items():
         if kind.touches_repository:
             assert rule.level == Autonomy.SHADOW, kind
@@ -247,7 +247,7 @@ async def test_settings_change_by_writer_waits_and_maintainer_applies(
         decision = await h.service.gate.check(
             REPO, "walt", await h.service.profiles.active(REPO)
         )
-        assert not decision.allowed and "needs maintain" in decision.reason
+        assert not decision.allowed and "needs admin" in decision.reason
         await h.store.save_memory_change(change)
         await h.service.actuator.merge_memory(change.id)
         assert (
@@ -449,7 +449,7 @@ async def test_renaming_a_repository_to_its_spelling_on_github(tmp_path: Path) -
         await h.poll(old)
         await h.store.save_evaluation(Evaluation(repo=old, number=42, total=50.0))
         h.forge.repos[new] = h.forge.repos.pop(old).model_copy(update={"name": new})
-        h.forge.set_permission(new, "maria", Permission.MAINTAIN)
+        h.forge.set_permission(new, "maria", Permission.ADMIN)
         with pytest.raises(ValueError, match="only the letter case"):
             await h.service.rename_repo(old, "acme/other", "maria")
         with pytest.raises(ValueError, match="GitHub spells it Acme/Widget"):

@@ -72,6 +72,7 @@ from ..profiles.layers import ProfileError, parse_yaml
 from .api import (
     code_maintainer,
     require_view,
+    review_setup,
     service_of,
     start_evaluations,
     visible_repos,
@@ -608,6 +609,36 @@ async def _page_block(
             f"Its settings layer (what kind=configure with repo={context.repo} replaces):\n"
             + (layer or "(empty)")[:8000]
         )
+        active = await service.profiles.active(context.repo)
+        if active is not None:
+            setup = await review_setup(service, context.repo, active)
+            use = setup["in_use"]
+            lines.append(
+                "How its PRs are reviewed: review.skill is "
+                f"{setup['skill']!r}, so reviews follow "
+                + (
+                    f"the repository's skill {use['name']} ({use['path']})"
+                    if use["kind"] == "repo"
+                    else f"the service's skill {use['name']}"
+                    if use["kind"] == "service"
+                    else "a repository skill that is no longer there (the service's "
+                    "skill instead)"
+                )
+                + ". Its skills: "
+                + (
+                    "; ".join(
+                        f"{x['path']} ({x['name']})" for x in setup["repo_skills"]
+                    )
+                    or "none"
+                )
+                + ". To change it, set review: {skill: builtin:pr-review (the "
+                "repository's review skill when it has one, else the service's) | "
+                "service:<name> (the service's even so) | repo:<path of a SKILL.md "
+                "above>, instructions: <how its maintainers want PRs reviewed, in their "
+                "words>} in its settings layer. Instructions now: "
+                + (repr(setup["instructions"]) if setup["instructions"] else "none")
+                + "."
+            )
         offered = [
             (name, m)
             for name, m in sorted(service.machines.items())

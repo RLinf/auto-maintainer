@@ -55,6 +55,7 @@ from ..domain.records import (
     CiObservation,
     Job,
     JobStatus,
+    PrAssignee,
     ProfileState,
     RepoRecord,
     ReviewRecord,
@@ -71,6 +72,17 @@ ACTIVE_JOB_STATES = (JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.WAITING)
 def ts(value: datetime) -> str:
     """A sortable UTC timestamp string."""
     return as_utc(value).strftime("%Y-%m-%dT%H:%M:%S.%f+00:00")
+
+
+def _assignee(row: Row) -> PrAssignee:
+    return PrAssignee(
+        repo=row.repo,
+        number=row.number,
+        login=row.login,
+        kind=row.kind,
+        by=row.by,
+        at=datetime.fromisoformat(row.at),
+    )
 
 
 def _dump(model: BaseModel) -> str:
@@ -382,11 +394,20 @@ class SqliteStore:
         )
 
     async def list_agent_runs(
-        self, limit: int = 100, runtime: str | None = None
+        self,
+        limit: int = 100,
+        runtime: str | None = None,
+        *,
+        repo: str | None = None,
+        since: datetime | None = None,
     ) -> list[AgentRunRecord]:
         stmt = select(m.agent_runs.c.data)
         if runtime:
             stmt = stmt.where(m.agent_runs.c.runtime == runtime)
+        if repo:
+            stmt = stmt.where(m.agent_runs.c.repo == repo)
+        if since:
+            stmt = stmt.where(m.agent_runs.c.created_at >= ts(since))
         return _many(
             AgentRunRecord,
             await self._fetch(
@@ -694,7 +715,7 @@ class SqliteStore:
             await self._fetch(stmt.order_by(m.ci_observations.c.created_at)),
         )
 
-    # -- merge arms, claims, leases --------------------------------------------------
+    # -- merge arms, assignees, leases -----------------------------------------------
 
     async def save_arm(self, arm: MergeArm) -> None:
         await self._upsert(
@@ -722,23 +743,65 @@ class SqliteStore:
             )
         )
 
-    async def set_claim(self, repo: str, number: int, login: str | None) -> None:
-        if login is None:
-            await self._exec(
-                delete(m.claims).where(
-                    m.claims.c.repo == repo, m.claims.c.number == number
+    async def add_assignee(self, assignee: PrAssignee) -> PrAssignee:
+        a = assignee
+        async with self._write, self._engine.begin() as conn:
+            row = (
+                await conn.execute(
+                    select(m.pr_assignees).where(
+                        m.pr_assignees.c.repo == a.repo,
+                        m.pr_assignees.c.number == a.number,
+                        func.lower(m.pr_assignees.c.login) == a.login.lower(),
+                    )
+                )
+            ).first()
+            if row is not None:
+                kept = _assignee(row)
+                if kept.kind == "assigned" or a.kind == "claimed":
+                    return kept
+                await conn.execute(
+                    update(m.pr_assignees)
+                    .where(
+                        m.pr_assignees.c.repo == a.repo,
+                        m.pr_assignees.c.number == a.number,
+                        m.pr_assignees.c.login == kept.login,
+                    )
+                    .values(kind=a.kind, by=a.by, at=ts(a.at))
+                )
+                return kept.model_copy(update={"kind": a.kind, "by": a.by, "at": a.at})
+            await conn.execute(
+                insert(m.pr_assignees).values(
+                    repo=a.repo,
+                    number=a.number,
+                    login=a.login,
+                    kind=a.kind,
+                    by=a.by,
+                    at=ts(a.at),
                 )
             )
-        else:
-            await self._upsert(
-                m.claims, {"repo": repo, "number": number}, {"login": login}
-            )
+            return a
 
-    async def get_claims(self, repo: str | None = None) -> dict[str, str]:
-        stmt = select(m.claims)
-        if repo:
-            stmt = stmt.where(m.claims.c.repo == repo)
-        return {f"{r.repo}#{r.number}": r.login for r in await self._fetch(stmt)}
+    async def remove_assignee(self, repo: str, number: int, login: str) -> bool:
+        async with self._write, self._engine.begin() as conn:
+            result = await conn.execute(
+                delete(m.pr_assignees).where(
+                    m.pr_assignees.c.repo == repo,
+                    m.pr_assignees.c.number == number,
+                    func.lower(m.pr_assignees.c.login) == login.lower(),
+                )
+            )
+            return bool(result.rowcount)
+
+    async def list_assignees(
+        self, repo: str | None = None, number: int | None = None
+    ) -> list[PrAssignee]:
+        stmt = select(m.pr_assignees)
+        if repo is not None:
+            stmt = stmt.where(m.pr_assignees.c.repo == repo)
+        if number is not None:
+            stmt = stmt.where(m.pr_assignees.c.number == number)
+        rows = await self._fetch(stmt.order_by(m.pr_assignees.c.at))
+        return [_assignee(r) for r in rows]
 
     async def acquire_lease(
         self, lab: str, resource: str, holder: str, ttl_seconds: int, now: datetime

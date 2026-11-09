@@ -249,7 +249,7 @@ async def test_the_agent_offers_to_add_a_repository_and_a_maintainer_approves(
     from auto_maintainer.domain.snapshot import RepoInfo
 
     h.forge.add_repo(RepoInfo(name="acme/gadget", default_branch_sha="f" * 40))
-    h.forge.set_permission("acme/gadget", "maria", Permission.MAINTAIN)
+    h.forge.set_permission("acme/gadget", "maria", Permission.ADMIN)
     h.runner.on(
         "chat",
         lambda task: {

@@ -35,8 +35,9 @@ import { Icon } from "../icons";
 import { Markdown } from "../markdown";
 import { CommentOnDiff, parseDiff, usePrDiff } from "../diffview";
 import { DataTable, ListToolbar, useList, type Column } from "../list";
-import { FixButton, MergeBaseButton, type InlineComment } from "../proposal";
+import { ApproveButton, FixButton, MergeBaseButton, type InlineComment } from "../proposal";
 import { ReproduceButton } from "../reproduce";
+import { ReviewersCard } from "../assignees";
 import { ACTIVE, PrWork, usePrWork } from "../jobs";
 import { openJob } from "../openJob";
 import { Skeleton, Tabs, useTab, useToast } from "../ui";
@@ -55,8 +56,6 @@ export default function PrPage({ me }: { me: Me }) {
   const rows = usePrs();
   const row = rows.data?.find((p) => p.repo === full && String(p.number) === number);
   const keys = [["pr"], ["prs"]];
-  const claim = useAct(() => api.post(`${base}/claim`), keys);
-  const unclaim = useAct(() => api.del(`${base}/claim`), keys);
   const [reviewer, setReviewer] = useAgentChoice("review");
   const review = useAct(() => api.post<ReviewStart>(`${base}/review`, { agent: reviewer || null }), [...keys, ["proposals"]]);
   const arm = useAct(() => api.post(`${base}/merge`), keys);
@@ -81,8 +80,7 @@ export default function PrPage({ me }: { me: Me }) {
   }
   if (detail.error || !d) return <ErrorBox error={detail.error} />;
   const pr = d.pr;
-  const claimedBy = row?.claimed_by ?? null;
-  const mutationError = claim.error || unclaim.error || review.error || arm.error || disarm.error;
+  const mutationError = review.error || arm.error || disarm.error;
   const job = row?.review_activity.job;
   const reviewing = !!job && ["queued", "running", "waiting"].includes(job.status);
   const reviewingText = reviewing
@@ -170,6 +168,16 @@ export default function PrPage({ me }: { me: Me }) {
               <Icon name="pr" size={15} />
               {reviewing ? t("Reviewing…") : d.review_state.reviewed_sha ? t("Follow up") : t("Review")}
             </button>
+            {pr.state === "OPEN" && (
+              <ApproveButton
+                repo={full}
+                number={pr.number}
+                head={pr.head_sha}
+                approved={myApproval(pr.reviews ?? [], me.login, pr.head_sha)}
+                own={pr.author.toLowerCase() === me.login.toLowerCase()}
+                canPost={!!me.can_post_as_me}
+              />
+            )}
             {latestReview && <FixButton repo={full} number={pr.number} review={latestReview} align="right" />}
             {pr.state === "OPEN" && (
               <MergeBaseButton
@@ -182,13 +190,6 @@ export default function PrPage({ me }: { me: Me }) {
             )}
             <ReproduceButton repo={full} number={pr.number} />
             <RunCiButton repo={full} number={pr.number} plan={d.run_ci} />
-            {claimedBy === me.login ? (
-              <button onClick={() => unclaim.mutate(undefined)}>{t("Unclaim")}</button>
-            ) : (
-              <button onClick={() => claim.mutate(undefined)} title={claimedBy ? `${t("Claimed by")} ${claimedBy}` : undefined}>
-                {claimedBy ? t("Take over") : t("Claim")}
-              </button>
-            )}
             <RefreshButton base={base} />
           </>
         }
@@ -231,6 +232,7 @@ export default function PrPage({ me }: { me: Me }) {
         </div>
 
         <aside className="side">
+          <ReviewersCard repo={full} number={pr.number} author={pr.author} assignees={d.assignees ?? []} requested={pr.requested_reviewers ?? []} me={me.login} />
           <QualityCard
             repo={full}
             number={pr.number}
@@ -291,8 +293,6 @@ export default function PrPage({ me }: { me: Me }) {
               <dd>{t(REVIEW_STATES[d.review_state.state] ?? d.review_state.state)}</dd>
               <dt>{t("Last reviewed")}</dt>
               <dd>{d.review_state.reviewed_sha ? <code>{d.review_state.reviewed_sha.slice(0, 7)}</code> : "—"}</dd>
-              <dt>{t("Claimed by")}</dt>
-              <dd>{claimedBy ?? "—"}</dd>
               <dt>{t("Changes")}</dt>
               <dd>
                 {pr.files.length} {t("files")} · <span style={{ color: "var(--ok)" }}>+{adds}</span> <span style={{ color: "var(--bad)" }}>−{dels}</span>
@@ -322,6 +322,13 @@ export default function PrPage({ me }: { me: Me }) {
       </div>
     </>
   );
+}
+
+/** Whether ``login``'s newest review on GitHub approves ``head``. */
+function myApproval(reviews: NonNullable<PrDetail["pr"]["reviews"]>, login: string, head: string): boolean {
+  const mine = reviews.filter((r) => r.author.toLowerCase() === login.toLowerCase() && r.state !== "COMMENTED");
+  const last = mine[mine.length - 1];
+  return !!last && last.state === "APPROVED" && !!last.commit_sha && (last.commit_sha.startsWith(head) || head.startsWith(last.commit_sha));
 }
 
 /** A review body as stored: an older renderer doubled a skill's own heading marks. */

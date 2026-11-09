@@ -151,6 +151,24 @@ export interface AgentQuestion {
   answer: AgentAnswer | null;
 }
 
+export interface Assignee {
+  login: string;
+  /** "claimed": they took it themselves; "assigned": a maintainer (``by``) gave it to them. */
+  kind: "claimed" | "assigned";
+  by: string;
+  at: string;
+}
+
+export interface Assignable {
+  can_assign: boolean;
+  people: { login: string; role: string | null; areas: string[] }[];
+}
+
+export interface AssignResult {
+  assignees: Assignee[];
+  requested: { status: string; error: string | null; reason: string | null; action: string } | null;
+}
+
 export interface PrRow {
   repo: string;
   number: number;
@@ -163,7 +181,8 @@ export interface PrRow {
   updated_at: string | null;
   review_state: string;
   reviewed_sha: string;
-  claimed_by: string | null;
+  /** Reviewers working on the PR in the service, oldest first. */
+  assignees: Assignee[];
   tier: string | null;
   total: number | null;
   summary: string;
@@ -215,8 +234,29 @@ export interface QualityStart {
 
 /** How a repository's reviews are written and how their agent judges quality;
  *  ``null`` means the service's default. */
+export interface SkillChoice {
+  name: string;
+  /** The repository's SKILL.md; empty for the service's own skills. */
+  path: string;
+  description: string;
+  /** Its name or folder says review, so the default review follows it. */
+  reviews?: boolean;
+}
+
 export interface ReviewGuides {
   repo: string;
+  /** ``review.skill``: builtin:<name> (the repository's review skill, else the service's),
+   *  service:<name> (the service's even so), or repo:<path>. */
+  skill: string;
+  default_skill: string;
+  /** The maintainers' own words on how PRs are reviewed; null when they gave none. */
+  instructions: string | null;
+  /** What reviews follow now under ``skill``. "missing": a repository skill that is gone. */
+  in_use: { kind: "repo" | "service" | "missing"; name: string; path: string };
+  repo_skills: SkillChoice[];
+  service_skills: SkillChoice[];
+  /** The repository has no review skill and nobody chose how its PRs are reviewed. */
+  needs_choice: boolean;
   writing_guide: string | null;
   quality_guide: string | null;
   /** Whether every open PR gets a quick score before its review. */
@@ -303,6 +343,10 @@ export interface ActionRecord {
 
 export interface ProposalWithAction extends Proposal {
   action: ActionRecord | null;
+  /** Who asked for the action: the reviewer a draft is for, or the person whose request made it. */
+  requester?: string | null;
+  /** Whether the viewer may approve, edit, or reject it: a maintainer, or the person who asked. */
+  can_decide?: boolean;
 }
 
 export interface Evaluation {
@@ -350,7 +394,10 @@ export interface PrDetail {
     state: string;
     files: { path: string; additions: number; deletions: number }[];
     checks: { id: number; name: string; workflow: string | null; status: string; conclusion: string | null }[];
+    reviews?: { id: number; author: string; state: string; submitted_at: string | null; commit_sha: string | null }[];
+    requested_reviewers?: string[];
   };
+  assignees: Assignee[];
   review_state: { state: string; reviewed_sha: string | null; latest_review_state: string | null };
   evaluation: Evaluation | null;
   quality: ReviewQuality | null;
@@ -512,7 +559,34 @@ export interface AgentRun {
   output_tokens: number;
   cost_usd: number | null;
   duration_seconds: number;
+  /** The person whose request the run worked for; null for the service's own work. */
+  requested_by?: string | null;
   created_at: string;
+}
+
+export interface UsageRow {
+  /** null: the service's own work, such as scans and scheduled checks. */
+  login: string | null;
+  runs: number;
+  failed: number;
+  input_tokens: number;
+  output_tokens: number;
+  cost_usd: number | null;
+  seconds: number;
+  last_at: string | null;
+  by_kind: Record<string, { runs: number; tokens: number }>;
+  by_runtime: Record<string, { runs: number; tokens: number }>;
+}
+
+export interface RepoUsage {
+  days: number;
+  since: string;
+  /** False when the summary hit the most runs it reads; older runs are left out. */
+  complete: boolean;
+  /** Whether the viewer sees everyone (a maintainer) or only themselves. */
+  everyone: boolean;
+  total: UsageRow;
+  people: UsageRow[];
 }
 
 export interface AuditEntry {

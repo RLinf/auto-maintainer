@@ -94,7 +94,9 @@ async def test_a_maintainer_answers_on_the_dashboard(demo, tmp_path: Path) -> No
     app = create_app(h.service, data_dir=tmp_path, allow_dev_login=True)
     events: list = []
     h.service.bus.subscribe(lambda e: _record(events, e))
-    waiting = asyncio.create_task(h.service.questions.ask(_question(), 60))
+    waiting = asyncio.create_task(
+        h.service.questions.ask(_question(asked_for="walt"), 60)
+    )
     question = await _pending(h.service.questions, h.store)
     async with _client(app, "stranger") as stranger:
         assert (await stranger.get("/api/questions")).json() == []

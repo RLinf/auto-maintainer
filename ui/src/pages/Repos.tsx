@@ -9,6 +9,7 @@ import { api, type Agreement, type GateDecision, type MemoryChange, type Profile
 import { useAgent } from "../agent";
 import { RepoMachinesSection, useRepoMachines } from "../machines";
 import { PeopleTab } from "../people";
+import { UsageTab } from "../usage";
 import { ProfileChanges, type Profile } from "../profileView";
 import { kindLabel } from "../proposal";
 import { Empty, ErrorBox, PageHead, Section, Status, timeOf, useAct, When } from "../components";
@@ -223,10 +224,12 @@ export function RepoDetailPage() {
   const candidateHash = p?.candidate.candidate_hash ?? null;
   const labs = useRepoMachines(full);
   const usedMachines = labs.data?.machines.filter((m) => m.used).length;
+  const guides = useReviewGuides(full, !!profile.data?.lock);
   const tabs = [
     { id: "overview", label: t("Overview") },
     { id: "people", label: t("People") },
     { id: "labs", label: t("Test machines"), count: usedMachines },
+    { id: "usage", label: t("Usage") },
     { id: "candidate", label: t("Profile change"), count: candidateHash ? 1 : 0 },
     { id: "settings", label: t("Settings") },
   ];
@@ -293,6 +296,15 @@ export function RepoDetailPage() {
           <span>{t("A profile change waits for a maintainer's approval.")}</span>
           <button className="sm right" onClick={() => setTab("candidate")}>
             {t("Review it")}
+          </button>
+        </div>
+      )}
+      {guides.data?.needs_choice && tab !== "overview" && (
+        <div className="strip question">
+          <Icon name="question" />
+          <span>{t("This repository has no review skill of its own. How would you like its PRs reviewed?")}</span>
+          <button className="sm right" onClick={() => setTab("overview")}>
+            {t("Choose how")}
           </button>
         </div>
       )}
@@ -390,6 +402,7 @@ export function RepoDetailPage() {
       {tab === "people" && <PeopleTab repo={full} />}
 
       {tab === "labs" && <RepoMachinesSection repo={full} />}
+      {tab === "usage" && <UsageTab repo={full} />}
 
       {tab === "settings" && (
         <div className="stack" style={{ gap: 16 }}>
@@ -497,40 +510,100 @@ function SettingsEditor({
  *  quality: plain text every review, follow-up, and revision reads. The service's
  *  default applies until a maintainer changes it; saving is a settings change that a
  *  maintainer of the repository applies. */
+export function useReviewGuides(repo: string, enabled = true) {
+  return useQuery({
+    queryKey: ["profile", repo, "review-guides"],
+    queryFn: () => api.get<ReviewGuides>(`/api/repos/${repo}/review-guides`),
+    enabled,
+    retry: false,
+  });
+}
+
 function ReviewGuidesSection({ repo }: { repo: string }) {
   const t = useT();
   const toast = useToast();
+  const agent = useAgent();
   const url = `/api/repos/${repo}/review-guides`;
-  const view = useQuery({ queryKey: ["profile", repo, "review-guides"], queryFn: () => api.get<ReviewGuides>(url) });
+  const view = useReviewGuides(repo);
   const d = view.data;
+  const [skill, setSkill] = useState("");
+  const [instructions, setInstructions] = useState("");
   const [writing, setWriting] = useState("");
   const [quality, setQuality] = useState("");
   const [quick, setQuick] = useState(true);
   useEffect(() => {
     if (!d) return;
+    setSkill(d.skill);
+    setInstructions(d.instructions ?? "");
     setWriting(d.writing_guide ?? d.default_writing_guide);
     setQuality(d.quality_guide ?? d.default_quality_guide);
     setQuick(d.quick_quality);
   }, [d]);
   const save = useAct(
-    () => api.put<{ applied: boolean; reason: string }>(url, { writing_guide: writing, quality_guide: quality, quick_quality: quick }),
+    () =>
+      api.put<{ applied: boolean; reason: string }>(url, {
+        skill,
+        instructions,
+        writing_guide: writing,
+        quality_guide: quality,
+        quick_quality: quick,
+      }),
     [["profile"], ["memory"]],
   );
   const changed =
     !!d &&
-    (writing.trim() !== (d.writing_guide ?? d.default_writing_guide).trim() ||
+    (skill !== d.skill ||
+      instructions.trim() !== (d.instructions ?? "").trim() ||
+      writing.trim() !== (d.writing_guide ?? d.default_writing_guide).trim() ||
       quality.trim() !== (d.quality_guide ?? d.default_quality_guide).trim() ||
       quick !== d.quick_quality);
   return (
-    <Section title={t("How reviews read and score")} hint={t("every review, follow-up, and revision")}>
+    <Section title={t("How PRs are reviewed")} hint={t("every review, follow-up, and revision")}>
       {!d ? (
         view.isLoading ? <Skeleton rows={4} /> : null
       ) : (
-        <div className="stack" style={{ gap: 14 }}>
+        <div className="stack" style={{ gap: 14 }} id="review-setup">
           <span className="small muted">
-            {t("Plain instructions the reviewing agent follows, over the review skill's own format.")}{" "}
+            {t("The skill the reviewing agent follows, and plain instructions on top of it.")}{" "}
             {d.can_configure ? t("You qualify, so saving is your approval.") : t("Changes you make here are proposals for a maintainer of the repository.")}
           </span>
+          {d.needs_choice && (
+            <div className="strip question">
+              <Icon name="question" />
+              <span>
+                {t("This repository has no review skill of its own, so its PRs are reviewed with the service's built-in skill. Pick a skill below, or say in your own words how they should be reviewed.")}
+              </span>
+            </div>
+          )}
+          <SkillPicker view={d} value={skill} onChange={setSkill} onRefresh={() => view.refetch()} />
+          <label className="stack" style={{ gap: 6 }}>
+            <span className="row" style={{ gap: 8 }}>
+              <strong>{t("Review instructions")}</strong>
+              <span className={`pill ${instructions.trim() ? "status-warn" : "status-ok"}`}>{instructions.trim() ? t("this repository's own") : t("none")}</span>
+              <span className="spacer" />
+              <button
+                type="button"
+                className="ghost sm"
+                onClick={() =>
+                  agent.open({
+                    prompt: t("Help me decide how PRs in this repository should be reviewed: read its docs and recent PRs, suggest review instructions, and set them in its settings."),
+                  })
+                }
+              >
+                <Icon name="sparkles" size={13} />
+                {t("Work them out with the agent")}
+              </button>
+            </span>
+            <span className="small muted">
+              {t("In your own words: what reviews here must check, what matters most, and what to leave alone. Every review follows them over the skill where the two disagree.")}
+            </span>
+            <textarea
+              value={instructions}
+              onChange={(e) => setInstructions(e.target.value)}
+              rows={Math.min(14, Math.max(4, instructions.split("\n").length + 1))}
+              placeholder={t("For example: Check that every new config option is documented in docs/. Changes to the scheduler need a benchmark in the description. Do not comment on formatting; CI checks it.")}
+            />
+          </label>
           <GuideField
             label={t("Writing")}
             hint={t("How the review comment reads: who it is for, how long it is, and how much code it shows.")}
@@ -578,6 +651,64 @@ function ReviewGuidesSection({ repo }: { repo: string }) {
       )}
       <ErrorBox error={view.error || save.error} />
     </Section>
+  );
+}
+
+/** Which skill reviews follow: automatic (the repository's review skill, else the
+ *  service's), one of the repository's own skills, or the service's built-in one. */
+function SkillPicker({ view, value, onChange, onRefresh }: { view: ReviewGuides; value: string; onChange: (v: string) => void; onRefresh: () => void }) {
+  const t = useT();
+  const own = view.repo_skills.find((s) => s.reviews);
+  const options: { value: string; title: string; detail: string }[] = [
+    {
+      value: view.default_skill,
+      title: t("Automatic"),
+      detail: own
+        ? `${t("The repository's review skill:")} ${own.name} (${own.path})`
+        : t("The repository's review skill when it adds one; until then the service's built-in skill."),
+    },
+    ...view.repo_skills.map((s) => ({ value: `repo:${s.path}`, title: s.name, detail: `${s.path}${s.description ? ` · ${s.description}` : ""}` })),
+    ...view.service_skills.map((s) => ({ value: `service:${s.name}`, title: `${t("Built-in:")} ${s.name}`, detail: s.description || t("The service's own review skill.") })),
+  ];
+  const known = options.some((o) => o.value === value);
+  return (
+    <div className="stack" style={{ gap: 6 }}>
+      <span className="row" style={{ gap: 8 }}>
+        <strong>{t("Review skill")}</strong>
+        <span className="small muted">
+          {view.in_use.kind === "repo"
+            ? `${t("Reviews follow")} ${view.in_use.name}`
+            : view.in_use.kind === "missing"
+              ? t("The chosen skill is no longer in the repository; reviews follow the service's.")
+              : `${t("Reviews follow the built-in")} ${view.in_use.name}`}
+        </span>
+        <span className="spacer" />
+        <button type="button" className="ghost sm" onClick={onRefresh} title={t("Read the repository's skills from GitHub again")}>
+          <Icon name="refresh" size={13} />
+        </button>
+      </span>
+      <div className="skill-options" role="radiogroup" aria-label={t("Review skill")}>
+        {options.map((o) => (
+          <label key={o.value} className={`skill-option${value === o.value ? " on" : ""}`}>
+            <input type="radio" name="review-skill" checked={value === o.value} onChange={() => onChange(o.value)} />
+            <span className="stack" style={{ gap: 2, minWidth: 0 }}>
+              <strong>{o.title}</strong>
+              <span className="small muted clamp2">{o.detail}</span>
+            </span>
+          </label>
+        ))}
+        {!known && (
+          <label className="skill-option on">
+            <input type="radio" name="review-skill" checked readOnly />
+            <span className="stack" style={{ gap: 2 }}>
+              <strong>{value}</strong>
+              <span className="small muted">{t("Set in the profile; not among the skills found.")}</span>
+            </span>
+          </label>
+        )}
+      </div>
+      {view.repo_skills.length === 0 && <span className="small muted">{t("No skills found in the repository's skill folders (.claude/skills, .agents/skills, and others) on its default branch.")}</span>}
+    </div>
   );
 }
 

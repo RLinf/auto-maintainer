@@ -1,7 +1,9 @@
 # The starting record of a repository's roles and how people move between them
 # (design 2.6). It is a skeleton: an agent replaces it with the repository's own
 # process, from its governance documents and what its maintainers say, and a
-# maintainer approves the result. Nothing here grants anything in the service.
+# maintainer approves the result. The holders of a role with `maintains: true` become
+# the repository's maintainers in the service (design 2.3); until a record names
+# some, its GitHub admins are.
 schema: 1
 established: false
 summary: >-
@@ -24,6 +26,7 @@ roles:
     name: Maintainer
     level: 2
     github_permission: maintain
+    maintains: true
     description: Owns the direction and quality of the whole repository.
     responsibilities:
       - Review and merge pull requests.
@@ -36,6 +39,7 @@ roles:
     name: Owner
     level: 3
     github_permission: admin
+    maintains: true
     description: Accountable for the project; settles what maintainers cannot agree on.
     responsibilities:
       - Decide the project's direction and its governance.

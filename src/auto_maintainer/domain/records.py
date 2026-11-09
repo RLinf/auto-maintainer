@@ -123,7 +123,23 @@ class AgentRunRecord(BaseModel):
     cost_usd: float | None = None
     transcript_path: str | None = None
     duration_seconds: float = 0.0
+    requested_by: str | None = None
+    """The person whose request the run worked for; None for the service's own work."""
     created_at: datetime = Field(default_factory=utc_now)
+
+
+class PrAssignee(BaseModel):
+    """A reviewer working on a PR in the service (design 2.3): one who claimed it
+    themselves, or one a maintainer of the repository assigned. A PR has any number;
+    the login need not have signed in to the dashboard."""
+
+    repo: str
+    number: int
+    login: str
+    kind: Literal["claimed", "assigned"] = "claimed"
+    by: str
+    """Who claimed or assigned it: the login itself for a claim."""
+    at: datetime = Field(default_factory=utc_now)
 
 
 class ReviewRecord(BaseModel):

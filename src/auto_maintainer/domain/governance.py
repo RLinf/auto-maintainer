@@ -19,8 +19,9 @@ Every repository runs this differently, so the model is a skeleton its maintaine
 fill in: ``config/defaults/governance.yaml`` is the starting point, and an agent
 rewrites it from the repository's own governance documents and what its maintainers
 say. The record lives in the memory repo and changes only through a memory change a
-maintainer approves. It describes people; it grants nothing in the service, where a
-person's GitHub permission stays the only authority (design 2.3).
+maintainer approves. It decides two things in the service (design 2.3): the holders
+of a role that ``maintains`` are the repository's maintainers, and its members may use
+the repository's dashboard with read access. The rest describes the process.
 """
 
 from __future__ import annotations
@@ -68,6 +69,12 @@ class Role(_Model):
         default=False,
         description="Whether the role is held for areas (paths or components) "
         "rather than for the whole repository.",
+    )
+    maintains: bool = Field(
+        default=False,
+        description="Whether holders are the repository's maintainers in the "
+        "service: they assign PRs, change its settings, this record, and its test "
+        "machines, and approve configuration changes.",
     )
 
 
@@ -188,6 +195,15 @@ class Governance(_Model):
 
     def role(self, role_id: str | None) -> Role | None:
         return next((r for r in self.roles if r.id == role_id), None)
+
+    def maintainers(self) -> set[str]:
+        """The logins, lowercased, that hold a role that ``maintains``."""
+        maintaining = {r.id for r in self.roles if r.maintains}
+        return {m.login.lower() for m in self.members if m.role in maintaining}
+
+    def listed(self) -> set[str]:
+        """Every login the record lists, lowercased."""
+        return {m.login.lower() for m in self.members}
 
     def roles_of(self, login: str) -> list[Member]:
         return [m for m in self.members if m.login.lower() == login.lower()]

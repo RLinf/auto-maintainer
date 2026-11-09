@@ -54,6 +54,7 @@ const KIND_LABELS: Record<string, string> = {
   "ci.rerun_failed": "Rerun failed CI",
   "pr.request_reviewers": "Request reviewers",
   "pr.update_branch": "Update the branch",
+  "pr.approve": "Approve the PR",
   "pr.merge": "Merge",
   "pr.nudge": "Nudge the author",
   "pr.fix": "Open a fix PR",
@@ -178,6 +179,9 @@ export function ProposalCard({
 
   if (!action) return <div className="proposal muted">Action {proposal.action_id} is missing.</div>;
   const done = proposal.state !== "pending" || approve.isSuccess || reject.isSuccess;
+  // The repository's maintainers decide every proposal; a reviewer, the ones they asked for.
+  const decides = proposal.can_decide !== false;
+  const requester = proposal.requester ?? proposal.requested_by;
   const editable = typeof payload.body === "string" || kind === "lab.reproduce" || (Array.isArray(payload.comments) && comments.length > 0);
   const findings = ((payload.result as { findings?: unknown[] } | undefined)?.findings ?? []).length;
   const approveLabel = isFix
@@ -226,7 +230,7 @@ export function ProposalCard({
   return (
     <div className="proposal">
       <div className="row">
-        {onSelect && !done && <input type="checkbox" aria-label={`Select ${kindLabel(kind)}`} checked={!!selected} onChange={onSelect} />}
+        {onSelect && !done && decides && <input type="checkbox" aria-label={`Select ${kindLabel(kind)}`} checked={!!selected} onChange={onSelect} />}
         <strong>{t(kindLabel(kind))}</strong>
         {action.number != null && (
           <Link to={prPath(action.repo, action.number)} className="small">
@@ -237,7 +241,7 @@ export function ProposalCard({
         {action.head_sha && <span className="mono muted">{action.head_sha.slice(0, 7)}</span>}
         <Status value={approve.isSuccess ? "approved" : reject.isSuccess ? "rejected" : proposal.state} />
         <span className="muted small right">
-          {proposal.requested_by ? `${t("requested by")} ${proposal.requested_by === me?.login ? t("you") : proposal.requested_by} · ` : ""}
+          {requester ? `${t("requested by")} ${requester === me?.login ? t("you") : requester} · ` : ""}
           <When at={proposal.created_at} />
         </span>
       </div>
@@ -264,7 +268,14 @@ export function ProposalCard({
           )}
         </>
       )}
-      {!done && (
+      {!done && !decides && (
+        <span className="small muted">
+          {requester
+            ? `${t("A maintainer of the repository, or the person who asked for it, decides this:")} @${requester}.`
+            : t("A maintainer of the repository decides this.")}
+        </span>
+      )}
+      {!done && decides && (
         <div className="row">
           <div className="split-button">
             <button
@@ -367,7 +378,7 @@ export function ProposalCard({
           )}
         </div>
       )}
-      {isFix && !done && me && !me.can_post_as_me && <span className="small muted">{t("Sign in with GitHub to open it as yourself.")}</span>}
+      {isFix && !done && decides && me && !me.can_post_as_me && <span className="small muted">{t("Sign in with GitHub to open it as yourself.")}</span>}
       {kind === "review.update" && !!payload.revises && !done && (
         <span className="small muted">
           {reviewAuthor
@@ -685,6 +696,100 @@ export function MergeBaseButton({
           </div>
           {!canPush && <span className="small muted">{t("Sign in with GitHub, so the merge is pushed as you.")}</span>}
           <ErrorBox error={merge.error} />
+        </div>
+      )}
+    </Popover>
+  );
+}
+
+/** Approve the PR on GitHub as yourself, at the head you are looking at. The service's
+ *  own account never approves; whether the approval counts is GitHub's rule for you. */
+export function ApproveButton({
+  repo,
+  number,
+  head,
+  approved,
+  own,
+  canPost,
+}: {
+  repo: string;
+  number: number;
+  head: string;
+  /** Your newest review on GitHub approves this head. */
+  approved: boolean;
+  /** You opened the PR, which GitHub does not let you approve. */
+  own: boolean;
+  canPost: boolean;
+}) {
+  const t = useT();
+  const toast = useToast();
+  const [note, setNote] = useState("");
+  const approve = useAct(
+    () =>
+      api.post<{ status: string; error: string | null; reason: string | null; rule: string | null }>(`/api/prs/${repo}/${number}/approve`, {
+        body: note,
+        head,
+      }),
+    [["pr"], ["prs"], ["work"]],
+  );
+  if (approved) {
+    return (
+      <span className="button on" title={t("Your newest review on GitHub approves this head")}>
+        <Icon name="check" size={14} />
+        {t("Approved by you")}
+      </span>
+    );
+  }
+  if (own) return null;
+  return (
+    <Popover
+      align="right"
+      label={t("Approve")}
+      trigger={(open, toggle) => (
+        <button className={open ? "on" : ""} onClick={toggle} aria-expanded={open}>
+          <Icon name="check" size={14} />
+          {t("Approve")}
+        </button>
+      )}
+    >
+      {(close) => (
+        <div className="stack" style={{ gap: 10, padding: 6, width: 340, maxWidth: "calc(100vw - 48px)" }}>
+          <span className="small muted">
+            {t("Approves the PR on GitHub as you, at")} <code>{head.slice(0, 7)}</code>.
+          </span>
+          <textarea rows={3} value={note} onChange={(e) => setNote(e.target.value)} placeholder={t("A comment with the approval (optional)")} aria-label={t("A comment with the approval")} />
+          <div className="row">
+            <button
+              className="primary right"
+              disabled={approve.isPending || !canPost}
+              title={canPost ? undefined : t("Sign in with GitHub, so the approval comes from you.")}
+              onClick={() =>
+                approve.mutate(undefined, {
+                  onSuccess: (out) => {
+                    close();
+                    if (out.status === "executed") {
+                      setNote("");
+                      toast({ title: t("Approved"), body: t("GitHub has your approval of this PR."), icon: "check" });
+                    } else if (out.status === "queued" || out.status === "intent") {
+                      toast({ title: t("Approving…"), body: t("Your approval goes to GitHub in a moment."), icon: "clock" });
+                    } else if (out.status === "shadowed") {
+                      toast({
+                        title: t("Not approved"),
+                        body: t("This instance only records what it would do, so GitHub was not asked."),
+                        icon: "eye",
+                      });
+                    } else {
+                      toast({ title: t("Not approved"), body: out.error || out.reason || out.status, icon: "x" });
+                    }
+                  },
+                })
+              }
+            >
+              {approve.isPending ? t("Approving…") : t("Approve as me")}
+            </button>
+          </div>
+          {!canPost && <span className="small muted">{t("Sign in with GitHub, so the approval comes from you.")}</span>}
+          <ErrorBox error={approve.error} />
         </div>
       )}
     </Popover>

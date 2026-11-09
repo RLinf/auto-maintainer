@@ -147,7 +147,7 @@ class Harness:
                 name=repo, labels=labels or DEFAULT_LABELS, default_branch_sha="d" * 40
             )
         )
-        forge.set_permission(repo, maintainer, Permission.MAINTAIN)
+        forge.set_permission(repo, maintainer, Permission.ADMIN)
         if code_repo:
             forge.add_repo(RepoInfo(name=code_repo, default_branch_sha="e" * 40))
             forge.set_permission(code_repo, maintainer, Permission.MAINTAIN)

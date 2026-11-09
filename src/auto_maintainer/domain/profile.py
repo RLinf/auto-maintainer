@@ -78,7 +78,8 @@ class People(_Section):
 
 
 class Access(_Section):
-    configure: Permission = Permission.MAINTAIN
+    configure: Permission = Permission.ADMIN
+    """Who configures a repository whose People record names no maintainers."""
 
     @field_validator("configure")
     @classmethod
@@ -169,6 +170,15 @@ class Review(_Section):
     or gets new commits."""
     scan: ReviewScan = Field(default_factory=ReviewScan)
     skill: str = "builtin:pr-review"
+    """The skill reviews follow. ``builtin:<name>``: the repository's own review skill
+    when it has one (a skill whose name or folder says review), else the service's
+    skill ``<name>``. ``service:<name>``: the service's skill ``<name>`` even when the
+    repository has its own. ``repo:<path>``: the repository's skill at ``<path>``
+    (its ``SKILL.md``), read from the default branch."""
+    instructions: str | None = Field(default=None, max_length=8000)
+    """How the repository's maintainers want its PRs reviewed, in their own words: what
+    to check, what matters most, what to leave alone. Every review, follow-up, and
+    revision follows it on top of the skill, and it wins where they disagree."""
     template: list[str] = Field(default_factory=lambda: list(DEFAULT_SECTIONS))
     recommendations: dict[Literal["ready", "changes", "blocked"], str] = Field(
         default_factory=lambda: {

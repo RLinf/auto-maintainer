@@ -659,6 +659,7 @@ DEMO_GOVERNANCE: dict[str, Any] = {
             "name": "Maintainer",
             "level": 2,
             "github_permission": "maintain",
+            "maintains": True,
             "description": "Owns the quality and direction of the repository.",
             "responsibilities": [
                 "Merge PRs once a reviewer of the area approves.",
@@ -672,6 +673,7 @@ DEMO_GOVERNANCE: dict[str, Any] = {
             "name": "Project lead",
             "level": 3,
             "github_permission": "admin",
+            "maintains": True,
             "description": "Settles what the maintainers cannot agree on.",
             "responsibilities": ["Decide the roadmap with the maintainers."],
             "privileges": ["Appoint and remove maintainers."],

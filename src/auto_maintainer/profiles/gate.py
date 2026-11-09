@@ -14,13 +14,17 @@
 
 """The configuration gate (design 2.3): who may change a repository's configuration.
 
-Every path that changes a profile layer or lock calls ``ConfigGate.check``. It
-reads the user's permission from the forge at the moment of the change and never
-from a cache.
+Every path that changes a profile layer or lock calls ``ConfigGate.check``. A
+repository's maintainers are the people its applied People record names in a role
+that ``maintains`` (design 2.6), who must still have access to it on the forge; when
+the record names nobody, those whose forge permission reaches ``access.configure``
+(the repository's admins by default). Permissions are read from the forge at the
+moment of the change and never from a cache.
 """
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 
 from pydantic import BaseModel
@@ -41,9 +45,16 @@ class GateDecision(BaseModel):
 
 
 class ConfigGate:
-    def __init__(self, forge: ForgeReader, service_identities: set[str]) -> None:
+    def __init__(
+        self,
+        forge: ForgeReader,
+        service_identities: set[str],
+        maintainers: Callable[[str], Awaitable[set[str]]] | None = None,
+    ) -> None:
         self._forge = forge
         self._service = {s.lower() for s in service_identities}
+        self._maintainers = maintainers
+        """A repository's maintainers by its People record (lowercased logins)."""
 
     def add_service_identity(self, login: str) -> None:
         self._service.add(login.lower())
@@ -57,11 +68,14 @@ class ConfigGate:
         *,
         person: bool = False,
     ) -> GateDecision:
-        """Whether ``login`` may change ``repo``'s configuration.
+        """Whether ``login`` may change ``repo``'s configuration: whether they
+        maintain it (design 2.3).
 
-        The bar is the approved profile's ``access.configure``; for a repository
-        without one, the candidate's. A change that lowers the bar still needs the
-        current bar.
+        When the repository's People record names maintainers (members of a role
+        that ``maintains``), only they do, while they can still read it on GitHub.
+        Otherwise the bar is the approved profile's ``access.configure`` (for a
+        repository without one, the candidate's; ``admin`` without either). A change
+        that lowers the bar still needs the current bar.
 
         ``person`` says that ``login`` is someone who signed in to the dashboard or
         ran the CLI as themselves. Only then may it be the service's own account, as
@@ -73,7 +87,7 @@ class ConfigGate:
         required = (
             current.access.configure
             if current
-            else (bars[0] if bars else Permission.MAINTAIN)
+            else (bars[0] if bars else Permission.ADMIN)
         )
         if login.lower() in self._service and not person:
             return GateDecision(
@@ -85,11 +99,31 @@ class ConfigGate:
                 reason="the service cannot approve its own configuration changes",
             )
         actual = await self._forge.get_permission(repo, login)
+        named = await self._maintainers(repo) if self._maintainers else set()
+        if named:
+            allowed = login.lower() in named and actual.at_least(Permission.READ)
+            reason = (
+                f"{login} maintains {repo} by its People record"
+                if allowed
+                else f"{login} is not a maintainer of {repo} in its People record"
+                if login.lower() not in named
+                else f"{login} is a maintainer of {repo} in its People record but "
+                "has no access to it on GitHub"
+            )
+            return GateDecision(
+                allowed=allowed,
+                repo=repo,
+                login=login,
+                required=Permission.READ,
+                actual=actual,
+                reason=reason,
+            )
         allowed = actual.at_least(required)
         reason = (
             f"{login} has {actual} on {repo}"
             if allowed
-            else f"{login} has {actual} on {repo}; changing its configuration needs {required}"
+            else f"{login} has {actual} on {repo}; its People record names no "
+            f"maintainers, so changing its configuration needs {required}"
         )
         return GateDecision(
             allowed=allowed,

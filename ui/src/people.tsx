@@ -3,8 +3,8 @@
 // of changes. It starts as a skeleton. Reviewers talk with the agent that keeps it:
 // where the process is written, rules, answers to its questions, members, or a check
 // of who should change role. What the agent drafts waits here as a memory change that
-// a maintainer of the repository applies. Roles grant nothing in the service: GitHub
-// permissions still decide.
+// a maintainer of the repository applies. The holders of a role that maintains are the
+// repository's maintainers in the service, and every member may use its dashboard.
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Fragment, useEffect, useRef, useState } from "react";
@@ -20,6 +20,7 @@ import { QuestionCard } from "./pages/Questions";
 import { ChangeById } from "./settingsChange";
 import { DataTable, ListToolbar, useList, type Column } from "./list";
 import { Skeleton, Tabs, useTab } from "./ui";
+import { Avatar } from "./avatar";
 
 interface Role {
   id: string;
@@ -30,6 +31,8 @@ interface Role {
   privileges?: string[];
   github_permission?: string | null;
   scoped?: boolean;
+  /** Its holders are the repository's maintainers in the service. */
+  maintains?: boolean;
 }
 interface Criterion {
   text: string;
@@ -255,10 +258,6 @@ function RoleBadge({ role }: { role: Role | undefined }) {
   );
 }
 
-function Avatar({ login, size = 22 }: { login: string; size?: number }) {
-  return <img className="avatar-img" src={`https://github.com/${encodeURIComponent(login)}.png?size=${size * 2}`} width={size} height={size} alt="" loading="lazy" />;
-}
-
 interface PersonRow extends Member {
   level: number;
   roleName: string;
@@ -393,7 +392,7 @@ function MembersView({
         empty={(gov.members ?? []).length ? t("Nobody matches.") : t("Nobody is listed yet. Tell the agent who holds each role.")}
       />
       <span className="small muted">
-        {t("GitHub permissions decide who may approve and configure in the service; roles here describe people.")} {Object.keys(permissions).length > 0 && `${t("Checked against GitHub for")} ${Object.keys(permissions).length} ${t("people")}.`}{" "}
+        {t("Holders of a role that maintains are this repository's maintainers here; until the record names some, its GitHub admins are. Every member may use its dashboard.")} {Object.keys(permissions).length > 0 && `${t("Checked against GitHub for")} ${Object.keys(permissions).length} ${t("people")}.`}{" "}
         <a href={`https://github.com/${repo}/graphs/contributors`} target="_blank" rel="noreferrer">
           {t("Contributors on GitHub")}
         </a>
@@ -593,6 +592,11 @@ function RolesView({ repo, gov, roles, name }: { repo: string; gov: Governance; 
               <RoleBadge role={r} />
               <span className="ellipsis role-desc small muted">{r.description}</span>
               <span className="row small" style={{ gap: 6, marginLeft: "auto", flexShrink: 0 }}>
+                {r.maintains && (
+                  <span className="pill status-ok" title={t("Its holders configure the repository here, assign reviewers, and decide every proposal.")}>
+                    {t("maintains")}
+                  </span>
+                )}
                 {r.github_permission && <span className="pill tag">GitHub: {r.github_permission}</span>}
                 {r.scoped && <span className="pill tag">{t("by area")}</span>}
                 <span className="pill tag">

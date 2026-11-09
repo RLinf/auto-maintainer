@@ -41,6 +41,7 @@ class ActionKind(StrEnum):
     COMMENT_UPSERT = "comment.upsert"
     CI_RERUN_FAILED = "ci.rerun_failed"
     PR_REQUEST_REVIEWERS = "pr.request_reviewers"
+    PR_APPROVE = "pr.approve"
     PR_UPDATE_BRANCH = "pr.update_branch"
     PR_MERGE = "pr.merge"
     PR_NUDGE = "pr.nudge"
@@ -289,6 +290,13 @@ class UpdateBranchPayload(_Payload):
     pass
 
 
+class ApprovePrPayload(_Payload):
+    """A person's approval of a PR at ``Action.head_sha``. It runs only with their own
+    GitHub sign-in (``ActionRecord.post_as``): the service's account never approves."""
+
+    body: str = Field(default="", max_length=20_000)
+
+
 class MergePayload(_Payload):
     method: Literal["squash", "merge", "rebase"] = "squash"
     subject: str
@@ -432,6 +440,7 @@ PAYLOADS: dict[ActionKind, type[BaseModel]] = {
     ActionKind.COMMENT_UPSERT: CommentUpsertPayload,
     ActionKind.CI_RERUN_FAILED: RerunPayload,
     ActionKind.PR_REQUEST_REVIEWERS: RequestReviewersPayload,
+    ActionKind.PR_APPROVE: ApprovePrPayload,
     ActionKind.PR_UPDATE_BRANCH: UpdateBranchPayload,
     ActionKind.PR_MERGE: MergePayload,
     ActionKind.PR_NUDGE: NudgePayload,
@@ -461,6 +470,7 @@ PUBLIC_TEXT_FIELDS: dict[ActionKind, tuple[str, ...]] = {
     ActionKind.PR_CLOSE: ("body",),
     ActionKind.ISSUE_COMMENT: ("body",),
     ActionKind.PR_FIX: ("title", "body"),
+    ActionKind.PR_APPROVE: ("body",),
 }
 """Payload fields that become public text and must pass the leak guard."""
 

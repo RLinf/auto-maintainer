@@ -157,7 +157,8 @@ async def build_service(cfg: HostConfig, dev: bool = False) -> Service:
         return GitHubWriter(
             GitHubClient(
                 StaticTokenProvider(token=token.token), api_url=cfg.github.api_url
-            )
+            ),
+            person=login,
         )
 
     async def publisher_for_user(login: str, token: UserToken) -> Any:

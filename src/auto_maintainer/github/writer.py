@@ -55,10 +55,13 @@ class GitHubWriter:
 
     Args:
         client: The API client. Its token provider decides who the writes come from.
+        person: The login whose own token the client holds; only such a writer
+            approves a PR. ``None`` for the service's own account.
     """
 
-    def __init__(self, client: GitHubClient) -> None:
+    def __init__(self, client: GitHubClient, *, person: str | None = None) -> None:
         self._client = client
+        self._person = person
 
     async def add_labels(self, repo: str, number: int, labels: list[str]) -> None:
         if labels:
@@ -132,6 +135,22 @@ class GitHubWriter:
                 "body": _public(body, repo, "body"),
                 "event": event,
                 "comments": payload_comments,
+            },
+        )
+        return CommentRef(id=int(data["id"]), url=data.get("html_url") or "")
+
+    async def approve_pr(
+        self, repo: str, number: int, commit_sha: str, body: PublicText
+    ) -> CommentRef:
+        if self._person is None:
+            raise PermissionError("the service's own account never approves a PR")
+        data = await self._client.post(
+            f"/repos/{repo}/pulls/{number}/reviews",
+            repo=repo,
+            json={
+                "commit_id": commit_sha,
+                "body": _public(body, repo, "body"),
+                "event": "APPROVE",
             },
         )
         return CommentRef(id=int(data["id"]), url=data.get("html_url") or "")

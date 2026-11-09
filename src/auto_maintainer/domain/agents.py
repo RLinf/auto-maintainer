@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
@@ -36,6 +37,36 @@ REPO_SKILL_FOLDERS = (
     ".opencode/skills",
 )
 """Where a repository keeps skills for coding agents, relative to its root."""
+
+
+class SkillInfo(BaseModel):
+    """A skill a review can follow: the repository's own (``path`` to its
+    ``SKILL.md``) or the service's (``path`` empty)."""
+
+    name: str
+    path: str = ""
+    description: str = ""
+
+    @property
+    def reviews(self) -> bool:
+        """Whether its name or folder says it reviews, which makes it the repository's
+        review skill under ``review.skill: builtin:<name>``."""
+        return "review" in self.name.lower() or "review" in self.path.lower()
+
+
+def parse_skill(text: str, folder: str, path: str = "") -> SkillInfo:
+    """A ``SKILL.md``'s name and description from its front matter, else its folder."""
+    meta: dict[str, str] = {}
+    if text.startswith("---"):
+        for key, value in re.findall(
+            r"^(name|description):\s*(.+)$", text[:2000], re.M
+        ):
+            meta.setdefault(key, value.strip().strip("\"'"))
+    return SkillInfo(
+        name=meta.get("name") or folder,
+        path=path,
+        description=meta.get("description", ""),
+    )
 
 
 class TaskKind(StrEnum):

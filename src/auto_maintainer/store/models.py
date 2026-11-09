@@ -191,12 +191,15 @@ merge_arms = Table(
     Column("data", Text, nullable=False),
 )
 
-claims = Table(
-    "claims",
+pr_assignees = Table(
+    "pr_assignees",
     metadata,
     Column("repo", String, primary_key=True),
     Column("number", Integer, primary_key=True),
-    Column("login", String, nullable=False),
+    Column("login", String, primary_key=True),
+    Column("kind", String, nullable=False),
+    Column("by", String, nullable=False),
+    Column("at", String, nullable=False),
 )
 
 memory_changes = Table(

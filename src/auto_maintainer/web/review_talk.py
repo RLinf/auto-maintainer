@@ -68,10 +68,10 @@ from ..playbooks.review_revise import (
     task_kind_of,
 )
 from ..service import Service
-from .api import service_of
+from .api import is_maintainer, service_of
 from .auth import User, current_user
 from .chat import ProposedAction, save_lesson
-from .jobs import _job
+from .jobs import _job, _payload
 
 log = logging.getLogger(__name__)
 
@@ -255,6 +255,16 @@ def build_router() -> APIRouter:
         service = service_of(request)
         job = await talk_job(service, user, job_id)
         assert job.repo and job.number is not None
+        asker = str(_payload(job).get("by") or "")
+        if asker.lower() != user.login.lower() and not await is_maintainer(
+            service, user, job.repo
+        ):
+            # A turn can revise the draft, so it is the asker's or a maintainer's.
+            raise HTTPException(
+                403,
+                f"{asker or 'the service'} asked for this review; only they and the "
+                f"maintainers of {job.repo} talk to its agent",
+            )
         if service.a.agents.listening(job.id):
             return await _tell(service, user, job, body.text)
         record = await _draft(service, job)

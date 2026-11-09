@@ -304,14 +304,17 @@ class ActionPipeline:
                 ActionKind.REVIEW_UPDATE,
                 ActionKind.PR_FIX,
                 ActionKind.PR_UPDATE_BRANCH,
+                ActionKind.PR_APPROVE,
             ):
                 raise ApprovalError(
-                    "only a review draft, a review's revision, a fix, or a branch "
-                    "update can be done as its approver"
+                    "only a review draft, a review's revision, a fix, a branch "
+                    "update, or an approval of the PR can be done as its approver"
                 )
             record.post_as = post_as
         elif action.kind == ActionKind.PR_FIX:
             raise ApprovalError("a fix PR is opened as the maintainer who approves it")
+        elif action.kind == ActionKind.PR_APPROVE:
+            raise ApprovalError("a PR is approved only by a person, as themselves")
         proposal.state = ProposalState.APPROVED
         proposal.decided_by = login
         proposal.decided_at = self.clock.now()

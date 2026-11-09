@@ -32,6 +32,7 @@ from ..domain.memory import profile_path
 from ..domain.profile import ROLES, RepoProfile
 from ..profiles.layers import ProfileError, parse_yaml
 from ..profiles.loader import IN_REPO_PATH
+from ..profiles.skills import repository_skills
 from .base import Playbook, PlaybookContext, PlaybookResult
 from .prompts import schema_hint, untrusted
 
@@ -44,6 +45,18 @@ READ_FILES = [
     IN_REPO_PATH,
     *CODEOWNERS_LOCATIONS,
 ]
+
+
+NO_REVIEW_SKILL = (
+    "{repo} has no review skill of its own (a SKILL.md in a skill folder such as "
+    ".claude/skills or .agents/skills whose name says review), so its PRs are reviewed "
+    "with the service's built-in review skill. How would you like them reviewed? Pick "
+    "one of the repository's skills or keep the built-in one, and say in your own words "
+    "what reviews should check, on the repository's Overview under How PRs are reviewed, "
+    "or tell the agent there."
+)
+"""The question onboarding adds for the maintainers when nothing in the repository
+says how its PRs are reviewed."""
 
 
 class OnboardAnswer(BaseModel):
@@ -59,8 +72,10 @@ class OnboardAnswer(BaseModel):
 SCHEMA_OUTLINE = """Profile keys you may set: extends (packs: {packs}), scope {{min_pr, base_branches, include_drafts, ignore_authors}},
 people {{codeowners, team, review_identities}}, contribution {{commit_convention: none|conventional, title_rule {{pattern,
 max_description, lowercase_start, ascii_only, no_trailing_period}}, signoff, template_sections, license_header {{pattern, paths}}}},
-checks [{{id, type: builtin|command|agent, name, run, prompt, blocking, settings}}], review {{skill (builtin:pr-review or
-repo:<path>), template [section names], recommendations {{ready, changes, blocked}}}}, labels {{roles {{{roles}}}, rules
+checks [{{id, type: builtin|command|agent, name, run, prompt, blocking, settings}}], review {{skill (builtin:pr-review: the
+repository's review skill when it has one, else the service's; repo:<path to a SKILL.md>: one of the repository's skills listed
+below), instructions (how the repository's own docs say PRs are reviewed, in a few plain lines, only when they say), template
+[section names], recommendations {{ready, changes, blocked}}}}, labels {{roles {{{roles}}}, rules
 [{{label, keywords, title_prefixes, paths}}]}}, ci {{required_workflows, cancelled_is_failure, runner_groups}},
 merge {{enabled, method: squash|merge|rebase, arming {{who: write|maintain|admin|codeowners}}, message {{preserve_trailers}}}},
 timing {{first_response_days, rereview_days, stale_days}}, languages {{public, internal, style_guide}}.
@@ -103,6 +118,8 @@ class Onboard(Playbook):
             f"#{m.number} {m.title} by {m.author} labels={m.labels} trailers={[ln for msg in m.commit_messages for ln in msg.splitlines() if ':' in ln and ln.split(':')[0] in ('Signed-off-by', 'Co-authored-by')][:2]}"
             for m in merged
         )
+        skills = await repository_skills(ctx.forge, repo)
+        reviewing = [s for s in skills if s.reviews]
         current = await ctx.memory.read_text(profile_path(repo))
         packs = ctx.profiles.loader.packs.names()
         prompt = "\n\n".join(
@@ -119,6 +136,12 @@ class Onboard(Playbook):
                 ),
                 f"Labels in the repository: {info.labels}",
                 f"Default branch: {info.default_branch}. Required checks: {info.required_checks}.",
+                untrusted(
+                    "repository_skills",
+                    "\n".join(f"- {s.path}: {s.name}: {s.description}" for s in skills)
+                    or "(none)",
+                    6_000,
+                ),
                 untrusted("current.memory_profile", current or "(none)", 10_000),
                 *[untrusted(path, text, 15_000) for path, text in files.items()],
                 untrusted("merged_prs", history or "(none)", 15_000),
@@ -137,6 +160,8 @@ class Onboard(Playbook):
         if not answer.ok or answer.structured is None:
             raise RuntimeError(f"onboarding agent failed: {answer.error}")
         result = OnboardAnswer.model_validate(answer.structured)
+        if not reviewing and not drift:
+            result.questions.append(NO_REVIEW_SKILL.format(repo=repo))
         layer = {
             k: v
             for k, v in result.profile.items()
@@ -196,6 +221,7 @@ class Onboard(Playbook):
                 "change": change.id,
                 "questions": result.questions,
                 "hash": merged_profile.hash,
+                "review_skill": reviewing[0].path if reviewing else None,
             },
         )
 

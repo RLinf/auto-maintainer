@@ -41,9 +41,13 @@ AS_PERSON = frozenset(
         ActionKind.REVIEW_UPDATE,
         ActionKind.PR_FIX,
         ActionKind.PR_UPDATE_BRANCH,
+        ActionKind.PR_APPROVE,
     }
 )
 """Action kinds a maintainer may run with their own GitHub account."""
+
+ONLY_AS_PERSON = frozenset({ActionKind.PR_FIX, ActionKind.PR_APPROVE})
+"""Kinds that run only as the person who approves them, never as the service."""
 
 ON_TEST_MACHINES = frozenset({ActionKind.LAB_REPRODUCE, ActionKind.LAB_RUN})
 """Actions that hold a test machine, for up to an hour: each repository runs them in
@@ -152,9 +156,9 @@ class Actuator:
             record.approver = approver or record.approver
             await self.x.store.save_action(record)
             x = self.x
-            if action.kind == ActionKind.PR_FIX and not record.post_as:
+            if action.kind in ONLY_AS_PERSON and not record.post_as:
                 raise RuntimeError(
-                    "a fix PR is pushed and opened only as the maintainer who approves it"
+                    f"{action.kind} runs only as the person who approves it"
                 )
             if action.kind == ActionKind.REVIEW_UPDATE and record.post_as != (
                 action.payload.get("author") or None

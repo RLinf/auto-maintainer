@@ -25,6 +25,7 @@ from ..domain.actions import (
     Action,
     ActionKind,
     ActionStatus,
+    ApprovePrPayload,
     CodeMergePayload,
     CodePrPayload,
     CommentUpsertPayload,
@@ -332,6 +333,24 @@ async def _request_reviewers(
         raise Noop("every suggested reviewer is already requested or is the author")
     await x.writer.request_reviewers(action.repo, pr.number, logins)
     return {"requested": logins}
+
+
+async def _approve_pr(
+    x: ExecContext,
+    action: Action,
+    profile: RepoProfile | None,
+    pr: PrSnapshot | None,
+    approver: str | None,
+) -> dict[str, Any]:
+    """Approve the PR at the head the person saw, as them: the executor gives this
+    handler their own writer, and the service's writer refuses to approve."""
+    assert profile is not None and pr is not None
+    p = ApprovePrPayload.model_validate(action.payload)
+    body = await x.public(
+        action, profile, p.body, marker_kind="approve", pr=pr, bare=True
+    )
+    ref = await x.writer.approve_pr(action.repo, pr.number, pr.head_sha, body)
+    return {"review_id": ref.id, "url": ref.url, "sha": pr.head_sha}
 
 
 async def _update_branch(
@@ -755,6 +774,9 @@ HANDLERS: dict[ActionKind, HandlerSpec] = {
         _rerun, needs_pr=True, needs_current_head=True
     ),
     ActionKind.PR_REQUEST_REVIEWERS: HandlerSpec(_request_reviewers, needs_pr=True),
+    ActionKind.PR_APPROVE: HandlerSpec(
+        _approve_pr, needs_pr=True, needs_current_head=True
+    ),
     ActionKind.PR_UPDATE_BRANCH: HandlerSpec(
         _update_branch, needs_pr=True, needs_current_head=True
     ),

@@ -130,7 +130,7 @@ export default function InboxPage({ me }: { me: Me }) {
           disabled={bulk.isPending}
           onClick={() =>
             bulk.mutate(
-              list.selected.map((p) => p.id),
+              list.selected.filter((p) => p.can_decide !== false).map((p) => p.id),
               {
                 onSuccess: (n) => {
                   list.clearSelection();

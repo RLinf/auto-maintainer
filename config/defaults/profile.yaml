@@ -12,6 +12,7 @@ policy:
   ci.rerun_failed: {level: shadow}
   pr.request_reviewers: {level: shadow}
   pr.update_branch: {level: shadow}
+  pr.approve: {level: shadow}          # a person's Approve button; only ever as them
   pr.merge: {level: shadow}
   pr.nudge: {level: shadow}
   pr.convert_to_draft: {level: shadow}

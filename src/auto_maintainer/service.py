@@ -217,7 +217,11 @@ class Service:
             settings.defaults_profile,
             settings.host_overrides,
         )
-        self.gate = ConfigGate(adapters.forge, settings.identities | {settings.login})
+        self.gate = ConfigGate(
+            adapters.forge,
+            settings.identities | {settings.login},
+            maintainers=self.governance.maintainers_of,
+        )
         self.profiles = ProfileService(
             self.loader,
             adapters.memory,

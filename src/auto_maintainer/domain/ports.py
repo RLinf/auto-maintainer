@@ -53,6 +53,7 @@ from .records import (
     CiObservation,
     Job,
     JobStatus,
+    PrAssignee,
     ProfileState,
     RepoRecord,
     ReviewRecord,
@@ -165,6 +166,13 @@ class ForgeWriter(Protocol):
     async def update_review(
         self, repo: str, number: int, review_id: int, body: PublicText
     ) -> None: ...
+
+    async def approve_pr(
+        self, repo: str, number: int, commit_sha: str, body: PublicText
+    ) -> CommentRef:
+        """Approve the PR at ``commit_sha``. Only a writer acting as a person does;
+        the service's own writer raises ``PermissionError``."""
+        ...
 
     async def reply_to_review_comment(
         self, repo: str, number: int, comment_id: int, body: PublicText
@@ -602,8 +610,16 @@ class Store(Protocol):
     # agent runs
     async def add_agent_run(self, run: AgentRunRecord) -> None: ...
     async def list_agent_runs(
-        self, limit: int = 100, runtime: str | None = None
-    ) -> list[AgentRunRecord]: ...
+        self,
+        limit: int = 100,
+        runtime: str | None = None,
+        *,
+        repo: str | None = None,
+        since: datetime | None = None,
+    ) -> list[AgentRunRecord]:
+        """Agent runs, newest first."""
+        ...
+
     async def agent_usage_since(
         self, runtime: str, since: datetime
     ) -> tuple[int, float]: ...
@@ -671,7 +687,7 @@ class Store(Protocol):
         since: datetime | None = None,
     ) -> list[CiObservation]: ...
 
-    # merge arms, claims, leases
+    # merge arms, assignees, leases
     async def save_arm(self, arm: MergeArm) -> None: ...
     async def get_arm(self, repo: str, number: int) -> MergeArm | None: ...
     async def delete_arm(self, repo: str, number: int) -> None: ...
@@ -679,8 +695,21 @@ class Store(Protocol):
         """Every armed merge in ``repo``, by PR number."""
         ...
 
-    async def set_claim(self, repo: str, number: int, login: str | None) -> None: ...
-    async def get_claims(self, repo: str | None = None) -> dict[str, str]: ...
+    async def add_assignee(self, assignee: PrAssignee) -> PrAssignee:
+        """Add a reviewer to a PR, or keep the one there: a claim never turns an
+        assignment back into a claim. Returns what is stored."""
+        ...
+
+    async def remove_assignee(self, repo: str, number: int, login: str) -> bool:
+        """Take ``login`` off the PR; whether it was there."""
+        ...
+
+    async def list_assignees(
+        self, repo: str | None = None, number: int | None = None
+    ) -> list[PrAssignee]:
+        """The reviewers on PRs, oldest first."""
+        ...
+
     async def acquire_lease(
         self, lab: str, resource: str, holder: str, ttl_seconds: int, now: datetime
     ) -> bool: ...

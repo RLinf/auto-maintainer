@@ -16,6 +16,7 @@ import { openJob } from "../openJob";
 import { ScoringProgress } from "../jobs";
 import { BulkBar, DataTable, ListToolbar, useList, type Column } from "../list";
 import { MenuItem, Popover, Skeleton, Tabs, useTab, useToast } from "../ui";
+import { AvatarStack } from "../avatar";
 
 const NEEDS_REVIEW = new Set(["NEW_REVIEW", "FOLLOWUP_REVIEW", "APPROVED_NEW_COMMITS"]);
 
@@ -60,7 +61,7 @@ export default function QueuePage({ me }: { me: Me }) {
   const list = useList<PrRow>({
     rows: source,
     key: prKey,
-    search: (p) => `${p.title} ${p.repo}#${p.number} #${p.number} ${p.author} ${p.labels.join(" ")} ${p.summary} ${p.claimed_by ?? ""}`,
+    search: (p) => `${p.title} ${p.repo}#${p.number} #${p.number} ${p.author} ${p.labels.join(" ")} ${p.summary} ${p.assignees.map((a) => a.login).join(" ")}`,
     facets: [
       { id: "tier", label: t("Priority"), values: (p) => p.tier ?? t("Not evaluated") },
       { id: "state", label: t("Review state"), values: (p) => t(REVIEW_STATES[p.review_state] ?? p.review_state) },
@@ -68,7 +69,7 @@ export default function QueuePage({ me }: { me: Me }) {
       { id: "scored", label: t("Quality from"), values: (p) => (showsQuick(p.quality, p.quick_quality, p.head) ? t("Quick score") : p.quality ? t("Review") : t("Not scored yet")) },
       { id: "author", label: t("Author"), values: (p) => p.author },
       { id: "label", label: t("Label"), values: (p) => p.labels },
-      { id: "claimed", label: t("Claimed by"), values: (p) => p.claimed_by ?? t("Unclaimed") },
+      { id: "claimed", label: t("Reviewers"), values: (p) => (p.assignees.length ? p.assignees.map((a) => a.login) : t("Nobody")) },
     ],
     sorts: [
       { id: "priority", label: t("Priority"), value: (p) => p.total, descFirst: true },
@@ -91,7 +92,7 @@ export default function QueuePage({ me }: { me: Me }) {
         order: [...QUALITY_BANDS.map((b) => t(b.label)), t("Not scored yet")],
       },
       { id: "author", label: t("Author"), value: (p) => p.author },
-      { id: "claimed", label: t("Claimed by"), value: (p) => p.claimed_by ?? t("Unclaimed") },
+      { id: "claimed", label: t("Reviewers"), value: (p) => (p.assignees.length ? p.assignees.map((a) => a.login).join(", ") : t("Nobody")) },
     ],
     pageSize: 50,
   });
@@ -168,8 +169,8 @@ export default function QueuePage({ me }: { me: Me }) {
     { id: "labels", header: t("Labels"), cell: (p) => <Labels labels={p.labels} max={3} />, className: "hide-narrow" },
     {
       id: "claimed",
-      header: t("Claimed by"),
-      cell: (p) => (p.claimed_by ? (p.claimed_by === me.login ? <strong>{t("you")}</strong> : p.claimed_by) : <span className="muted">—</span>),
+      header: t("Reviewers"),
+      cell: (p) => (p.assignees.length ? <AvatarStack logins={p.assignees.map((a) => a.login)} me={me.login} /> : <span className="muted">—</span>),
       className: "hide-narrow",
     },
     {

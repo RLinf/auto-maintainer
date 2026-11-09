@@ -21,10 +21,9 @@ through ``untrusted``, which marks it as data.
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 
-from ..domain.agents import REPO_SKILL_FOLDERS
+from ..domain.agents import REPO_SKILL_FOLDERS, parse_skill
 from ..domain.profile import DEFAULT_SECTIONS, RepoProfile
 from ..domain.snapshot import PrSnapshot
 
@@ -76,7 +75,7 @@ def pr_block(pr: PrSnapshot, diff: str | None = None, diff_limit: int = 120_000)
 def skill_instruction(profile: RepoProfile, skills_dir: Path) -> str:
     """Where the review skill lives, for the agent to read first."""
     skill = profile.review.skill
-    if skill.startswith("builtin:"):
+    if skill.startswith(("builtin:", "service:")):
         path = skills_dir / skill.split(":", 1)[1] / "SKILL.md"
         return f"Follow the review skill at {path} (read it first)."
     if skill.startswith("repo:"):
@@ -142,26 +141,19 @@ def repo_skills(workdir: Path) -> list[tuple[str, str, str]]:
     found = []
     for base in SKILL_DIRS:
         for skill in sorted((workdir / base).glob("*/SKILL.md")):
-            text = skill.read_text(encoding="utf-8", errors="replace")[:2000]
-            meta = (
-                dict(re.findall(r"^(name|description):\s*(.+)$", text, re.M))
-                if text.startswith("---")
-                else {}
+            info = parse_skill(
+                skill.read_text(encoding="utf-8", errors="replace"),
+                skill.parent.name,
+                str(skill.relative_to(workdir)),
             )
-            name = meta.get("name", skill.parent.name).strip()
-            found.append(
-                (
-                    name,
-                    str(skill.relative_to(workdir)),
-                    meta.get("description", "").strip(),
-                )
-            )
+            found.append((info.name, info.path, info.description))
     return found
 
 
 def builtin_review_skill(profile: RepoProfile, skills_dir: Path) -> str | None:
-    """The path of the service's review skill the profile names (``builtin:<name>``)."""
-    if not profile.review.skill.startswith("builtin:"):
+    """The path of the service's review skill the profile names (``builtin:<name>`` or
+    ``service:<name>``)."""
+    if not profile.review.skill.startswith(("builtin:", "service:")):
         return None
     path = skills_dir / profile.review.skill.split(":", 1)[1] / "SKILL.md"
     return str(path) if path.is_file() else None
@@ -252,26 +244,47 @@ def reproduction_block(
     return "\n\n".join(parts)
 
 
+def review_instructions_block(profile: RepoProfile) -> str:
+    """How the repository's maintainers want its PRs reviewed, in their words, when
+    they said. It comes from the approved profile, so it is the task, not data."""
+    text = (profile.review.instructions or "").strip()
+    if not text:
+        return ""
+    return (
+        "How this repository's maintainers want its PRs reviewed (follow it in every "
+        "review; where it and the review skill disagree, it wins):\n" + text
+    )
+
+
 def review_skill_block(profile: RepoProfile, skills_dir: Path, workdir: Path) -> str:
     """Which review skill to follow: one the profile names, else the repository's own
-    review skill when it has one, else the built-in skill; and the repository's other
-    skills, which the agent may use."""
+    review skill when it has one, else the built-in skill; the repository's other
+    skills, which the agent may use; and the maintainers' own review instructions."""
     skills = repo_skills(workdir)
     own = [s for s in skills if "review" in s[0].lower() or "review" in s[1].lower()]
-    if profile.review.skill.startswith("builtin:") and own:
+    skill = profile.review.skill
+    if skill.startswith("builtin:") and own:
         name, path, _ = own[0]
         lines = [
             f"Follow this repository's review skill `{name}` at `{path}` in the working "
             "directory (read it first). It comes from the default branch, not from the PR."
         ]
+        skip = {path}
     else:
         lines = [skill_instruction(profile, skills_dir)]
-    others = [s for s in skills if not own or s[1] != own[0][1]]
+        # The maintainers chose the service's skill over the repository's own.
+        skip = {p for _, p, _ in own} if skill.startswith("service:") else set()
+        if skill.startswith("repo:"):
+            skip.add(skill.split(":", 1)[1].split("#", 1)[0])
+    others = [s for s in skills if s[1] not in skip]
     if others:
         lines.append(
             "The repository also has these skills; use one when it applies:\n"
             + "\n".join(f"- `{p}`: {d or n}" for n, p, d in others[:20])
         )
+    told = review_instructions_block(profile)
+    if told:
+        lines.append(told)
     return "\n".join(lines)
 
 

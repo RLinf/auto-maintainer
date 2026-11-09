@@ -86,6 +86,23 @@ class GovernanceRecords:
             return Loaded(self.skeleton(repo), stored=True, error=_short(e))
         return Loaded(gov, stored=True)
 
+    async def maintainers_of(self, repo: str) -> set[str]:
+        """Who maintains ``repo`` by its applied record; empty when the record names
+        nobody (then its GitHub admins do, design 2.3)."""
+        loaded = await self.load(repo)
+        return (
+            set()
+            if loaded.error or not loaded.stored
+            else loaded.governance.maintainers()
+        )
+
+    async def members_of(self, repo: str) -> set[str]:
+        """Everyone ``repo``'s applied record lists."""
+        loaded = await self.load(repo)
+        return (
+            set() if loaded.error or not loaded.stored else loaded.governance.listed()
+        )
+
     def drafted(self, repo: str, change: MemoryChange) -> Governance | None:
         """The record ``change`` would store for ``repo``, or ``None`` when it does
         not change the record or does not read."""

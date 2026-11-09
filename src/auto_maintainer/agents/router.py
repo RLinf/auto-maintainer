@@ -472,6 +472,7 @@ class AgentRouter:
                     cost_usd=result.usage.cost_usd,
                     transcript_path=result.transcript_path,
                     duration_seconds=result.duration_seconds,
+                    requested_by=task.requested_by,
                     created_at=self.clock.now(),
                 )
             )

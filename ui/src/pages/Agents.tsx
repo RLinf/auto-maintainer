@@ -64,6 +64,7 @@ export default function AgentsPage() {
       ),
     },
     { id: "repo", header: t("Repository"), cell: (r) => r.repo ?? <span className="muted">—</span>, className: "small hide-narrow" },
+    { id: "for", header: t("For"), cell: (r) => r.requested_by ?? <span className="muted">{t("the service")}</span>, className: "small hide-narrow" },
     {
       id: "result",
       header: t("Result"),

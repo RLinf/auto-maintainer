@@ -104,7 +104,7 @@ async def test_settings_change_needs_a_maintainer(demo) -> None:
         profile = (await walt.get("/api/repos/acme/widget/profile")).json()
         assert (
             profile["can_configure"] is False
-            and "needs maintain" in profile["gate"]["reason"]
+            and "needs admin" in profile["gate"]["reason"]
         )
         out = (
             await walt.put("/api/repos/acme/widget/settings", json={"yaml": yaml_text})
