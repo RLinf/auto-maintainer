@@ -256,8 +256,14 @@ class Actuator:
         return record
 
     async def reconcile_intents(self) -> int:
-        """After a crash: settle actions left between intent and result (design 4.10)."""
+        """On start: settle actions left between intent and result (design 4.10), and
+        queue again, in the order they were allowed, the allowed actions that waited
+        in the queue, which lives only in memory, when the service stopped."""
         records = await self.x.store.list_actions(statuses=[ActionStatus.INTENT])
+        waiting = sorted(
+            await self.x.store.list_actions(statuses=[ActionStatus.QUEUED]),
+            key=lambda r: r.action.created_at,
+        )
         settled = 0
         for record in records:
             action = record.action
@@ -278,6 +284,14 @@ class Actuator:
                 record.status = ActionStatus.QUEUED
                 await self.x.store.save_action(record)
                 self.enqueue(action.id, action.repo, record.approver, action.kind)
+            settled += 1
+        for record in waiting:
+            self.enqueue(
+                record.action.id,
+                record.action.repo,
+                record.approver,
+                record.action.kind,
+            )
             settled += 1
         return settled
 

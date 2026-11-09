@@ -528,6 +528,7 @@ Stack: Python 3.11+ via uv, asyncio, Pydantic v2, FastAPI with uvicorn, SQLAlche
 |---|---|
 | The service crashes or restarts during a job | The job returns to the queue when the service starts again (job store, 5.4) and runs again from fresh reads. Idempotency keys stop repeated writes. An agent task resumes its session when the runtime supports it and restarts otherwise. |
 | The service crashes between a forge write and recording it | The actuator records an intent before each write. On startup, an intent without a result is reconciled by looking for the action's marker or reading the target's state, and it is retried only if the write did not happen. |
+| The service stops while allowed actions wait in the actuator's queue | The queue lives in memory, so on startup the actions still `queued` are queued again, after the reconciled intents, in the order they were allowed. |
 | The forge is down or rate-limited | Polling backs off, the actuator holds its queue, jobs wait, and the dashboard shows a banner. |
 | An agent CLI fails, runs out of quota, or returns invalid output | Invalid output gets one repair turn; after that, the router moves to the fallback runtime and opens the failing runtime's circuit breaker. A job that runs out of runtimes fails and shows on the dashboard. |
 | A profile layer becomes invalid | The repository keeps running on its lock. The candidate is flagged on the dashboard, cannot be approved until it validates, and the service proposes a fix. |

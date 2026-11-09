@@ -791,3 +791,40 @@ async def test_a_run_on_a_test_machine_does_not_hold_up_posting(demo) -> None:
     machine_free.set()
     await h.settle()
     assert len(runner.reproduced) == 1
+
+
+async def test_actions_waiting_in_the_queue_at_a_restart_go_out_after_it(demo) -> None:
+    """The queue lives in memory: an allowed action still waiting in it when the
+    service stops runs once the service starts again, after any it was running."""
+    from auto_maintainer.domain.actions import (
+        ActionKind,
+        ActionStatus,
+        LabelPayload,
+        make_action,
+    )
+    from auto_maintainer.domain.records import ActionRecord
+
+    h, _app = demo
+    pr = await h.forge.get_pr(REPO, 42)
+    assert pr is not None
+    waiting = []
+    for i, label in enumerate(["needs review", "community"]):
+        action = make_action(
+            ActionKind.LABEL_APPLY,
+            REPO,
+            LabelPayload(labels=[label]),
+            number=42,
+            head_sha=pr.head_sha,
+            discriminator=f"left in the queue {i}",
+        )
+        record, _ = await h.store.add_action(
+            ActionRecord(action=action, status=ActionStatus.QUEUED, approver="walt")
+        )
+        waiting.append(record.action.id)
+    await h.service.actuator.reconcile_intents()
+    await h.service.actuator.drain()
+    for action_id in waiting:
+        record = await h.store.get_action(action_id)
+        assert record is not None and record.status in ("executed", "noop"), (
+            record.status if record else None
+        )
