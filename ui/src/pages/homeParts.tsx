@@ -8,7 +8,7 @@ import { api, type AgentJob, type Automation, type ChatThread, type Me, type PrR
 import { useAgent } from "../agent";
 import { agentName, AgentPicker, reviewToast, useAgentChoice } from "../agentPicker";
 import { ErrorBox, prPath, Quality, Tier, useAct, When } from "../components";
-import { prKey, useSettings } from "../data";
+import { prKey, REVIEW_STATES, useSettings } from "../data";
 import { useT } from "../i18n";
 import { Icon } from "../icons";
 import { ACTIVE, needsMe, ScoringRow, useWork, WorkRow } from "../jobs";
@@ -156,8 +156,16 @@ function activity(p: PrRow, me: Me, t: (s: string) => string): ReactNode {
   return null;
 }
 
-/** PRs that need a review in one repository, ranked by its priorities. */
-export function ReviewCard({ rows, loading, me, automations }: { rows: PrRow[]; loading: boolean; me: Me; automations: Automation[] }) {
+/** Whether a PR matches every word of a search: its title, repository and number,
+ *  author, labels, summary, and the reviewers on it. */
+function matches(p: PrRow, words: string[]): boolean {
+  const hay = `${p.title} ${p.repo}#${p.number} #${p.number} ${p.author} ${p.labels.join(" ")} ${p.summary} ${p.assignees.map((a) => a.login).join(" ")}`.toLowerCase();
+  return words.every((w) => hay.includes(w));
+}
+
+/** PRs that need a review in one repository, ranked by its priorities. A search looks
+ *  through every open PR (``all``), not only those waiting for a review. */
+export function ReviewCard({ rows, all, loading, me, automations }: { rows: PrRow[]; all: PrRow[]; loading: boolean; me: Me; automations: Automation[] }) {
   const t = useT();
   const toast = useToast();
   const agent = useAgent();
@@ -165,8 +173,13 @@ export function ReviewCard({ rows, loading, me, automations }: { rows: PrRow[]; 
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [who, setWho] = useAgentChoice("review");
   const [showAll, setShowAll] = useState(false);
-  const sorted = [...rows].sort((a, b) => (b.total ?? -1) - (a.total ?? -1));
-  const shown = showAll ? sorted : sorted.slice(0, 8);
+  const [query, setQuery] = useState("");
+  const words = query.toLowerCase().split(/\s+/).filter(Boolean);
+  const searching = words.length > 0;
+  const pool = searching ? all.filter((p) => matches(p, words)) : rows;
+  const sorted = [...pool].sort((a, b) => (b.total ?? -1) - (a.total ?? -1));
+  const shown = showAll || searching ? sorted : sorted.slice(0, 8);
+  const waiting = new Set(rows.map(prKey));
   const review = useAct(
     (prs: PrRow[]) => api.post<ReviewStart[]>("/api/reviews", { prs: prs.map((p) => ({ repo: p.repo, number: p.number })), agent: who || null }),
     [["prs"], ["proposals"]],
@@ -190,7 +203,9 @@ export function ReviewCard({ rows, loading, me, automations }: { rows: PrRow[]; 
           onChange={() => setSelected(allChecked ? new Set() : new Set(shown.map(prKey)))}
         />
         <h2>{t("Pull requests to review")}</h2>
-        <span className="small muted">{rows.length}</span>
+        <span className="small muted" title={searching ? t("PRs that match, of the open PRs") : undefined}>
+          {searching ? `${sorted.length} / ${all.length}` : rows.length}
+        </span>
         <span className="spacer" />
         <AgentPicker value={who} onChange={setWho} />
         <button className="primary" disabled={!chosen.length || review.isPending} onClick={() => start(chosen)}>
@@ -198,9 +213,26 @@ export function ReviewCard({ rows, loading, me, automations }: { rows: PrRow[]; 
           {review.isPending ? t("Starting…") : chosen.length ? `${t("Review")} ${chosen.length}` : t("Review selected")}
         </button>
       </div>
+      <label className="search" style={{ minWidth: 0, width: "100%", flex: "none", marginBottom: 8 }}>
+        <Icon name="search" />
+        <input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={(e) => e.key === "Escape" && setQuery("")}
+          placeholder={t("Search open PRs: title, #number, author, label, reviewer")}
+          aria-label={t("Search open PRs")}
+        />
+        {query && (
+          <button type="button" className="ghost icon sm" aria-label={t("Clear the search")} onClick={() => setQuery("")}>
+            <Icon name="x" size={13} />
+          </button>
+        )}
+      </label>
       {loading ? (
         <Skeleton rows={4} />
-      ) : !rows.length ? (
+      ) : searching && !sorted.length ? (
+        <span className="small muted">{t("No open PR matches the search.")}</span>
+      ) : !pool.length ? (
         <span className="small muted">{t("No PR needs a review.")}</span>
       ) : (
         <div className="list">
@@ -233,6 +265,7 @@ export function ReviewCard({ rows, loading, me, automations }: { rows: PrRow[]; 
                   {t("Needs follow-up")}
                 </span>
               )}
+              {searching && !waiting.has(prKey(p)) && <span className="pill tag">{t(REVIEW_STATES[p.review_state] ?? p.review_state)}</span>}
               <span className="small">{activity(p, me, t)}</span>
               <span className="row-actions">
                 <button
@@ -251,7 +284,7 @@ export function ReviewCard({ rows, loading, me, automations }: { rows: PrRow[]; 
           ))}
         </div>
       )}
-      {rows.length > 8 && (
+      {!searching && rows.length > 8 && (
         <button className="ghost sm" style={{ marginTop: 8 }} onClick={() => setShowAll(!showAll)}>
           {showAll ? t("Show fewer") : `${t("Show all")} (${rows.length})`}
         </button>

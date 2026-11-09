@@ -154,7 +154,7 @@ export default function HomePage({ me }: { me: Me }) {
       <RepoTabs names={names} scope={scope} onPick={setScope} count={(repo) => allRows.filter((p) => p.repo === repo && NEEDS_REVIEW.has(p.review_state)).length} />
       <GettingStarted repos={repoRows} prs={rows} automations={automations} />
       <AgentWork me={me} />
-      <ReviewCard rows={needs} loading={prs.isLoading} me={me} automations={automations} />
+      <ReviewCard rows={needs} all={rows} loading={prs.isLoading} me={me} automations={automations} />
 
       <section id="decisions" className="stack" style={{ gap: 12, minWidth: 0 }}>
         <div className="row">
