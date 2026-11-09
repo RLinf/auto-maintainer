@@ -189,6 +189,13 @@ class ReproducePlaybook(Playbook):
     async def run(self, ctx: PlaybookContext, event: Event) -> PlaybookResult:
         profile = ctx.require_profile()
         request = _request(ctx, event)
+        if request.kind == EventKind.REVIEW_REPRODUCE:
+            return PlaybookResult(
+                result={
+                    "skipped": "a review's reproduction from before reviews tested "
+                    "their PRs in their own session; ask for one again if needed"
+                }
+            )
         assert request.repo and request.number
         by: str | None = request.payload.get("by") or None
         lab = str(request.payload["lab"])

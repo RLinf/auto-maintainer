@@ -42,6 +42,9 @@ class EventKind(StrEnum):
     REPO_FILES_CHANGED = "repo.files_changed"
     SCHEDULE_TICK = "schedule.tick"
     DASHBOARD_COMMAND = "dashboard.command"
+    REVIEW_REPRODUCE = "review.reproduce"
+    """No longer sent: reviews test in their own session. Kept so jobs and events
+    stored before that still load (the reproduce playbook ends them)."""
     CHAT_MESSAGE = "chat.message"
     PRIORITY_OVERRIDDEN = "priority.overridden"
     """A review asked for its PR to be reproduced on a test machine; the reproduce

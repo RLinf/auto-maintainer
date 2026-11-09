@@ -988,3 +988,34 @@ async def test_a_session_the_policy_only_records_does_not_hold_the_review(
     assert job.status == "done", "the review goes on at once, without waiting an hour"
     assert job.result and "only records such runs" in job.result["not_tested"]
     assert h.service.a.lab_runner.reproduced == []
+
+
+async def test_a_reviews_reproduction_stored_before_the_change_ends_cleanly(
+    demo,
+) -> None:
+    """Jobs a review started before reviews tested in their own session still load
+    after the upgrade and end, instead of failing on every try."""
+    from auto_maintainer.domain.events import Event, EventKind
+    from auto_maintainer.domain.records import Job
+
+    h, _ = demo
+    old = Event(
+        kind=EventKind.REVIEW_REPRODUCE,
+        repo=REPO,
+        number=42,
+        payload={"lab": "gpu-01", "review": "act_1"},
+    )
+    job, _ = await h.store.upsert_job(
+        Job(
+            playbook="reproduce",
+            key=f"reproduce:{REPO}#42:review:act_1",
+            repo=REPO,
+            number=42,
+            pool="agent",
+            events=[old.model_dump(mode="json")],
+        )
+    )
+    await h.settle()
+    done = await h.store.get_job(job.id)
+    assert done is not None and done.status == "done"
+    assert done.result and "ask for one again" in done.result["skipped"]
