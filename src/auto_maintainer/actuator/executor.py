@@ -154,6 +154,7 @@ class Actuator:
                     spec.needs_current_head
                     and action.head_sha
                     and not same_commit(pr.head_sha, action.head_sha)
+                    and not (spec.approved_on_its_commit and approver)
                 ):
                     raise Stale(
                         f"the head moved from {action.head_sha[:7]} to {pr.head_sha[:7]}"

@@ -51,6 +51,8 @@ ONE_PER_SHA = {ActionKind.REVIEW_POST}
 """Kinds limited to one execution per PR and head SHA (later changes edit in place)."""
 
 WRITE_CAP_RULE = "limit.write_cap"
+PAUSED_RULE = "paused"
+"""The rule of a public action held while the service or its repository is paused."""
 
 
 def _conditions_hold(conditions: Conditions, facts: PolicyFacts) -> tuple[bool, str]:
@@ -125,7 +127,7 @@ def decide(action: Action, profile: RepoProfile, facts: PolicyFacts) -> Decision
     if facts.paused and public:
         return Decision(
             kind=DecisionKind.PROPOSE,
-            rule="paused",
+            rule=PAUSED_RULE,
             reason="the service is paused; held for a maintainer",
         )
     if level == Autonomy.PROPOSE and not facts.approved_by:

@@ -792,3 +792,89 @@ async def test_a_refused_post_comes_back_as_a_draft(harness: Harness) -> None:
     assert len(harness.forge.writes_of("create_review")) == 1
     done = await harness.store.get_proposal(proposal.id)
     assert done is not None and done.state == ProposalState.EXECUTED
+
+
+async def test_a_requested_draft_outlives_a_push_and_posts_on_its_commit(
+    harness: Harness,
+) -> None:
+    """The reviewer who asked for a draft may post it after the author pushed: it
+    reviews its own commit. A draft nobody asked for gives way to the new head."""
+    from auto_maintainer.domain.actions import (
+        ActionKind,
+        ReviewPostPayload,
+        make_action,
+    )
+
+    await _auto(harness, review_post="propose")
+    harness.forge.put_pr(_pr())
+
+    def draft(discriminator: str, draft_for: str | None):
+        action = make_action(
+            ActionKind.REVIEW_POST,
+            "acme/widget",
+            ReviewPostPayload(body=f"Review {discriminator}."),
+            number=42,
+            head_sha="a" * 40,
+            discriminator=discriminator,
+        )
+        return action.model_copy(update={"draft_for": draft_for})
+
+    asked, scanned = draft("asked", "maria"), draft("scan", None)
+    for action in (asked, scanned):
+        await harness.service.pipeline.submit(action)
+    harness.forge.put_pr(
+        (await harness.forge.get_pr("acme/widget", 42)).model_copy(
+            update={"head_sha": "b" * 40}
+        )
+    )
+    await harness.service.pipeline.supersede_stale("acme/widget", 42, "b" * 40)
+    pending = {
+        (await harness.store.get_action(p.action_id)).action.id: p
+        for p in await harness.store.list_proposals(ProposalState.PENDING)
+    }
+    assert set(pending) == {asked.id}
+
+    await harness.service.pipeline.approve(pending[asked.id].id, "maria")
+    await harness.settle()
+    [posted] = harness.forge.writes_of("create_review")
+    assert posted["commit_sha"] == "a" * 40
+
+
+async def test_a_post_the_policy_refuses_after_approval_stays_a_draft(
+    harness: Harness,
+) -> None:
+    """One review per head commit: a second draft for a commit already reviewed is
+    refused when approved, and goes back to its reviewers with the reason."""
+    from auto_maintainer.domain.actions import (
+        ActionKind,
+        ReviewPostPayload,
+        make_action,
+    )
+
+    await _auto(harness, review_post="propose")
+    harness.forge.put_pr(_pr())
+    first, second = (
+        make_action(
+            ActionKind.REVIEW_POST,
+            "acme/widget",
+            ReviewPostPayload(body=f"Review {n}.", runtime=n),
+            number=42,
+            head_sha="a" * 40,
+            discriminator=n,
+        )
+        for n in ("codex", "claude-code")
+    )
+    for action in (first, second):
+        await harness.service.pipeline.submit(action)
+    proposals = {
+        p.action_id: p
+        for p in await harness.store.list_proposals(ProposalState.PENDING)
+    }
+    await harness.service.pipeline.approve(proposals[first.id].id, "maria")
+    await harness.settle()
+    await harness.service.pipeline.approve(proposals[second.id].id, "maria")
+    await harness.settle()
+    assert len(harness.forge.writes_of("create_review")) == 1
+    back = await harness.store.get_proposal(proposals[second.id].id)
+    assert back is not None and back.state == ProposalState.PENDING
+    assert any("already ran for this head" in w for w in back.warnings), back.warnings

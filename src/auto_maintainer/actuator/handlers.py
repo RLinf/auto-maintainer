@@ -84,6 +84,9 @@ class HandlerSpec:
     """Re-read the PR before running and refuse if it closed."""
     needs_current_head: bool = False
     """Refuse if the PR's head moved past ``action.head_sha``."""
+    approved_on_its_commit: bool = False
+    """With ``needs_current_head``: run anyway after the head moved when a person
+    approved it, on ``action.head_sha``, the commit it was written for."""
 
 
 async def _labels(
@@ -780,8 +783,14 @@ HANDLERS: dict[ActionKind, HandlerSpec] = {
     ActionKind.LABEL_CI_GATE: HandlerSpec(
         _labels, needs_pr=True, needs_current_head=True
     ),
+    # A reviewer who read the draft may post it after a push: GitHub shows it
+    # against the commit it reviewed, and marks inline comments outdated where the
+    # code changed since.
     ActionKind.REVIEW_POST: HandlerSpec(
-        _review_post, needs_pr=True, needs_current_head=True
+        _review_post,
+        needs_pr=True,
+        needs_current_head=True,
+        approved_on_its_commit=True,
     ),
     # An edited review still covers the commit it reviewed, whatever came since.
     ActionKind.REVIEW_UPDATE: HandlerSpec(_review_update, needs_pr=True),

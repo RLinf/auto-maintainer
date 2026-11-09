@@ -44,7 +44,7 @@ from ..domain.memory import Signal, SignalKind
 from ..domain.ports import EventSink, Store
 from ..domain.profile import RepoProfile
 from ..domain.records import ActionRecord, AuditEntry
-from ..policy.engine import WRITE_CAP_RULE, PolicyFacts, decide
+from ..policy.engine import PAUSED_RULE, WRITE_CAP_RULE, PolicyFacts, decide
 from ..policy.leak_guard import TIER_BLIND, check_text
 from ..profiles.knowledge import Knowledge
 from ..profiles.service import ProfileService
@@ -422,6 +422,7 @@ class ActionPipeline:
             record.status = ActionStatus.FAILED
             record.error = f"{action.repo} has no approved profile"
             await self.store.save_action(record)
+            await self._back_to_reviewers(action.id, record.error)
             return
         decision = decide(action, profile, await self._facts(action, login))
         if (
@@ -445,6 +446,8 @@ class ActionPipeline:
             record.status = ActionStatus.PROPOSED
             record.error = f"held after approval: {decision.reason or decision.rule}"
             await self.store.save_action(record)
+            if decision.rule != PAUSED_RULE:  # a pause holds it until released
+                await self._back_to_reviewers(action.id, record.error)
         await self.store.add_audit(
             AuditEntry(
                 kind="proposal",
@@ -455,6 +458,20 @@ class ActionPipeline:
                 summary=f"approved; {decision.kind} ({decision.rule})",
             )
         )
+
+    async def _back_to_reviewers(self, action_id: str, why: str) -> None:
+        """Return an approved proposal that will not run to pending, with ``why``
+        among its warnings, so its reviewers see it and can change or reject it."""
+        proposal = await self.store.proposal_for_action(action_id)
+        if proposal is None or proposal.state != ProposalState.APPROVED:
+            return
+        proposal.state = ProposalState.PENDING
+        proposal.decided_by = proposal.decided_at = None
+        proposal.warnings = [
+            *(w for w in proposal.warnings if not w.startswith("not done: ")),
+            f"not done: {why}",
+        ]
+        await self.store.save_proposal(proposal)
 
     async def reject(self, proposal_id: str, login: str, reason: str) -> Proposal:
         if not reason.strip():
@@ -507,7 +524,11 @@ class ActionPipeline:
         return proposal
 
     async def supersede_stale(self, repo: str, number: int, head_sha: str) -> int:
-        """Mark pending proposals for an older head of ``repo#number`` as superseded."""
+        """Mark pending proposals for an older head of ``repo#number`` as superseded.
+
+        A review draft a reviewer asked for stays: it reviews its own commit, and
+        posts there when approved (``HandlerSpec.approved_on_its_commit``).
+        """
         count = 0
         for proposal in await self.store.list_proposals(ProposalState.PENDING, repo):
             record = await self.store.get_action(proposal.action_id)
@@ -515,6 +536,10 @@ class ActionPipeline:
                 record is None
                 or record.action.number != number
                 or not record.action.head_sha
+                or (
+                    record.action.kind == ActionKind.REVIEW_POST
+                    and record.action.draft_for
+                )
             ):
                 continue
             if not same_commit(record.action.head_sha, head_sha):
