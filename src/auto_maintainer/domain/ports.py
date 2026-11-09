@@ -167,6 +167,10 @@ class ForgeWriter(Protocol):
         self, repo: str, number: int, review_id: int, body: PublicText
     ) -> None: ...
 
+    async def approve_workflow_run(self, repo: str, run_id: int) -> None:
+        """Approve a workflow run GitHub holds for a maintainer, so it runs."""
+        ...
+
     async def approve_pr(
         self, repo: str, number: int, commit_sha: str, body: PublicText
     ) -> CommentRef:

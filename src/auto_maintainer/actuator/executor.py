@@ -42,11 +42,14 @@ AS_PERSON = frozenset(
         ActionKind.PR_FIX,
         ActionKind.PR_UPDATE_BRANCH,
         ActionKind.PR_APPROVE,
+        ActionKind.CI_APPROVE_RUN,
     }
 )
 """Action kinds a maintainer may run with their own GitHub account."""
 
-ONLY_AS_PERSON = frozenset({ActionKind.PR_FIX, ActionKind.PR_APPROVE})
+ONLY_AS_PERSON = frozenset(
+    {ActionKind.PR_FIX, ActionKind.PR_APPROVE, ActionKind.CI_APPROVE_RUN}
+)
 """Kinds that run only as the person who approves them, never as the service."""
 
 ON_TEST_MACHINES = frozenset(

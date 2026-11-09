@@ -10,6 +10,7 @@ policy:
   thread.reply: {level: shadow}
   comment.upsert: {level: shadow}
   ci.rerun_failed: {level: shadow}
+  ci.approve_run: {level: shadow}     # a person's Approve and run; only ever as them
   pr.request_reviewers: {level: shadow}
   pr.update_branch: {level: shadow}
   pr.approve: {level: shadow}          # a person's Approve button; only ever as them

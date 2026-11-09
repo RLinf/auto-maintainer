@@ -417,3 +417,26 @@ async def test_merged_prs_newest_first(client, router):
         and merged[1].commit_messages == ["m1"]
         and merged[1].review_count == 1
     )
+
+
+def test_a_workflow_github_holds_for_approval_is_a_check_that_has_not_run():
+    node = load_fixture("pr_node.json")
+    suites = node["headCommit"]["nodes"][0]["commit"]["checkSuites"]["nodes"]
+    suites.append(
+        {
+            "status": "COMPLETED",
+            "conclusion": "ACTION_REQUIRED",
+            "workflowRun": {
+                "databaseId": 991,
+                "runAttempt": 1,
+                "url": "https://github.com/acme/widget/actions/runs/991",
+                "workflow": {"name": "CI"},
+            },
+            "checkRuns": {"nodes": []},
+        }
+    )
+    pr = snapshot_from_graphql("acme/widget", node)
+    [held] = [c for c in pr.checks if c.awaiting_approval]
+    assert (held.name, held.workflow, held.run_id) == ("CI", "CI", 991)
+    assert held.status != "completed" and not held.failed
+    assert held.details_url == "https://github.com/acme/widget/actions/runs/991"

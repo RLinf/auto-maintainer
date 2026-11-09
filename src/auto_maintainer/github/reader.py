@@ -100,7 +100,8 @@ fragment PrFields on PullRequest {
       commit {
         checkSuites(first: 20) {
           nodes {
-            workflowRun { databaseId runAttempt workflow { name } }
+            status conclusion
+            workflowRun { databaseId runAttempt url workflow { name } }
             checkRuns(first: 50, filterBy: {checkType: LATEST}) {
               nodes { databaseId name status conclusion detailsUrl startedAt completedAt summary }
             }
@@ -194,7 +195,29 @@ def snapshot_from_graphql(repo: str, node: dict[str, Any]) -> PrSnapshot:
     for suite in suites:
         run = suite.get("workflowRun") or {}
         workflow = ((run.get("workflow") or {}).get("name")) if run else None
-        for cr in _nodes(suite.get("checkRuns")):
+        runs_in_suite = _nodes(suite.get("checkRuns"))
+        if (
+            run
+            and not runs_in_suite
+            and (suite.get("conclusion") or "").upper() == "ACTION_REQUIRED"
+        ):
+            # A workflow GitHub holds until a maintainer approves it (a first-time
+            # contributor's fork PR): it has no jobs yet, and it has not run.
+            checks.append(
+                CheckRun(
+                    id=int(run["databaseId"]),
+                    name=workflow or "workflow",
+                    workflow=workflow,
+                    status=CheckStatus.QUEUED,
+                    conclusion=CheckConclusion.ACTION_REQUIRED,
+                    run_id=run.get("databaseId"),
+                    run_attempt=run.get("runAttempt"),
+                    details_url=run.get("url"),
+                    summary="waiting for a maintainer to approve running it",
+                )
+            )
+            continue
+        for cr in runs_in_suite:
             checks.append(
                 CheckRun(
                     id=int(cr["databaseId"]),

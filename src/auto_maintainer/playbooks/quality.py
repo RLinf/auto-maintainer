@@ -334,10 +334,16 @@ def quick_facts(pr: PrSnapshot, hygiene: dict | None) -> str:
     ]
     failing = [c.name for c in pr.checks if (c.conclusion or "").lower() == "failure"]
     pending = [c.name for c in pr.checks if not c.conclusion]
+    held = [c.name for c in pr.checks if c.awaiting_approval]
     lines.append(
         f"CI: {len(pr.checks)} checks"
         + (f"; failing: {', '.join(failing[:10])}" if failing else "")
         + (f"; still running: {len(pending)}" if pending else "")
+        + (
+            f"; not run yet, waiting for a maintainer's approval: {', '.join(held[:10])}"
+            if held
+            else ""
+        )
         + "."
         if pr.checks
         else "CI: no checks ran on this head."

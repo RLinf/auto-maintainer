@@ -139,6 +139,11 @@ class GitHubWriter:
         )
         return CommentRef(id=int(data["id"]), url=data.get("html_url") or "")
 
+    async def approve_workflow_run(self, repo: str, run_id: int) -> None:
+        await self._client.post(
+            f"/repos/{repo}/actions/runs/{run_id}/approve", repo=repo
+        )
+
     async def approve_pr(
         self, repo: str, number: int, commit_sha: str, body: PublicText
     ) -> CommentRef:

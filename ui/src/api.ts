@@ -413,8 +413,12 @@ export interface PrDetail {
 }
 
 export interface RunCiPlan {
-  state: "gated" | "failed" | "running" | "passed" | "none";
+  /** "approval": GitHub holds a workflow until a maintainer approves running it. */
+  state: "gated" | "failed" | "approval" | "running" | "passed" | "none";
   label: string | null;
+  waiting?: string[];
+  approve_url?: string | null;
+  approve_runs?: number[];
   reruns: { run_id: number; attempt: number | null; workflow: string | null }[];
 }
 

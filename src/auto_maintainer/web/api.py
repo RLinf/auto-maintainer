@@ -41,6 +41,7 @@ from ..domain.actions import (
     ActionKind,
     ActionStatus,
     ApprovePrPayload,
+    ApproveRunsPayload,
     Autonomy,
     CodeMergePayload,
     LabelPayload,
@@ -1660,6 +1661,43 @@ def build_router() -> APIRouter:
         if pr is None or pr.state != PrState.OPEN:
             raise HTTPException(409, f"{repo}#{number} is not open")
         plan = plan_run_ci(pr, profile.label_for("ci_gate"))
+        if plan.state == "approval":
+            # Approving runs the contributor's code on CI: it is the person's own.
+            if not await service.can_post_as(user.login):
+                raise HTTPException(
+                    403, "sign in with GitHub, so the approval comes from you"
+                )
+            record = await _run_now(
+                service,
+                user,
+                make_action(
+                    ActionKind.CI_APPROVE_RUN,
+                    repo,
+                    ApproveRunsPayload(
+                        run_ids=plan.approve_runs, workflows=plan.waiting
+                    ),
+                    number=number,
+                    head_sha=pr.head_sha,
+                    discriminator="approve-ci:"
+                    + ",".join(str(r) for r in plan.approve_runs),
+                    rationale=f"{user.login} approved running "
+                    + ", ".join(plan.waiting),
+                    draft_for=user.login,
+                    provenance=Provenance(requested_by=user.login),
+                ),
+                as_them=True,
+            )
+            return {
+                "plan": plan.model_dump(mode="json"),
+                "actions": [
+                    {
+                        "id": record.action.id,
+                        "kind": record.action.kind,
+                        "status": record.status,
+                        "error": record.error,
+                    }
+                ],
+            }
         if not plan.can_run:
             raise HTTPException(
                 409,

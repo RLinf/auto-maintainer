@@ -327,6 +327,11 @@ class FakeForge:
             url=f"https://example.test/{repo}/pull/{number}#pullrequestreview-{rid}",
         )
 
+    async def approve_workflow_run(self, repo: str, run_id: int) -> None:
+        self._record(
+            "approve_workflow_run", repo=repo, run_id=run_id, by=self.acting_as
+        )
+
     async def approve_pr(
         self, repo: str, number: int, commit_sha: str, body: PublicText
     ) -> CommentRef:

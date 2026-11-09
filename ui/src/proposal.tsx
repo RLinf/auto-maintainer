@@ -55,6 +55,7 @@ const KIND_LABELS: Record<string, string> = {
   "pr.request_reviewers": "Request reviewers",
   "pr.update_branch": "Update the branch",
   "pr.approve": "Approve the PR",
+  "ci.approve_run": "Approve and run CI",
   "pr.merge": "Merge",
   "pr.nudge": "Nudge the author",
   "pr.fix": "Open a fix PR",

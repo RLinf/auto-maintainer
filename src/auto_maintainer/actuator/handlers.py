@@ -26,6 +26,7 @@ from ..domain.actions import (
     ActionKind,
     ActionStatus,
     ApprovePrPayload,
+    ApproveRunsPayload,
     CodeMergePayload,
     CodePrPayload,
     CommentUpsertPayload,
@@ -333,6 +334,21 @@ async def _request_reviewers(
         raise Noop("every suggested reviewer is already requested or is the author")
     await x.writer.request_reviewers(action.repo, pr.number, logins)
     return {"requested": logins}
+
+
+async def _approve_runs(
+    x: ExecContext,
+    action: Action,
+    profile: RepoProfile | None,
+    pr: PrSnapshot | None,
+    approver: str | None,
+) -> dict[str, Any]:
+    """Approve the workflow runs GitHub holds for the PR's head, as the person who
+    pressed the button (the executor gives this handler their writer)."""
+    p = ApproveRunsPayload.model_validate(action.payload)
+    for run_id in p.run_ids:
+        await x.writer.approve_workflow_run(action.repo, run_id)
+    return {"approved": p.run_ids}
 
 
 async def _approve_pr(
@@ -775,6 +791,9 @@ HANDLERS: dict[ActionKind, HandlerSpec] = {
         _rerun, needs_pr=True, needs_current_head=True
     ),
     ActionKind.PR_REQUEST_REVIEWERS: HandlerSpec(_request_reviewers, needs_pr=True),
+    ActionKind.CI_APPROVE_RUN: HandlerSpec(
+        _approve_runs, needs_pr=True, needs_current_head=True
+    ),
     ActionKind.PR_APPROVE: HandlerSpec(
         _approve_pr, needs_pr=True, needs_current_head=True
     ),

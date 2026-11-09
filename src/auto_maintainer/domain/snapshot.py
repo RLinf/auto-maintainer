@@ -158,6 +158,12 @@ class CheckRun(_Model):
     summary: str | None = None
 
     @property
+    def awaiting_approval(self) -> bool:
+        """A workflow GitHub holds until a maintainer approves running it; it has
+        not run, so it neither passed nor failed."""
+        return self.conclusion == CheckConclusion.ACTION_REQUIRED
+
+    @property
     def failed(self) -> bool:
         return self.conclusion in {
             CheckConclusion.FAILURE,

@@ -40,6 +40,9 @@ class ActionKind(StrEnum):
     THREAD_REPLY = "thread.reply"
     COMMENT_UPSERT = "comment.upsert"
     CI_RERUN_FAILED = "ci.rerun_failed"
+    CI_APPROVE_RUN = "ci.approve_run"
+    """Approve workflow runs GitHub holds for a maintainer (a first-time
+    contributor's fork PR), as the person who pressed the button."""
     PR_REQUEST_REVIEWERS = "pr.request_reviewers"
     PR_APPROVE = "pr.approve"
     PR_UPDATE_BRANCH = "pr.update_branch"
@@ -286,6 +289,11 @@ class CommentUpsertPayload(_Payload):
     runtime: str | None = None
 
 
+class ApproveRunsPayload(_Payload):
+    run_ids: list[int] = Field(min_length=1)
+    workflows: list[str] = Field(default_factory=list)
+
+
 class RerunPayload(_Payload):
     run_id: int
     workflow: str | None = None
@@ -452,6 +460,7 @@ PAYLOADS: dict[ActionKind, type[BaseModel]] = {
     ActionKind.THREAD_REPLY: ThreadReplyPayload,
     ActionKind.COMMENT_UPSERT: CommentUpsertPayload,
     ActionKind.CI_RERUN_FAILED: RerunPayload,
+    ActionKind.CI_APPROVE_RUN: ApproveRunsPayload,
     ActionKind.PR_REQUEST_REVIEWERS: RequestReviewersPayload,
     ActionKind.PR_APPROVE: ApprovePrPayload,
     ActionKind.PR_UPDATE_BRANCH: UpdateBranchPayload,

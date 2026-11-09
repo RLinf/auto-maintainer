@@ -35,6 +35,7 @@ from .snapshot import (
 )
 
 _PASSING = {CheckConclusion.SUCCESS, CheckConclusion.NEUTRAL, CheckConclusion.SKIPPED}
+AWAITING_APPROVAL = "waiting for a maintainer to approve running it on GitHub"
 
 
 class MergeArm(BaseModel):
@@ -181,6 +182,15 @@ def evaluate_merge_gate(
                     detail="not reported yet",
                 )
             )
+        elif any(c.awaiting_approval for c in runs):
+            items.append(
+                GateItem(
+                    name=f"check:{name}",
+                    ok=False,
+                    pending=True,
+                    detail=AWAITING_APPROVAL,
+                )
+            )
         elif any(c.status != CheckStatus.COMPLETED for c in runs):
             items.append(
                 GateItem(name=f"check:{name}", ok=False, pending=True, detail="running")
@@ -205,6 +215,16 @@ def evaluate_merge_gate(
             )
             items.append(
                 GateItem(name=f"workflow:{wf}", ok=False, pending=True, detail=detail)
+            )
+            continue
+        if any(c.awaiting_approval for c in runs):
+            items.append(
+                GateItem(
+                    name=f"workflow:{wf}",
+                    ok=False,
+                    pending=True,
+                    detail=AWAITING_APPROVAL,
+                )
             )
             continue
         running = [c for c in runs if c.status != CheckStatus.COMPLETED]

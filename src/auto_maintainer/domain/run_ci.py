@@ -42,10 +42,17 @@ class RerunTarget(BaseModel):
 
 
 class RunCiPlan(BaseModel):
-    state: Literal["gated", "failed", "running", "passed", "none"]
+    state: Literal["gated", "failed", "approval", "running", "passed", "none"]
     """``gated``: the gate label is missing. ``failed``: some runs failed and are done.
+    ``approval``: GitHub holds a workflow until a maintainer approves running it.
     ``running``: checks are still going. ``passed``: every check ended well. ``none``:
     no check ran at this commit."""
+    waiting: list[str] = Field(default_factory=list)
+    """The workflows waiting for approval, for ``approval``."""
+    approve_url: str | None = None
+    """Where on GitHub a maintainer approves them, for ``approval``."""
+    approve_runs: list[int] = Field(default_factory=list)
+    """The workflow runs to approve, for ``approval``."""
     label: str | None = None
     """The gate label to add, for ``gated``."""
     reruns: list[RerunTarget] = Field(default_factory=list)
@@ -53,7 +60,7 @@ class RunCiPlan(BaseModel):
 
     @property
     def can_run(self) -> bool:
-        return self.state in ("gated", "failed")
+        return self.state in ("gated", "failed", "approval")
 
 
 def plan_run_ci(pr: PrSnapshot, gate_label: str | None) -> RunCiPlan:
@@ -79,6 +86,15 @@ def plan_run_ci(pr: PrSnapshot, gate_label: str | None) -> RunCiPlan:
             )
     if reruns:
         return RunCiPlan(state="failed", reruns=reruns)
+    held = [c for c in pr.checks if c.awaiting_approval]
+    if held:
+        return RunCiPlan(
+            state="approval",
+            waiting=sorted({c.workflow or c.name for c in held}),
+            approve_url=next((c.details_url for c in held if c.details_url), None)
+            or f"{pr.url}/checks",
+            approve_runs=sorted({c.run_id for c in held if c.run_id}),
+        )
     if any(c.status != CheckStatus.COMPLETED for c in pr.checks):
         return RunCiPlan(state="running")
     if pr.checks:

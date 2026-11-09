@@ -61,6 +61,12 @@ def _check(run_id: int, status: str, conclusion: str | None, attempt: int = 1):
         (["run-ci"], [_check(2, "in_progress", None)], "running", []),
         (["run-ci"], [_check(1, "completed", "success")], "passed", []),
         (["run-ci"], [], "none", []),
+        (
+            ["run-ci"],
+            [_check(1, "completed", "success"), _check(2, "queued", "action_required")],
+            "approval",
+            [],
+        ),
     ],
 )
 def test_run_ci_does_the_one_step_ci_needs(
@@ -70,7 +76,7 @@ def test_run_ci_does_the_one_step_ci_needs(
     plan = plan_run_ci(pr, "run-ci")
     assert plan.state == state
     assert [(r.run_id, r.attempt) for r in plan.reruns] == reruns
-    assert plan.can_run is (state in ("gated", "failed"))
+    assert plan.can_run is (state in ("gated", "failed", "approval"))
 
 
 def test_without_a_gate_label_failed_runs_are_rerun() -> None:
@@ -170,3 +176,39 @@ async def test_a_maintainer_turns_on_automatic_flaky_reruns_in_one_step(demo) ->
     profile = await h.service.profiles.active(REPO)
     assert profile is not None
     assert profile.policy[ActionKind.LABEL_CI_GATE].level == Autonomy.AUTO
+
+
+def test_ci_a_maintainer_must_approve_is_not_passed() -> None:
+    """GitHub holds a first-time contributor's workflows until a maintainer approves
+    them: they have not run, so CI has neither passed nor failed."""
+    from auto_maintainer.domain.merge_gate import AWAITING_APPROVAL
+
+    held = _check(2, "queued", "action_required")
+    pr = make_pr(labels=["run-ci"], checks=[_check(1, "completed", "success"), held])
+    plan = plan_run_ci(pr, "run-ci")
+    assert plan.waiting == ["wf-2"] and plan.approve_url and not held.failed
+    assert held.awaiting_approval
+    assert AWAITING_APPROVAL.startswith("waiting for a maintainer to approve")
+
+
+async def test_ci_held_for_approval_is_approved_and_run_as_the_person(demo) -> None:
+    from auto_maintainer.domain.settings import UserToken
+
+    h, app = demo
+    held = _check(7, "queued", "action_required")
+    h.forge.put_pr(make_pr(number=50, labels=["run-ci"], checks=[held]))
+    await h.poll()
+    async with _as(app, "walt") as walt:
+        detail = (await walt.get(f"/api/prs/{REPO}/50")).json()
+        assert detail["run_ci"]["state"] == "approval"
+        assert detail["run_ci"]["approve_runs"] == [7]
+        refused = await walt.post(f"/api/prs/{REPO}/50/ci")
+        assert refused.status_code == 403, "only with walt's own GitHub sign-in"
+        await h.service.a.user_tokens.set("walt", UserToken(token="t"))
+        out = (await walt.post(f"/api/prs/{REPO}/50/ci")).json()
+        assert out["actions"][0]["kind"] == "ci.approve_run"
+        await h.settle()
+    [approved] = h.forge.writes_of("approve_workflow_run")
+    assert approved["run_id"] == 7 and approved["by"] == "walt", (
+        "as walt, not the service"
+    )

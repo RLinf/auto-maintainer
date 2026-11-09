@@ -190,7 +190,7 @@ export default function PrPage({ me }: { me: Me }) {
               />
             )}
             <ReproduceButton repo={full} number={pr.number} />
-            <RunCiButton repo={full} number={pr.number} plan={d.run_ci} />
+            <RunCiButton repo={full} number={pr.number} plan={d.run_ci} canPush={!!me.can_post_as_me} />
             {pr.state === "OPEN" && <FixCiButton repo={full} number={pr.number} failed={failedChecks(pr.checks)} canPush={!!me.can_post_as_me} />}
             <RefreshButton base={base} />
           </>
@@ -423,7 +423,10 @@ function Overview({ d }: { d: PrDetail }) {
           <div className="list">
             {d.pr.checks.map((c) => (
               <div key={c.id} className="list-row">
-                <Status value={c.conclusion ?? c.status} />
+                <Status
+                  value={c.conclusion ?? c.status}
+                  label={c.conclusion === "action_required" ? t("awaiting approval") : undefined}
+                />
                 <span className="main">
                   <span className="t">{c.name}</span>
                   {c.workflow && <span className="meta">{c.workflow}</span>}
@@ -913,13 +916,42 @@ function EvaluationCard({ base, repo, number, evaluation }: { base: string; repo
 
 /** Get CI going on the PR's head: add the CI gate label, or rerun what failed. The
  * click is the approval; it runs at once unless the policy holds it. */
-function RunCiButton({ repo, number, plan }: { repo: string; number: number; plan: RunCiPlan }) {
+function RunCiButton({ repo, number, plan, canPush }: { repo: string; number: number; plan: RunCiPlan; canPush: boolean }) {
   const t = useT();
   const toast = useToast();
   const run = useAct(
     () => api.post<{ actions: { kind: string; status: string; error: string | null }[] }>(`/api/prs/${repo}/${number}/ci`),
     [["pr"], ["prs"], ["audit"]],
   );
+  if (plan.state === "approval") {
+    const held = (plan.waiting ?? []).join(", ");
+    return (
+      <button
+        disabled={run.isPending || !canPush}
+        title={
+          canPush
+            ? `${t("GitHub holds these until a maintainer approves running them:")} ${held}. ${t("Approves them as you; read the PR's changes to its workflows first.")}`
+            : t("Sign in with GitHub, so the approval comes from you.")
+        }
+        onClick={() =>
+          run.mutate(undefined, {
+            onSuccess: (out) => {
+              const held2 = out.actions.filter((a) => !["executed", "queued", "intent"].includes(a.status));
+              toast(
+                held2.length
+                  ? { title: t("Not approved"), body: held2.map((a) => a.error || a.status).join("; "), icon: "pause" }
+                  : { title: t("CI approved"), body: `${t("GitHub runs")} ${held}.`, icon: "play" },
+              );
+            },
+            onError: (e) => toast({ title: t("Not approved"), body: String((e as Error).message), icon: "x" }),
+          })
+        }
+      >
+        <Icon name="shield" size={14} />
+        {run.isPending ? t("Approving…") : t("Approve and run CI")}
+      </button>
+    );
+  }
   if (plan.state === "running")
     return (
       <button disabled title={t("CI is running at this commit")}>
