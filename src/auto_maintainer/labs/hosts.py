@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import shlex
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from ..domain.ports import CommandResult, GpuStatus
@@ -61,7 +62,11 @@ class _Host:
     name: str
 
     async def _shell(
-        self, script: str, timeout: float, stdin: str | None = None
+        self,
+        script: str,
+        timeout: float,
+        stdin: str | None = None,
+        on_output: Callable[[str], Awaitable[None]] | None = None,
     ) -> CommandResult:
         raise NotImplementedError
 
@@ -73,8 +78,9 @@ class _Host:
         env: dict[str, str] | None = None,
         timeout: float = 600,
         stdin: str | None = None,
+        on_output: Callable[[str], Awaitable[None]] | None = None,
     ) -> CommandResult:
-        return await self._shell(_script(command, cwd, env), timeout, stdin)
+        return await self._shell(_script(command, cwd, env), timeout, stdin, on_output)
 
     async def gpu_status(self) -> list[GpuStatus]:
         gpus = await self._shell(GPU_QUERY, 30)
@@ -89,9 +95,15 @@ class LocalLabHost(_Host):
         self.name = name
 
     async def _shell(
-        self, script: str, timeout: float, stdin: str | None = None
+        self,
+        script: str,
+        timeout: float,
+        stdin: str | None = None,
+        on_output: Callable[[str], Awaitable[None]] | None = None,
     ) -> CommandResult:
-        r = await run(["bash", "-c", script], timeout=timeout, stdin=stdin)
+        r = await run(
+            ["bash", "-c", script], timeout=timeout, stdin=stdin, on_line=on_output
+        )
         return CommandResult(
             exit_code=r.exit_code,
             stdout=r.stdout,
@@ -134,7 +146,11 @@ class SshLabHost(_Host):
             self._options += ["-o", "IdentitiesOnly=yes"]
 
     async def _shell(
-        self, script: str, timeout: float, stdin: str | None = None
+        self,
+        script: str,
+        timeout: float,
+        stdin: str | None = None,
+        on_output: Callable[[str], Awaitable[None]] | None = None,
     ) -> CommandResult:
         argv = [
             "ssh",
@@ -153,7 +169,7 @@ class SshLabHost(_Host):
             self.host,
             script,
         ]
-        r = await run(argv, timeout=timeout, stdin=stdin)
+        r = await run(argv, timeout=timeout, stdin=stdin, on_line=on_output)
         return CommandResult(
             exit_code=r.exit_code,
             stdout=r.stdout,

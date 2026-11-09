@@ -503,7 +503,11 @@ class LabHost(Protocol):
         env: dict[str, str] | None = None,
         timeout: float = 600,
         stdin: str | None = None,
-    ) -> CommandResult: ...
+        on_output: Callable[[str], Awaitable[None]] | None = None,
+    ) -> CommandResult:
+        """Run ``command``; with ``on_output``, each line of its output is handed to
+        it as it comes."""
+        ...
 
     async def gpu_status(self) -> list[GpuStatus]: ...
 

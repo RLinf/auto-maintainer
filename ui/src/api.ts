@@ -717,7 +717,7 @@ export interface MachineCheck {
 }
 
 export interface JobStep {
-  kind: "start" | "message" | "thinking" | "tool" | "result" | "question" | "error" | "done";
+  kind: "start" | "message" | "thinking" | "tool" | "result" | "question" | "error" | "done" | "output";
   text: string;
   detail: string;
   runtime: string;

@@ -278,6 +278,7 @@ class Service:
             request_restart=self.request_restart,
             writer_as=self.user_writer,
             publisher_as=self.user_publisher,
+            lab_progress=self.progress.lab,
         )
         self.actuator = Actuator(self.exec)
         self.pipeline = ActionPipeline(

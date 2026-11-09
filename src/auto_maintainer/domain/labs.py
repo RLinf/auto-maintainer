@@ -23,6 +23,7 @@ that needs more isolation runs reproductions in a container or under its own use
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
 from .profile import LabBinding
 from .settings import LabMachine
@@ -101,3 +102,13 @@ def time_limit(machine: LabMachine, binding: LabBinding | None) -> int:
     if binding is not None and binding.timeout_seconds:
         return min(machine.timeout_seconds, binding.timeout_seconds)
     return machine.timeout_seconds
+
+
+@dataclass(frozen=True)
+class LabProgress:
+    """What a run on a test machine is doing, for people watching it: a new
+    ``phase``, or a ``line`` of the output of one ``side`` (``base`` or ``head``)."""
+
+    side: str | None = None
+    phase: str = ""
+    line: str = ""

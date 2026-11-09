@@ -297,6 +297,8 @@ function stepLine(step: JobStep, t: (s: string) => string): string {
       return step.text.slice(0, 90);
     case "done":
       return step.ok ? t("finished") : t("failed");
+    case "output":
+      return `${step.text}: ${step.detail.split("\n").slice(-1)[0].slice(0, 80)}`;
   }
 }
 
@@ -531,6 +533,25 @@ function Step({ step, result }: { step: JobStep; result: JobStep | null }) {
                 {result?.detail && <pre className="pre muted">{result.detail}</pre>}
               </>
             )}
+          </div>
+        </li>
+      );
+    }
+    case "output": {
+      // The live output of a run on a test machine: its newest line, and when opened
+      // its newest lines, so a long setup shows it is moving.
+      const lines = step.detail.split("\n");
+      return (
+        <li className="step">
+          <span className="sdot tool" />
+          <div className="stack" style={{ gap: 4, minWidth: 0 }}>
+            <button className="step-tool" onClick={() => setOpen(!open)} aria-expanded={open} title={lines[lines.length - 1]}>
+              <Icon name={open ? "chevronDown" : "chevronRight"} size={12} />
+              <Icon name="server" size={12} />
+              <strong className="ellipsis">{step.text}</strong>
+              {!open && <code className="ellipsis">{lines[lines.length - 1]}</code>}
+            </button>
+            {open && <pre className="pre lab-output">{step.detail}</pre>}
           </div>
         </li>
       );

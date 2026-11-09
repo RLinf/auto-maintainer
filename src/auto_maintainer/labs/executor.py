@@ -21,9 +21,11 @@ only idle GPUs, passes the command guard, and cleans up whatever happens.
 
 from __future__ import annotations
 
+import contextlib
 import random
 import re
 import shlex
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from pydantic import BaseModel
@@ -31,6 +33,7 @@ from pydantic import BaseModel
 from ..domain.actions import LabReproducePayload, LabRunPayload
 from ..domain.clock import Clock
 from ..domain.labs import (
+    LabProgress,
     forbidden,
     script_refusals,
     setup_lines,
@@ -174,11 +177,21 @@ class LabExecutor:
         code: dict[str, str],
         holder: str,
         binding: LabBinding | None = None,
+        progress: Callable[[LabProgress], Awaitable[None]] | None = None,
     ) -> dict[str, Any]:
         """Run an approved reproduction: copy each side's code (base64 tar.gz) into a
         run folder of its own on the machine, run the machine's setup, the
         repository's (``binding``), the script's setup, and the script there, and
-        remove the folder whatever happens."""
+        remove the folder whatever happens. ``progress`` hears each phase and each
+        line of output as it comes."""
+
+        async def tell(
+            side: str | None = None, phase: str = "", line: str = ""
+        ) -> None:
+            if progress is not None:
+                with contextlib.suppress(Exception):
+                    await progress(LabProgress(side=side, phase=phase, line=line))
+
         machine = self.machines.get(payload.lab)
         host = self.hosts.get(payload.lab)
         why = unusable(repo, payload.lab, machine, binding)
@@ -202,7 +215,10 @@ class LabExecutor:
         gpu: int | None = None
         timeout = min(payload.timeout_seconds, time_limit(machine, binding))
         if payload.needs_gpu:
+            await tell(phase=f"Waiting for an idle GPU on {payload.lab}")
             gpu = await self._lease_gpu(payload.lab, host, holder, timeout)
+            if gpu is not None:
+                await tell(phase=f"Leased GPU {gpu}")
             if gpu is None:
                 return {
                     "lab": payload.lab,
@@ -214,6 +230,7 @@ class LabExecutor:
         try:
             for side in payload.sides:
                 where = f"{run_dir}/{side}"
+                await tell(side, phase=f"Copying the {side} code to {payload.lab}")
                 put = await host.run(
                     f"mkdir -p {shlex.quote(where)} && base64 -d | tar -xzf - -C {shlex.quote(where)}",
                     timeout=900,
@@ -225,7 +242,28 @@ class LabExecutor:
                         "tail": _tail(put.stdout + "\n" + put.stderr),
                     }
                     continue
-                result = await host.run(steps, cwd=where, env=env, timeout=timeout)
+                await tell(
+                    side,
+                    phase=f"Setting up and running the script on {side} "
+                    f"(at most {round(timeout / 60)} minutes)",
+                )
+
+                async def output(line: str, side: str = side) -> None:
+                    await tell(side, line=line)
+
+                result = await host.run(
+                    steps, cwd=where, env=env, timeout=timeout, on_output=output
+                )
+                await tell(
+                    side,
+                    phase=f"{side}: "
+                    + (
+                        "timed out"
+                        if result.timed_out
+                        else f"exit code {result.exit_code}"
+                    )
+                    + f" after {round(result.duration_seconds)} s",
+                )
                 runs[side] = {
                     "exit_code": result.exit_code,
                     "timed_out": result.timed_out,
@@ -233,6 +271,7 @@ class LabExecutor:
                     "tail": _tail(result.stdout + "\n" + result.stderr),
                 }
         finally:
+            await tell(phase=f"Removing the run folder on {payload.lab}")
             await host.run(f"rm -rf {shlex.quote(run_dir)}", timeout=300)
             await self._release(payload.lab, gpu, holder)
         return {"lab": payload.lab, "gpu": gpu, "runs": runs}

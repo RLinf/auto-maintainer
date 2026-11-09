@@ -30,6 +30,7 @@ from typing import Any
 from ..domain.agents import AgentEvent, AgentEventType, AgentTask
 from ..domain.clock import Clock
 from ..domain.events import Event, EventKind
+from ..domain.labs import LabProgress
 from ..domain.ports import Store
 from ..domain.progress import JobStep, step_from_event
 from ..domain.secrets import redact_secrets
@@ -39,6 +40,8 @@ MAX_STEPS = 300
 KEEP_JOBS = 500
 """Jobs whose steps stay in the store; older ones are cleared."""
 NOTIFY_SECONDS = 1.0
+OUTPUT_LINES = 40
+"""Newest lines of a test machine's output kept on its step."""
 _INDEX = "job-steps:index"
 
 
@@ -98,6 +101,48 @@ class JobProgress:
             self.changed(task.job_id, task.repo, task.pr)
         else:
             self._throttled(task.job_id)
+
+    async def lab(
+        self,
+        job_id: str,
+        repo: str,
+        number: int | None,
+        machine: str,
+        progress: LabProgress,
+    ) -> None:
+        """Add what a run on a test machine does to the job that asked for it: a
+        phase as a step of its own, and its output as one step per side that keeps
+        the newest lines, so a long setup shows it is moving."""
+        steps = self._live.get(job_id)
+        if steps is None:
+            steps = await self._saved(job_id)
+            self._live[job_id] = steps
+            while len(self._live) > 50:
+                self._live.popitem(last=False)
+        self._jobs[job_id] = (repo, number)
+        now = self.clock.now()
+        if progress.phase:
+            text, _ = redact_secrets(progress.phase)
+            steps.append(JobStep(kind="message", text=text, runtime=machine, at=now))
+            await self._save(job_id, steps)
+            self.changed(job_id, repo, number)
+            return
+        if not progress.line.strip():
+            return
+        title = f"{machine} · {progress.side}" if progress.side else machine
+        line, _ = redact_secrets(progress.line[-2_000:])
+        last = steps[-1] if steps else None
+        if last is not None and last.kind == "output" and last.text == title:
+            lines = [*last.detail.splitlines(), line][-OUTPUT_LINES:]
+            last.detail = "\n".join(lines)
+            last.at = now
+        else:
+            steps.append(
+                JobStep(kind="output", text=title, detail=line, runtime=machine, at=now)
+            )
+        if len(steps) > MAX_STEPS:
+            del steps[10 : len(steps) - (MAX_STEPS - 10)]
+        self._throttled(job_id)
 
     async def steps(self, job_id: str) -> list[JobStep]:
         """The job's steps so far, oldest first."""

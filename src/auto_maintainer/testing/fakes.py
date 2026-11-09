@@ -839,15 +839,21 @@ class FakeLabHost:
         env: dict[str, str] | None = None,
         timeout: float = 600,
         stdin: str | None = None,
+        on_output: Any = None,
     ) -> CommandResult:
         self.commands.append((command, cwd, dict(env or {})))
         if stdin is not None:
             self.stdin.append(stdin)
-        return (
+        result = (
             self.results.pop(0)
             if self.results
             else CommandResult(exit_code=0, stdout="ok")
         )
+        if on_output is not None:
+            for line in (result.stdout + "\n" + result.stderr).splitlines():
+                if line:
+                    await on_output(line)
+        return result
 
     async def gpu_status(self) -> list[GpuStatus]:
         return self.gpus
@@ -891,7 +897,14 @@ class FakeLabRunner:
         code: dict[str, str],
         holder: str,
         binding: Any = None,
+        progress: Any = None,
     ) -> dict[str, Any]:
+        if progress is not None:
+            from ..domain.labs import LabProgress
+
+            for side in getattr(payload, "sides", []) or []:
+                await progress(LabProgress(side=side, phase=f"Running {side}"))
+                await progress(LabProgress(side=side, line=f"{side}: collecting tests"))
         self.reproduced.append(
             {
                 "payload": payload,

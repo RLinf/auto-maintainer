@@ -832,3 +832,4 @@ details.pv-section[open] > summary { margin-bottom: 6px; }
 }
 .nowrap { white-space: nowrap; }
 .people .role-row > summary > .role-badge { flex-shrink: 0; }
+.lab-output { max-height: 320px; overflow: auto; font-size: 11.5px; }

@@ -48,6 +48,7 @@ from ..domain.actions import (
     ThreadReplyPayload,
 )
 from ..domain.ids import same_commit
+from ..domain.labs import LabProgress
 from ..domain.markers import parse_markers
 from ..domain.memory import MemoryChange, MemoryChangeState
 from ..domain.ports import ReviewCommentSpec
@@ -496,6 +497,12 @@ async def _lab_reproduce(
         }
     finally:
         await x.workspace.release(workdir)
+    job_id = action.provenance.job_id
+
+    async def progress(step: LabProgress) -> None:
+        if x.lab_progress is not None and job_id:
+            await x.lab_progress(job_id, action.repo, pr.number, p.lab, step)
+
     out = await x.labs.reproduce(
         p,
         action.repo,
@@ -503,6 +510,7 @@ async def _lab_reproduce(
         code,
         holder=action.id,
         binding=profile.labs.get(p.lab) if profile else None,
+        progress=progress,
     )
     return {**out, "base_sha": base, "head_sha": pr.head_sha}
 

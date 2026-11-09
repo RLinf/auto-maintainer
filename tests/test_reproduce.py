@@ -104,6 +104,11 @@ async def test_both_sides_run_in_a_folder_of_their_own_that_is_removed(
     machine = LabMachine(setup="module load cuda/12.4", timeout_seconds=3600)
     executor = await _executor(tmp_path, machine, host)
     used = LabBinding(setup="source ~/venv/bin/activate", timeout_seconds=600)
+    heard: list[tuple[str | None, str, str]] = []
+
+    async def progress(p) -> None:  # type: ignore[no-untyped-def]
+        heard.append((p.side, p.phase, p.line))
+
     out = await executor.reproduce(
         _payload(timeout_seconds=1800),
         REPO,
@@ -111,7 +116,14 @@ async def test_both_sides_run_in_a_folder_of_their_own_that_is_removed(
         {"base": "QkFTRQ==", "head": "SEVBRA=="},
         "act_12345678",
         binding=used,
+        progress=progress,
     )
+    phases = [phase for _, phase, _ in heard if phase]
+    assert phases[0] == "Copying the base code to gpu-01"
+    assert phases[1].startswith("Setting up and running the script on base")
+    assert "base: exit code 1 after 0 s" in phases
+    assert phases[-1] == "Removing the run folder on gpu-01"
+    assert ("head", "", "1 passed") in heard, "each line of output is heard as it comes"
     run_dir = "/home/ci/am-labs/acme__widget-42-12345678"
     commands = [c for c, _, _ in host.commands]
     assert host.stdin == ["QkFTRQ==", "SEVBRA=="]
@@ -281,6 +293,12 @@ async def test_a_reproduction_runs_once_the_requester_approves_its_script(
         await h.settle()
         [ran] = runner.reproduced
         assert set(ran["code"]) == {"base", "head"}
+        steps = await h.service.progress.steps(job.id)
+        assert [s.text for s in steps if s.kind == "output"] == [
+            "gpu-01 · base",
+            "gpu-01 · head",
+        ], "the job that asked for the run shows its output as it comes"
+        assert any(s.kind == "message" and s.text == "Running head" for s in steps)
         job = await h.store.get_job(job.id)
         assert job is not None and job.status == JobStatus.DONE
         assert job.result and job.result["conclusion"] == "reproduced"

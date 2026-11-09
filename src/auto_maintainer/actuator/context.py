@@ -24,6 +24,7 @@ from typing import Any, Protocol
 from ..domain.actions import Action, LabReproducePayload, LabRunPayload
 from ..domain.clock import Clock
 from ..domain.codeowners import CODEOWNERS_LOCATIONS, owners_of_paths, parse_codeowners
+from ..domain.labs import LabProgress
 from ..domain.markers import build_marker
 from ..domain.ports import (
     BranchPublisher,
@@ -74,6 +75,7 @@ class LabRunner(Protocol):
         code: dict[str, str],
         holder: str,
         binding: LabBinding | None = None,
+        progress: Callable[[LabProgress], Awaitable[None]] | None = None,
     ) -> dict[str, Any]: ...
 
     async def check(self, lab: str) -> dict[str, Any]: ...
@@ -110,6 +112,11 @@ class ExecContext:
     publisher_as: Callable[[str], Awaitable[BranchPublisher | None]] | None = None
     """A branch publisher pushing as a signed-in maintainer, for fix PRs."""
     memory_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    lab_progress: (
+        Callable[[str, str, int | None, str, LabProgress], Awaitable[None]] | None
+    ) = None
+    """Shows what a run on a test machine is doing on the job that asked for it:
+    (job id, repository, PR, machine, progress)."""
     """Held while the memory gate stages or merges a change: an approval on the
     dashboard and the action that saved the change can reach the gate at once."""
 

@@ -32,8 +32,18 @@ from .clock import utc_now
 from .secrets import redact_secrets
 
 StepKind = Literal[
-    "start", "message", "thinking", "tool", "result", "question", "error", "done"
+    "start",
+    "message",
+    "thinking",
+    "tool",
+    "result",
+    "question",
+    "error",
+    "done",
+    "output",
 ]
+"""``output`` is the live output of a run on a test machine: ``text`` names it,
+``detail`` holds its newest lines."""
 
 _INPUT_KEYS = (
     "command",
