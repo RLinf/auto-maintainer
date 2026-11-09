@@ -195,3 +195,35 @@ def test_a_persons_run_mounts_their_sign_in_and_not_the_services(
     mounts = " ".join(argv)
     assert f"src={own / '.claude'},dst={host_home / '.claude'}" in mounts
     assert f"src={host_home / '.claude'}," not in mounts
+
+
+async def test_antigravity_without_its_token_is_not_signed_in_at_once(
+    tmp_path: Path,
+) -> None:
+    from auto_maintainer.agents.adapters.antigravity import AntigravityRuntime
+
+    hangs = tmp_path / "agy"
+    hangs.write_text("#!/bin/sh\nsleep 30\n")  # agy -p waits for a sign-in
+    hangs.chmod(0o755)
+    runtime = AntigravityRuntime(binary=str(hangs))
+    assert await asyncio.wait_for(runtime.signed_in(tmp_path / "home"), 2) is False
+
+
+async def test_a_cli_that_stays_up_after_signing_in_is_stopped_and_done(
+    tmp_path: Path,
+) -> None:
+    """Antigravity's ``acp --login`` serves ACP once it signed in; the sign-in ends
+    when the CLI writes its sign-in file."""
+    stays = _cli(
+        tmp_path,
+        "#!/bin/sh\necho 'visit: https://sign.example/a'\nprintf 'paste the code > '\n"
+        'read code\nmkdir -p "$HOME/.claude"\necho t > "$HOME/.claude/.credentials.json"\n'
+        "sleep 60\n",
+    )
+    runtime = ClaudeCodeRuntime(binary=stays)
+    state = AgentLogin(agent="claude-code", by="maria", started_at=datetime.now(UTC))
+    process = runtime.start_login(tmp_path / "home", state)
+    await _until(state, lambda s: s.needs_code)
+    await process.submit("c")
+    await asyncio.wait_for(process.wait(), 10)
+    assert state.state == "done"

@@ -97,6 +97,7 @@ class CodexRuntime(ExecRuntime):
 
     home_paths = (".codex",)
     login_args = ("login", "--device-auth")
+    login_marker = ".codex/auth.json"
     """Codex's device login (checked against 0.162.1): it prints a page and a
     one-time code to enter there, and waits."""
 

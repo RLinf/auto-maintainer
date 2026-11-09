@@ -52,14 +52,23 @@ class LoginProcess:
         argv: The sign-in command.
         env: Its environment, with ``HOME`` set to the account's home folder.
         state: The record to fill in.
+        marker: The file the CLI writes when the sign-in succeeds. Once it is new,
+            the sign-in is done and the CLI is stopped, since one may stay running
+            after it (Antigravity's ``acp --login`` serves ACP next).
     """
 
     def __init__(
-        self, argv: Sequence[str], env: Mapping[str, str], state: AgentLogin
+        self,
+        argv: Sequence[str],
+        env: Mapping[str, str],
+        state: AgentLogin,
+        marker: Path | None = None,
     ) -> None:
         self.argv = list(argv)
         self.env = dict(env)
         self.state = state
+        self.marker = marker
+        self._before = _mtime(marker)
         self._proc: asyncio.subprocess.Process | None = None
         self._task: asyncio.Task[None] | None = None
         self._lines: list[str] = []
@@ -104,22 +113,57 @@ class LoginProcess:
             self.state.state, self.state.message = "failed", f"could not start: {exc}"
             return
         self.state.state = "waiting"
+        reader = asyncio.create_task(self._read())
+        ended = asyncio.create_task(self._proc.wait())
+        watched = asyncio.create_task(self._signed())
         try:
-            await asyncio.wait_for(self._read(), timeout=LOGIN_SECONDS)
-            code = await self._proc.wait()
-        except TimeoutError:
-            await self.cancel()
-            self.state.state, self.state.message = "failed", "the sign-in timed out"
+            await asyncio.wait(
+                {ended, watched},
+                timeout=LOGIN_SECONDS,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            watched.cancel()
+        if not ended.done():
+            signed = watched.done() and not watched.cancelled() and watched.result()
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(self._proc.pid, signal.SIGTERM)
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(self._proc.wait(), 10)
+            reader.cancel()
+            if self.state.state == "cancelled":
+                return
+            if not signed:
+                self.state.state, self.state.message = "failed", "the sign-in timed out"
+                return
+            self.state.state, self.state.message = "done", "signed in"
+            self.state.needs_code = False
             return
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(reader, 5)
+        code = ended.result()
         if self.state.state == "cancelled":
             return
         tail = " ".join(self._lines[-3:])
-        if code == 0:
+        if code == 0 or self._marked():
             self.state.state, self.state.message = "done", tail or "signed in"
         else:
             self.state.state = "failed"
             self.state.message = tail or f"the sign-in ended with exit code {code}"
         self.state.needs_code = False
+
+    def _marked(self) -> bool:
+        """Whether the CLI wrote its sign-in since this one started."""
+        now = _mtime(self.marker)
+        return now is not None and (self._before is None or now > self._before)
+
+    async def _signed(self) -> bool:
+        """Until the CLI's sign-in file is new: ``True`` then; never without one."""
+        if self.marker is None:
+            await asyncio.Event().wait()
+        while not self._marked():
+            await asyncio.sleep(1)
+        return True
 
     async def _read(self) -> None:
         assert self._proc is not None and self._proc.stdout is not None
@@ -150,3 +194,10 @@ class LoginProcess:
         text = redact_secrets(line)[0][:300]
         self._lines = [*self._lines[-9:], text]
         self.state.message = text
+
+
+def _mtime(path: Path | None) -> float | None:
+    try:
+        return path.stat().st_mtime if path is not None else None
+    except OSError:
+        return None

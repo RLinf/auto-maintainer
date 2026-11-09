@@ -60,12 +60,18 @@ class AntigravityRuntime(AcpRuntime):
 
     home_paths = (".gemini",)
     login_args = ("acp", "--login")
+    login_marker = ".gemini/antigravity-cli/antigravity-oauth-token"
     """Antigravity's sign-in with Google (checked against 1.5.3): without a browser
     it prints a page, then reads the code (or the page's address) it ends on from
     standard input. Over ACP it refuses to sign in without a browser."""
 
     async def signed_in(self, home: Path | None = None) -> bool | None:
-        """Whether ``agy -p /usage`` answers, which needs a sign-in and spends nothing."""
+        """Not without ``~/.gemini/antigravity-cli/antigravity-oauth-token`` (checked
+        against 1.5.3: without a sign-in, ``agy -p`` waits for one); with it, whether
+        ``agy -p /usage`` answers, which spends nothing."""
+        root = home or self.account_home or Path.home()
+        if not (root / ".gemini/antigravity-cli/antigravity-oauth-token").is_file():
+            return False
         out = await self.cli_output(
             "-p", "/usage", "--output-format", "json", home=home, check=False
         )

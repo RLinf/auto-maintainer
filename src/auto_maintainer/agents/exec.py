@@ -497,6 +497,8 @@ class ExecRuntime:
     login_args: ClassVar[tuple[str, ...]] = ()
     """The arguments that start the CLI's own sign-in on a host without a browser
     (``agents/login.py``); empty for a CLI that has none and runs on a model API."""
+    login_marker: ClassVar[str] = ""
+    """The file, relative to the home folder, the CLI writes when it signed in."""
 
     account: str | None = None
     """The person whose own agent account this runtime runs on; ``None`` for the
@@ -519,7 +521,8 @@ class ExecRuntime:
             AgentTask(kind="probe", prompt="", workdir=home), self.env_allow
         )
         env["HOME"] = str(home)
-        process = LoginProcess([binary, *self.login_args], env, state)
+        marker = home / self.login_marker if self.login_marker else None
+        process = LoginProcess([binary, *self.login_args], env, state, marker)
         process.start(home)
         return process
 
@@ -673,6 +676,8 @@ class ExecRuntime:
             except (TimeoutError, OSError) as exc:
                 if proc is not None:
                     _kill_group(proc.pid, signal.SIGKILL)
+                    with contextlib.suppress(Exception):
+                        await proc.wait()
                 log.warning("%s %s failed: %r", self.name, " ".join(args), exc)
                 return None
         if check and proc.returncode != 0:

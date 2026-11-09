@@ -115,6 +115,7 @@ class ClaudeCodeRuntime(ExecRuntime):
 
     home_paths = (".claude", ".claude.json")
     login_args = ("auth", "login")
+    login_marker = ".claude/.credentials.json"
     """Claude Code's sign-in (checked against 2.1.319): without a browser it prints
     a page whose result is a code, and reads that code from standard input."""
 
