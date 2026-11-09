@@ -53,6 +53,7 @@ from .base import (
     in_scope,
     may_succeed_later,
 )
+from .feedback import declined_labels, rejections_block, rejections_on
 from .prompts import (
     accepted_labels,
     headless,
@@ -157,7 +158,11 @@ class ReviewPlaybook(Playbook):
                 )
 
         info = await ctx.forge.get_repo(pr.repo)
-        choices = label_choices(info.labels, profile, pr)
+        turned_down = await rejections_on(ctx.store, pr.repo, pr.number)
+        declined = declined_labels(turned_down)
+        choices = [
+            c for c in label_choices(info.labels, profile, pr) if c not in declined
+        ]
         limit = profile.review.max_suggested_labels
         machine = await review_machine(
             ctx,
@@ -201,6 +206,7 @@ class ReviewPlaybook(Playbook):
                     f"The working directory is a checkout of the PR head {pr.head_sha}. "
                     f"Compare against origin/{info.default_branch}.",
                     pr_block(pr, diff),
+                    rejections_block(turned_down),
                     label_block(choices, limit),
                     schema_hint(ReviewResult.model_json_schema()),
                 ]

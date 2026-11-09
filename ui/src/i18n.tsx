@@ -44,6 +44,8 @@ const zh: Record<string, string> = {
   "Arm merge": "启动合并",
   "Cancel merge": "取消合并",
   "Approve all labels": "批准全部标签",
+  "Keep this label": "保留这个标签",
+  "Leave this label out": "不加这个标签",
   "Open changes": "待合并的变更",
   Files: "文件",
   "Approved profile": "已批准的配置",

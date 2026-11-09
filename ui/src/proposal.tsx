@@ -132,6 +132,8 @@ export function ProposalCard({
   const [steps, setSteps] = useState(list(payload.steps).join("\n"));
   const [comments, setComments] = useState<InlineComment[]>(Array.isArray(payload.comments) ? (payload.comments as InlineComment[]) : []);
   const [asMe, setAsMe] = useState(readAsMe);
+  // Labels the reviewer leaves out of a label proposal before approving the rest.
+  const [dropped, setDropped] = useState<string[]>([]);
   // The review's live view, where its conversation is, when it is the one open.
   const openedJob = useSearchParams()[0].get("job");
   // A revision from the conversation about the review replaces the draft; show it.
@@ -160,6 +162,7 @@ export function ProposalCard({
     ...(typeof payload.body === "string" ? { body } : {}),
     ...(Array.isArray(payload.comments) ? { comments } : {}),
     ...(isFix ? { title, ...(isMerge ? {} : { target }) } : {}),
+    ...(dropped.length ? { labels: list(payload.labels).filter((l) => !dropped.includes(l)) } : {}),
     ...(kind === "lab.reproduce"
       ? str(payload.script)
         ? { script, setup }
@@ -172,7 +175,7 @@ export function ProposalCard({
       : {}),
   });
   const approve = useAct((as?: boolean) => {
-    const edited = editing || changedTarget ? editedPayload() : undefined;
+    const edited = editing || changedTarget || dropped.length ? editedPayload() : undefined;
     const mine = as ?? postAsMe;
     return api.post(`/api/proposals/${proposal.id}/approve`, { ...(edited ? { payload: edited } : {}), ...(mine ? { as_me: true } : {}) });
   }, PROPOSAL_KEYS);
@@ -207,10 +210,16 @@ export function ProposalCard({
           ? t("Post")
           : t("Approve");
 
+  const toggleDrop =
+    kind === "label.apply" && !done && decides
+      ? (l: string) => setDropped((d) => (d.includes(l) ? d.filter((x) => x !== l) : [...d, l]))
+      : undefined;
   const details = (
     <KindBody
       kind={kind}
       payload={payload}
+      dropped={dropped}
+      toggleDrop={toggleDrop}
       editing={editing}
       raw={raw}
       body={body}
@@ -407,6 +416,8 @@ export function ProposalCard({
 function KindBody({
   kind,
   payload,
+  dropped = [],
+  toggleDrop,
   editing,
   raw,
   body,
@@ -426,6 +437,9 @@ function KindBody({
 }: {
   kind: string;
   payload: Record<string, unknown>;
+  /** Labels left out of a label proposal; ``toggleDrop`` leaves one out or keeps it. */
+  dropped?: string[];
+  toggleDrop?: (label: string) => void;
   editing: boolean;
   raw: boolean;
   body: string;
@@ -595,11 +609,25 @@ function KindBody({
     const removed = list(payload.remove_roles);
     parts.push(
       <div key="labels" className="labels">
-        {labels.map((l) => (
-          <span key={l} className="label">
-            + {l}
-          </span>
-        ))}
+        {labels.map((l) =>
+          toggleDrop && list(payload.labels).includes(l) ? (
+            <button
+              key={l}
+              type="button"
+              className={`label${dropped.includes(l) ? " muted" : ""}`}
+              style={{ cursor: "pointer", textDecoration: dropped.includes(l) ? "line-through" : undefined }}
+              aria-pressed={!dropped.includes(l)}
+              title={dropped.includes(l) ? t("Keep this label") : t("Leave this label out")}
+              onClick={() => toggleDrop(l)}
+            >
+              {dropped.includes(l) ? "−" : "+"} {l}
+            </button>
+          ) : (
+            <span key={l} className="label">
+              + {l}
+            </span>
+          ),
+        )}
         {removed.map((l) => (
           <span key={l} className="label muted">
             − {l}

@@ -29,6 +29,7 @@ from ..domain.review import ReviewState
 from ..domain.scoring import Evaluation
 from ..domain.snapshot import PrSnapshot
 from .base import PR_EVENTS, Playbook, PlaybookContext, PlaybookResult, in_scope
+from .feedback import declined_labels, rejections_block, rejections_on
 from .prompts import pr_block, schema_hint
 
 
@@ -70,7 +71,9 @@ class Triage(Playbook):
             return PlaybookResult(result={"skipped": "out of scope"})
         state = ctx.classify(pr).state
         rules = await ctx.knowledge.label_rules(pr.repo, profile)
-        labels = rule_labels(pr, rules)
+        turned_down = await rejections_on(ctx.store, pr.repo, pr.number)
+        declined = declined_labels(turned_down)
+        labels = [lbl for lbl in rule_labels(pr, rules) if lbl not in declined]
         roles: list[str] = []
         remove: list[str] = []
         if state in (ReviewState.NEW_REVIEW, ReviewState.FOLLOWUP_REVIEW):
@@ -84,8 +87,14 @@ class Triage(Playbook):
         summary = evaluation.summary if evaluation else ""
         if not summary or event.kind == EventKind.PR_OPENED:
             info = await ctx.forge.get_repo(pr.repo)
-            taxonomy = sorted({r.label for r in rules} or set(info.labels))
-            answer = await self._ask(ctx, pr, taxonomy, profile.languages.internal)
+            taxonomy = sorted(({r.label for r in rules} or set(info.labels)) - declined)
+            notes = [
+                rejections_block(turned_down),
+                await ctx.knowledge.review_lessons(pr.repo, profile),
+            ]
+            answer = await self._ask(
+                ctx, pr, taxonomy, profile.languages.internal, notes
+            )
             if answer is not None:
                 summary = answer.summary
                 labels += [
@@ -123,13 +132,25 @@ class Triage(Playbook):
         )
 
     async def _ask(
-        self, ctx: PlaybookContext, pr: PrSnapshot, taxonomy: list[str], language: str
+        self,
+        ctx: PlaybookContext,
+        pr: PrSnapshot,
+        taxonomy: list[str],
+        language: str,
+        notes: list[str],
     ) -> TriageAnswer | None:
+        """``notes``: what reviewers turned down on the PR, and the repository's
+        review lessons."""
+        rejected, lessons = notes
         workdir = ctx.scratch()
         prompt = "\n\n".join(
             [
                 "Summarize this pull request for the maintainers and pick labels.",
                 f"Write the summary in {language}. Pick labels only from this list: {taxonomy}.",
+                f"Review lessons from this repository's maintainers:\n{lessons}"
+                if lessons
+                else "",
+                rejected,
                 pr_block(pr),
                 schema_hint(TriageAnswer.model_json_schema()),
             ]

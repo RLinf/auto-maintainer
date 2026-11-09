@@ -410,6 +410,11 @@ class ActionPipeline:
                 },
             )
         )
+        if action.kind == ActionKind.LABEL_APPLY:
+            removed = set(action.payload.get("labels") or []) - set(
+                new_payload.get("labels") or []
+            )
+            proposal.declined = sorted(set(proposal.declined) | removed)
         action.payload = new_payload
         record.action = action
         proposal.edited = True

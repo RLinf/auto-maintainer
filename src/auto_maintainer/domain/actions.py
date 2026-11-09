@@ -219,6 +219,9 @@ class Proposal(BaseModel):
     expires_at: datetime | None = None
     requested_by: str | None = None
     """For a requested review draft: the reviewer it is for."""
+    declined: list[str] = Field(default_factory=list)
+    """Labels a reviewer removed from a label proposal before approving it; the
+    service does not propose them for the PR again (``playbooks.feedback``)."""
 
 
 # ---------------------------------------------------------------------------
