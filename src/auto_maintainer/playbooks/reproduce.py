@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -50,6 +50,7 @@ from ..domain.actions import (
     Autonomy,
     CommentUpsertPayload,
     LabReproducePayload,
+    Proposal,
     ProposalState,
     ReviewPostPayload,
     make_action,
@@ -80,11 +81,16 @@ from .review_revise import (
     apply_revision,
     names,
     owns_format,
+    posted_update_action,
     revision_blocks,
     task_kind_of,
 )
 
 WAIT_SECONDS = 7 * 24 * 3600
+
+MAX_ATTEMPTS = 3
+"""Runs of one reproduction: the first, and corrected plans after runs that failed
+for a reason the agent could fix (a missing package, a wrong command)."""
 
 PLAN = """You are planning a reproduction of a PR for {who} inside an automated maintainer service. The working directory is a checkout of the PR's head commit.
 The service runs your setup and script on test machine {lab}, in a fresh folder that holds only the repository's files, at the PR's head ("head") and, when comparing helps, on the code before the PR ("base").
@@ -99,8 +105,10 @@ The service runs your setup and script on test machine {lab}, in a fresh folder 
 - {unclear}
 {machine}"""
 
-REPORT = """You are reporting a reproduction to {who} inside an automated maintainer service. The script below ran on test machine {lab} on the sides listed (the code before the PR, "base", and at its head, "head"); the end of each run's output follows.
+REPORT = """You are reporting a reproduction to {who} inside an automated maintainer service. The script below ran on test machine {lab} on the sides listed (the code before the PR, "base", and at its head, "head"); the end of each run's output follows. The working directory is a checkout of the PR's head, to read.
 - Decide whether the runs confirm what the PR claims: reproduced (head shows the documented or promised behavior, and base shows the problem when it ran), not_reproduced, or inconclusive (the script failed for reasons unrelated to the PR, timed out, or the output does not decide it).
+- {retry}
+- {ask}
 - Write a short comment for the PR in {public_language}: what was run and how (the documented steps followed), on what kind of machine, what each side did, the first failure and any step the docs left out, the functional and the metric result, and the conclusion. Quote at most a few lines of output. Plain and specific; no scores, priorities, or internal names.
 - Put anything only maintainers need (for example a broken environment on the machine) in notes."""
 
@@ -206,6 +214,44 @@ class ReproReport(BaseModel):
     conclusion: Literal["reproduced", "not_reproduced", "inconclusive"]
     comment: str = Field(description="The comment for the PR.")
     notes: str = Field(default="", description="For maintainers only.")
+    retry: ReproPlan | None = Field(
+        default=None,
+        description="A corrected plan to run again, when the run failed before it "
+        "could test the PR for a reason you can fix in the setup or the script.",
+    )
+    changed: str = Field(
+        default="", description="With `retry`: what you changed and why, briefly."
+    )
+
+
+RETRY = (
+    "When the run failed before it could test the PR, for a reason in the setup, the "
+    "script, or the machine's environment rather than in the PR (a missing system or "
+    "Python package, a wrong path or command, a mirror, proxy, or download problem, a "
+    "step the docs left out), find the cause in the output and fix it: set conclusion to "
+    "inconclusive and return a corrected plan in `retry`, the whole plan, changed only "
+    "where it must be, with the same rules as the first, and say in `changed` what you "
+    "changed and why. When the output does not show the cause, have the corrected plan "
+    "print what finds it (versions, paths, the failing command's full output) before the "
+    "step that failed. The service runs it again ({left} more attempts after this one). "
+    "Never use `retry` to work around a failure the PR itself causes: that is the result "
+    "to report."
+)
+NO_RETRY = (
+    "This was the last attempt: report what happened and, for a failure you could have "
+    "fixed, what the next run should change."
+)
+ASK = (
+    "When you cannot fix it in the setup or the script, because the machine needs a "
+    "change only its administrators can make, or you cannot tell whether the PR or the "
+    "machine causes it, ask {by} with your tool for asking the user what to do, with "
+    "what you found and the choices you see; then follow the answer, with a corrected "
+    "plan in `retry` or a report."
+)
+NO_ASK = (
+    "Nobody waits on this run to answer questions: when you cannot fix it in the setup "
+    "or the script, say in notes what the machine needs and why."
+)
 
 
 def _request(ctx: PlaybookContext, event: Event) -> Event:
@@ -259,17 +305,21 @@ class ReproducePlaybook(Playbook):
                 kinds=[ActionKind.LAB_REPRODUCE, ActionKind.COMMENT_UPSERT],
             )
             if r.action.discriminator == discriminator
+            or r.action.discriminator.startswith(f"{discriminator}:try")
         ]
-        planned = next(
-            (r for r in mine if r.action.kind == ActionKind.LAB_REPRODUCE), None
+        attempts = sorted(
+            (r for r in mine if r.action.kind == ActionKind.LAB_REPRODUCE),
+            key=lambda r: r.action.created_at,
         )
         reported = next(
             (r for r in mine if r.action.kind == ActionKind.COMMENT_UPSERT), None
         )
         if reported is not None:
             return PlaybookResult(result={"reported": reported.action.id})
-        if planned is not None:
-            return await self._after_run(ctx, request, event, planned, by, lab)
+        if attempts:
+            return await self._after_run(
+                ctx, request, event, attempts[-1], by, lab, len(attempts)
+            )
 
         pr = await ctx.forge.get_pr(request.repo, request.number)
         if pr is None or pr.state != PrState.OPEN:
@@ -388,31 +438,16 @@ class ReproducePlaybook(Playbook):
                 plan=plan,
                 refused=refused,
             )
-        action = make_action(
-            ActionKind.LAB_REPRODUCE,
-            pr.repo,
-            LabReproducePayload(
-                lab=lab,
-                summary=plan.summary,
-                setup=plan.setup,
-                script=plan.script,
-                expect=plan.expect,
-                needs_gpu=plan.needs_gpu,
-                timeout_seconds=min(plan.timeout_minutes * 60, limit),
-                sides=plan.sides or ["base", "head"],
-                runtime=answer.runtime,
-                requested_by=by,
-            ),
-            number=pr.number,
-            head_sha=pr.head_sha,
+        action = _plan_action(
+            pr,
+            plan,
+            lab=lab,
+            limit=limit,
+            by=by,
+            for_review=for_review,
             discriminator=discriminator,
-            rationale=(
-                f"a reproduction on {lab} for the review at {pr.head_sha[:7]}: {plan.summary}"
-                if for_review
-                else f"a reproduction on {lab}, asked by {by}: {plan.summary}"
-            ),
-            hints=ActionHints(author_is_team=ctx.trusted_input, changed_paths=pr.paths),
-            draft_for=None if for_review else by,
+            runtime=answer.runtime,
+            team=ctx.trusted_input,
         )
         return PlaybookResult(
             actions=[action],
@@ -437,6 +472,7 @@ class ReproducePlaybook(Playbook):
         planned: ActionRecord,
         by: str | None,
         lab: str,
+        attempt: int = 1,
     ) -> PlaybookResult:
         record = await ctx.store.get_action(planned.action.id) or planned
         payload = LabReproducePayload.model_validate(record.action.payload)
@@ -507,10 +543,15 @@ class ReproducePlaybook(Playbook):
         profile = ctx.require_profile()
         runs = outcome.get("runs") or {}
         who = f"{by}, a maintainer" if by else "the repository's maintainers"
+        left = MAX_ATTEMPTS - attempt
         prompt = "\n\n".join(
             [
                 REPORT.format(
-                    who=who, lab=lab, public_language=profile.languages.public
+                    who=who,
+                    lab=lab,
+                    public_language=profile.languages.public,
+                    retry=RETRY.format(left=left) if left > 0 else NO_RETRY,
+                    ask=ASK.format(by=by) if by else NO_ASK,
                 ),
                 "The reproduction: "
                 + untrusted(
@@ -537,30 +578,63 @@ class ReproducePlaybook(Playbook):
                 schema_hint(ReproReport.model_json_schema()),
             ]
         )
-        answer = await ctx.ask(
-            AgentTask(
-                kind=TaskKind.REPRODUCE,
-                prompt=prompt,
-                workdir=ctx.scratch(),
-                mode="read_only",
-                output_schema=ReproReport.model_json_schema(),
-                repo=request.repo,
-                timeout_seconds=600,
-            ),
-            ReproReport,
+        workdir = (
+            await ctx.workspace.prepare(
+                pr.repo,
+                pr.number,
+                record.action.head_sha or pr.head_sha,
+                (await ctx.forge.get_repo(pr.repo)).default_branch,
+            )
+            if pr is not None
+            else ctx.scratch()
         )
+        try:
+            answer = await ctx.ask(
+                AgentTask(
+                    kind=TaskKind.REPRODUCE,
+                    prompt=prompt,
+                    workdir=workdir,
+                    mode="read_only",
+                    output_schema=ReproReport.model_json_schema(),
+                    repo=request.repo,
+                    timeout_seconds=900,
+                ),
+                ReproReport,
+            )
+        finally:
+            if pr is not None:
+                await ctx.workspace.release(workdir)
         if not answer.ok or answer.structured is None:
             raise RuntimeError(f"reproduction report failed: {answer.error}")
         report = ReproReport.model_validate(answer.structured)
         summary = {
             "conclusion": report.conclusion,
             "notes": report.notes,
+            "attempt": attempt,
             "runs": {
                 side: {k: v for k, v in run.items() if k != "tail"}
                 for side, run in runs.items()
             },
         }
-        if _for_review(request) and pr is not None:
+        again = await self._retry(
+            ctx, request, pr, report, attempt, by, lab, answer.runtime
+        )
+        if again is not None:
+            return PlaybookResult(
+                actions=[again],
+                wait=Wait(
+                    kinds=[
+                        EventKind.ACTION_EXECUTED,
+                        EventKind.ACTION_FAILED,
+                        EventKind.PROPOSAL_DECIDED,
+                    ],
+                    seconds=WAIT_SECONDS,
+                    reason=_waiting(by, _for_review(request)),
+                    action_ids=[again.id],
+                ),
+                result={**summary, "retry": attempt + 1, "changed": report.changed},
+            )
+        if pr is not None:
             machine = ctx.service.machines.get(lab)
             record_text = untrusted(
                 "reproduction",
@@ -584,9 +658,20 @@ class ReproducePlaybook(Playbook):
                 ),
                 40_000,
             )
-            revised = await self._revise(ctx, request, pr, record_text)
-            if revised is not None:
-                return PlaybookResult(result={**summary, "revised": revised})
+            target = await self._review_of(ctx, request, pr)
+            if target is not None and target[1] is not None:
+                revised = await self._revise(ctx, target[0], target[1], pr, record_text)
+                if revised is not None:
+                    return PlaybookResult(result={**summary, "revised": revised})
+            elif target is not None:
+                update = await self._update_posted(
+                    ctx, target[0], pr, record_text, by, request
+                )
+                if update is not None:
+                    return PlaybookResult(
+                        actions=[update],
+                        result={**summary, "updates": target[0].action.id},
+                    )
         return PlaybookResult(
             actions=[
                 self._comment(
@@ -628,27 +713,151 @@ class ReproducePlaybook(Playbook):
                 ),
                 10_000,
             )
-            revised = await self._revise(ctx, request, pr, record_text)
-            if revised is not None:
-                result["revised"] = revised
+            target = await self._review_of(ctx, request, pr)
+            if target is not None and target[1] is not None:
+                revised = await self._revise(ctx, target[0], target[1], pr, record_text)
+                if revised is not None:
+                    result["revised"] = revised
         return PlaybookResult(result=result)
 
-    async def _revise(
-        self, ctx: PlaybookContext, request: Event, pr: PrSnapshot, record_text: str
-    ) -> str | None:
-        """Add the reproduction's record to the review draft while it waits for a
-        decision; the id of the draft, or ``None`` when it was decided (or is gone)
-        or the agent could not revise it."""
-        review_id = str(request.payload.get("review") or "")
-        record = await ctx.store.get_action(review_id) if review_id else None
-        proposal = await ctx.store.proposal_for_action(review_id) if record else None
+    async def _review_of(
+        self, ctx: PlaybookContext, request: Event, pr: PrSnapshot
+    ) -> tuple[ActionRecord, Proposal | None] | None:
+        """The review a reproduction's result belongs in, with its proposal while it
+        waits for a decision: the review that asked for the run, else the PR's
+        newest review that waits or was posted. ``None`` when the PR has none."""
+        wanted = str(request.payload.get("review") or "")
+        records = (
+            [r for r in [await ctx.store.get_action(wanted)] if r is not None]
+            if wanted
+            else sorted(
+                await ctx.store.list_actions(
+                    repo=pr.repo, number=pr.number, kinds=[ActionKind.REVIEW_POST]
+                ),
+                key=lambda r: r.action.created_at,
+                reverse=True,
+            )
+        )
+        for record in records:
+            proposal = await ctx.store.proposal_for_action(record.action.id)
+            if proposal is not None and proposal.state == ProposalState.PENDING:
+                return record, proposal
+            if record.status == ActionStatus.EXECUTED and record.external_ref.get(
+                "review_id"
+            ):
+                return record, None
+        return None
+
+    async def _retry(
+        self,
+        ctx: PlaybookContext,
+        request: Event,
+        pr: PrSnapshot | None,
+        report: ReproReport,
+        attempt: int,
+        by: str | None,
+        lab: str,
+        runtime: str | None,
+    ) -> Action | None:
+        """The next attempt, when the agent corrected a plan that failed for a
+        reason it could fix and attempts remain; it is allowed (or drafted for the
+        requester) as the first was."""
+        plan = report.retry
         if (
-            record is None
-            or proposal is None
-            or proposal.state != ProposalState.PENDING
-            or ctx.drafts is None
+            plan is None
+            or attempt >= MAX_ATTEMPTS
+            or report.conclusion != "inconclusive"
+            or pr is None
+            or pr.state != PrState.OPEN
+            or plan.blocked.strip()
+            or not plan.script.strip()
         ):
             return None
+        profile = ctx.require_profile()
+        machine = ctx.service.machines.get(lab)
+        binding = profile.labs.get(lab)
+        if machine is None or unusable(pr.repo, lab, machine, binding):
+            return None
+        before = setup_lines(machine, binding)
+        if script_refusals(
+            "\n".join([*before, plan.setup, plan.script]), forbidden(machine, binding)
+        ):
+            return None
+        ctx.trusted_input = await ctx.author_is_team(pr)
+        if report.changed.strip():
+            plan = plan.model_copy(
+                update={
+                    "summary": f"{plan.summary} (attempt {attempt + 1}: {report.changed.strip()})"
+                }
+            )
+        return _plan_action(
+            pr,
+            plan,
+            lab=lab,
+            limit=time_limit(machine, binding),
+            by=by,
+            for_review=_for_review(request),
+            discriminator=f"req:{request.id}:try{attempt + 1}",
+            runtime=runtime,
+            team=ctx.trusted_input,
+        )
+
+    async def _update_posted(
+        self,
+        ctx: PlaybookContext,
+        record: ActionRecord,
+        pr: PrSnapshot,
+        record_text: str,
+        by: str | None,
+        request: Event,
+    ) -> Action | None:
+        """An edit of the posted review that adds the reproduction's record, for
+        whoever posted it to approve; ``None`` when the agent could not revise it."""
+        new_payload = await self._revised_payload(ctx, record, pr, record_text)
+        if new_payload is None:
+            return None
+        return posted_update_action(
+            record,
+            new_payload,
+            discriminator=f"req:{request.id}:review",
+            rationale="add the result of a reproduction to the posted review"
+            + (f", asked by {by}" if by else ""),
+            draft_for=by,
+        )
+
+    async def _revise(
+        self,
+        ctx: PlaybookContext,
+        record: ActionRecord,
+        proposal: Proposal,
+        pr: PrSnapshot,
+        record_text: str,
+    ) -> str | None:
+        """Add the reproduction's record to the review draft while it waits for a
+        decision; the id of the draft, or ``None`` when it was decided while the
+        agent worked or the agent could not revise it."""
+        if ctx.drafts is None:
+            return None
+        new_payload = await self._revised_payload(ctx, record, pr, record_text)
+        if new_payload is None:
+            return None
+        try:
+            await ctx.drafts.save_edits(
+                proposal.id, ctx.service.login, new_payload, person=False
+            )
+        except ValueError:
+            return None  # decided while the agent worked
+        return record.action.id
+
+    async def _revised_payload(
+        self,
+        ctx: PlaybookContext,
+        record: ActionRecord,
+        pr: PrSnapshot,
+        record_text: str,
+    ) -> dict[str, Any] | None:
+        """The review ``record`` drafted or posted, revised by an agent with the
+        reproduction's record, rendered as the playbook renders it."""
         profile = ctx.require_profile()
         payload = ReviewPostPayload.model_validate(record.action.payload)
         kind = task_kind_of(payload)
@@ -715,15 +924,7 @@ class ReproducePlaybook(Playbook):
             head,
             own_format,
         )
-        if new_payload is None:
-            return None
-        try:
-            await ctx.drafts.save_edits(
-                proposal.id, ctx.service.login, new_payload, person=False
-            )
-        except ValueError:
-            return None  # decided while the agent worked
-        return review_id
+        return new_payload
 
     @staticmethod
     def _comment(
@@ -744,6 +945,48 @@ class ReproducePlaybook(Playbook):
             + (f", asked by {by}" if by else ", after its review was posted"),
             draft_for=by,
         )
+
+
+def _plan_action(
+    pr: PrSnapshot,
+    plan: ReproPlan,
+    *,
+    lab: str,
+    limit: int,
+    by: str | None,
+    for_review: bool,
+    discriminator: str,
+    runtime: str | None,
+    team: bool,
+) -> Action:
+    """The ``lab.reproduce`` action that runs ``plan``: drafted for the maintainer
+    who asked, or decided by the repository's rule for a review's reproduction."""
+    return make_action(
+        ActionKind.LAB_REPRODUCE,
+        pr.repo,
+        LabReproducePayload(
+            lab=lab,
+            summary=plan.summary,
+            setup=plan.setup,
+            script=plan.script,
+            expect=plan.expect,
+            needs_gpu=plan.needs_gpu,
+            timeout_seconds=min(plan.timeout_minutes * 60, limit),
+            sides=plan.sides or ["base", "head"],
+            runtime=runtime,
+            requested_by=by,
+        ),
+        number=pr.number,
+        head_sha=pr.head_sha,
+        discriminator=discriminator,
+        rationale=(
+            f"a reproduction on {lab} for the review at {pr.head_sha[:7]}: {plan.summary}"
+            if for_review
+            else f"a reproduction on {lab}, asked by {by}: {plan.summary}"
+        ),
+        hints=ActionHints(author_is_team=team, changed_paths=pr.paths),
+        draft_for=None if for_review else by,
+    )
 
 
 def _waiting(by: str | None, for_review: bool) -> str:

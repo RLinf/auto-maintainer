@@ -45,7 +45,6 @@ from ..domain.actions import (
     ProposalState,
     ReviewPostPayload,
     ReviewUpdatePayload,
-    make_action,
 )
 from ..domain.agents import AgentTask, TaskKind
 from ..domain.events import Event, EventKind
@@ -63,6 +62,8 @@ from ..playbooks.review_revise import (
     apply_revision,
     names,
     owns_format,
+    posted_update,
+    posted_update_action,
     revision_blocks,
     task_kind_of,
 )
@@ -546,16 +547,7 @@ async def _revise_posted(
     """Draft the edit of a posted review, or update the edit already waiting, and
     return its action id. Whoever posted the review approves it, as GitHub lets only
     a review's author edit it."""
-    update = ReviewUpdatePayload(
-        target="review",
-        target_id=review_id,
-        body=str(new_payload["body"]),
-        runtime=new_payload.get("runtime"),
-        kind=new_payload.get("kind") or "review",
-        revises=record.action.id,
-        result=new_payload.get("result"),
-        author=record.post_as,
-    )
+    update = posted_update(record, new_payload)
     if revision is not None:
         proposal = await service.store.proposal_for_action(revision.action.id)
         if proposal is not None and proposal.state == ProposalState.PENDING:
@@ -563,15 +555,12 @@ async def _revise_posted(
                 proposal.id, user.login, update.model_dump(mode="json")
             )
             return revision.action.id
-    action = make_action(
-        ActionKind.REVIEW_UPDATE,
-        record.action.repo,
-        update,
-        number=record.action.number,
-        head_sha=record.action.head_sha,
+    action = posted_update_action(
+        record,
+        new_payload,
         discriminator=f"talk:{run}",
         rationale=f"revise the review posted for {user.login} in the conversation",
-        draft_for=record.post_as or user.login,
+        draft_for=user.login,
     )
     saved = await service.pipeline.submit(action, force_propose=True)
     return saved.action.id

@@ -32,9 +32,16 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from ..domain.actions import ReviewPostPayload
+from ..domain.actions import (
+    Action,
+    ActionKind,
+    ReviewPostPayload,
+    ReviewUpdatePayload,
+    make_action,
+)
 from ..domain.agents import TaskKind
 from ..domain.profile import RepoProfile
+from ..domain.records import ActionRecord
 from ..domain.review import (
     FollowupResult,
     ReviewResult,
@@ -231,3 +238,43 @@ def apply_revision(
             "result": result,
         }
     ).model_dump(mode="json")
+
+
+def posted_update(
+    record: ActionRecord, new_payload: dict[str, Any]
+) -> ReviewUpdatePayload:
+    """The edit of the review ``record`` posted that makes it read as
+    ``new_payload``. It keeps the reviewed commit and names who posted it, since
+    GitHub lets only a review's author edit it."""
+    return ReviewUpdatePayload(
+        target="review",
+        target_id=int(record.external_ref["review_id"]),
+        body=str(new_payload["body"]),
+        runtime=new_payload.get("runtime"),
+        kind=new_payload.get("kind") or "review",
+        revises=record.action.id,
+        result=new_payload.get("result"),
+        author=record.post_as,
+    )
+
+
+def posted_update_action(
+    record: ActionRecord,
+    new_payload: dict[str, Any],
+    *,
+    discriminator: str,
+    rationale: str,
+    draft_for: str | None,
+) -> Action:
+    """A ``review.update`` draft for the review ``record`` posted, for whoever
+    posted it to approve (or ``draft_for`` when the service posted it)."""
+    return make_action(
+        ActionKind.REVIEW_UPDATE,
+        record.action.repo,
+        posted_update(record, new_payload),
+        number=record.action.number,
+        head_sha=record.action.head_sha,
+        discriminator=discriminator,
+        rationale=rationale,
+        draft_for=record.post_as or draft_for,
+    )

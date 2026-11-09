@@ -25,6 +25,7 @@ import contextlib
 import random
 import re
 import shlex
+from collections import deque
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -46,7 +47,7 @@ from ..domain.secrets import redact_secrets
 from ..domain.settings import LabMachine
 from .hosts import LocalLabHost, SshLabHost
 
-TAIL_LINES = 80
+TAIL_LINES = 150
 
 
 class GpuThresholds(BaseModel):
@@ -248,7 +249,14 @@ class LabExecutor:
                     f"(at most {round(timeout / 60)} minutes)",
                 )
 
-                async def output(line: str, side: str = side) -> None:
+                # The last lines in the order they came, stdout and stderr together,
+                # so the step that failed shows next to what it printed.
+                merged: deque[str] = deque(maxlen=TAIL_LINES)
+
+                async def output(
+                    line: str, side: str = side, merged: deque[str] = merged
+                ) -> None:
+                    merged.append(line)
                     await tell(side, line=line)
 
                 result = await host.run(
@@ -268,7 +276,11 @@ class LabExecutor:
                     "exit_code": result.exit_code,
                     "timed_out": result.timed_out,
                     "duration_seconds": round(result.duration_seconds, 1),
-                    "tail": _tail(result.stdout + "\n" + result.stderr),
+                    "tail": _tail(
+                        "\n".join(merged)
+                        if merged
+                        else result.stdout + "\n" + result.stderr
+                    ),
                 }
         finally:
             await tell(phase=f"Removing the run folder on {payload.lab}")

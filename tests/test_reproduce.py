@@ -545,8 +545,8 @@ async def test_an_outside_prs_reproduction_waits_for_a_maintainer(demo) -> None:
             if p["action"]["action"]["kind"] == "lab.reproduce"
         ]
         assert script["requested_by"] is None
-        # The review is posted before the script is approved: the result becomes a
-        # comment of its own.
+        # The review is posted before the script is approved: the result becomes an
+        # edit of the posted review, not a comment of its own.
         posted = await maria.post(f"/api/proposals/{draft['id']}/approve", json={})
         assert posted.status_code == 200, posted.text
         await maria.post(f"/api/proposals/{script['id']}/approve", json={})
@@ -555,9 +555,12 @@ async def test_an_outside_prs_reproduction_waits_for_a_maintainer(demo) -> None:
     comments = await h.store.list_actions(
         repo=REPO, number=42, kinds=["comment.upsert"]
     )
-    assert any(c.action.payload.get("purpose") == "reproduction" for c in comments), (
-        "the result follows the posted review as a comment"
-    )
+    assert not [
+        c for c in comments if c.action.payload.get("purpose") == "reproduction"
+    ]
+    [edit] = await h.store.list_actions(repo=REPO, number=42, kinds=["review.update"])
+    assert edit.action.payload["revises"] == draft["action_id"]
+    assert edit.status == "proposed", "whoever posted the review approves the edit"
 
 
 async def test_a_run_the_machine_cannot_do_is_reported_in_the_review(demo) -> None:
@@ -846,3 +849,106 @@ async def test_actions_waiting_in_the_queue_at_a_restart_go_out_after_it(demo) -
         assert record is not None and record.status in ("executed", "noop"), (
             record.status if record else None
         )
+
+
+async def _approve_scripts(h: Any, client: httpx.AsyncClient) -> int:
+    """Approve every reproduction script waiting; how many there were."""
+    waiting = [
+        p
+        for p in (await client.get("/api/proposals")).json()
+        if p["action"]["action"]["kind"] == "lab.reproduce"
+    ]
+    for p in waiting:
+        await client.post(f"/api/proposals/{p['id']}/approve", json={})
+    await h.settle()
+    return len(waiting)
+
+
+async def test_a_reproduction_asked_for_goes_into_the_waiting_review(demo) -> None:
+    h, app = demo
+    async with _as(app, "maria") as maria:
+        draft = await _review(h, maria, 42)
+        await maria.post(f"/api/prs/{REPO}/42/reproduce", json={"lab": "gpu-01"})
+        await h.settle()
+        assert await _approve_scripts(h, maria) == 1
+    comments = await h.store.list_actions(
+        repo=REPO, number=42, kinds=["comment.upsert"]
+    )
+    assert not [
+        c for c in comments if c.action.payload.get("purpose") == "reproduction"
+    ]
+    [update] = [t for t in h.runner.tasks if "That reproduction has ended" in t.prompt]
+    assert "load([1])" in update.prompt, "the run's record reaches the review"
+    [job] = [j for j in await h.store.list_jobs() if j.playbook == "reproduce"]
+    assert job.result and job.result["revised"] == draft["action_id"]
+
+
+def _plan(script: str) -> dict[str, Any]:
+    return {
+        "summary": "Load a batch of one item.",
+        "setup": "pip install -e .",
+        "script": script,
+        "expect": "head prints 1 passed",
+        "sides": ["head"],
+    }
+
+
+async def test_a_run_that_fails_on_the_machine_is_fixed_and_run_again(demo) -> None:
+    h, app = demo
+    reports: list[str] = []
+
+    def agent(task: Any) -> dict[str, Any]:
+        if "You are reporting" not in task.prompt:
+            return _plan("python check.py")
+        reports.append(task.prompt)
+        if len(reports) == 1:
+            return {
+                "conclusion": "inconclusive",
+                "comment": "The setup failed before the check ran.",
+                "retry": _plan("pip install numpy && python check.py"),
+                "changed": "install numpy, which the machine lacks",
+            }
+        return {"conclusion": "reproduced", "comment": "Reproduced: 1 passed."}
+
+    h.runner.on("reproduce", agent)
+    async with _as(app, "maria") as maria:
+        await maria.post(f"/api/prs/{REPO}/43/reproduce", json={"lab": "gpu-01"})
+        await h.settle()
+        assert await _approve_scripts(h, maria) == 1
+        assert await _approve_scripts(h, maria) == 1, "the corrected plan comes back"
+    runner = h.service.a.lab_runner
+    assert [r["payload"].script for r in runner.reproduced] == [
+        "python check.py",
+        "pip install numpy && python check.py",
+    ]
+    assert "2 more attempts after this one" in reports[0]
+    assert "ask maria with your tool for asking the user" in reports[0]
+    assert "find the cause in the output and fix it" in reports[0]
+    [job] = [j for j in await h.store.list_jobs() if j.playbook == "reproduce"]
+    assert job.result and job.result["conclusion"] == "reproduced"
+    assert job.result["attempt"] == 2
+
+
+async def test_retries_stop_after_the_last_attempt(demo) -> None:
+    h, app = demo
+
+    def agent(task: Any) -> dict[str, Any]:
+        if "You are reporting" not in task.prompt:
+            return _plan("python check.py")
+        return {
+            "conclusion": "inconclusive",
+            "comment": "Still failing in setup.",
+            "retry": _plan("python check.py --again"),
+            "changed": "try again",
+        }
+
+    h.runner.on("reproduce", agent)
+    async with _as(app, "maria") as maria:
+        await maria.post(f"/api/prs/{REPO}/43/reproduce", json={"lab": "gpu-01"})
+        await h.settle()
+        for _ in range(5):
+            if not await _approve_scripts(h, maria):
+                break
+    assert len(h.service.a.lab_runner.reproduced) == 3
+    last = [t for t in h.runner.tasks if "You are reporting" in t.prompt][-1]
+    assert "This was the last attempt" in last.prompt
