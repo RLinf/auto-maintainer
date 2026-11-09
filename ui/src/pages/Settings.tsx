@@ -4,10 +4,10 @@
 // go only into their key fields. Only maintainers of the service's repository apply
 // changes; anyone else's wait for one.
 
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
-import { api, type AgentChoices, type LabMachine, type MachineCheck, type MachineDraft, type SettingsAgent, type SettingsCheck, type SandboxView, type SettingsProvider, type SettingsView } from "../api";
+import { api, type AgentChoices, type AgentInstall, type LabMachine, type MachineCheck, type MachineDraft, type SettingsAgent, type SettingsCheck, type SandboxView, type SettingsProvider, type SettingsView } from "../api";
 import { useAgent, type AgentContext } from "../agent";
 import { Diff, Empty, ErrorBox, PageHead, Section, Status, useAct, When } from "../components";
 import { useRepos, useSettings } from "../data";
@@ -472,6 +472,39 @@ function SandboxCard() {
   );
 }
 
+/** Install an agent CLI on this host (maintainers of the service's repository), and
+ * follow the install until it ends. */
+function InstallButton({ name, source, state, canInstall }: { name: string; source: string; state?: AgentInstall; canInstall: boolean }) {
+  const t = useT();
+  const client = useQueryClient();
+  const install = useAct(() => api.post<AgentInstall>(`/api/settings/agents/${name}/install`), [["settings"]]);
+  const running = state?.state === "running";
+  useEffect(() => {
+    if (!running) {
+      void client.invalidateQueries({ queryKey: ["agents"] });
+      return;
+    }
+    const timer = window.setInterval(() => void client.invalidateQueries({ queryKey: ["settings"] }), 3000);
+    return () => window.clearInterval(timer);
+  }, [running, client]);
+  return (
+    <span className="stack" style={{ gap: 2, alignItems: "flex-end", maxWidth: 320 }}>
+      <button
+        className="sm"
+        disabled={!canInstall || running || install.isPending}
+        title={canInstall ? `${t("Install from")} ${source}` : t("Maintainers of the service's repository install agents")}
+        onClick={() => install.mutate(undefined)}
+      >
+        <Icon name="download" size={14} />
+        {running ? t("Installing…") : t("Install")}
+      </button>
+      {running && state.lines.length > 0 && <span className="small muted truncate" style={{ maxWidth: 320 }}>{state.lines[state.lines.length - 1]}</span>}
+      {state?.state === "failed" && <span className="small danger-text" style={{ whiteSpace: "normal" }}>{state.error}</span>}
+      {install.error && <ErrorBox error={install.error} />}
+    </span>
+  );
+}
+
 function AgentsTab({ v, ask }: { v: SettingsView; ask: (p: string, send?: boolean) => void }) {
   const t = useT();
   const health = useAgentsData();
@@ -556,6 +589,9 @@ function AgentsTab({ v, ask }: { v: SettingsView; ask: (p: string, send?: boolea
                     <ModelControls agent={a} choices={choices} canChange={v.access.allowed} />
                   )}
                   {a.can_bypass && <AgentModeSwitch agent={a} canChange={v.access.allowed} />}
+                  {v.installable[a.name] && (a.installed === false || v.installs[a.name]?.state === "running") && (
+                    <InstallButton name={a.name} source={v.installable[a.name]} state={v.installs[a.name]} canInstall={v.access.allowed} />
+                  )}
                   <ChangeButton onClick={() => ask(`${t("For the")} ${a.name} ${t("agent")}, `)} />
                 </span>
               }

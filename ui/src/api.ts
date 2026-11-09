@@ -761,7 +761,23 @@ export interface SettingsRoute {
   runs_on: string | null;
 }
 
+export interface AgentInstall {
+  name: string;
+  by: string;
+  state: "running" | "done" | "failed";
+  source: string;
+  started_at: string;
+  finished_at: string | null;
+  version: string;
+  error: string;
+  /** The installer's last lines of output. */
+  lines: string[];
+}
+
 export interface SettingsView {
+  /** The agent CLIs this host can install, with where each comes from. */
+  installable: Record<string, string>;
+  installs: Record<string, AgentInstall>;
   access: GateDecision;
   repo: string | null;
   document: string;

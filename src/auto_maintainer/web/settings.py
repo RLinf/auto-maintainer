@@ -188,6 +188,11 @@ async def settings_view(service: Service, user: User) -> dict[str, Any]:
             {"name": name, **machine.model_dump(mode="json")}
             for name, machine in config.labs.items()
         ],
+        "installable": service.installable(),
+        "installs": {
+            name: state.model_dump(mode="json")
+            for name, state in service.installs.items()
+        },
     }
 
 
@@ -437,6 +442,21 @@ def build_router() -> APIRouter:
             "diff": settings_diff(current, body.yaml),
             "status": service.settings_status.model_dump(mode="json"),
         }
+
+    @r.post("/agents/{name}/install")
+    async def install_agent(
+        request: Request, name: str, user: User = Depends(current_user)
+    ) -> dict[str, Any]:
+        """Install agent ``name``'s CLI on this host, from npm when its publisher
+        ships it there, else from the publisher's release; maintainers of the
+        service's repository only, as for every service setting."""
+        service = service_of(request)
+        await _require_maintainer(service, user)
+        try:
+            state = service.start_install(name, user.login)
+        except ValueError as e:
+            raise HTTPException(404, str(e)) from e
+        return state.model_dump(mode="json")
 
     @r.get("/sandbox")
     async def sandbox_view(

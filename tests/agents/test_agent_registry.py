@@ -20,6 +20,7 @@ import pytest
 from pydantic import ValidationError
 
 from auto_maintainer.agents.adapters.claude_code import ClaudeCodeRuntime
+from auto_maintainer.agents.adapters.dsh import DshRuntime
 from auto_maintainer.agents.adapters.generic import GenericRuntime
 from auto_maintainer.agents.registry import (
     DEFAULT_RUNTIMES,
@@ -42,7 +43,7 @@ def test_defaults_cover_every_cli_and_keep_placeholders_off() -> None:
         "pi",
         "dsh",
     }
-    assert not DEFAULT_RUNTIMES["pi"].enabled and not DEFAULT_RUNTIMES["dsh"].enabled
+    assert not DEFAULT_RUNTIMES["pi"].enabled and DEFAULT_RUNTIMES["dsh"].enabled
     runtimes = build_runtimes(merge_configs())
     assert set(runtimes) == {
         "claude-code",
@@ -50,14 +51,16 @@ def test_defaults_cover_every_cli_and_keep_placeholders_off() -> None:
         "antigravity",
         "opencode",
         "gemini",
+        "dsh",
     }
+    assert isinstance(runtimes["dsh"], DshRuntime)
     assert all(isinstance(r, AgentRuntime) for r in runtimes.values())
 
 
 def test_overrides_merge_and_enable_generic_runtimes(tmp_path: Path) -> None:
     configs = merge_configs(
         {
-            "dsh": {"enabled": True, "command": ["dsh", "go", "{prompt}"]},
+            "pi": {"enabled": True, "command": ["pi", "go", "{prompt}"]},
             "claude-code": {
                 "model": "opus",
                 "options": {"setting_sources": ""},
@@ -66,8 +69,8 @@ def test_overrides_merge_and_enable_generic_runtimes(tmp_path: Path) -> None:
         }
     )
     runtimes = build_runtimes(configs, runs_dir=tmp_path)
-    dsh = runtimes["dsh"]
-    assert isinstance(dsh, GenericRuntime) and dsh.command == ["dsh", "go", "{prompt}"]
+    pi = runtimes["pi"]
+    assert isinstance(pi, GenericRuntime) and pi.command == ["pi", "go", "{prompt}"]
     claude = runtimes["claude-code"]
     assert (
         isinstance(claude, ClaudeCodeRuntime)

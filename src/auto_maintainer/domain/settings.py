@@ -52,7 +52,7 @@ SSH_DESTINATION = re.compile(r"^(?:[A-Za-z0-9._-]+@)?[A-Za-z0-9][A-Za-z0-9._-]*$
 option: a destination that starts with ``-`` would be read by ssh as one."""
 
 AdapterName = Literal[
-    "claude-code", "codex", "antigravity", "opencode", "gemini", "generic"
+    "claude-code", "codex", "antigravity", "opencode", "gemini", "dsh", "generic"
 ]
 ProviderProtocol = Literal["anthropic", "openai", "openai-responses"]
 """The wire API a provider speaks: Anthropic Messages, OpenAI Chat Completions, or
@@ -62,6 +62,7 @@ PROVIDER_PROTOCOLS: dict[str, frozenset[str]] = {
     "claude-code": frozenset({"anthropic"}),
     "codex": frozenset({"openai", "openai-responses"}),
     "opencode": frozenset({"anthropic", "openai", "openai-responses"}),
+    "dsh": frozenset({"openai"}),
     "generic": frozenset({"anthropic", "openai", "openai-responses"}),
     "gemini": frozenset(),
     "antigravity": frozenset(),
@@ -154,15 +155,10 @@ DEFAULT_RUNTIMES: dict[str, RuntimeConfig] = {
         command=["pi", "-p", "{prompt}"],
         output=GenericOutput(format="text"),
     ),
-    "dsh": RuntimeConfig(
-        adapter="generic",
-        enabled=False,
-        command=["dsh", "run", "--cwd", "{workdir}", "--prompt-file", "{prompt_file}"],
-        output=GenericOutput(format="text"),
-    ),
+    "dsh": RuntimeConfig(adapter="dsh"),
 }
-"""Defaults for every known CLI. ``pi`` and ``dsh`` are placeholders: their command
-lines are unconfirmed, so they stay disabled until someone sets them."""
+"""Defaults for every known CLI. ``pi`` is a placeholder: its command line is
+unconfirmed, so it stays disabled until someone sets it."""
 
 
 def merge_configs(

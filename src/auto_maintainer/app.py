@@ -27,6 +27,7 @@ import yaml
 
 from .agents.container import ContainerSandbox, SandboxStarter, host_tools, image_tag
 from .agents.github_proxy import GitHubReadProxy
+from .agents.install import AgentInstaller, installs_dir
 from .agents.registry import budgets_of, build_runtimes, merge_configs
 from .agents.router import AgentRouter
 from .config import CONFIG_DIR, HostConfig, load_host_config, save_host_config
@@ -109,6 +110,7 @@ async def build_service(cfg: HostConfig, dev: bool = False) -> Service:
             github_socket=proxy.socket_path,
             tools=host_tools(),
             mounts=[Path(os.path.expanduser(m)) for m in cfg.sandbox.mounts],
+            installs=installs_dir(data),
         ),
         lambda: router.runtimes,
         enabled=cfg.sandbox.enabled,
@@ -242,6 +244,7 @@ async def build_service(cfg: HostConfig, dev: bool = False) -> Service:
         secrets=FileSecretStore(CONFIG_DIR / "provider-keys.json"),
         reconfigure=reconfigure,
         user_tokens=user_tokens,
+        installer=AgentInstaller(data),
         writer_for_user=writer_for_user,
         publisher_for_user=publisher_for_user,
         background=background,

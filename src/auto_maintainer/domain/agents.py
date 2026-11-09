@@ -328,6 +328,31 @@ class QuotaBucket(BaseModel):
     """When it resets, in the CLI's own words, when it gives no exact time."""
 
 
+class InstalledAgent(BaseModel):
+    """An agent CLI the service installed on its host."""
+
+    name: str
+    version: str = ""
+    path: str
+    source: str
+    """Where it came from, such as ``npm @openai/codex``."""
+
+
+class AgentInstall(BaseModel):
+    """An install of an agent CLI that a maintainer of the service asked for."""
+
+    name: str
+    by: str
+    state: Literal["running", "done", "failed"] = "running"
+    source: str = ""
+    started_at: datetime
+    finished_at: datetime | None = None
+    version: str = ""
+    error: str = ""
+    lines: list[str] = Field(default_factory=list)
+    """The installer's last lines of output, for watching it."""
+
+
 class AgentQuota(BaseModel):
     """What an agent CLI says is left of its account's limits."""
 

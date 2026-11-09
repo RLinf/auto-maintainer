@@ -17,6 +17,7 @@ out, configuring through the agent, and how providers reach each CLI."""
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 from collections.abc import AsyncIterator
@@ -486,3 +487,42 @@ async def test_the_sandbox_is_a_setting_of_the_services_maintainers(demo) -> Non
         ).json()
         assert off["enabled"] is False and "on the host" in off["status"]
         assert runtime.container_sandbox is None, "agents run on the host at once"
+
+
+class _Installer:
+    def sources(self) -> dict[str, str]:
+        return {"codex": "npm @openai/codex"}
+
+    async def install(self, name, on_line=None):
+        from auto_maintainer.domain.agents import InstalledAgent
+
+        if on_line is not None:
+            await on_line("added 1 package")
+        return InstalledAgent(
+            name=name, version="9.9.9", path="/x", source="npm @openai/codex"
+        )
+
+
+async def test_only_maintainers_of_the_service_install_agents(demo) -> None:
+    h, app = demo
+    h.service.a.installer = _Installer()
+    async with _client(app, "walt") as walt:
+        refused = await walt.post("/api/settings/agents/codex/install")
+        assert refused.status_code == 403
+    async with _client(app, "maria") as maria:
+        view = (await maria.get("/api/settings")).json()
+        assert view["installable"] == {"codex": "npm @openai/codex"}
+        started = await maria.post("/api/settings/agents/codex/install")
+        assert started.status_code == 200 and started.json()["by"] == "maria"
+        assert (
+            await maria.post("/api/settings/agents/nonesuch/install")
+        ).status_code == 404
+        await asyncio.gather(*h.service._install_tasks)
+        done = (await maria.get("/api/settings")).json()["installs"]["codex"]
+    assert (done["state"], done["version"], done["lines"]) == (
+        "done",
+        "9.9.9",
+        ["added 1 package"],
+    )
+    audit = await h.store.list_audit(limit=5)
+    assert any("installed codex 9.9.9" in a.summary for a in audit)

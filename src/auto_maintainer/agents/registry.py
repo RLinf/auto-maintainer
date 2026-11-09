@@ -33,6 +33,7 @@ from ..domain.settings import (
 from .adapters.antigravity import AntigravityRuntime
 from .adapters.claude_code import ClaudeCodeRuntime
 from .adapters.codex import CodexRuntime
+from .adapters.dsh import DshRuntime
 from .adapters.gemini import GeminiRuntime
 from .adapters.generic import GenericRuntime
 from .adapters.opencode import OpenCodeRuntime
@@ -57,6 +58,7 @@ ADAPTERS: dict[str, type[ExecRuntime]] = {
     "codex": CodexRuntime,
     "antigravity": AntigravityRuntime,
     "opencode": OpenCodeRuntime,
+    "dsh": DshRuntime,
     "gemini": GeminiRuntime,
     "generic": GenericRuntime,
 }

@@ -36,6 +36,7 @@ from .agents import (
     AgentResult,
     AgentTask,
     Capabilities,
+    InstalledAgent,
     QuestionState,
     RuntimeHealth,
 )
@@ -559,6 +560,18 @@ class SecretStore(Protocol):
     async def describe(self, names: list[str]) -> list[SecretInfo]: ...
     async def set(self, name: str, value: str, by: str) -> None: ...
     async def delete(self, name: str) -> None: ...
+
+
+class AgentInstaller(Protocol):
+    """Installs agent CLIs on the service's host (``agents/install.py``)."""
+
+    def sources(self) -> dict[str, str]:
+        """The CLIs this host can install, by runtime name, with where each comes from."""
+        ...
+
+    async def install(
+        self, name: str, on_line: Callable[[str], Awaitable[None]] | None = None
+    ) -> InstalledAgent: ...
 
 
 class UserTokens(Protocol):

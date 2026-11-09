@@ -52,8 +52,9 @@ TOOLS_DIR = "/opt/am/bin"
 PATH = f"{TOOLS_DIR}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 GH_PLACEHOLDER = "am-read-proxy"
 """What ``gh`` sees as its token; the proxy replaces it with the service's own."""
-HOST_TOOLS = ("gh", "uv", "uvx", "ruff")
-"""Host tools mounted read-only when the host has them."""
+HOST_TOOLS = ("gh", "uv", "uvx", "ruff", "node")
+"""Host tools mounted read-only when the host has them. ``node`` runs the agent CLIs
+installed from npm, whose Node is newer than the image's."""
 
 
 def dockerfile() -> str:
@@ -123,6 +124,7 @@ class ContainerSandbox:
         github_socket: The GitHub read proxy's socket on the host, if it runs.
         tools: Host tools to mount, by name (``host_tools()``).
         mounts: More host paths to mount read-only at the same place.
+        installs: Where the dashboard installs agent CLIs (``agents/install.py``).
         home: The home folder path agents see; the host's own by default.
     """
 
@@ -138,6 +140,7 @@ class ContainerSandbox:
         github_socket: Path | None = None,
         tools: Mapping[str, Path] | None = None,
         mounts: Sequence[Path] = (),
+        installs: Path | None = None,
         home: Path | None = None,
     ) -> None:
         self.image = image
@@ -149,6 +152,9 @@ class ContainerSandbox:
         self.github_socket = github_socket
         self.tools = dict(tools or {})
         self.mounts = list(mounts)
+        self.installs = installs
+        """Where the dashboard installs agent CLIs (``agents/install.py``); a CLI
+        from there runs in place, with its folder mounted read-only."""
         self.home = home or Path.home()
 
     async def ready(self) -> bool:
@@ -219,8 +225,15 @@ class ContainerSandbox:
         binds += [(p, str(p), False) for p in rw if p.exists()]
         binds += [(p, str(p), True) for p in [*ro, *self.mounts] if p.exists()]
         real = Path(os.path.realpath(binary))
-        inside = f"{TOOLS_DIR}/{Path(binary).name}"
-        binds.append((real, inside, True))
+        installs = Path(os.path.realpath(self.installs)) if self.installs else None
+        if installs is not None and real.is_relative_to(installs):
+            # An npm package needs its whole folder; it runs where it lies.
+            package = installs / real.relative_to(installs).parts[0]
+            binds.append((package, str(package), True))
+            inside = str(real)
+        else:
+            inside = f"{TOOLS_DIR}/{Path(binary).name}"
+            binds.append((real, inside, True))
         for tool, path in self.tools.items():
             binds.append((path, f"{TOOLS_DIR}/{tool}", True))
         if self.github_socket is not None and self.github_socket.exists():

@@ -32,7 +32,7 @@ from .actuator.executor import Actuator
 from .actuator.lab_sessions import LabSessions
 from .actuator.pipeline import ActionPipeline
 from .domain.actions import ActionKind, ActionStatus, MemoryChangePayload, make_action
-from .domain.agents import AgentQuota
+from .domain.agents import AgentInstall, AgentQuota
 from .domain.clock import Clock
 from .domain.events import Event, EventKind
 from .domain.memory import (
@@ -45,6 +45,7 @@ from .domain.memory import (
 )
 from .domain.permissions import Permission
 from .domain.ports import (
+    AgentInstaller,
     AgentRunner,
     BranchPublisher,
     CiProvider,
@@ -62,7 +63,7 @@ from .domain.ports import (
 )
 from .domain.profile import Route
 from .domain.records import AuditEntry, Job, RepoRecord
-from .domain.secrets import find_secrets
+from .domain.secrets import find_secrets, redact_secrets
 from .domain.settings import (
     LEGACY_RUNTIMES_PATH,
     SETTINGS_PATH,
@@ -105,6 +106,8 @@ from .profiles.service import ProfileService
 
 log = logging.getLogger(__name__)
 
+INSTALL_LINES = 12
+"""How many of an installer's last lines of output the Settings page shows."""
 QUOTA_SECONDS = 300
 """How long an agent's quota reading is shown before its CLI is asked again."""
 QUOTA_FRESH_SECONDS = 30
@@ -153,6 +156,8 @@ class Adapters:
         Callable[[str, UserToken], Awaitable[BranchPublisher | None]] | None
     ) = None
     """A branch publisher pushing as a person with their token, for fix PRs."""
+    installer: AgentInstaller | None = None
+    """Installs agent CLIs on this host when maintainers of the service ask."""
     background: list[Any] = field(default_factory=list)
     """Pieces that run alongside the service, each with ``start`` and ``stop`` (the
     agents' sandbox and its GitHub read proxy)."""
@@ -209,6 +214,9 @@ class Service:
         self.a = adapters
         self._quotas: dict[str, AgentQuota] = {}
         """Each agent's last quota reading (``agent_quota``)."""
+        self.installs: dict[str, AgentInstall] = {}
+        """The latest install of each agent CLI asked for since the service started."""
+        self._install_tasks: set[asyncio.Task[None]] = set()
         self.settings = settings
         self.store = adapters.store
         self.clock = adapters.clock
@@ -727,6 +735,55 @@ class Service:
             await self.reload_settings()
         if event.repo and lock_path(event.repo) in paths:
             self.poll_now(event.repo)
+
+    def installable(self) -> dict[str, str]:
+        """The agent CLIs this host can install from the dashboard, with their source."""
+        return self.a.installer.sources() if self.a.installer is not None else {}
+
+    def start_install(self, name: str, by: str) -> AgentInstall:
+        """Install agent ``name``'s CLI in the background, unless it is being
+        installed already. ``by`` passed ``service_gate`` (maintainers of the
+        service's repository install software on its host)."""
+        current = self.installs.get(name)
+        if current is not None and current.state == "running":
+            return current
+        sources = self.installable()
+        if self.a.installer is None or name not in sources:
+            raise ValueError(f"{name} cannot be installed on this host")
+        state = AgentInstall(
+            name=name, by=by, source=sources[name], started_at=self.clock.now()
+        )
+        self.installs[name] = state
+        task = asyncio.create_task(self._install(state), name=f"install-{name}")
+        self._install_tasks.add(task)
+        task.add_done_callback(self._install_tasks.discard)
+        return state
+
+    async def _install(self, state: AgentInstall) -> None:
+        assert self.a.installer is not None
+
+        async def on_line(line: str) -> None:
+            text = redact_secrets(line.rstrip())[0]
+            if text:
+                state.lines = [*state.lines[-(INSTALL_LINES - 1) :], text[:300]]
+
+        try:
+            done = await self.a.installer.install(state.name, on_line)
+        except Exception as exc:  # shown on the Settings page as it is
+            state.state, state.error = "failed", redact_secrets(str(exc))[0]
+            log.warning("installing %s failed: %s", state.name, exc)
+        else:
+            state.state, state.version = "done", done.version
+        state.finished_at = self.clock.now()
+        await self.store.add_audit(
+            AuditEntry(
+                kind="service",
+                actor=state.by,
+                summary=f"installed {state.name} {state.version} from {state.source}"
+                if state.state == "done"
+                else f"installing {state.name} failed: {state.error}",
+            )
+        )
 
     async def agent_quota(self, name: str, fresh: bool = False) -> AgentQuota | None:
         """What agent ``name``'s CLI says is left of its account's limits; ``None``
