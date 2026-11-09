@@ -243,7 +243,7 @@ class ActionPipeline:
                 )
             )
         elif decision.kind == DecisionKind.EXECUTE:
-            self.actuator.enqueue(action.id, action.repo)
+            self.actuator.enqueue(action.id, action.repo, kind=action.kind)
         elif decision.kind == DecisionKind.DENY and decision.rule == WRITE_CAP_RULE:
             await self.set_paused(
                 True, "service", reason="the hourly public write cap was reached"
@@ -430,7 +430,7 @@ class ActionPipeline:
         if decision.kind == DecisionKind.EXECUTE:
             record.status = ActionStatus.QUEUED
             await self.store.save_action(record)
-            self.actuator.enqueue(action.id, action.repo, login)
+            self.actuator.enqueue(action.id, action.repo, login, action.kind)
         else:
             record.status = ActionStatus.PROPOSED
             record.error = f"held after approval: {decision.reason or decision.rule}"

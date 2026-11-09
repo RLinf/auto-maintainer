@@ -845,7 +845,7 @@ Rollout: a new action kind or a new repository starts in `shadow`. The dashboard
 
 ### 5.9 Actuator and identity
 
-The actuator executes allowed actions with one handler per action kind. Each handler:
+The actuator executes allowed actions with one handler per action kind. A repository's actions run one at a time, in the order they were allowed, except those that hold a test machine (`lab.reproduce`, `lab.run`, `executor.ON_TEST_MACHINES`), which can take an hour: they run one at a time in a lane of their own, so the repository's reviews, labels, and comments go out meanwhile. Each handler:
 
 1. Checks the idempotency key against the `actions` table and returns the earlier result if it already ran.
 2. Re-reads the target (for example, the PR head SHA) and refuses stale actions, marking their proposals `superseded`.

@@ -729,3 +729,65 @@ async def test_an_agent_drafts_what_the_service_enforces_from_the_description(
         )
         assert saved.json()["approved"] is True
     assert h.service.machines["gpu-09"].forbid == [r"\bray\s+stop\b", "/data/datasets"]
+
+
+async def test_a_run_on_a_test_machine_does_not_hold_up_posting(demo) -> None:
+    """A reproduction can hold a machine for an hour; labels, reviews, and comments
+    approved meanwhile for the same repository go out without waiting for it."""
+    import asyncio
+
+    from auto_maintainer.domain.actions import ActionKind, LabelPayload, make_action
+
+    h, app = demo
+    runner = h.service.a.lab_runner
+    machine_free = asyncio.Event()
+    finish = runner.reproduce
+
+    async def slow_reproduce(*args, **kwargs):
+        await machine_free.wait()
+        return await finish(*args, **kwargs)
+
+    runner.reproduce = slow_reproduce
+    async with _as(app, "maria") as maria:
+        await maria.post(f"/api/prs/{REPO}/42/reproduce", json={"lab": "gpu-01"})
+        await h.settle()
+        [draft] = [
+            p
+            for p in (await maria.get("/api/proposals")).json()
+            if p["action"]["action"]["kind"] == "lab.reproduce"
+        ]
+        await maria.post(f"/api/proposals/{draft['id']}/approve", json={})
+    pr = await h.forge.get_pr(REPO, 42)
+    assert pr is not None
+    await h.service.pipeline.submit(
+        make_action(
+            ActionKind.LABEL_APPLY,
+            REPO,
+            LabelPayload(labels=["needs-gpu-check"]),
+            number=42,
+            head_sha=pr.head_sha,
+            discriminator="while the machine runs",
+        )
+    )
+
+    async def label_status() -> str:
+        [record] = [
+            r
+            for r in await h.store.list_actions(repo=REPO, number=42, limit=50)
+            if r.action.kind == "label.apply"
+            and "needs-gpu-check" in str(r.action.payload)
+        ]
+        return record.status
+
+    for _ in range(100):
+        if await label_status() not in ("queued", "intent"):
+            break
+        await asyncio.sleep(0.02)
+    assert await label_status() not in ("queued", "intent"), (
+        "the label waited for the machine"
+    )
+    lab = await h.store.get_action(draft["action_id"])
+    assert lab is not None and lab.status == "intent", "the run is still going"
+    machine_free.set()
+    await h.settle()
+    assert len(runner.reproduced) == 1

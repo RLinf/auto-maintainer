@@ -45,6 +45,10 @@ AS_PERSON = frozenset(
 )
 """Action kinds a maintainer may run with their own GitHub account."""
 
+ON_TEST_MACHINES = frozenset({ActionKind.LAB_REPRODUCE, ActionKind.LAB_RUN})
+"""Actions that hold a test machine, for up to an hour: each repository runs them in
+a lane of their own, so its reviews, labels, and comments go out meanwhile."""
+
 _COMMENT_KINDS = {
     ActionKind.REVIEW_POST,
     ActionKind.COMMENT_UPSERT,
@@ -62,12 +66,22 @@ class Actuator:
         self._idle.set()
         self._pending = 0
 
-    def enqueue(self, action_id: str, repo: str, approver: str | None = None) -> None:
-        queue = self._queues.get(repo)
+    def enqueue(
+        self,
+        action_id: str,
+        repo: str,
+        approver: str | None = None,
+        kind: ActionKind | None = None,
+    ) -> None:
+        """Queue an action. A repository's actions run one at a time, in order,
+        except those on its test machines (``ON_TEST_MACHINES``), which run one at a
+        time in a lane of their own."""
+        lane = f"{repo} on test machines" if kind in ON_TEST_MACHINES else repo
+        queue = self._queues.get(lane)
         if queue is None:
-            queue = self._queues[repo] = asyncio.Queue()
-            self._workers[repo] = asyncio.create_task(
-                self._worker(queue), name=f"actuator:{repo}"
+            queue = self._queues[lane] = asyncio.Queue()
+            self._workers[lane] = asyncio.create_task(
+                self._worker(queue), name=f"actuator:{lane}"
             )
         self._pending += 1
         self._idle.clear()
@@ -263,7 +277,7 @@ class Actuator:
             else:
                 record.status = ActionStatus.QUEUED
                 await self.x.store.save_action(record)
-                self.enqueue(action.id, action.repo, record.approver)
+                self.enqueue(action.id, action.repo, record.approver, action.kind)
             settled += 1
         return settled
 
