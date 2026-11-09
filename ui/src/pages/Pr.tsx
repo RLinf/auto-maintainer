@@ -43,6 +43,7 @@ import { ACTIVE, PrWork, usePrWork } from "../jobs";
 import { openJob } from "../openJob";
 import { Skeleton, Tabs, useTab, useToast } from "../ui";
 import { TranslateReview } from "../translate";
+import { forgeOf } from "../forges";
 
 const TIERS = ["P0", "P1", "P2", "P3"];
 type TimelineRow = PrDetail["actions"][number];
@@ -136,7 +137,7 @@ export default function PrPage({ me }: { me: Me }) {
         actions={
           <>
             <a className="button" href={pr.url} target="_blank" rel="noreferrer" title={t("Open on GitHub in a new tab")}>
-              GitHub <Icon name="external" size={13} />
+              {forgeOf(full).terms.forge_name} <Icon name="external" size={13} />
             </a>
             <button className="agent" onClick={() => agent.open()}>
               <Icon name="sparkles" />

@@ -31,8 +31,8 @@ from ..domain.actions import Action
 from ..domain.agents import AgentResult, AgentTask, QuestionState, TaskKind
 from ..domain.clock import Clock
 from ..domain.codeowners import (
-    CODEOWNERS_LOCATIONS,
     OwnerRule,
+    codeowners_locations,
     owners_of_paths,
     parse_codeowners,
 )
@@ -369,7 +369,7 @@ class PlaybookContext:
             paths = (
                 [profile.people.codeowners]
                 if profile.people.codeowners
-                else list(CODEOWNERS_LOCATIONS)
+                else list(codeowners_locations(profile.repo))
             )
             text = None
             for path in paths:

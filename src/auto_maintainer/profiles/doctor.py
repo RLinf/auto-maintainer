@@ -22,7 +22,7 @@ from collections.abc import Mapping
 import yaml
 from pydantic import BaseModel
 
-from ..domain.codeowners import CODEOWNERS_LOCATIONS, parse_codeowners
+from ..domain.codeowners import codeowners_locations, parse_codeowners
 from ..domain.ports import ForgeReader
 from ..domain.profile import RepoProfile
 from ..domain.settings import LabMachine
@@ -155,7 +155,7 @@ async def run_doctor(
     locations = (
         [profile.people.codeowners]
         if profile.people.codeowners
-        else list(CODEOWNERS_LOCATIONS)
+        else list(codeowners_locations(profile.repo))
     )
     text = None
     for loc in locations:

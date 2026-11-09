@@ -33,7 +33,10 @@ from ..subproc import run
 
 TokenFn = Callable[[str], Awaitable[str | None]]
 
-_HELPER = "!f() { echo username=x-access-token; echo password=$AM_GIT_TOKEN; }; f"
+_HELPER = "!f() { echo username=$AM_GIT_USER; echo password=$AM_GIT_TOKEN; }; f"
+
+RemoteFn = Callable[[str], tuple[str, str]]
+"""A repository's clone address and the user name git presents with its token."""
 
 INSTRUCTION_NAMES = {
     "AGENTS.md",
@@ -69,7 +72,9 @@ class GitWorkspace:
         root: Data directory holding the mirrors and worktrees.
         token: Returns a forge token for a repository; git reads it through a
             credential helper from ``AM_GIT_TOKEN``, never from a remote URL.
-        forge_url: Base URL of the forge.
+        forge_url: Base URL of the forge, when every repository is on one.
+        remote: A repository's clone address and git user name, for repositories
+            on several forges; overrides ``forge_url``.
         author: Name and email that commits made by the service carry.
     """
 
@@ -78,6 +83,7 @@ class GitWorkspace:
         root: Path,
         token: TokenFn | None = None,
         forge_url: str = "https://github.com",
+        remote: RemoteFn | None = None,
         author: tuple[str, str] = (
             "auto-maintainer",
             "auto-maintainer@users.noreply.github.com",
@@ -87,7 +93,17 @@ class GitWorkspace:
         self.root = root
         self._token = token
         self._forge_url = forge_url.rstrip("/")
+        self._remote = remote
         self._locks: dict[str, asyncio.Lock] = {}
+
+    def remote_url(self, repo: str) -> str:
+        """Where ``repo`` is cloned from and pushed to."""
+        if self._remote is not None:
+            return self._remote(repo)[0]
+        return f"{self._forge_url}/{repo}.git"
+
+    def _git_user(self, repo: str) -> str:
+        return self._remote(repo)[1] if self._remote is not None else "x-access-token"
 
     async def _env(self, repo: str) -> dict[str, str]:
         env = {
@@ -107,6 +123,7 @@ class GitWorkspace:
             )
         }
         env["GIT_TERMINAL_PROMPT"] = "0"
+        env["AM_GIT_USER"] = self._git_user(repo)
         if self._token:
             token = await self._token(repo)
             if token:
@@ -149,7 +166,7 @@ class GitWorkspace:
                     "clone",
                     "--bare",
                     "--filter=blob:none",
-                    f"{self._forge_url}/{repo}.git",
+                    self.remote_url(repo),
                     str(path),
                 ],
                 env=await self._env(repo),
@@ -421,7 +438,7 @@ class GitWorkspace:
                 await run(["git", "rev-parse", "HEAD"], cwd=path, check=True)
             ).stdout.strip()
             remote = (
-                f"{self._forge_url}/{push_to}.git"
+                self.remote_url(push_to)
                 if push_to and push_to != repo
                 else "origin"
             )

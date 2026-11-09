@@ -20,7 +20,7 @@ import pytest
 import respx
 from gh_testutil import API, no_sleep
 
-from auto_maintainer.github import GitHubClient, StaticTokenProvider
+from auto_maintainer.forges.github import GitHubClient, StaticTokenProvider
 
 
 @pytest.fixture

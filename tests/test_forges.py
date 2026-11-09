@@ -95,11 +95,76 @@ async def test_the_api_takes_a_nested_name_as_one_repository(
             pr = await maria.get("/api/prs/corp:infra/tools/builder/42")
             known = await maria.get("/api/prs/acme/widget/42")
             unknown_forge = await maria.get("/api/repos/other:a/b/usage")
-        assert usage.status_code in (403, 404) and usage.json().get(
-            "detail"
-        ) != "Not Found"
+        assert (
+            usage.status_code in (403, 404)
+            and usage.json().get("detail") != "Not Found"
+        )
         assert pr.status_code in (403, 404) and pr.json().get("detail") != "Not Found"
         assert known.status_code == 200
         assert unknown_forge.status_code in (400, 404, 422)
+    finally:
+        await h.close()
+
+
+class _Reader:
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.calls: list[tuple] = []
+
+    async def get_pr(self, repo: str, number: int) -> str:
+        self.calls.append((repo, number))
+        return f"{self.name}:{number}"
+
+    async def service_login(self) -> str:
+        return f"bot-{self.name}"
+
+
+async def test_the_router_hands_each_call_to_its_repositorys_forge(two_forges) -> None:
+    from auto_maintainer.forges.router import ForgeRouter
+
+    hub, corp = _Reader("hub"), _Reader("corp")
+    router = ForgeRouter({"github": hub, "corp": corp})
+    assert await router.get_pr("RLinf/RLinf", 1) == "hub:1"
+    assert await router.get_pr("corp:infra/tools/builder", 2) == "corp:2"
+    assert corp.calls == [("corp:infra/tools/builder", 2)]
+    assert await router.service_login() == "bot-hub"
+    with pytest.raises(ValueError):
+        await router.get_pr("nowhere:a/b", 3)
+
+
+def test_each_forge_keeps_its_own_codeowners_order(monkeypatch) -> None:
+    from auto_maintainer.domain.codeowners import codeowners_locations
+
+    gitlab = forges.ForgeInfo(
+        id="corp",
+        kind="gitlab",
+        codeowners=("CODEOWNERS", "docs/CODEOWNERS", ".gitlab/CODEOWNERS"),
+    )
+    monkeypatch.setattr(
+        forges,
+        "_forges",
+        forges._Forges(
+            "github",
+            frozenset({"github", "corp"}),
+            {"github": forges.ForgeInfo(id="github"), "corp": gitlab},
+        ),
+    )
+    assert codeowners_locations("RLinf/RLinf")[0] == ".github/CODEOWNERS"
+    assert codeowners_locations("corp:a/b")[-1] == ".gitlab/CODEOWNERS"
+    assert forges.info_of("corp:alice").kind == "gitlab"
+
+
+async def test_the_dashboard_learns_the_forges(tmp_path: Path) -> None:
+    h = await build_demo(tmp_path)
+    try:
+        app = create_app(h.service, data_dir=tmp_path, allow_dev_login=True)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as maria:
+            await maria.get("/auth/dev?login=maria")
+            view = (await maria.get("/api/forges")).json()
+        [github] = view["forges"]
+        assert view["default"] == "github" and github["kind"] == "github"
+        assert github["change_url"] == "{web}/{path}/pull/{number}"
     finally:
         await h.close()

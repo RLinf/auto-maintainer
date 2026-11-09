@@ -30,7 +30,7 @@ from ..domain.actions import (
     make_action,
 )
 from ..domain.agents import AgentTask, TaskKind
-from ..domain.codeowners import CODEOWNERS_LOCATIONS
+from ..domain.codeowners import codeowners_locations
 from ..domain.events import Event
 from ..domain.profile import CheckSpec, RepoProfile
 from ..domain.snapshot import PrSnapshot
@@ -168,7 +168,7 @@ class Hygiene(Playbook):
             for loc in (
                 [profile.people.codeowners]
                 if profile.people.codeowners
-                else CODEOWNERS_LOCATIONS
+                else codeowners_locations(pr.repo)
             ):
                 text = await ctx.forge.get_file(pr.repo, loc)
                 if text:

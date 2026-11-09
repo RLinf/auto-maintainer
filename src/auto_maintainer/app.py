@@ -21,12 +21,10 @@ import os
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
 
 import yaml
 
 from .agents.container import ContainerSandbox, SandboxStarter, host_tools, image_tag
-from .agents.github_proxy import GitHubReadProxy
 from .agents.install import AgentInstaller, installs_dir
 from .agents.registry import budgets_of, build_runtimes, merge_configs
 from .agents.router import AgentRouter
@@ -36,8 +34,9 @@ from .domain.clock import SystemClock
 from .domain.profile import Route
 from .domain.records import AgentRunRecord
 from .domain.settings import ProviderBinding, RuntimeConfig, UserToken
-from .github import GitHubActionsCi, GitHubClient, GitHubReader, GitHubWriter
-from .github.auth import StaticTokenProvider
+from .forges.base import ForgeSite
+from .forges.registry import kind as forge_kind
+from .forges.router import ForgeRouter
 from .labs.executor import GpuThresholds, LabExecutor
 from .labs.hosts import LocalLabHost, SshLabHost
 from .labs.sessions import LabSessionServer
@@ -62,27 +61,49 @@ async def build_service(cfg: HostConfig, dev: bool = False) -> Service:
     clock = SystemClock()
     data = cfg.data_path
     data.mkdir(parents=True, exist_ok=True)
-    forges.configure(cfg.default_forge.id, {f.id for f in cfg.forges})
+    # Every forge the service serves (design 5.16), each built by its kind; the
+    # routers hand each call to the forge a repository is on.
+    sites = [
+        ForgeSite(
+            id=f.id,
+            kind=f.kind,
+            web_url=f.web,
+            api_url=f.api,
+            cli_config_dir=f.cli_config_dir,
+            data_dir=data,
+        )
+        for f in cfg.forges
+    ]
+    forges.configure(
+        cfg.default_forge.id, {s.id: forge_kind(s.kind).describe(s) for s in sites}
+    )
+    endpoints = {s.id: await forge_kind(s.kind).build(s) for s in sites}
+    home = endpoints[cfg.default_forge.id]
+    reader = ForgeRouter({k: e.reader for k, e in endpoints.items()})
+    fresh_reader = ForgeRouter({k: e.fresh_reader for k, e in endpoints.items()})
+    writer = ForgeRouter({k: e.writer for k, e in endpoints.items()})
+    ci = ForgeRouter({k: e.ci for k, e in endpoints.items()})
+    login = home.service_login
 
-    # The service acts as the GitHub CLI login made on the setup page, or, without
-    # one, the account the host user's own GitHub CLI is logged in to.
-    tokens = StaticTokenProvider(None, gh_config_dir=cfg.default_forge.cli_config_dir)
-    client = GitHubClient(tokens, api_url=cfg.default_forge.api)
-    reader = GitHubReader(client)
-    fresh_reader = GitHubReader(client, snapshot_cache_seconds=0)
-    writer = GitHubWriter(client)
-    ci = GitHubActionsCi(client)
-    login = await reader.service_login()
+    async def service_token(repo: str | None) -> str | None:
+        """The service's token on ``repo``'s forge (the default forge's for none)."""
+        at = endpoints[forges.forge_of(repo)] if repo else home
+        return await at.token(repo)
+
+    def remote_of(repo: str) -> tuple[str, str]:
+        ref = forges.parse_repo(repo)
+        at = endpoints[ref.forge]
+        return f"{at.site.web_url}/{ref.path}.git", at.git_user
 
     store = await SqliteStore.open(data / "am.db")
 
     remote = cfg.memory.remote
     memory = GitMemoryStore(
         cfg.memory_path,
-        remote_url=f"{cfg.default_forge.web}/{remote}.git" if remote else None,
+        remote_url=f"{home.site.web_url}/{remote}.git" if remote else None,
         remote_repo=remote,
         branch=cfg.memory.branch,
-        token=(lambda: tokens.token(remote)) if remote else None,
+        token=(lambda: home.token(remote)) if remote else None,
     )
     await memory.open()
 
@@ -91,10 +112,9 @@ async def build_service(cfg: HostConfig, dev: bool = False) -> Service:
     runtimes_cfg = merge_configs((_yaml(op / "runtimes.yaml") or {}).get("runtimes"))
     runtimes = build_runtimes(runtimes_cfg, runs_dir=data / "runs")
 
-    proxy = GitHubReadProxy(
-        data / "sandbox" / "github.sock",
-        lambda: tokens.token(None),
-        api_host=urlparse(cfg.default_forge.api).hostname or "api.github.com",
+    proxies = [e.read_proxy for e in endpoints.values() if e.read_proxy is not None]
+    github_proxy = next(
+        (e.read_proxy for e in endpoints.values() if e.site.kind == "github"), None
     )
 
     def save_sandbox(values: dict[str, Any]) -> None:
@@ -110,7 +130,7 @@ async def build_service(cfg: HostConfig, dev: bool = False) -> Service:
             memory=cfg.sandbox.memory,
             pids=cfg.sandbox.pids,
             network=cfg.sandbox.network,
-            github_socket=proxy.socket_path,
+            github_socket=github_proxy.socket_path if github_proxy else None,
             tools=host_tools(),
             mounts=[Path(os.path.expanduser(m)) for m in cfg.sandbox.mounts],
             installs=installs_dir(data),
@@ -119,7 +139,7 @@ async def build_service(cfg: HostConfig, dev: bool = False) -> Service:
         enabled=cfg.sandbox.enabled,
         save=save_sandbox,
     )
-    background: list[Any] = [proxy, starter]
+    background: list[Any] = [*proxies, starter]
 
     async def usage_today(runtime: str) -> tuple[int, float]:
         now = clock.now()
@@ -161,12 +181,8 @@ async def build_service(cfg: HostConfig, dev: bool = False) -> Service:
         if token.expires_at and token.expires_at <= clock.now():
             await user_tokens.delete(login)
             return None
-        return GitHubWriter(
-            GitHubClient(
-                StaticTokenProvider(token=token.token), api_url=cfg.default_forge.api
-            ),
-            person=login,
-        )
+        person = forges.parse_person(login)
+        return endpoints[person.forge].writer_for_token(token.token, person.login)
 
     async def publisher_for_user(login: str, token: UserToken) -> Any:
         """Pushes branches as ``login``; ``None`` when their token no longer works."""
@@ -177,7 +193,7 @@ async def build_service(cfg: HostConfig, dev: bool = False) -> Service:
         async def user_token(repo: str) -> str | None:
             return fresh.token
 
-        return GitWorkspace(data, token=user_token, forge_url=cfg.default_forge.web)
+        return GitWorkspace(data, token=user_token, remote=remote_of)
 
     labs: dict[str, Any] = {}
     for name, lab in cfg.labs.items():
@@ -212,7 +228,7 @@ async def build_service(cfg: HostConfig, dev: bool = False) -> Service:
     for pack in sorted((cfg.memory_path / "packs").glob("*/pack.yaml")):
         extra_packs[pack.parent.name] = pack.read_text(encoding="utf-8")
 
-    workspace = GitWorkspace(data, token=tokens.token, forge_url=cfg.default_forge.web)
+    workspace = GitWorkspace(data, token=service_token, remote=remote_of)
     checkout = (
         Path(cfg.self_update.checkout).expanduser()
         if cfg.self_update.checkout
@@ -258,7 +274,7 @@ async def build_service(cfg: HostConfig, dev: bool = False) -> Service:
     )
     settings = ServiceSettings(
         login=login,
-        identities={login},
+        identities={forges.person_on(k, e.service_login) for k, e in endpoints.items()},
         routing=routing,
         defaults_profile=defaults,
         lab_socket=lab_sessions.socket_path,

@@ -29,8 +29,8 @@ from auto_maintainer.domain.snapshot import (
     PrState,
     ReviewEventState,
 )
-from auto_maintainer.github import GitHubReader, snapshot_from_graphql
-from auto_maintainer.github.reader import map_check_conclusion, map_check_status
+from auto_maintainer.forges.github import GitHubReader, snapshot_from_graphql
+from auto_maintainer.forges.github.reader import map_check_conclusion, map_check_status
 
 
 def test_snapshot_mapping():
@@ -270,9 +270,9 @@ async def test_team_membership(client, router):
     )
     router.get("/orgs/acme/teams/core/memberships/eve").respond(404)
     reader = GitHubReader(client)
-    assert await reader.is_team_member("acme", "core", "alice")
-    assert not await reader.is_team_member("acme", "core", "bob")
-    assert not await reader.is_team_member("acme", "core", "eve")
+    assert await reader.is_team_member("acme/widget", "acme/core", "alice")
+    assert not await reader.is_team_member("acme/widget", "acme/core", "bob")
+    assert not await reader.is_team_member("acme/widget", "acme/core", "eve")
 
 
 async def test_get_file_and_list_dir(client, router):

@@ -24,9 +24,9 @@ from __future__ import annotations
 from typing import Any, Literal
 from urllib.parse import quote
 
-from ..domain.ports import ReviewCommentSpec
-from ..domain.snapshot import CommentRef
-from ..domain.visibility import PublicText
+from ...domain.ports import ReviewCommentSpec
+from ...domain.snapshot import CommentRef
+from ...domain.visibility import PublicText
 from .client import GitHubClient, GitHubError
 
 _DRAFT_MUTATION = """

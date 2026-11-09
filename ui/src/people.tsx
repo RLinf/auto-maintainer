@@ -21,6 +21,7 @@ import { ChangeById } from "./settingsChange";
 import { DataTable, ListToolbar, useList, type Column } from "./list";
 import { Skeleton, Tabs, useTab } from "./ui";
 import { Avatar } from "./avatar";
+import { forgeOf, links } from "./forges";
 
 interface Role {
   id: string;
@@ -393,7 +394,7 @@ function MembersView({
       />
       <span className="small muted">
         {t("Holders of a role that maintains are this repository's maintainers here; until the record names some, its GitHub admins are. Every member may use its dashboard.")} {Object.keys(permissions).length > 0 && `${t("Checked against GitHub for")} ${Object.keys(permissions).length} ${t("people")}.`}{" "}
-        <a href={`https://github.com/${repo}/graphs/contributors`} target="_blank" rel="noreferrer">
+        <a href={links.contributors(repo)} target="_blank" rel="noreferrer">
           {t("Contributors on GitHub")}
         </a>
       </span>
@@ -444,7 +445,7 @@ function PersonPanel({
         <Avatar login={member.login} size={32} />
         <div className="stack" style={{ gap: 2, minWidth: 0, flex: 1 }}>
           <strong>
-            <a href={`https://github.com/${member.login}`} target="_blank" rel="noreferrer">
+            <a href={links.user(member.login)} target="_blank" rel="noreferrer">
               @{member.login}
             </a>
           </strong>
@@ -481,7 +482,7 @@ function PersonPanel({
             </span>
             <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
               {(member.areas ?? []).map((a) => (
-                <a key={a} className="area-chip mono" href={`https://github.com/${repo}/tree/HEAD/${a.replace(/^\/+/, "")}`} target="_blank" rel="noreferrer">
+                <a key={a} className="area-chip mono" href={links.tree(repo, a)} target="_blank" rel="noreferrer">
                   {a}
                 </a>
               ))}
@@ -495,7 +496,7 @@ function PersonPanel({
           </div>
         )}
         <div className="stack" style={{ gap: 2 }}>
-          <span className="kind-chip">GitHub</span>
+          <span className="kind-chip">{forgeOf(repo).terms.forge_name}</span>
           <span className="small">
             {permission ? `${t("permission")}: ${permission}` : t("Not checked")}
             {role?.github_permission && (
@@ -597,7 +598,7 @@ function RolesView({ repo, gov, roles, name }: { repo: string; gov: Governance; 
                     {t("maintains")}
                   </span>
                 )}
-                {r.github_permission && <span className="pill tag">GitHub: {r.github_permission}</span>}
+                {r.github_permission && <span className="pill tag">{forgeOf(repo).terms.forge_name}: {r.github_permission}</span>}
                 {r.scoped && <span className="pill tag">{t("by area")}</span>}
                 <span className="pill tag">
                   {counts.get(r.id) ?? 0} {t("people")}
@@ -1021,7 +1022,7 @@ function SourceLink({ repo, source }: { repo: string; source: Source }) {
   }
   if (source.kind === "file") {
     return (
-      <a className="mono" href={`https://github.com/${repo}/blob/HEAD/${source.where.replace(/^\/+/, "")}`} target="_blank" rel="noreferrer">
+      <a className="mono" href={links.file(repo, source.where)} target="_blank" rel="noreferrer">
         {source.where}
       </a>
     );

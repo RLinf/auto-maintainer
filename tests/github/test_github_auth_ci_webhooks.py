@@ -21,7 +21,7 @@ import hmac
 
 import pytest
 
-from auto_maintainer.github import (
+from auto_maintainer.forges.github import (
     AuthError,
     GitHubActionsCi,
     GitHubReader,
@@ -29,7 +29,7 @@ from auto_maintainer.github import (
     hint,
     verify_signature,
 )
-from auto_maintainer.github.ci import MAX_LOG_BYTES
+from auto_maintainer.forges.github.ci import MAX_LOG_BYTES
 
 API = "https://api.github.com"
 

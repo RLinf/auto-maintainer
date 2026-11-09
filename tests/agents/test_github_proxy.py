@@ -23,7 +23,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from auto_maintainer.agents.github_proxy import (
+from auto_maintainer.forges.github.proxy import (
     GitHubReadProxy,
     allowed,
     graphql_reads,

@@ -19,7 +19,21 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-CODEOWNERS_LOCATIONS = (".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS")
+from . import forges
+
+CODEOWNERS_LOCATIONS = (
+    ".github/CODEOWNERS",
+    "CODEOWNERS",
+    "docs/CODEOWNERS",
+    ".gitlab/CODEOWNERS",
+)
+"""Every place a forge looks for CODEOWNERS, for reading all candidates; one
+repository's own order is ``codeowners_locations``."""
+
+
+def codeowners_locations(repo: str) -> tuple[str, ...]:
+    """Where the forge ``repo`` is on looks for CODEOWNERS, first to last."""
+    return forges.info_of(repo).codeowners
 
 
 @dataclass(frozen=True)

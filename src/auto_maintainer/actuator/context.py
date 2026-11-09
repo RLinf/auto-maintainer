@@ -23,7 +23,7 @@ from typing import Any, Protocol
 
 from ..domain.actions import Action, LabReproducePayload, LabRunPayload
 from ..domain.clock import Clock
-from ..domain.codeowners import CODEOWNERS_LOCATIONS, owners_of_paths, parse_codeowners
+from ..domain.codeowners import codeowners_locations, owners_of_paths, parse_codeowners
 from ..domain.labs import LabProgress
 from ..domain.markers import build_marker
 from ..domain.ports import (
@@ -170,7 +170,7 @@ class ExecContext:
         locations = (
             [profile.people.codeowners]
             if profile.people.codeowners
-            else list(CODEOWNERS_LOCATIONS)
+            else list(codeowners_locations(profile.repo))
         )
         for location in locations:
             text = await self.reader.get_file(profile.repo, location)

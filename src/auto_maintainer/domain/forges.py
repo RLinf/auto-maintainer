@@ -41,21 +41,48 @@ MAX_DEPTH = 21
 class _Forges:
     default: str = DEFAULT_FORGE
     known: frozenset[str] = field(default_factory=frozenset)
+    infos: dict[str, ForgeInfo] = field(default_factory=dict)
 
 
 _forges = _Forges()
 
 
-def configure(default: str, known: set[str] | frozenset[str]) -> None:
-    """Name the default forge and every forge this service serves."""
-    if not _FORGE.match(default) or default not in known:
-        raise ValueError(f"the default forge {default!r} is not among {sorted(known)}")
+def configure(default: str, infos: dict[str, ForgeInfo]) -> None:
+    """Name the default forge and describe every forge this service serves; the
+    composition root calls it once, from ``forges/registry.py``."""
+    if not _FORGE.match(default) or default not in infos:
+        raise ValueError(f"the default forge {default!r} is not among {sorted(infos)}")
     _forges.default = default
-    _forges.known = frozenset(known)
+    _forges.known = frozenset(infos)
+    _forges.infos = dict(infos)
 
 
 def default_forge() -> str:
     return _forges.default
+
+
+def info(forge: str) -> ForgeInfo:
+    """What the service knows of forge ``forge``; GitHub's defaults when unconfigured."""
+    found = _forges.infos.get(forge)
+    if found is not None:
+        return found
+    if _forges.infos:
+        raise ValueError(f"this service serves no forge {forge!r}")
+    return ForgeInfo(id=forge)
+
+
+def all_infos() -> list[ForgeInfo]:
+    """Every forge this service serves, the default first."""
+    if not _forges.infos:
+        return [info(_forges.default)]
+    first = _forges.infos[_forges.default]
+    return [first, *(i for k, i in _forges.infos.items() if k != _forges.default)]
+
+
+def info_of(repo_or_person: str) -> ForgeInfo:
+    """The forge a repository or person name belongs to."""
+    head, sep, _ = repo_or_person.partition(":")
+    return info(head if sep else _forges.default)
 
 
 @dataclass(frozen=True)
@@ -250,3 +277,27 @@ class ForgeTerms:
     change_short: str = "PR"
     change_number_prefix: str = "#"
     forge_name: str = "GitHub"
+
+
+@dataclass(frozen=True)
+class ForgeInfo:
+    """What core code may know of one forge: plain data the forge's adapter package
+    supplies (``forges/registry.py``), so nothing outside it names a forge."""
+
+    id: str
+    kind: str = "github"
+    web_url: str = "https://github.com"
+    capabilities: ForgeCapabilities = field(default_factory=ForgeCapabilities)
+    terms: ForgeTerms = field(default_factory=ForgeTerms)
+    codeowners: tuple[str, ...] = (".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS")
+    """Where the forge looks for CODEOWNERS, first to last."""
+    change_url: str = "{web}/{path}/pull/{number}"
+    file_url: str = "{web}/{path}/blob/{ref}/{file}"
+    tree_url: str = "{web}/{path}/tree/{ref}/{file}"
+    contributors_url: str = "{web}/{path}/graphs/contributors"
+    user_url: str = "{web}/{login}"
+    avatar_url: str = "https://avatars.githubusercontent.com/{login}?s={size}"
+    """A person's avatar by login; empty when the forge has no such address."""
+
+    def link(self, template: str, **fields: object) -> str:
+        return template.format(web=self.web_url.rstrip("/"), **fields)

@@ -23,6 +23,7 @@ are answered by its maintainers; questions outside any repository by operators.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 import re
@@ -59,6 +60,7 @@ from ..domain.actions import (
 )
 from ..domain.agents import AgentAnswer, AgentQuestion, QuestionState, SkillInfo
 from ..domain.events import Event, EventKind
+from ..domain.forges import all_infos, default_forge
 from ..domain.ids import check_login, check_repo, new_id, same_commit
 from ..domain.labs import FIX_CI_SESSION, time_limit, unusable
 from ..domain.memory import (
@@ -670,6 +672,15 @@ class FixBody(BaseModel):
 
 def build_router() -> APIRouter:
     r = APIRouter(prefix="/api")
+
+    @r.get("/forges")
+    async def forges_view(user: User = Depends(current_user)) -> dict[str, Any]:
+        """The forges this service serves, the default first: how the dashboard names
+        their repositories and people, and links to them."""
+        return {
+            "default": default_forge(),
+            "forges": [dataclasses.asdict(i) for i in all_infos()],
+        }
 
     @r.get("/me")
     async def me(

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import httpx
 
-from ..domain.snapshot import RunnerInfo
+from ...domain.snapshot import RunnerInfo
 from .client import GitHubClient
 
 MAX_LOG_BYTES = 2 * 1024 * 1024

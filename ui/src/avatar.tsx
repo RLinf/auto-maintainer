@@ -1,16 +1,18 @@
-// GitHub users' avatars, by login: GitHub's avatar host serves each user's picture by
-// login, so a login nobody signed in with still shows its face. It answers directly;
-// github.com/<login>.png redirects there and can take many seconds from some networks.
+// People's avatars, by login, from their forge (forges.ts): GitHub's avatar host serves
+// each user's picture by login, so a login nobody signed in with still shows its face.
+// A forge without such an address shows the login's first letter.
 
 import { useState } from "react";
+import { links } from "./forges";
 
 export function avatarUrl(login: string, size: number): string {
-  return `https://avatars.githubusercontent.com/${encodeURIComponent(login)}?s=${size * 2}`;
+  return links.avatar(login, size * 2);
 }
 
 export function Avatar({ login, size = 22, title }: { login: string; size?: number; title?: string }) {
   const [failed, setFailed] = useState(false);
-  if (failed) {
+  const src = avatarUrl(login, size);
+  if (failed || !src) {
     // GitHub could not be reached, or the login has no picture: its first letter.
     return (
       <span className="avatar-img avatar-letter" style={{ width: size, height: size, fontSize: Math.round(size * 0.5) }} title={title} aria-hidden>
@@ -18,7 +20,7 @@ export function Avatar({ login, size = 22, title }: { login: string; size?: numb
       </span>
     );
   }
-  return <img className="avatar-img" src={avatarUrl(login, size)} width={size} height={size} alt="" title={title} loading="lazy" onError={() => setFailed(true)} />;
+  return <img className="avatar-img" src={src} width={size} height={size} alt="" title={title} loading="lazy" onError={() => setFailed(true)} />;
 }
 
 /** A login with its avatar, inline in a line of text. */

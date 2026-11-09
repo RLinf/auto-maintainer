@@ -114,7 +114,10 @@ class ForgeReader(Protocol):
 
     async def get_permission(self, repo: str, login: str) -> Permission: ...
 
-    async def is_team_member(self, org: str, team_slug: str, login: str) -> bool: ...
+    async def is_team_member(self, repo: str, team: str, login: str) -> bool:
+        """Whether ``login`` belongs to ``team`` on ``repo``'s forge, as CODEOWNERS
+        names it without the ``@``: ``org/team`` on GitHub, a group path on GitLab."""
+        ...
 
     async def path_changed_by(
         self, repo: str, path: str, ref: str | None = None

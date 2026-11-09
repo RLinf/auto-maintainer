@@ -17,7 +17,7 @@
 The container holds only what the run needs: its checkout (and that checkout's git
 metadata), its run folder, the skills (read-only), the agent CLI and a few host tools
 (read-only), a home folder of its own with the agent's login, and the socket of the
-GitHub read proxy (``agents.github_proxy``). It holds none of the service's own
+GitHub read proxy (``forges.github.proxy``). It holds none of the service's own
 secrets, data, or other repositories, so inside it the agent may do anything: it runs
 in bypass mode, with no rules on its commands. CPU, memory, and processes are capped,
 every Linux capability is dropped, and no GPU is passed in. The network is open.

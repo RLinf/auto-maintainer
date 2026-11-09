@@ -89,7 +89,7 @@ class FakeForge:
         self.diffs: dict[tuple[str, int], str] = {}
         """PR diffs by (repo, number); without one, a diff is made from the files."""
         self.permissions: dict[tuple[str, str], Permission] = {}
-        self.teams: dict[tuple[str, str], set[str]] = {}
+        self.teams: dict[str, set[str]] = {}
         self.path_changers: dict[tuple[str, str], str] = {}
         self.job_logs: dict[int, str] = {}
         self.merged: list[MergedPrSummary] = []
@@ -190,8 +190,8 @@ class FakeForge:
     async def get_permission(self, repo: str, login: str) -> Permission:
         return self.permissions.get((repo, login.lower()), Permission.NONE)
 
-    async def is_team_member(self, org: str, team_slug: str, login: str) -> bool:
-        return login in self.teams.get((org, team_slug), set())
+    async def is_team_member(self, repo: str, team: str, login: str) -> bool:
+        return login in self.teams.get(team, set())
 
     async def path_changed_by(
         self, repo: str, path: str, ref: str | None = None

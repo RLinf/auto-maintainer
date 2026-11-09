@@ -50,8 +50,8 @@ from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import quote
 
-from ..domain.permissions import Permission
-from ..domain.snapshot import (
+from ...domain.permissions import Permission
+from ...domain.snapshot import (
     CheckConclusion,
     CheckRun,
     CheckStatus,
@@ -684,7 +684,10 @@ class GitHubReader:
             return Permission.NONE
         return Permission.parse(data.get("role_name") or data.get("permission"))
 
-    async def is_team_member(self, org: str, team_slug: str, login: str) -> bool:
+    async def is_team_member(self, repo: str, team: str, login: str) -> bool:
+        org, _, team_slug = team.partition("/")
+        if not team_slug:
+            return False
         try:
             data = await self._client.get(
                 f"/orgs/{org}/teams/{team_slug}/memberships/{quote(login, safe='')}",

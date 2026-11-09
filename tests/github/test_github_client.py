@@ -21,7 +21,7 @@ import time
 import httpx
 import pytest
 
-from auto_maintainer.github import GitHubError, GraphQLError, RateLimited
+from auto_maintainer.forges.github import GitHubError, GraphQLError, RateLimited
 
 
 async def test_paginate_follows_link_headers(client, router):

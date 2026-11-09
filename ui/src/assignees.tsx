@@ -12,6 +12,7 @@ import { ErrorBox, Section, useAct, When } from "./components";
 import { useT } from "./i18n";
 import { Icon } from "./icons";
 import { useToast } from "./ui";
+import { links } from "./forges";
 
 const KEYS = [["pr"], ["prs"], ["assignable"]];
 
@@ -105,7 +106,7 @@ export function ReviewersCard({
           <div key={a.login} className="assignee">
             <Avatar login={a.login} size={28} />
             <span className="main">
-              <a href={`https://github.com/${encodeURIComponent(a.login)}`} target="_blank" rel="noreferrer">
+              <a href={links.user(a.login)} target="_blank" rel="noreferrer">
                 {a.login}
               </a>
               {a.login.toLowerCase() === me.toLowerCase() && <span className="muted"> ({t("you")})</span>}

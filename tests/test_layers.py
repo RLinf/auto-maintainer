@@ -27,7 +27,7 @@ ROOT = SRC.parents[1]
 
 ADAPTERS = {
     "store",
-    "github",
+    "forges",
     "agents",
     "memory",
     "labs",

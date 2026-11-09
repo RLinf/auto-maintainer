@@ -31,11 +31,13 @@ import SettingsPage from "./pages/Settings";
 import SetupPage from "./pages/Setup";
 import SignIn from "./pages/SignIn";
 import { MenuItem, Popover, Skeleton, ToastProvider, useHotkey, useTheme, useToast } from "./ui";
+import { useForgesLoader } from "./forges";
 
 export { useMe } from "./data";
 
 export default function App() {
   const me = useMe();
+  useForgesLoader();
   if (me.isLoading) {
     return (
       <div className="content" style={{ paddingTop: 80 }}>

@@ -81,7 +81,7 @@ async def _whoami() -> str:
     """The caller's own GitHub login, from their ``gh`` token; it identifies them to the gate."""
     import httpx
 
-    from .github.auth import StaticTokenProvider
+    from .forges.github.auth import StaticTokenProvider
 
     token = await StaticTokenProvider("AM_USER_TOKEN").token(None)
     async with httpx.AsyncClient(trust_env=True, timeout=15) as client:
@@ -370,7 +370,7 @@ class _Host:
         """Build the service for ``cfg`` and put it in place of the current one. If
         building fails, the current one keeps running and the error goes to the caller."""
         from .app import build_service
-        from .github.webhooks import hint, verify_signature
+        from .forges.github.webhooks import hint, verify_signature
         from .web.app import create_app
 
         new = await build_service(cfg, dev=self.dev)

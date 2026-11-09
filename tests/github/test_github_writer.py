@@ -23,7 +23,7 @@ import pytest
 from gh_testutil import public
 
 from auto_maintainer.domain.ports import ReviewCommentSpec
-from auto_maintainer.github import GitHubError, GitHubWriter
+from auto_maintainer.forges.github import GitHubError, GitHubWriter
 
 
 def _json(route, index: int = 0) -> dict:

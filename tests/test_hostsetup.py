@@ -41,7 +41,7 @@ from auto_maintainer.config import (
 )
 from auto_maintainer.domain.permissions import Permission
 from auto_maintainer.domain.settings import UserToken
-from auto_maintainer.github.auth import StaticTokenProvider
+from auto_maintainer.forges.github.auth import StaticTokenProvider
 from auto_maintainer.hostsetup import GhLogin, HostSetup, SetupError, repo_from_remote
 from auto_maintainer.testing.demo import build_demo
 from auto_maintainer.web import app as web_app

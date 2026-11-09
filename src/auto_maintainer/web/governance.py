@@ -29,7 +29,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from ..domain.codeowners import CODEOWNERS_LOCATIONS, parse_codeowners
+from ..domain.codeowners import codeowners_locations, parse_codeowners
 from ..domain.events import Event, EventKind
 from ..domain.governance import role_changes
 from ..domain.memory import MemoryChangeState
@@ -51,7 +51,7 @@ class AskBody(BaseModel):
 
 
 async def _codeowners(service: Service, repo: str, path: str | None) -> set[str]:
-    for location in [path] if path else list(CODEOWNERS_LOCATIONS):
+    for location in [path] if path else list(codeowners_locations(repo)):
         text = await service.a.forge.get_file(repo, location)
         if text:
             return {
