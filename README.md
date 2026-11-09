@@ -97,13 +97,13 @@ There are no configuration files to write. Start the service, open the link it p
 git clone https://github.com/RLinf/auto-maintainer.git
 cd auto-maintainer
 uv sync
-uv run am start           # in the background: serves on :7777, restarts after deploys, rolls back a bad one
+uv run am start           # in the background: HTTPS on :443, restarts after deploys, rolls back a bad one
 uv run am logs -f         # follow its log (also on the dashboard: Service → Logs)
 uv run am status          # is it running, where, and the last lines
 uv run am stop            # stop it; running jobs get 20 s to finish
 ```
 
-Open the service's address in a browser (for example `http://192.168.1.20:7777`). Until it is set up, every page is the setup page, and it asks:
+Open the service's address in a browser (for example `https://192.168.1.20`). Until it is set up, every page is the setup page, and it asks:
 
 1. **The address** people use to reach the service.
 2. **Connect GitHub**, the account the service acts as. You enter a one-time code on github.com to authorize the GitHub CLI, and the service works as the account you authorize; for a team, authorize an account made for the service, so what it posts is not under your name. If the host has no GitHub CLI, an **Install the GitHub CLI** button downloads GitHub's own release into the service's data folder first. Authorizing also proves that you maintain the service's repository (the one your checkout came from): only its maintainers can set the host up.
@@ -111,6 +111,8 @@ Open the service's address in a browser (for example `http://192.168.1.20:7777`)
 4. **The service's own repository**, filled in from your checkout.
 
 The terminal also prints a one-time setup link (`uv run am setup` prints it again). Opening it proves you are at the host instead, and also offers the GitHub CLI login already on the host.
+
+The service serves HTTPS on port 443, with a certificate from a private authority it makes on its first start, since a host reached by an IP address gets none from a public one. The log prints the authority's file and fingerprint: everyone who opens the dashboard installs it once as a trusted root (it is also at `/tls/ca.crt`; until then the browser warns). If the service's user may not listen on port 443, `am serve` prints the one `sysctl` setting that allows it. `am serve --port 7777` serves plain HTTP instead; any port other than 443 does. Design 4.7 has the details, including a certificate of your own.
 
 ![First-run setup](docs/images/setup.png)
 

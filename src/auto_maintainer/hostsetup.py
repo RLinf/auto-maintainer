@@ -580,7 +580,9 @@ class HostSetup:
         ):
             raise SetupError("connect the service's GitHub account first")
         if not re.match(r"^https?://[^\s/]+(:\d+)?/?$", base_url.strip()):
-            raise SetupError("the address must look like http://host:7777")
+            raise SetupError(
+                "the address must look like https://host or http://host:7777"
+            )
         if code_repo and not re.fullmatch(r"[\w.-]+/[\w.-]+", code_repo):
             raise SetupError("name the service's repository as owner/name")
         if default_agent and default_agent not in AGENT_BINARIES:

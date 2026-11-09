@@ -192,9 +192,11 @@ def create_setup_app(
     data_dir: Path,
     on_finish: Callable[[Any], Awaitable[None]],
     cookie_secure: bool = False,
+    ca_cert: Path | None = None,
 ) -> FastAPI:
-    """The app ``am serve`` runs before the host is set up: the setup page only."""
-    from .app import install_csrf, install_spa
+    """The app ``am serve`` runs before the host is set up: the setup page only, and
+    the private authority's certificate (``app.install_authority``)."""
+    from .app import install_authority, install_csrf, install_spa
 
     app = FastAPI(title="auto-maintainer setup", docs_url=None, openapi_url=None)
     app.state.sessions = auth.Sessions(data_dir / ".session_secret")
@@ -229,6 +231,7 @@ def create_setup_app(
         return response
 
     install_csrf(app)
+    install_authority(app, ca_cert)
 
     async def visitor(request: Request) -> dict[str, Any]:
         return read(request)

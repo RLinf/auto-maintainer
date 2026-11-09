@@ -59,6 +59,7 @@ def create_app(
     setup_steps: Callable[[], Any] | None = None,
     on_host_change: Callable[[Any], Awaitable[None]] | None = None,
     log_path: Path | None = None,
+    ca_cert: Path | None = None,
 ) -> FastAPI:
     """Build the app. ``verify_webhook`` and ``webhook_target`` come from the forge adapter.
 
@@ -72,6 +73,8 @@ def create_app(
     while ``gh`` is not on the server's ``PATH``, the sign-in page offers to install it.
     ``setup_steps`` and ``on_host_change`` let maintainers of the service's repository
     change the host setup from the dashboard (``web/setup.py``).
+    ``ca_cert`` is the private authority's certificate when the dashboard serves
+    HTTPS with one (``install_authority``).
     """
     app = FastAPI(
         title="auto-maintainer", docs_url="/api/docs", openapi_url="/api/openapi.json"
@@ -128,6 +131,8 @@ def create_app(
             "dev_mode": service.settings.dev_mode,
         }
 
+    install_authority(app, ca_cert)
+
     @app.post("/webhooks/github")
     async def webhook(request: Request) -> dict[str, Any]:
         if verify_webhook is None or webhook_target is None:
@@ -152,6 +157,23 @@ def create_app(
 
     install_spa(app)
     return app
+
+
+def install_authority(app: FastAPI, ca_cert: Path | None) -> None:
+    """Offer the private authority's certificate at ``/tls/ca.crt`` to everyone, when
+    the server has one: it is public, and people install it to trust the dashboard."""
+    if ca_cert is None:
+        return
+
+    @app.get("/tls/ca.crt", include_in_schema=False)
+    async def authority() -> Response:
+        if not ca_cert.is_file():
+            raise HTTPException(404, "no authority certificate on this host")
+        return FileResponse(
+            ca_cert,
+            media_type="application/x-x509-ca-cert",
+            filename="auto-maintainer-ca.crt",
+        )
 
 
 def install_csrf(app: FastAPI) -> None:

@@ -23,6 +23,7 @@ uv run pytest -m live_agent               # adapter contract tests against insta
 uv run am serve                           # first start: prints a link to the setup page, which writes the config
 uv run am setup                           # print that link again; AM_CONFIG_DIR/AM_DATA_DIR point a trial at empty folders
 uv run am login                           # one-time sign-in link for the GitHub account logged in on the host
+uv run am tls [ADDRESS...]                # make the HTTPS certificate again (port 443 serves HTTPS, others HTTP)
 uv run am doctor [--live]                 # probe forge auth, memory repo, agent CLIs, the sandbox, labs
 uv run am sandbox [--force]               # build the image agents run in (the service builds it when missing)
 uv run am serve --demo                    # the whole service on fakes with sample data, on :7777
@@ -55,7 +56,7 @@ pre-commit run --all-files
 - `actuator/` – `pipeline.py` (policy, proposals, approvals), `executor.py` (per-repository queues, intents, staleness), `handlers.py` (one per action kind), `memory_gate.py`.
 - `engine/` – event bus, jobs and waits, poller, scheduler, the question desk (`questions.py`) where agents' questions wait for reviewers, and each job's live agent steps (`progress.py`).
 - Adapters: `github/`, `agents/` (`exec.py` with two-way `Conversation`s, `acp.py`, `approver.py`, `container.py` and `agent.Dockerfile` for each run's container, `github_proxy.py`, `adapters/`, `router.py`), `memory/`, `workspace/` (worktrees, and `publish` for the actuator), `labs/`, `store/` (SQLite, and `secrets.py` for API keys), `notify/`, `selfupdate/` (`updater.py` deploys the service's own checkout, `supervise.py`), plus `subproc.py`.
-- `hostsetup.py` – the steps of the setup page (the GitHub CLI login the service acts as, memory repo), which write `local.yaml`; `config.py` reads and writes it. `ghcli.py` installs the GitHub CLI into the data folder when the host has none.
+- `hostsetup.py` – the steps of the setup page (the GitHub CLI login the service acts as, memory repo), which write `local.yaml`; `config.py` reads and writes it. `ghcli.py` installs the GitHub CLI into the data folder when the host has none. `tls.py` makes the HTTPS certificate when the host has none.
 - `web/` – FastAPI app, sign-in (the GitHub CLI's one-time code, and one-time links), the dashboard API, chat, `jobs.py` (agents' work, live), `settings.py` (the service settings and test machines), `setup.py` (the setup page). `testing/` – fakes of every port, `Harness`, the demo data.
 - `packs/<name>/pack.yaml` – built-in packs. `skills/<name>/SKILL.md` – skills the service gives its runtime agents. `config/defaults/` – default profile (every repository action in `shadow`), routing, schedules.
 - `ui/` – React, TypeScript, Vite dashboard; `npm run build` writes into `src/auto_maintainer/web/static/`, which is not in git. `am serve` runs that build at startup whenever it is missing or older than `ui/` (`web/dashboard.py`), so Node 20+ is needed wherever the service runs from a checkout.

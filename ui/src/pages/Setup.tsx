@@ -163,7 +163,7 @@ export default function SetupPage({ firstRun = false }: { firstRun?: boolean }) 
       )}
 
       <Step n={1} title={t("Address")} done={!!baseUrl} hint={t("What browsers use to reach this service; links in alerts point here.")}>
-        <input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="http://your-host:7777" style={{ width: "100%" }} />
+        <input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://your-host" style={{ width: "100%" }} />
       </Step>
 
       <Step

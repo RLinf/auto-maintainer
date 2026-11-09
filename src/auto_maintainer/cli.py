@@ -31,7 +31,7 @@ from typing import Any
 
 import typer
 
-from .config import HostConfig, load_host_config
+from .config import HTTPS_PORT, HostConfig, load_host_config, serves_https
 
 app = typer.Typer(
     help="auto-maintainer: a maintainer service for GitHub repositories.",
@@ -107,13 +107,111 @@ def _lan_ip() -> str | None:
         return None
 
 
-def _print_setup_link(port: int, code: str) -> None:
+def _ssl_options(cfg: HostConfig) -> tuple[dict[str, str], Path | None]:
+    """uvicorn's TLS options for serving ``cfg`` over HTTPS, and the private
+    authority's certificate to offer at ``/tls/ca.crt`` (``None`` for a certificate
+    of the host's own, from ``tls``).
+
+    Without ``tls``, the certificate in ``<config>/tls/`` is made on the first start
+    and renewed before it expires (``tls.ensure``). Exits with a message when a
+    configured file is missing or the certificate cannot be made, before anything
+    listens.
+    """
+    from . import tls as certs
+    from .config import CONFIG_DIR
+
+    if cfg.tls.cert:
+        files = {
+            "ssl_certfile": os.path.expanduser(cfg.tls.cert),
+            "ssl_keyfile": os.path.expanduser(cfg.tls.key or cfg.tls.cert),
+        }
+        for path in files.values():
+            if not Path(path).is_file():
+                typer.echo(
+                    f"tls in local.yaml names {path}, which does not exist; remove "
+                    "tls to serve the certificate the service makes itself",
+                    err=True,
+                )
+                raise typer.Exit(1)
+        return files, None
+    try:
+        made = certs.ensure(CONFIG_DIR / "tls", certs.default_names(cfg.base_url))
+    except certs.TlsError as e:
+        typer.echo(f"cannot serve HTTPS: {e}", err=True)
+        raise typer.Exit(1) from e
+    if made.made:
+        _announce(made, cfg.base_url)
+    return {"ssl_certfile": str(made.cert), "ssl_keyfile": str(made.key)}, made.ca_cert
+
+
+def _announce(files: Any, base_url: str) -> None:
+    """Say what a new certificate means for the people who open the dashboard."""
+    from urllib.parse import urlsplit
+
+    typer.echo(f"HTTPS certificate for {', '.join(files.names)} in {files.folder}")
+    fingerprint = _sha256_fingerprint(files.ca_cert)
+    if files.new_authority:
+        typer.echo(
+            "Everyone who opens the dashboard installs the private authority once, "
+            "as a trusted root in their system or browser:\n"
+            f"  {files.ca_cert}, also at {base_url}/tls/ca.crt\n"
+            f"  SHA-256 {fingerprint} (compare it before trusting the file)\n"
+            "  It can sign only for the addresses above."
+        )
+    else:
+        typer.echo(f"  under the same authority, SHA-256 {fingerprint}")
+    if (urlsplit(base_url).hostname or "") not in files.names:
+        typer.echo(
+            f"  base_url ({base_url}) names another address: run am tls with it",
+            err=True,
+        )
+
+
+def _sha256_fingerprint(cert: Path) -> str:
+    import hashlib
+    import ssl
+
+    der = ssl.PEM_cert_to_DER_cert(cert.read_text(encoding="ascii"))
+    digest = hashlib.sha256(der).hexdigest().upper()
+    return ":".join(digest[i : i + 2] for i in range(0, len(digest), 2))
+
+
+def _check_port(host: str, port: int) -> None:
+    """Exit with what to do when this user may not listen on ``port``."""
+    import socket
+
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    try:
+        with socket.socket(family, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind((host, port))
+    except PermissionError as e:
+        typer.echo(
+            f"this user may not listen on port {port}. Allow it once, as root:\n"
+            f"  sysctl -w net.ipv4.ip_unprivileged_port_start={port}\n"
+            f"  echo net.ipv4.ip_unprivileged_port_start={port} "
+            "> /etc/sysctl.d/60-auto-maintainer.conf\n"
+            "or serve plain HTTP on another port: am serve --port 7777",
+            err=True,
+        )
+        raise typer.Exit(1) from e
+    except OSError:
+        pass  # in use, or another reason: uvicorn reports it
+
+
+def _url(scheme: str, host: str, port: int) -> str:
+    default = 443 if scheme == "https" else 80
+    return f"{scheme}://{host}" + ("" if port == default else f":{port}")
+
+
+def _print_setup_link(port: int, code: str, https: bool = False) -> None:
     hosts = ["127.0.0.1", *([ip] if (ip := _lan_ip()) else [])]
     typer.echo(
         "auto-maintainer is not set up yet. Open this in a browser to set it up:"
     )
+    scheme = "https" if https else "http"
     for h in hosts:
-        typer.echo(f"  http://{h}:{port}/setup/start?code={code}")
+        typer.echo(f"  {_url(scheme, h, port)}/setup/start?code={code}")
     typer.echo(
         "The code proves you are at this host; it stops working once setup is done."
     )
@@ -133,7 +231,7 @@ def setup(port: int | None = None) -> None:
         )
         return
     port = port or (_cfg().port if is_configured() else HostConfig().port)
-    _print_setup_link(port, HostSetup().code())
+    _print_setup_link(port, HostSetup().code(), serves_https(port))
 
 
 @app.command(hidden=True)
@@ -155,6 +253,51 @@ def login() -> None:
         f"Open this to sign in as {who}; it works once, for {LINK_MINUTES} minutes:"
     )
     typer.echo(f"  {url}")
+
+
+@app.command()
+def tls(
+    names: list[str] = typer.Argument(
+        None,
+        help="Addresses people open, IP addresses or host names; by default those of "
+        "the current authority, else the host in base_url, this host's address, and "
+        "its name.",
+    ),
+    new_authority: bool = typer.Option(
+        False,
+        "--new-authority",
+        help="Replace the private authority; everyone installs its ca.crt again.",
+    ),
+) -> None:
+    """Make the dashboard's HTTPS certificate again, for other addresses or under a
+    new private authority. The service makes one on its first start by itself."""
+    from . import tls as certs
+    from .config import CONFIG_DIR
+
+    cfg = load_host_config()
+    folder = CONFIG_DIR / "tls"
+    if not names:
+        kept = None if new_authority else certs.authority_names(folder)
+        names = list(kept or certs.default_names(cfg.base_url))
+    try:
+        files = certs.make(folder, names, new_authority=new_authority)
+    except certs.TlsError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(1) from e
+    _announce(files, cfg.base_url)
+    if cfg.tls.cert:
+        typer.echo(
+            f"  tls in local.yaml names {cfg.tls.cert}, which the service serves "
+            "instead; remove tls to serve this one",
+            err=True,
+        )
+    elif not serves_https(cfg.port):
+        typer.echo(
+            f"  the service listens on port {cfg.port}, which serves plain HTTP; "
+            f"HTTPS is served on port {HTTPS_PORT}",
+            err=True,
+        )
+    typer.echo("Restart the service to serve it: am stop && am start")
 
 
 STOP_SECONDS = 15.0
@@ -195,8 +338,12 @@ class _Host:
     ``STOP_SECONDS``. A second Ctrl+C skips the wait for connections.
     """
 
-    def __init__(self, dev: bool = False) -> None:
+    def __init__(self, dev: bool = False, https: bool = False) -> None:
         self.dev = dev
+        self.https = https
+        """Whether the server speaks HTTPS; cookies are then sent only over it."""
+        self.ca_cert: Path | None = None
+        """The private authority's certificate the dashboard offers, with HTTPS."""
         self.service: Any = None
         self.switch = _Switch()
         self.restart = False
@@ -230,13 +377,14 @@ class _Host:
             data_dir=cfg.data_path,
             api_url=cfg.github.api_url,
             webhook_secret_env=cfg.github.webhook_secret_env,
-            cookie_secure=cfg.cookie_secure,
+            cookie_secure=cfg.cookie_secure or self.https,
             verify_webhook=verify_signature,
             webhook_target=hint,
             links_path=cfg.data_path / LINKS_FILE,
             gh_signin=_gh_signin(cfg),
             setup_steps=self.steps,
             on_host_change=self.start_service,
+            ca_cert=self.ca_cert,
         )
         old = self.service
         if old is not None:
@@ -271,7 +419,10 @@ class _Host:
         if close is not None:
             await close()
 
-    async def serve(self, host: str, port: int) -> None:
+    async def serve(
+        self, host: str, port: int, ssl: dict[str, str] | None = None
+    ) -> None:
+        """Serve until stopped: HTTPS with uvicorn's ``ssl`` options."""
         import uvicorn
 
         loop = asyncio.get_running_loop()
@@ -294,6 +445,7 @@ class _Host:
                 port=port,
                 log_level="info",
                 timeout_graceful_shutdown=5,
+                **(ssl or {}),
             )
         )
         try:
@@ -376,11 +528,16 @@ def serve(
             if defaults.sandbox_repo
             else "dev mode: every repository action is held at shadow"
         )
+    bind, listen = host or defaults.host, port or defaults.port
+    https = serves_https(listen)
+    _check_port(bind, listen)
+    ssl, ca_cert = _ssl_options(defaults) if https else ({}, None)
 
     async def main() -> bool:
         from .web.setup import create_setup_app
 
-        runner = _Host(dev)
+        runner = _Host(dev, https=https)
+        runner.ca_cert = ca_cert
         legacy = legacy_github() if is_configured() else None
         if legacy:
             typer.echo(
@@ -400,10 +557,11 @@ def serve(
                 steps,
                 data_dir=defaults.data_path,
                 on_finish=runner.start_service,
-                cookie_secure=defaults.cookie_secure,
+                cookie_secure=defaults.cookie_secure or https,
+                ca_cert=ca_cert,
             )
-            _print_setup_link(port or defaults.port, steps.code())
-        await runner.serve(host or defaults.host, port or defaults.port)
+            _print_setup_link(listen, steps.code(), https)
+        await runner.serve(bind, listen, ssl)
         return runner.restart
 
     if asyncio.run(main()):
@@ -493,16 +651,19 @@ def start(ctx: typer.Context) -> None:
 
 
 def _serving_url(cfg: HostConfig, lines: list[str]) -> str:
-    """The configured address, with the port the server last said it listens on
-    (``--port`` may differ from the configuration)."""
+    """The configured address, with the scheme and port the server last said it
+    listens on (``--port`` may differ from the configuration)."""
     from urllib.parse import urlsplit
 
     for line in reversed(lines):
         if "Uvicorn running on http" in line:
-            port = line.split("Uvicorn running on ")[1].split()[0].rsplit(":", 1)[-1]
+            served = urlsplit(line.split("Uvicorn running on ")[1].split()[0])
             base = urlsplit(cfg.base_url)
-            if port.isdigit() and str(base.port or "") != port:
-                return f"{base.scheme}://{base.hostname}:{port}"
+            if served.port is None or base.hostname is None:
+                break
+            base_port = base.port or (443 if base.scheme == "https" else 80)
+            if (served.scheme, served.port) != (base.scheme, base_port):
+                return _url(served.scheme, base.hostname, served.port)
             break
     return cfg.base_url
 

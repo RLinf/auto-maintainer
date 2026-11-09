@@ -148,6 +148,7 @@ def test_the_service_writes_its_config_and_secrets(tmp_path: Path) -> None:
     text = path.read_text()
     assert text.startswith("# Written by auto-maintainer")
     assert yaml.safe_load(text) == {
+        "version": 2,
         "base_url": "http://box:7777",
         "github": {"gh_config_dir": "/svc/gh"},
         "code_repo": SERVICE_REPO,

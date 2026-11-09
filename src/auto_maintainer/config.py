@@ -34,6 +34,20 @@ CONFIG_DIR = Path(
 )
 
 
+HTTPS_PORT = 443
+"""The only port the dashboard serves HTTPS on; every other port serves plain HTTP."""
+CONFIG_VERSION = 2
+"""The ``local.yaml`` schema. Version 1 (no ``version`` key) listened on port 7777
+with plain HTTP by default; version 2 defaults to HTTPS on ``HTTPS_PORT``."""
+V1_PORT = 7777
+V1_BASE_URL = "http://127.0.0.1:7777"
+
+
+def serves_https(port: int) -> bool:
+    """Whether a server on ``port`` speaks HTTPS: only on ``HTTPS_PORT``."""
+    return port == HTTPS_PORT
+
+
 class _Cfg(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -114,11 +128,24 @@ class SandboxConfig(_Cfg):
     """More host paths to mount read-only, such as another CLI's installation."""
 
 
+class TlsConfig(_Cfg):
+    """A certificate of the host's own for HTTPS, such as one a public authority
+    signed for its name. Empty, the service makes one with a private authority in
+    ``<config>/tls/`` (``tls.py``, ``am tls``)."""
+
+    cert: str = ""
+    """PEM file of the server certificate."""
+    key: str = ""
+    """PEM file of its private key; empty when ``cert`` holds both."""
+
+
 class HostConfig(_Cfg):
+    version: int = CONFIG_VERSION
     host: str = "0.0.0.0"
     """Address the dashboard and API listen on; ``0.0.0.0`` is every interface."""
-    port: int = 7777
-    base_url: str = "http://127.0.0.1:7777"
+    port: int = HTTPS_PORT
+    """``HTTPS_PORT`` serves HTTPS; any other port serves plain HTTP."""
+    base_url: str = "https://127.0.0.1"
     """The URL browsers use to reach the dashboard. It builds the links in alerts and
     sign-in links, so set it to the host's reachable name or address when people
     connect from other machines."""
@@ -149,6 +176,9 @@ class HostConfig(_Cfg):
     actions follow its profile; every other repository is refused. Without it, dev
     mode serves every repository but holds all their actions at shadow."""
     cookie_secure: bool = False
+    """Send sign-in cookies only over HTTPS, as behind a TLS reverse proxy; always so
+    when the service serves HTTPS itself."""
+    tls: TlsConfig = Field(default_factory=TlsConfig)
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
 
     @property
@@ -190,6 +220,17 @@ def load_host_config(config_dir: Path | None = None) -> HostConfig:
     root = config_dir or CONFIG_DIR
     load_secrets(root / "secrets.env")
     data = _read(root)
+    # A file without a version predates them; no file at all is a new host.
+    version = data.get("version", 1 if is_configured(root) else CONFIG_VERSION)
+    if not isinstance(version, int) or version > CONFIG_VERSION:
+        raise ValueError(
+            f"{root / 'local.yaml'} has version {version!r}; this code reads "
+            f"versions up to {CONFIG_VERSION}"
+        )
+    if version == 1:  # its defaults stay what they were
+        data.setdefault("port", V1_PORT)
+        data.setdefault("base_url", V1_BASE_URL)
+    data["version"] = CONFIG_VERSION
     github = data.get("github")
     if isinstance(github, dict):
         data["github"] = {
@@ -250,7 +291,7 @@ def _write_private(path: Path, text: str, mode: int = 0o600) -> None:
 def save_host_config(cfg: HostConfig, config_dir: Path | None = None) -> Path:
     """Write ``local.yaml`` atomically, keeping only what differs from the defaults."""
     root = config_dir or CONFIG_DIR
-    data = cfg.model_dump(mode="json", exclude_defaults=True)
+    data = {"version": cfg.version} | cfg.model_dump(mode="json", exclude_defaults=True)
     path = root / "local.yaml"
     _write_private(
         path, HEADER + yaml.safe_dump(data, sort_keys=False, allow_unicode=True), 0o644
@@ -286,9 +327,11 @@ def write_private_file(path: Path, text: str) -> None:
 
 
 EXAMPLE = """# ~/.config/auto-maintainer/local.yaml
-port: 7777
+version: 2
+port: 443                               # HTTPS; any other port serves plain HTTP
 host: 0.0.0.0                           # listen on every interface
-base_url: http://your-host:7777         # what browsers open; links in alerts point here
+base_url: https://your-host             # what browsers open; links in alerts point here
+# tls: {cert: /path/server.crt, key: /path/server.key}  # your own certificate; else am tls
 operators: [your-login]
 github:
   gh_config_dir: ~/.config/auto-maintainer/gh   # the GitHub CLI login the service acts as
