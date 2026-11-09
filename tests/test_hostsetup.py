@@ -143,14 +143,14 @@ def _setup(tmp_path: Path, **kw: Any) -> HostSetup:
 
 def test_the_service_writes_its_config_and_secrets(tmp_path: Path) -> None:
     cfg = HostConfig(base_url="http://box:7777", code_repo=SERVICE_REPO)
-    cfg.github.gh_config_dir = "/svc/gh"
+    cfg.default_forge.cli_config_dir = "/svc/gh"
     path = save_host_config(cfg, tmp_path)
     text = path.read_text()
     assert text.startswith("# Written by auto-maintainer")
     assert yaml.safe_load(text) == {
-        "version": 2,
+        "version": 3,
         "base_url": "http://box:7777",
-        "github": {"gh_config_dir": "/svc/gh"},
+        "forges": [{"id": "github", "kind": "github", "cli_config_dir": "/svc/gh"}],
         "code_repo": SERVICE_REPO,
     }
     set_host_secret("AM_WEBHOOK_SECRET", "one", tmp_path)
@@ -158,7 +158,7 @@ def test_the_service_writes_its_config_and_secrets(tmp_path: Path) -> None:
     secrets = tmp_path / "secrets.env"
     assert secrets.read_text() == "AM_WEBHOOK_SECRET=two\n"
     assert stat.S_IMODE(secrets.stat().st_mode) == 0o600
-    assert load_host_config(tmp_path).github.gh_config_dir == "/svc/gh"
+    assert load_host_config(tmp_path).default_forge.cli_config_dir == "/svc/gh"
     assert legacy_github(tmp_path) is None
 
 
@@ -247,7 +247,7 @@ async def test_a_maintainers_login_claims_the_setup_and_a_strangers_does_not(
     with pytest.raises(SetupError, match="no agent named 'devin'"):
         s.finish("http://box:7777/", SERVICE_REPO, "devin")
     cfg = s.finish("http://box:7777/", SERVICE_REPO, "antigravity")
-    assert cfg.operators == ["hao"] and cfg.github.gh_config_dir is None
+    assert cfg.operators == ["hao"] and cfg.default_forge.cli_config_dir is None
     assert load_host_config(s.config_dir).default_agent == "antigravity"
     assert s.summary()["default_agent"] == "antigravity"
 
@@ -332,7 +332,7 @@ async def test_the_github_cli_login_runs_in_the_browser(
     own = tmp_path / "config" / "gh"
     assert (own / "git-config-was").read_text().strip() == str(own / "gitconfig")
     cfg = s.finish("http://box:7777", None)
-    assert cfg.github.gh_config_dir == str(own)
+    assert cfg.default_forge.cli_config_dir == str(own)
 
 
 # -- the first-run page ---------------------------------------------------------------------
@@ -389,7 +389,9 @@ async def test_first_run_is_owned_by_the_maintainer_who_proves_it(
         assert done.status_code == 200 and "am_session" in done.headers.get(
             "set-cookie", ""
         )
-    assert [c.github.gh_config_dir for c in finished] == [str(s.gh_login.config_dir)]
+    assert [c.default_forge.cli_config_dir for c in finished] == [
+        str(s.gh_login.config_dir)
+    ]
 
 
 # -- after setup ---------------------------------------------------------------------------
@@ -623,3 +625,40 @@ async def test_the_services_own_account_must_see_the_memory_repo(
     await s.use_gh()
     with pytest.raises(SetupError, match="service's account eve cannot see it"):
         await s.memory(MEMORY, create=False, person_token=TOKEN)
+
+
+def test_a_version_2_file_becomes_the_default_github_forge(tmp_path: Path) -> None:
+    (tmp_path / "local.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "version": 2,
+                "github": {
+                    "gh_config_dir": "/svc/gh",
+                    "web_url": "https://ghe.corp",
+                    "api_url": "https://ghe.corp/api/v3",
+                    "auth": "gh",
+                },
+            }
+        )
+    )
+    cfg = load_host_config(tmp_path)
+    [forge] = cfg.forges
+    assert (forge.id, forge.kind, forge.cli_config_dir) == (
+        "github",
+        "github",
+        "/svc/gh",
+    )
+    assert (forge.web, forge.api, forge.host) == (
+        "https://ghe.corp",
+        "https://ghe.corp/api/v3",
+        "ghe.corp",
+    )
+    gitlab = HostConfig.model_validate(
+        {"forges": [{"id": "github"}, {"id": "corp", "kind": "gitlab"}]}
+    ).forge("corp")
+    assert (gitlab.web, gitlab.api) == (
+        "https://gitlab.com",
+        "https://gitlab.com/api/v4",
+    )
+    with pytest.raises(ValueError, match="each id once"):
+        HostConfig.model_validate({"forges": [{"id": "a"}, {"id": "a"}]})

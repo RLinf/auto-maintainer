@@ -79,14 +79,14 @@ async def _permissions(
 def build_router() -> APIRouter:
     r = APIRouter(prefix="/api/repos")
 
-    @r.get("/{owner}/{name}/governance")
+    @r.get("/{repo:path}/governance")
     async def governance(
-        request: Request, owner: str, name: str, user: User = Depends(current_user)
+        request: Request, repo: str, user: User = Depends(current_user)
     ) -> dict[str, Any]:
         """The record (or the skeleton), where it disagrees with GitHub, and the
         changes to it that wait for a maintainer."""
         service = service_of(request)
-        repo = _repo(owner, name)
+        repo = _repo(repo)
         await require_view(service, user, repo)
         profile = await service.profiles.active(repo)
         loaded = await service.governance.load(repo)
@@ -134,11 +134,10 @@ def build_router() -> APIRouter:
             "has_profile": profile is not None,
         }
 
-    @r.post("/{owner}/{name}/governance/agent")
+    @r.post("/{repo:path}/governance/agent")
     async def ask(
         request: Request,
-        owner: str,
-        name: str,
+        repo: str,
         body: AskBody,
         user: User = Depends(current_user),
     ) -> dict[str, Any]:
@@ -146,7 +145,7 @@ def build_router() -> APIRouter:
         change role (``members``). It drafts a memory change; nothing applies until a
         maintainer approves it."""
         service = service_of(request)
-        repo = _repo(owner, name)
+        repo = _repo(repo)
         await require_view(service, user, repo)
         if await service.profiles.active(repo) is None:
             raise HTTPException(409, f"{repo} has no approved profile yet")

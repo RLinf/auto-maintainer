@@ -37,6 +37,7 @@ from ..domain.codeowners import (
     parse_codeowners,
 )
 from ..domain.events import Event, EventKind
+from ..domain.forges import fs_parts
 from ..domain.memory import Signal
 from ..domain.permissions import Permission
 from ..domain.ports import (
@@ -402,7 +403,7 @@ class PlaybookContext:
         """This job's own folder, for an agent that works without a checkout. It lies
         in the folder of the job's repository (``scratch/<owner>/<name>/<job>``, or
         ``scratch/service/<job>``), so a job's neighbors are its own repository's."""
-        parts = self.repo.split("/") if self.repo else ["service"]
+        parts = fs_parts(self.repo) if self.repo else ("service",)
         path = self.service.scratch_dir.joinpath(*parts, self.job.id)
         path.mkdir(parents=True, exist_ok=True)
         return path

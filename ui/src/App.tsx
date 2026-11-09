@@ -294,12 +294,12 @@ function Shell({ me }: { me: Me }) {
         <Routes>
           <Route path="/" element={<HomePage me={me} />} />
           <Route path="/prs" element={<QueuePage me={me} />} />
-          <Route path="/pr/:owner/:repo/:number" element={<PrPage me={me} />} />
+          <Route path="/pr/*" element={<PrPage me={me} />} />
           <Route path="/inbox" element={<InboxPage me={me} />} />
           <Route path="/questions" element={<QuestionsPage />} />
           <Route path="/memory" element={<MemoryPage />} />
           <Route path="/repos" element={<ReposPage />} />
-          <Route path="/repos/:owner/:repo" element={<RepoDetailPage />} />
+          <Route path="/repos/*" element={<RepoDetailPage />} />
           <Route path="/ci" element={<CiPage />} />
           <Route path="/agents" element={<AgentsPage />} />
           <Route path="/settings" element={<SettingsPage />} />

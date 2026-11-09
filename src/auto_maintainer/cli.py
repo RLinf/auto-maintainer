@@ -315,7 +315,9 @@ def _gh_signin(cfg: HostConfig) -> Any:
 
     root = cfg.data_path / "sign-in"
     shutil.rmtree(root, ignore_errors=True)
-    return lambda flow_id: GhLogin(root / flow_id, cfg.github.web_url, throwaway=True)
+    return lambda flow_id: GhLogin(
+        root / flow_id, cfg.default_forge.web, throwaway=True
+    )
 
 
 class _Switch:
@@ -375,8 +377,8 @@ class _Host:
         web = create_app(
             new,
             data_dir=cfg.data_path,
-            api_url=cfg.github.api_url,
-            webhook_secret_env=cfg.github.webhook_secret_env,
+            api_url=cfg.default_forge.api,
+            webhook_secret_env=cfg.default_forge.webhook_secret_env,
             cookie_secure=cfg.cookie_secure or self.https,
             verify_webhook=verify_signature,
             webhook_target=hint,

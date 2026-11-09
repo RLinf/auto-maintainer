@@ -20,24 +20,22 @@ import re
 import uuid
 from dataclasses import dataclass
 
-_REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+from . import forges
+
 _SHA_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
-_LOGIN_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
 
 
 def check_repo(name: str) -> str:
-    """Return ``name`` if it is an ``owner/repo`` string, else raise ``ValueError``."""
-    if not _REPO_RE.match(name or ""):
-        raise ValueError(f"expected a repository as 'owner/repo', got {name!r}")
-    return name
+    """``name`` in its canonical form when it names a repository (``owner/repo`` on
+    the default forge, ``forge:group/project`` elsewhere; ``domain/forges.py``), else
+    raise ``ValueError``."""
+    return forges.check_repo(name)
 
 
 def check_login(login: str) -> str:
-    """Return ``login`` if it can be a GitHub user's login, else raise ``ValueError``."""
-    login = (login or "").strip().lstrip("@")
-    if not _LOGIN_RE.match(login):
-        raise ValueError(f"{login!r} is not a GitHub login")
-    return login
+    """``login`` in its canonical form when it can be someone's login (bare on the
+    default forge, ``forge:login`` elsewhere), else raise ``ValueError``."""
+    return forges.check_person(login)
 
 
 def is_sha(value: str) -> bool:

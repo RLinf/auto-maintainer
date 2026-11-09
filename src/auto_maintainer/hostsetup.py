@@ -249,7 +249,7 @@ class HostSetup:
         self._token: str | None = None
         self._checkout_repo: str | None | Literal[False] = False
         self._claimer_token: str | None = None
-        self.gh_login = GhLogin(config_dir / "gh", self.cfg.github.web_url)
+        self.gh_login = GhLogin(config_dir / "gh", self.cfg.default_forge.web)
         """The service's own GitHub CLI login, made in the browser."""
 
     # -- the one-time code ---------------------------------------------------------------
@@ -275,7 +275,7 @@ class HostSetup:
 
     def _client(self, base: str | None = None) -> httpx.AsyncClient:
         return httpx.AsyncClient(
-            base_url=base or self.cfg.github.api_url,
+            base_url=base or self.cfg.default_forge.api,
             timeout=20,
             transport=self.transport,
             headers={
@@ -397,7 +397,7 @@ class HostSetup:
         if not token:
             raise SetupError("the GitHub CLI on this host is not logged in")
         user = await self._user(token)
-        self.cfg.github.gh_config_dir = None
+        self.cfg.default_forge.cli_config_dir = None
         self._token = token
         self.identity = {**user, "kind": "gh", "warning": self._warning(user)}
         return self.identity
@@ -426,7 +426,7 @@ class HostSetup:
             shutil.rmtree(self.gh_login.config_dir, ignore_errors=True)
             self.gh_login.proc = None
             return {"state": "failed", "error": str(e)}
-        self.cfg.github.gh_config_dir = str(self.gh_login.config_dir)
+        self.cfg.default_forge.cli_config_dir = str(self.gh_login.config_dir)
         self._token = token
         self.identity = {**user, "kind": "gh", "warning": self._warning(user)}
         return {"state": "done", "identity": self.identity}
@@ -443,7 +443,7 @@ class HostSetup:
                 "description": "Memory of auto-maintainer",
             }
         )
-        return f"{self.cfg.github.web_url}/new?{q}"
+        return f"{self.cfg.default_forge.web}/new?{q}"
 
     async def _service_token(self) -> str | None:
         """The credential the service itself will use: the GitHub CLI login chosen in
@@ -453,7 +453,7 @@ class HostSetup:
             return self._token
         if self.reconnect:
             return None
-        if self.cfg.github.gh_config_dir:
+        if self.cfg.default_forge.cli_config_dir:
             token = await self.gh_login.token()
             if token:
                 return token

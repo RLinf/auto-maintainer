@@ -23,11 +23,12 @@ edit them by hand.
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 CONFIG_DIR = Path(
     os.environ.get("AM_CONFIG_DIR", Path.home() / ".config" / "auto-maintainer")
@@ -36,9 +37,10 @@ CONFIG_DIR = Path(
 
 HTTPS_PORT = 443
 """The only port the dashboard serves HTTPS on; every other port serves plain HTTP."""
-CONFIG_VERSION = 2
+CONFIG_VERSION = 3
 """The ``local.yaml`` schema. Version 1 (no ``version`` key) listened on port 7777
-with plain HTTP by default; version 2 defaults to HTTPS on ``HTTPS_PORT``."""
+with plain HTTP by default; version 2 defaults to HTTPS on ``HTTPS_PORT``; version 3
+lists the forges (``forges``) where version 2 had one ``github`` block."""
 V1_PORT = 7777
 V1_BASE_URL = "http://127.0.0.1:7777"
 
@@ -52,13 +54,42 @@ class _Cfg(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-class GitHubConfig(_Cfg):
-    api_url: str = "https://api.github.com"
-    web_url: str = "https://github.com"
-    gh_config_dir: str | None = None
-    """The GitHub CLI login the service acts as, made on the setup page; unset, the
-    host user's own GitHub CLI login is used."""
+ForgeKindName = Literal["github", "gitlab"]
+
+FORGE_DEFAULTS: dict[str, dict[str, str]] = {
+    "github": {"web_url": "https://github.com", "api_url": "https://api.github.com"},
+    "gitlab": {"web_url": "https://gitlab.com", "api_url": "https://gitlab.com/api/v4"},
+}
+"""Each kind's public addresses; a self-hosted forge names its own."""
+
+
+class ForgeConfig(_Cfg):
+    """One forge the service serves (design 5.16)."""
+
+    id: str = "github"
+    """How names on it begin (``corp:group/project``); the first forge's is left out."""
+    kind: ForgeKindName = "github"
+    web_url: str = ""
+    """Its web address; empty for the kind's public one (``FORGE_DEFAULTS``)."""
+    api_url: str = ""
+    """Its API's address; empty for the kind's public one."""
+    cli_config_dir: str | None = None
+    """The forge CLI's login the service acts as (``gh``, ``glab``), made on the
+    setup page; unset, the host user's own login with that CLI is used."""
     webhook_secret_env: str = "AM_WEBHOOK_SECRET"
+
+    @property
+    def web(self) -> str:
+        return (self.web_url or FORGE_DEFAULTS[self.kind]["web_url"]).rstrip("/")
+
+    @property
+    def api(self) -> str:
+        return (self.api_url or FORGE_DEFAULTS[self.kind]["api_url"]).rstrip("/")
+
+    @property
+    def host(self) -> str:
+        """The forge's host name, as its CLI knows it (``--hostname``)."""
+        return self.web.split("://", 1)[-1].split("/", 1)[0]
 
 
 LEGACY_GITHUB_KEYS = (
@@ -153,7 +184,8 @@ class HostConfig(_Cfg):
         "AM_DATA_DIR", str(Path.home() / ".local" / "share" / "auto-maintainer")
     )
     operators: list[str] = Field(default_factory=list)
-    github: GitHubConfig = Field(default_factory=GitHubConfig)
+    forges: list[ForgeConfig] = Field(default_factory=lambda: [ForgeConfig()])
+    """The forges the service serves; the first is the default (design 5.16)."""
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     code_repo: str | None = None
     """``owner/repo`` of the service's own code, where self-improvements go."""
@@ -180,6 +212,30 @@ class HostConfig(_Cfg):
     when the service serves HTTPS itself."""
     tls: TlsConfig = Field(default_factory=TlsConfig)
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
+
+    @model_validator(mode="after")
+    def _forges_are_distinct(self) -> HostConfig:
+        ids = [f.id for f in self.forges]
+        if not ids:
+            raise ValueError("forges: name at least one forge")
+        if len(set(ids)) != len(ids):
+            raise ValueError(f"forges: each id once, got {ids}")
+        for forge_id in ids:
+            if not re.fullmatch(r"[a-z][a-z0-9-]{0,30}", forge_id):
+                raise ValueError(f"forges: {forge_id!r} is no forge id")
+        return self
+
+    @property
+    def default_forge(self) -> ForgeConfig:
+        """The first forge: names on it carry no forge prefix."""
+        return self.forges[0]
+
+    def forge(self, forge_id: str) -> ForgeConfig:
+        """The forge called ``forge_id``; ``KeyError`` when there is none."""
+        for forge in self.forges:
+            if forge.id == forge_id:
+                return forge
+        raise KeyError(forge_id)
 
     @property
     def data_path(self) -> Path:
@@ -230,12 +286,13 @@ def load_host_config(config_dir: Path | None = None) -> HostConfig:
     if version == 1:  # its defaults stay what they were
         data.setdefault("port", V1_PORT)
         data.setdefault("base_url", V1_BASE_URL)
+    if version < 3:  # one GitHub, described by the ``github`` block
+        github = data.pop("github", None) or {}
+        forge = {k: v for k, v in github.items() if k not in LEGACY_GITHUB_KEYS}
+        if "gh_config_dir" in forge:
+            forge["cli_config_dir"] = forge.pop("gh_config_dir")
+        data["forges"] = [{"id": "github", "kind": "github", **forge}]
     data["version"] = CONFIG_VERSION
-    github = data.get("github")
-    if isinstance(github, dict):
-        data["github"] = {
-            k: v for k, v in github.items() if k not in LEGACY_GITHUB_KEYS
-        }
     return HostConfig.model_validate(data)
 
 
@@ -249,7 +306,10 @@ def legacy_github(config_dir: Path | None = None) -> str | None:
     ``secrets.env`` was already reading the GitHub CLI's token.
     """
     root = config_dir or CONFIG_DIR
-    github = _read(root).get("github") or {}
+    data = _read(root)
+    if isinstance(data.get("version"), int) and data["version"] >= 3:
+        return None  # written since forges; the GitHub CLI was the only way then
+    github = data.get("github") or {}
     auth = github.get("auth")
     if auth == "app" or github.get("app_id"):
         return "a GitHub App"
@@ -289,9 +349,16 @@ def _write_private(path: Path, text: str, mode: int = 0o600) -> None:
 
 
 def save_host_config(cfg: HostConfig, config_dir: Path | None = None) -> Path:
-    """Write ``local.yaml`` atomically, keeping only what differs from the defaults."""
+    """Write ``local.yaml`` atomically, keeping only what differs from the defaults;
+    each forge it lists keeps its ``id`` and ``kind``."""
     root = config_dir or CONFIG_DIR
     data = {"version": cfg.version} | cfg.model_dump(mode="json", exclude_defaults=True)
+    if "forges" in data:
+        data["forges"] = [
+            {"id": f.id, "kind": f.kind}
+            | f.model_dump(mode="json", exclude_defaults=True, exclude={"id", "kind"})
+            for f in cfg.forges
+        ]
     path = root / "local.yaml"
     _write_private(
         path, HEADER + yaml.safe_dump(data, sort_keys=False, allow_unicode=True), 0o644

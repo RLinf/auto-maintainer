@@ -27,6 +27,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
+from ..domain.forges import fs_parts, slug
 from ..domain.ports import CommandResult, MergeAttempt, WorkChanges
 from ..subproc import run
 
@@ -130,12 +131,11 @@ class GitWorkspace:
         ).stdout
 
     def mirror(self, repo: str) -> Path:
-        return self.root / "mirrors" / f"{repo.replace('/', '__')}.git"
+        return self.root / "mirrors" / f"{slug(repo)}.git"
 
     def repo_dir(self, repo: str) -> Path:
         """The repository's own folder: every checkout an agent works in for it."""
-        owner, name = repo.split("/", 1)
-        return self.root / "repos" / owner / name
+        return self.root.joinpath("repos", *fs_parts(repo))
 
     async def _ensure_mirror(self, repo: str) -> Path:
         path = self.mirror(repo)

@@ -414,8 +414,15 @@ async def visible_repos(service: Service, user: User) -> list[str]:
     return out
 
 
-def _repo(owner: str, name: str) -> str:
-    return check_repo(f"{owner}/{name}")
+def _repo(repo: str) -> str:
+    """The repository a route names, canonical; 404 when it names none here."""
+    try:
+        return check_repo(repo)
+    except ValueError as e:
+        raise HTTPException(404, str(e)) from e
+
+
+repo_param = _repo
 
 
 class OverrideBody(BaseModel):
@@ -718,7 +725,7 @@ def build_router() -> APIRouter:
         request: Request, body: RepoBody, user: User = Depends(current_user)
     ) -> dict[str, Any]:
         service = service_of(request)
-        repo = check_repo(body.repo)
+        repo = _repo(body.repo)
         decision = await service.gate.check(
             repo, user.login, await service.profiles.active(repo), person=True
         )
@@ -730,12 +737,12 @@ def build_router() -> APIRouter:
             raise HTTPException(409, str(e)) from e
         return record.model_dump(mode="json")
 
-    @r.get("/repos/{owner}/{name}/profile")
+    @r.get("/repos/{repo:path}/profile")
     async def get_profile(
-        request: Request, owner: str, name: str, user: User = Depends(current_user)
+        request: Request, repo: str, user: User = Depends(current_user)
     ) -> dict[str, Any]:
         service = service_of(request)
-        repo = _repo(owner, name)
+        repo = _repo(repo)
         await require_view(service, user, repo)
         lock = await service.profiles.lock(repo)
         state = await service.profiles.refresh(repo)
@@ -762,16 +769,15 @@ def build_router() -> APIRouter:
             "gate": can.model_dump(mode="json"),
         }
 
-    @r.post("/repos/{owner}/{name}/profile/approve")
+    @r.post("/repos/{repo:path}/profile/approve")
     async def approve_profile(
         request: Request,
-        owner: str,
-        name: str,
+        repo: str,
         body: HashBody,
         user: User = Depends(current_user),
     ) -> dict[str, Any]:
         service = service_of(request)
-        repo = _repo(owner, name)
+        repo = _repo(repo)
         try:
             decision, change = await service.profiles.approve_candidate(
                 repo, user.login, body.hash
@@ -824,16 +830,15 @@ def build_router() -> APIRouter:
             "action": status,
         }
 
-    @r.put("/repos/{owner}/{name}/settings")
+    @r.put("/repos/{repo:path}/settings")
     async def put_settings(
         request: Request,
-        owner: str,
-        name: str,
+        repo: str,
         body: SettingsBody,
         user: User = Depends(current_user),
     ) -> dict[str, Any]:
         service = service_of(request)
-        repo = _repo(owner, name)
+        repo = _repo(repo)
         await require_view(service, user, repo)
         try:
             layer = (
@@ -878,13 +883,13 @@ def build_router() -> APIRouter:
             "after": merged.data,
         }
 
-    @r.get("/repos/{owner}/{name}/rubric")
+    @r.get("/repos/{repo:path}/rubric")
     async def get_rubric(
-        request: Request, owner: str, name: str, user: User = Depends(current_user)
+        request: Request, repo: str, user: User = Depends(current_user)
     ) -> dict[str, Any]:
         """The approved rubric and active stage goals (internal)."""
         service = service_of(request)
-        repo = _repo(owner, name)
+        repo = _repo(repo)
         await require_view(service, user, repo)
         profile = await service.profiles.active(repo)
         if profile is None:
@@ -900,14 +905,14 @@ def build_router() -> APIRouter:
             ],
         }
 
-    @r.get("/repos/{owner}/{name}/review-automation")
+    @r.get("/repos/{repo:path}/review-automation")
     async def review_automation(
-        request: Request, owner: str, name: str, user: User = Depends(current_user)
+        request: Request, repo: str, user: User = Depends(current_user)
     ) -> dict[str, Any]:
         """When reviews start on their own: only on request, periodically, or on every
         update; and whether updated PRs are re-reviewed."""
         service = service_of(request)
-        repo = _repo(owner, name)
+        repo = _repo(repo)
         await require_view(service, user, repo)
         profile = await service.profiles.active(repo)
         if profile is None:
@@ -925,18 +930,17 @@ def build_router() -> APIRouter:
             "reason": gate.reason,
         }
 
-    @r.put("/repos/{owner}/{name}/review-automation")
+    @r.put("/repos/{repo:path}/review-automation")
     async def set_review_automation(
         request: Request,
-        owner: str,
-        name: str,
+        repo: str,
         body: AutomationBody,
         user: User = Depends(current_user),
     ) -> dict[str, Any]:
         """Change it through the repository's settings layer; a maintainer applies it
         by making it, anyone else proposes it."""
         service = service_of(request)
-        repo = _repo(owner, name)
+        repo = _repo(repo)
         await require_view(service, user, repo)
         current = await service.profiles.active(repo)
         layer = parse_yaml(
@@ -977,11 +981,10 @@ def build_router() -> APIRouter:
             "reason": decision.reason,
         }
 
-    @r.get("/repos/{owner}/{name}/review-guides")
+    @r.get("/repos/{repo:path}/review-guides")
     async def review_guides(
         request: Request,
-        owner: str,
-        name: str,
+        repo: str,
         refresh: bool = False,
         user: User = Depends(current_user),
     ) -> dict[str, Any]:
@@ -991,7 +994,7 @@ def build_router() -> APIRouter:
         the default), and the defaults. ``refresh`` reads the repository's skills
         from GitHub again."""
         service = service_of(request)
-        repo = _repo(owner, name)
+        repo = _repo(repo)
         await require_view(service, user, repo)
         profile = await service.profiles.active(repo)
         if profile is None:
@@ -1013,18 +1016,17 @@ def build_router() -> APIRouter:
             "reason": gate.reason,
         }
 
-    @r.put("/repos/{owner}/{name}/review-guides")
+    @r.put("/repos/{repo:path}/review-guides")
     async def set_review_guides(
         request: Request,
-        owner: str,
-        name: str,
+        repo: str,
         body: ReviewGuidesBody,
         user: User = Depends(current_user),
     ) -> dict[str, Any]:
         """Change the guides through the repository's settings layer; a maintainer
         applies it by making it, anyone else proposes it."""
         service = service_of(request)
-        repo = _repo(owner, name)
+        repo = _repo(repo)
         await require_view(service, user, repo)
         current = await service.profiles.active(repo)
         layer = parse_yaml(
@@ -1091,26 +1093,25 @@ def build_router() -> APIRouter:
             "reason": decision.reason,
         }
 
-    @r.post("/repos/{owner}/{name}/pause")
+    @r.post("/repos/{repo:path}/pause")
     async def pause_repo(
         request: Request,
-        owner: str,
-        name: str,
+        repo: str,
         body: PauseBody,
         user: User = Depends(current_user),
     ) -> dict[str, Any]:
         service = service_of(request)
-        repo = _repo(owner, name)
+        repo = _repo(repo)
         await require_view(service, user, repo)
         await service.pipeline.set_paused(True, user.login, repo, body.reason)
         return {"paused": True}
 
-    @r.post("/repos/{owner}/{name}/resume")
+    @r.post("/repos/{repo:path}/resume")
     async def resume_repo(
-        request: Request, owner: str, name: str, user: User = Depends(current_user)
+        request: Request, repo: str, user: User = Depends(current_user)
     ) -> dict[str, Any]:
         service = service_of(request)
-        repo = _repo(owner, name)
+        repo = _repo(repo)
         decision = await service.gate.check(
             repo, user.login, await service.profiles.active(repo), person=True
         )
@@ -1119,12 +1120,12 @@ def build_router() -> APIRouter:
         await service.pipeline.set_paused(False, user.login, repo)
         return {"paused": False}
 
-    @r.get("/repos/{owner}/{name}/agreement")
+    @r.get("/repos/{repo:path}/agreement")
     async def agreement(
-        request: Request, owner: str, name: str, user: User = Depends(current_user)
+        request: Request, repo: str, user: User = Depends(current_user)
     ) -> dict[str, Any]:
         service = service_of(request)
-        repo = _repo(owner, name)
+        repo = _repo(repo)
         await require_view(service, user, repo)
         out = await agreement_scores(service, repo)
         profile = await service.profiles.active(repo)
@@ -1139,11 +1140,10 @@ def build_router() -> APIRouter:
             out["can_configure"] = gate.allowed
         return out
 
-    @r.put("/repos/{owner}/{name}/policy/{kind}")
+    @r.put("/repos/{repo:path}/policy/{kind}")
     async def set_level(
         request: Request,
-        owner: str,
-        name: str,
+        repo: str,
         kind: str,
         body: LevelBody,
         user: User = Depends(current_user),
@@ -1153,7 +1153,7 @@ def build_router() -> APIRouter:
         it, anyone else proposes it. Conditions on the level are kept unless the caller
         supplies them."""
         service = service_of(request)
-        repo = _repo(owner, name)
+        repo = _repo(repo)
         await require_view(service, user, repo)
         try:
             action_kind = ActionKind(kind)
@@ -1318,17 +1318,16 @@ def build_router() -> APIRouter:
             (started if service.poll_now(repo) else running).append(repo)
         return {"started": started, "running": running}
 
-    @r.post("/prs/{owner}/{name}/{number}/refresh")
+    @r.post("/prs/{repo:path}/{number:int}/refresh")
     async def refresh_pr(
         request: Request,
-        owner: str,
-        name: str,
+        repo: str,
         number: int,
         user: User = Depends(current_user),
     ) -> dict[str, Any]:
         """Read one PR from GitHub now and publish what changed."""
         service = service_of(request)
-        repo = _repo(owner, name)
+        repo = _repo(repo)
         await require_view(service, user, repo)
         record = await service.store.get_repo(repo)
         if record is None or not record.active or not service.serves(repo):
@@ -1425,16 +1424,15 @@ def build_router() -> APIRouter:
             )
         return out
 
-    @r.get("/prs/{owner}/{name}/{number}")
+    @r.get("/prs/{repo:path}/{number:int}")
     async def pr_detail(
         request: Request,
-        owner: str,
-        name: str,
+        repo: str,
         number: int,
         user: User = Depends(current_user),
     ) -> dict[str, Any]:
         service = service_of(request)
-        repo = _repo(owner, name)
+        repo = _repo(repo)
         await require_view(service, user, repo)
         pr = await service.store.get_snapshot(repo, number)
         if pr is None:
@@ -1513,11 +1511,10 @@ def build_router() -> APIRouter:
             ).model_dump(mode="json"),
         }
 
-    @r.post("/prs/{owner}/{name}/{number}/approve")
+    @r.post("/prs/{repo:path}/{number:int}/approve")
     async def approve_pr(
         request: Request,
-        owner: str,
-        name: str,
+        repo: str,
         number: int,
         body: ApprovePrBody,
         user: User = Depends(current_user),
@@ -1527,7 +1524,7 @@ def build_router() -> APIRouter:
         ``pr.approve`` rule. The service's account never approves (hard limit), and
         whether the approval counts is GitHub's rule for that person."""
         service = service_of(request)
-        repo = _repo(owner, name)
+        repo = _repo(repo)
         await require_view(service, user, repo)
         if not await service.can_post_as(user.login):
             raise HTTPException(
@@ -1581,11 +1578,10 @@ def build_router() -> APIRouter:
             "action": record.action.id,
         }
 
-    @r.post("/prs/{owner}/{name}/{number}/merge-base")
+    @r.post("/prs/{repo:path}/{number:int}/merge-base")
     async def merge_base(
         request: Request,
-        owner: str,
-        name: str,
+        repo: str,
         number: int,
         body: MergeBaseBody,
         user: User = Depends(current_user),
@@ -1595,7 +1591,7 @@ def build_router() -> APIRouter:
         approval); with conflicts an agent resolves them and the merge comes back as
         a draft for them to read and push."""
         service = service_of(request)
-        repo = _repo(owner, name)
+        repo = _repo(repo)
         await require_view(service, user, repo)
         if not await service.can_post_as(user.login):
             raise HTTPException(
@@ -1638,11 +1634,10 @@ def build_router() -> APIRouter:
         await service.bus.publish(event)
         return {"run": "resolve", "event": event.id}
 
-    @r.post("/prs/{owner}/{name}/{number}/ci")
+    @r.post("/prs/{repo:path}/{number:int}/ci")
     async def run_ci(
         request: Request,
-        owner: str,
-        name: str,
+        repo: str,
         number: int,
         user: User = Depends(current_user),
     ) -> dict[str, Any]:
@@ -1651,7 +1646,7 @@ def build_router() -> APIRouter:
         The click is the person's approval; the policy still decides (pauses, the
         gate budget, the rerun limit), and the audit log records them."""
         service = service_of(request)
-        repo = _repo(owner, name)
+        repo = _repo(repo)
         await require_view(service, user, repo)
         profile = await service.profiles.active(repo)
         if profile is None:
@@ -1753,17 +1748,16 @@ def build_router() -> APIRouter:
             ],
         }
 
-    @r.get("/prs/{owner}/{name}/{number}/diff")
+    @r.get("/prs/{repo:path}/{number:int}/diff")
     async def pr_diff(
         request: Request,
-        owner: str,
-        name: str,
+        repo: str,
         number: int,
         user: User = Depends(current_user),
     ) -> dict[str, Any]:
         """The PR's diff at its current head, so drafts can show comments in place."""
         service = service_of(request)
-        repo = _repo(owner, name)
+        repo = _repo(repo)
         await require_view(service, user, repo)
         pr = await service.store.get_snapshot(repo, number)
         if pr is None:
@@ -1778,17 +1772,16 @@ def build_router() -> APIRouter:
                 _DIFFS.pop(next(iter(_DIFFS)))
         return {"sha": pr.head_sha, "diff": text, "truncated": len(text) >= MAX_DIFF}
 
-    @r.post("/prs/{owner}/{name}/{number}/override")
+    @r.post("/prs/{repo:path}/{number:int}/override")
     async def override(
         request: Request,
-        owner: str,
-        name: str,
+        repo: str,
         number: int,
         body: OverrideBody,
         user: User = Depends(current_user),
     ) -> dict[str, Any]:
         service = service_of(request)
-        repo = _repo(owner, name)
+        repo = _repo(repo)
         await require_view(service, user, repo)
         if not body.reason.strip():
             raise HTTPException(422, "an override needs a reason")
@@ -1867,43 +1860,40 @@ def build_router() -> APIRouter:
         )
         return after.model_dump(mode="json")
 
-    @r.post("/prs/{owner}/{name}/{number}/claim")
+    @r.post("/prs/{repo:path}/{number:int}/claim")
     async def claim(
         request: Request,
-        owner: str,
-        name: str,
+        repo: str,
         number: int,
         user: User = Depends(current_user),
     ) -> dict[str, Any]:
         """Join the reviewers working on the PR; others who claimed it stay."""
         service = service_of(request)
-        repo = _repo(owner, name)
+        repo = _repo(repo)
         await require_view(service, user, repo)
         await service.store.add_assignee(
             PrAssignee(repo=repo, number=number, login=user.login, by=user.login)
         )
         return {"assignees": await _assignees(service, repo, number)}
 
-    @r.delete("/prs/{owner}/{name}/{number}/claim")
+    @r.delete("/prs/{repo:path}/{number:int}/claim")
     async def unclaim(
         request: Request,
-        owner: str,
-        name: str,
+        repo: str,
         number: int,
         user: User = Depends(current_user),
     ) -> dict[str, Any]:
         """Leave the PR's reviewers, whether you claimed it or were assigned."""
         service = service_of(request)
-        repo = _repo(owner, name)
+        repo = _repo(repo)
         await require_view(service, user, repo)
         await service.store.remove_assignee(repo, number, user.login)
         return {"assignees": await _assignees(service, repo, number)}
 
-    @r.post("/prs/{owner}/{name}/{number}/assignees")
+    @r.post("/prs/{repo:path}/{number:int}/assignees")
     async def assign(
         request: Request,
-        owner: str,
-        name: str,
+        repo: str,
         number: int,
         body: AssignBody,
         user: User = Depends(current_user),
@@ -1914,7 +1904,7 @@ def build_router() -> APIRouter:
         requested on GitHub, as the repository's ``pr.request_reviewers`` rule
         allows."""
         service = service_of(request)
-        repo = _repo(owner, name)
+        repo = _repo(repo)
         await require_view(service, user, repo)
         if not await is_maintainer(service, user, repo):
             raise HTTPException(403, f"only maintainers of {repo} assign reviewers")
@@ -1988,11 +1978,10 @@ def build_router() -> APIRouter:
             "requested": requested,
         }
 
-    @r.delete("/prs/{owner}/{name}/{number}/assignees/{login}")
+    @r.delete("/prs/{repo:path}/{number:int}/assignees/{login}")
     async def unassign(
         request: Request,
-        owner: str,
-        name: str,
+        repo: str,
         number: int,
         login: str,
         user: User = Depends(current_user),
@@ -2000,7 +1989,7 @@ def build_router() -> APIRouter:
         """Take a reviewer off the PR: maintainers take anyone off, and everyone
         themselves. A review requested on GitHub stays requested there."""
         service = service_of(request)
-        repo = _repo(owner, name)
+        repo = _repo(repo)
         await require_view(service, user, repo)
         if login.lower() != user.login.lower() and not await is_maintainer(
             service, user, repo
@@ -2011,11 +2000,10 @@ def build_router() -> APIRouter:
         await service.store.remove_assignee(repo, number, login)
         return {"assignees": await _assignees(service, repo, number)}
 
-    @r.get("/repos/{owner}/{name}/usage")
+    @r.get("/repos/{repo:path}/usage")
     async def usage(
         request: Request,
-        owner: str,
-        name: str,
+        repo: str,
         days: int = Query(default=30, ge=1, le=365),
         user: User = Depends(current_user),
     ) -> dict[str, Any]:
@@ -2023,7 +2011,7 @@ def build_router() -> APIRouter:
         request they worked for (``login`` null for the service's own work, such as
         scans). Maintainers see everyone; others see the total and their own row."""
         service = service_of(request)
-        repo = _repo(owner, name)
+        repo = _repo(repo)
         await require_view(service, user, repo)
         since = service.clock.now() - timedelta(days=days)
         runs = await service.store.list_agent_runs(USAGE_RUNS, repo=repo, since=since)
@@ -2124,15 +2112,15 @@ def build_router() -> APIRouter:
             ],
         }
 
-    @r.get("/repos/{owner}/{name}/assignable")
+    @r.get("/repos/{repo:path}/assignable")
     async def assignable(
-        request: Request, owner: str, name: str, user: User = Depends(current_user)
+        request: Request, repo: str, user: User = Depends(current_user)
     ) -> dict[str, Any]:
         """Whether the user assigns reviewers in the repository, and the people to
         suggest: its People record's members, with their roles, then the logins
         assigned or claiming there before."""
         service = service_of(request)
-        repo = _repo(owner, name)
+        repo = _repo(repo)
         await require_view(service, user, repo)
         people: list[dict[str, Any]] = []
         seen: set[str] = set()
@@ -2159,16 +2147,15 @@ def build_router() -> APIRouter:
             "people": people,
         }
 
-    @r.post("/prs/{owner}/{name}/{number}/merge")
+    @r.post("/prs/{repo:path}/{number:int}/merge")
     async def arm(
         request: Request,
-        owner: str,
-        name: str,
+        repo: str,
         number: int,
         user: User = Depends(current_user),
     ) -> dict[str, Any]:
         service = service_of(request)
-        repo = _repo(owner, name)
+        repo = _repo(repo)
         await require_view(service, user, repo)
         profile = await service.profiles.active(repo)
         pr = await service.a.actuator_reader.get_pr(repo, number)
@@ -2199,16 +2186,15 @@ def build_router() -> APIRouter:
         )
         return arm_.model_dump(mode="json")
 
-    @r.delete("/prs/{owner}/{name}/{number}/merge")
+    @r.delete("/prs/{repo:path}/{number:int}/merge")
     async def disarm(
         request: Request,
-        owner: str,
-        name: str,
+        repo: str,
         number: int,
         user: User = Depends(current_user),
     ) -> dict[str, Any]:
         service = service_of(request)
-        repo = _repo(owner, name)
+        repo = _repo(repo)
         await require_view(service, user, repo)
         await service.store.delete_arm(repo, number)
         await service.bus.publish(
@@ -2221,27 +2207,25 @@ def build_router() -> APIRouter:
         )
         return {"armed": False}
 
-    @r.post("/prs/{owner}/{name}/{number}/review")
+    @r.post("/prs/{repo:path}/{number:int}/review")
     async def request_review(
         request: Request,
-        owner: str,
-        name: str,
+        repo: str,
         number: int,
         body: ReviewBody | None = None,
         user: User = Depends(current_user),
     ) -> dict[str, Any]:
         service = service_of(request)
-        repo = _repo(owner, name)
+        repo = _repo(repo)
         await require_view(service, user, repo)
         return await _request_review(
             service, user, repo, number, body.agent if body else None
         )
 
-    @r.post("/prs/{owner}/{name}/{number}/fix")
+    @r.post("/prs/{repo:path}/{number:int}/fix")
     async def request_fix(
         request: Request,
-        owner: str,
-        name: str,
+        repo: str,
         number: int,
         body: FixBody,
         user: User = Depends(current_user),
@@ -2249,7 +2233,7 @@ def build_router() -> APIRouter:
         """Have an agent fix the review's findings; the result is a diff that the
         maintainer opens as a PR into this PR's branch, as themselves."""
         service = service_of(request)
-        repo = _repo(owner, name)
+        repo = _repo(repo)
         await require_view(service, user, repo)
         review = body.review
         if review is None:
@@ -2281,11 +2265,10 @@ def build_router() -> APIRouter:
         await service.bus.publish(event)
         return {"repo": repo, "number": number, "event": event.id, "review": review}
 
-    @r.post("/prs/{owner}/{name}/{number}/fix-ci")
+    @r.post("/prs/{repo:path}/{number:int}/fix-ci")
     async def request_ci_fix(
         request: Request,
-        owner: str,
-        name: str,
+        repo: str,
         number: int,
         body: FixCiBody,
         user: User = Depends(current_user),
@@ -2297,7 +2280,7 @@ def build_router() -> APIRouter:
         repository's rule still decides (``off`` refuses it) and every command passes
         the machine's checks."""
         service = service_of(request)
-        repo = _repo(owner, name)
+        repo = _repo(repo)
         await require_view(service, user, repo)
         pr = await service.a.forge.get_pr(repo, number)
         if pr is None or pr.state != PrState.OPEN:
@@ -2371,17 +2354,16 @@ def build_router() -> APIRouter:
         await service.bus.publish(event)
         return {"repo": repo, "number": number, "event": event.id, "session": session}
 
-    @r.post("/prs/{owner}/{name}/{number}/lab")
+    @r.post("/prs/{repo:path}/{number:int}/lab")
     async def lab(
         request: Request,
-        owner: str,
-        name: str,
+        repo: str,
         number: int,
         body: LabBody,
         user: User = Depends(current_user),
     ) -> dict[str, Any]:
         service = service_of(request)
-        repo = _repo(owner, name)
+        repo = _repo(repo)
         await require_view(service, user, repo)
         event = Event(
             kind=EventKind.DASHBOARD_COMMAND,

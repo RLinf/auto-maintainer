@@ -1027,6 +1027,63 @@ Adapters for Feishu/Lark bots, Slack webhooks, and email. Routes are configured 
 - The audit log is append-only and records every action: decision, actor (service or maintainer), approver, payload hash, external reference.
 - Metrics on `/metrics` (Prometheus format), labeled by repository: jobs by state, agent latency and usage, forge rate limit, proposals waiting, agreement scores.
 
+### 5.16 Forges
+
+A forge is where repositories live: GitHub (github.com or GitHub Enterprise Server) and GitLab (gitlab.com or self-managed) now, others (Gitea and Forgejo, Bitbucket) later. One service serves repositories on several forges at once. Core code knows forges only through the ports below; nothing outside a forge's adapter package names one.
+
+**Forges on the host.** `local.yaml` lists them (`forges`). Each has an id, a kind, its web and API addresses, and the CLI login the service acts as there. The first is the default forge. A host set up before forges keeps working: its `github` block reads as the default forge `github` (`local.yaml` version 3).
+
+```yaml
+forges:
+  - id: github                          # the default forge
+    kind: github
+    web_url: https://github.com
+    api_url: https://api.github.com
+    cli_config_dir: ~/.config/auto-maintainer/gh
+  - id: corp
+    kind: gitlab
+    web_url: https://gitlab.corp.com
+    api_url: https://gitlab.corp.com/api/v4
+    cli_config_dir: ~/.config/auto-maintainer/glab/corp
+```
+
+**Names.** A repository is named `<forge>:<path>`, where the path is the forge's own full project path: `owner/repo` on GitHub, `group/subgroup/project` on GitLab. On the default forge the prefix is left out, so every name from before forges stays as it was (`RLinf/RLinf`); elsewhere it is part of the name (`corp:infra/tools/builder`). People are named the same way, `alice` on the default forge and `corp:alice` elsewhere, because a login means something only on its own forge: alice on GitHub is not alice on a company GitLab. `domain/forges.py` holds the rules (`RepoRef`, `parse_repo`, `person`), and every check of a name goes through it. The memory repo keeps the default forge's repositories under `repos/<path>/` and the others under `forges/<forge>/<path>/`. The API names a repository as one path parameter (`/api/repos/{repo:path}/...`), and the dashboard's routes the same.
+
+**One set of ports.** Every forge kind implements the same ports, `ForgeReader`, `ForgeWriter`, `CiProvider`, and `BranchPublisher`, plus a `ForgeKind` entry in `forges/registry.py` that describes the rest:
+
+- `capabilities` (`domain/forges.py:ForgeCapabilities`): what the forge can do, such as draft changes, requested reviewers, a verdict that blocks a merge, CI that waits for a maintainer's approval, updating a branch (merge or rebase), and suggestion blocks. A playbook asks before it proposes what a forge cannot do, and the actuator refuses such an action.
+- `terms`: the forge's own words for what the service posts and shows (a merge request on GitLab), handed to prompts and the dashboard; the domain keeps one vocabulary.
+- `links`: web addresses of a repository, a change, a commit, a file, and a person, and a person's avatar.
+- `cli`: the CLI the service acts through (`gh`, `glab`): how it is installed, how it signs in (a device code, or a token on standard input), how to read its token, and how git borrows it (a credential helper; never a token in a remote URL).
+- `webhooks`: how a delivery is verified (HMAC on GitHub, a shared token on GitLab) and which repository and change it is about.
+- `roles`: the forge's roles mapped to `Permission` (read, triage, write, maintain, admin), so the configuration gate and every permission check stay forge-neutral.
+- `read_proxy`: the read-only door through which agents in their containers use the forge's CLI as the service, with the token outside (5.7).
+
+`forges/router.py:ForgeRouter` implements each port by handing the call to the forge the repository is on, so services and playbooks call `reader.get_pr(repo, number)` as before and do not change when a forge kind is added.
+
+**One vocabulary.** The domain keeps forge-neutral terms. A PR is any change request (a GitLab merge request, numbered by its `iid`). A review is a set of comments with a verdict (on GitLab, a submitted review or an approval, with diff discussions). Checks are CI results (GitLab pipeline jobs and commit statuses). Comments are notes.
+
+| Concept | GitHub | GitLab |
+|---|---|---|
+| change request | pull request, `number` | merge request, `iid` |
+| review | review with a state | approval or a request for changes, and diff discussions |
+| inline comment | review comment (path, line, side) | diff discussion with a position (base, start, and head SHAs; old or new line) |
+| suggestion | ` ```suggestion ` | ` ```suggestion:-0+0 ` |
+| checks | check runs and commit statuses | pipeline jobs and commit statuses |
+| rerun failed CI | rerun failed jobs | retry the pipeline's failed jobs |
+| CI held for approval | a fork PR's workflow run | a pipeline for a fork's merge request, run by a maintainer |
+| update a branch | merge the base into the head | rebase onto the target |
+| draft | draft PR | draft merge request |
+| reviewers | requested reviewers | reviewers |
+| roles | read, triage, write, maintain, admin | Guest, Reporter, Developer, Maintainer, Owner |
+| CODEOWNERS | `CODEOWNERS`, `.github/`, `docs/` | `CODEOWNERS`, `.gitlab/`, `docs/` |
+| webhook check | HMAC (`X-Hub-Signature-256`) | shared token (`X-Gitlab-Token`) |
+| CLI | `gh` | `glab` |
+
+**People and sign-in.** Each forge has its own service account, the CLI login made on the setup page. People sign in on the forge their repositories are on, and a dashboard session belongs to one forge account: its login is forge-qualified as above, and a permission is checked only on that person's own forge. On GitHub, people authorize the GitHub CLI with a one-time code (5.13). On GitLab, `glab auth login --device` asks for a one-time code on the GitLab site (GitLab 17.9 or later); on an older self-managed instance, a person pastes a personal access token once instead. The service checks either through the forge's API and keeps the token under that person's forge-qualified login, for what they approve as themselves (5.9).
+
+**Adding a forge kind.** A package `forges/<kind>/` with its reader, writer, CI, publisher, webhooks, read proxy, and CLI; its `ForgeKind` in `forges/registry.py`; recorded API responses for tests (scrubbed of tokens and addresses); a live read-only test; and a column in the table above.
+
 ## 6. Main flows
 
 The flows use `acme/widget` with the profile from 2.2.

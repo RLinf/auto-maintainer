@@ -52,7 +52,7 @@ export function ReposPage() {
     facets: [
       { id: "state", label: t("Status"), values: (r) => t(repoState(r)) },
       { id: "profile", label: t("Profile"), values: (r) => t(profileState(r)) },
-      { id: "owner", label: t("Owner"), values: (r) => r.repo.split("/")[0] },
+      { id: "owner", label: t("Owner"), values: (r) => r.repo.slice(0, r.repo.lastIndexOf("/")) },
     ],
     sorts: [
       { id: "repo", label: t("Name"), value: (r) => r.repo.toLowerCase() },
@@ -210,8 +210,8 @@ export function RepoDetailPage() {
   const t = useT();
   const toast = useToast();
   const agent = useAgent();
-  const { owner, repo } = useParams();
-  const full = `${owner}/${repo}`;
+  // The whole rest of the address: names may hold more slashes (forge:group/project).
+  const full = useParams()["*"] ?? "";
   const base = `/api/repos/${full}`;
   const profile = useQuery({ queryKey: ["profile", full], queryFn: () => api.get<ProfileResponse>(`${base}/profile`) });
   const repos = useRepos();

@@ -38,6 +38,7 @@ from pydantic import BaseModel, Field
 
 from ..domain.actions import ActionKind, MemoryChangePayload, make_action
 from ..domain.agents import AgentTask, TaskKind
+from ..domain.forges import slug
 from ..domain.governance import Governance, role_changes
 from ..domain.ids import new_id
 from ..domain.memory import MemoryChangeState
@@ -62,7 +63,7 @@ class TalkBody(BaseModel):
 
 
 def thread_id_of(repo: str) -> str:
-    return "people_" + repo.replace("/", "__")
+    return "people_" + slug(repo)
 
 
 async def _thread(service: Service, repo: str, user: User) -> ChatThread:
@@ -93,13 +94,13 @@ async def _checkout(service: Service, thread: ChatThread, repo: str) -> Path:
 def build_router() -> APIRouter:
     r = APIRouter(prefix="/api/repos")
 
-    @r.get("/{owner}/{name}/governance/talk")
+    @r.get("/{repo:path}/governance/talk")
     async def conversation(
-        request: Request, owner: str, name: str, user: User = Depends(current_user)
+        request: Request, repo: str, user: User = Depends(current_user)
     ) -> dict[str, Any]:
         """The conversation: its messages, and the run answering now."""
         service = service_of(request)
-        repo = _repo(owner, name)
+        repo = _repo(repo)
         await require_view(service, user, repo)
         thread = await service.store.get_thread(thread_id_of(repo))
         return {
@@ -118,17 +119,16 @@ def build_router() -> APIRouter:
             ],
         }
 
-    @r.get("/{owner}/{name}/governance/talk/steps")
+    @r.get("/{repo:path}/governance/talk/steps")
     async def turn_steps(
         request: Request,
-        owner: str,
-        name: str,
+        repo: str,
         run: str | None = None,
         user: User = Depends(current_user),
     ) -> dict[str, Any]:
         """What the agent did for one answer (``run``), or is doing now."""
         service = service_of(request)
-        repo = _repo(owner, name)
+        repo = _repo(repo)
         await require_view(service, user, repo)
         thread = await service.store.get_thread(thread_id_of(repo))
         if thread is None:
@@ -149,18 +149,17 @@ def build_router() -> APIRouter:
             ],
         }
 
-    @r.post("/{owner}/{name}/governance/talk")
+    @r.post("/{repo:path}/governance/talk")
     async def say(
         request: Request,
-        owner: str,
-        name: str,
+        repo: str,
         body: TalkBody,
         user: User = Depends(current_user),
     ) -> dict[str, Any]:
         """One turn: the message and the agent's answer, which may draft a revision
         of the record. While a turn runs, the message goes to the agent at work."""
         service = service_of(request)
-        repo = _repo(owner, name)
+        repo = _repo(repo)
         await require_view(service, user, repo)
         profile = await service.profiles.active(repo)
         if profile is None:

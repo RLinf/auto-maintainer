@@ -51,10 +51,14 @@ export default function PrPage({ me }: { me: Me }) {
   const t = useT();
   const toast = useToast();
   const agent = useAgent();
-  const { owner, repo, number } = useParams();
-  const full = `${owner}/${repo}`;
+  // The repository's name may hold more slashes (forge:group/subgroup/project); the
+  // PR's number is the last part.
+  const rest = useParams()["*"] ?? "";
+  const split = rest.lastIndexOf("/");
+  const full = rest.slice(0, split);
+  const number = rest.slice(split + 1);
   const base = `/api/prs/${full}/${number}`;
-  const detail = useQuery({ queryKey: ["pr", owner, repo, number], queryFn: () => api.get<PrDetail>(base) });
+  const detail = useQuery({ queryKey: ["pr", full, number], queryFn: () => api.get<PrDetail>(base) });
   const rows = usePrs();
   const row = rows.data?.find((p) => p.repo === full && String(p.number) === number);
   const keys = [["pr"], ["prs"]];

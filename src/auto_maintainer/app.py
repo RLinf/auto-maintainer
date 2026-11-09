@@ -31,6 +31,7 @@ from .agents.install import AgentInstaller, installs_dir
 from .agents.registry import budgets_of, build_runtimes, merge_configs
 from .agents.router import AgentRouter
 from .config import CONFIG_DIR, HostConfig, load_host_config, save_host_config
+from .domain import forges
 from .domain.clock import SystemClock
 from .domain.profile import Route
 from .domain.records import AgentRunRecord
@@ -61,11 +62,12 @@ async def build_service(cfg: HostConfig, dev: bool = False) -> Service:
     clock = SystemClock()
     data = cfg.data_path
     data.mkdir(parents=True, exist_ok=True)
+    forges.configure(cfg.default_forge.id, {f.id for f in cfg.forges})
 
     # The service acts as the GitHub CLI login made on the setup page, or, without
     # one, the account the host user's own GitHub CLI is logged in to.
-    tokens = StaticTokenProvider(None, gh_config_dir=cfg.github.gh_config_dir)
-    client = GitHubClient(tokens, api_url=cfg.github.api_url)
+    tokens = StaticTokenProvider(None, gh_config_dir=cfg.default_forge.cli_config_dir)
+    client = GitHubClient(tokens, api_url=cfg.default_forge.api)
     reader = GitHubReader(client)
     fresh_reader = GitHubReader(client, snapshot_cache_seconds=0)
     writer = GitHubWriter(client)
@@ -77,7 +79,7 @@ async def build_service(cfg: HostConfig, dev: bool = False) -> Service:
     remote = cfg.memory.remote
     memory = GitMemoryStore(
         cfg.memory_path,
-        remote_url=f"{cfg.github.web_url}/{remote}.git" if remote else None,
+        remote_url=f"{cfg.default_forge.web}/{remote}.git" if remote else None,
         remote_repo=remote,
         branch=cfg.memory.branch,
         token=(lambda: tokens.token(remote)) if remote else None,
@@ -92,7 +94,7 @@ async def build_service(cfg: HostConfig, dev: bool = False) -> Service:
     proxy = GitHubReadProxy(
         data / "sandbox" / "github.sock",
         lambda: tokens.token(None),
-        api_host=urlparse(cfg.github.api_url).hostname or "api.github.com",
+        api_host=urlparse(cfg.default_forge.api).hostname or "api.github.com",
     )
 
     def save_sandbox(values: dict[str, Any]) -> None:
@@ -161,7 +163,7 @@ async def build_service(cfg: HostConfig, dev: bool = False) -> Service:
             return None
         return GitHubWriter(
             GitHubClient(
-                StaticTokenProvider(token=token.token), api_url=cfg.github.api_url
+                StaticTokenProvider(token=token.token), api_url=cfg.default_forge.api
             ),
             person=login,
         )
@@ -175,7 +177,7 @@ async def build_service(cfg: HostConfig, dev: bool = False) -> Service:
         async def user_token(repo: str) -> str | None:
             return fresh.token
 
-        return GitWorkspace(data, token=user_token, forge_url=cfg.github.web_url)
+        return GitWorkspace(data, token=user_token, forge_url=cfg.default_forge.web)
 
     labs: dict[str, Any] = {}
     for name, lab in cfg.labs.items():
@@ -210,7 +212,7 @@ async def build_service(cfg: HostConfig, dev: bool = False) -> Service:
     for pack in sorted((cfg.memory_path / "packs").glob("*/pack.yaml")):
         extra_packs[pack.parent.name] = pack.read_text(encoding="utf-8")
 
-    workspace = GitWorkspace(data, token=tokens.token, forge_url=cfg.github.web_url)
+    workspace = GitWorkspace(data, token=tokens.token, forge_url=cfg.default_forge.web)
     checkout = (
         Path(cfg.self_update.checkout).expanduser()
         if cfg.self_update.checkout

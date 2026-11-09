@@ -32,7 +32,6 @@ from pydantic import BaseModel, Field
 from ..domain.actions import ActionKind, ProposalState
 from ..domain.agents import QuestionState
 from ..domain.events import Event, EventKind
-from ..domain.ids import check_repo
 from ..domain.labs import unusable
 from ..domain.memory import profile_path
 from ..domain.permissions import Permission
@@ -40,7 +39,7 @@ from ..domain.profile import LabBinding
 from ..domain.records import Job, JobStatus
 from ..profiles.layers import ProfileError, parse_yaml
 from ..service import Service
-from .api import require_view, service_of, visible_repos
+from .api import repo_param, require_view, service_of, visible_repos
 from .auth import User, current_user
 
 AGENT_PLAYBOOKS = {
@@ -243,7 +242,7 @@ def build_router() -> APIRouter:
         """The test machines offered to ``repo``, each with whether the repository
         uses it and how; and whether the user may change that."""
         service = service_of(request)
-        await require_view(service, user, check_repo(repo))
+        await require_view(service, user, repo_param(repo))
         profile = await service.profiles.active(repo)
         gate = (
             await service.gate.check(repo, user.login, profile, person=True)
@@ -284,11 +283,10 @@ def build_router() -> APIRouter:
             "reason": gate.reason if gate else f"{repo} has no approved profile yet",
         }
 
-    @r.put("/repos/{owner}/{name}/labs/{lab}")
+    @r.put("/repos/{repo:path}/labs/{lab}")
     async def use_machine(
         request: Request,
-        owner: str,
-        name: str,
+        repo: str,
         lab: str,
         body: MachineUseBody,
         user: User = Depends(current_user),
@@ -297,7 +295,7 @@ def build_router() -> APIRouter:
         maintainer of the repository applies it by making it, anyone else proposes
         it."""
         service = service_of(request)
-        repo = check_repo(f"{owner}/{name}")
+        repo = repo_param(repo)
         await require_view(service, user, repo)
         machine = service.machines.get(lab)
         if machine is None or not machine.serves(repo):
@@ -345,11 +343,10 @@ def build_router() -> APIRouter:
             "reason": decision.reason,
         }
 
-    @r.post("/prs/{owner}/{name}/{number}/reproduce")
+    @r.post("/prs/{repo:path}/{number:int}/reproduce")
     async def reproduce(
         request: Request,
-        owner: str,
-        name: str,
+        repo: str,
         number: int,
         body: ReproduceBody,
         user: User = Depends(current_user),
@@ -357,7 +354,7 @@ def build_router() -> APIRouter:
         """Have an agent write a reproduction for the PR; the script comes back to the
         requester to approve before it runs on the machine."""
         service = service_of(request)
-        repo = check_repo(f"{owner}/{name}")
+        repo = repo_param(repo)
         await require_view(service, user, repo)
         profile = await service.profiles.active(repo)
         why = unusable(
@@ -403,7 +400,7 @@ def build_router() -> APIRouter:
         first; only the user's own unless ``everyone``."""
         service = service_of(request)
         if repo is not None:
-            await require_view(service, user, check_repo(repo))
+            await require_view(service, user, repo_param(repo))
             visible = {repo}
         else:
             visible = set(await visible_repos(service, user))

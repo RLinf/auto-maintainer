@@ -23,6 +23,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from .clock import utc_now
+from .forges import memory_dir, repo_of_memory_path
 from .ids import new_id
 
 
@@ -95,8 +96,8 @@ class Signal(BaseModel):
 
 
 def repo_dir(repo: str) -> str:
-    """The repository's directory in the memory repo."""
-    return f"repos/{repo}"
+    """The repository's directory in the memory repo (``forges.memory_dir``)."""
+    return memory_dir(repo)
 
 
 def profile_path(repo: str) -> str:
@@ -119,12 +120,10 @@ def is_configuration_path(path: str) -> bool:
     """Whether a memory path is configuration (T2) rather than knowledge."""
     if path.startswith("config/") or path.startswith("packs/"):
         return True
-    return path.startswith("repos/") and path.endswith(CONFIG_PATH_SUFFIXES)
+    return repo_of_memory_path(path) is not None and path.endswith(CONFIG_PATH_SUFFIXES)
 
 
 def repos_of_path(path: str) -> list[str]:
     """The target repository a memory path belongs to, if any."""
-    parts = path.split("/")
-    if len(parts) >= 3 and parts[0] == "repos":
-        return [f"{parts[1]}/{parts[2]}"]
-    return []
+    found = repo_of_memory_path(path)
+    return [found] if found else []
