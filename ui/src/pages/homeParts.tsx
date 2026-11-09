@@ -268,9 +268,7 @@ export function ReviewCard({ rows, all, loading, me, automations }: { rows: PrRo
               )}
               {searching && !waiting.has(prKey(p)) && <span className="pill tag">{t(REVIEW_STATES[p.review_state] ?? p.review_state)}</span>}
               {p.assignees.length > 0 && (
-                <span className="hide-narrow">
-                  <AvatarStack logins={p.assignees.map((a) => a.login)} me={me.login} size={20} />
-                </span>
+                <AvatarStack logins={p.assignees.map((a) => a.login)} me={me.login} size={20} title={`${t("Reviewers")}: ${p.assignees.map((a) => a.login).join(", ")}`} />
               )}
               <span className="small">{activity(p, me, t)}</span>
               <span className="row-actions">

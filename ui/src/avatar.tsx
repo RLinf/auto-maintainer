@@ -32,11 +32,11 @@ export function Person({ login, size = 16 }: { login: string; size?: number }) {
 }
 
 /** Overlapping avatars for a tight cell, with a count for the rest. */
-export function AvatarStack({ logins, max = 3, size = 20, me }: { logins: string[]; max?: number; size?: number; me?: string }) {
+export function AvatarStack({ logins, max = 3, size = 20, me, title }: { logins: string[]; max?: number; size?: number; me?: string; title?: string }) {
   if (!logins.length) return null;
   const shown = logins.slice(0, max);
   return (
-    <span className="avatar-stack" title={logins.join(", ")}>
+    <span className="avatar-stack" title={title ?? logins.join(", ")}>
       {shown.map((l) => (
         <span key={l} className={l === me ? "avatar-me" : undefined}>
           <Avatar login={l} size={size} />

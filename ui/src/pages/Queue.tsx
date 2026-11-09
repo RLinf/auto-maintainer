@@ -170,8 +170,17 @@ export default function QueuePage({ me }: { me: Me }) {
     {
       id: "claimed",
       header: t("Reviewers"),
-      cell: (p) => (p.assignees.length ? <AvatarStack logins={p.assignees.map((a) => a.login)} me={me.login} /> : <span className="muted">—</span>),
-      className: "hide-narrow",
+      label: t("Reviewers"),
+      cell: (p) =>
+        p.assignees.length ? (
+          <AvatarStack
+            logins={p.assignees.map((a) => a.login)}
+            me={me.login}
+            title={p.assignees.map((a) => `${a.login} (${a.kind === "assigned" ? `${t("assigned by")} ${a.by}` : t("claimed")})`).join("\n")}
+          />
+        ) : (
+          <span className="muted">—</span>
+        ),
     },
     {
       id: "actions",
