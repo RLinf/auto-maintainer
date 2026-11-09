@@ -3,7 +3,7 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
-import { api, type RepoUsage, type UsageRow } from "./api";
+import { api, type AgentQuota, type AgentsUsage, type RepoUsage, type UsageRow } from "./api";
 import { Avatar } from "./avatar";
 import { Empty, ErrorBox, Section, When } from "./components";
 import { useMe } from "./data";
@@ -151,5 +151,103 @@ export function UsageTab({ repo }: { repo: string }) {
         </div>
       )}
     </Section>
+  );
+}
+
+/** Each agent's tokens in a period, and what its CLI's own /usage says is left of its
+ * account's limits. */
+export function AgentsUsageSection() {
+  const t = useT();
+  const [days, setDays] = useState(7);
+  const [fresh, setFresh] = useState(false);
+  const q = useQuery({
+    queryKey: ["agents-usage", days, fresh],
+    queryFn: () => api.get<AgentsUsage>(`/api/agents/usage?days=${days}${fresh ? "&fresh=true" : ""}`),
+  });
+  const u = q.data;
+  return (
+    <Section
+      title={t("Usage and limits")}
+      hint={u?.everything ? t("Tokens of every agent run, and what each CLI says is left.") : t("Tokens of runs in the repositories you see, and what each CLI says is left.")}
+      aside={
+        <span className="row" style={{ gap: 6 }}>
+          <select value={days} onChange={(e) => setDays(Number(e.target.value))} aria-label={t("Period")}>
+            {PERIODS.map((d) => (
+              <option key={d} value={d}>
+                {t("Last")} {d} {t("days")}
+              </option>
+            ))}
+          </select>
+          <button className="ghost sm" onClick={() => (fresh ? q.refetch() : setFresh(true))} disabled={q.isFetching} title={t("Ask each CLI again")}>
+            <Icon name="refresh" size={14} />
+          </button>
+        </span>
+      }
+    >
+      {q.isLoading ? (
+        <Skeleton rows={3} />
+      ) : q.error || !u ? (
+        <ErrorBox error={q.error} />
+      ) : u.agents.length === 0 ? (
+        <Empty icon="cpu">{t("No agents on this host yet.")}</Empty>
+      ) : (
+        <div className="list">
+          {u.agents.map((a) => (
+            <div key={a.name} className="list-row" style={{ alignItems: "flex-start", flexWrap: "wrap", gap: 16 }}>
+              <span className="main" style={{ minWidth: 180 }}>
+                <span className="t mono">{a.name}</span>
+                <span className="meta">
+                  {tokens(a.input_tokens + a.output_tokens)} {t("tokens")} · {a.runs} {t("runs")}
+                  {a.cost_usd != null && ` · ${cost(a.cost_usd)}`}
+                </span>
+                <span className="meta">
+                  {tokens(a.input_tokens)} {t("in")} · {tokens(a.output_tokens)} {t("out")}
+                </span>
+              </span>
+              <QuotaView quota={a.quota} ready={a.ready} />
+            </div>
+          ))}
+        </div>
+      )}
+    </Section>
+  );
+}
+
+function QuotaView({ quota, ready }: { quota: AgentQuota | null; ready: boolean }) {
+  const t = useT();
+  if (!quota) return <span className="small muted">{ready ? t("This CLI does not report its limits.") : t("Not installed or turned off.")}</span>;
+  if (!quota.buckets.length) return <span className="small muted">{quota.note}</span>;
+  return (
+    <div className="stack" style={{ gap: 6, flex: "1 1 280px", minWidth: 0 }}>
+      {quota.buckets.map((b) => {
+        const left = b.remaining;
+        const color = left == null ? "var(--muted)" : left > 0.5 ? "var(--ok)" : left > 0.2 ? "var(--warn)" : "var(--bad)";
+        const resets = b.resets_at ? new Date(b.resets_at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : b.resets;
+        return (
+          <div key={`${b.group}/${b.name}`} className="stack" style={{ gap: 3 }}>
+            <span className="row small" style={{ gap: 6, justifyContent: "space-between" }}>
+              <span className="truncate">
+                {b.group && <span className="muted">{b.group} · </span>}
+                {b.name}
+              </span>
+              <span>
+                <strong>{left == null ? "—" : `${Math.round(left * 100)}%`}</strong> {t("left")}
+              </span>
+            </span>
+            <span className="quality-meter" style={{ ["--qc" as string]: color }}>
+              <span style={{ width: `${Math.round((left ?? 0) * 100)}%` }} />
+            </span>
+            {resets && (
+              <span className="small muted">
+                {t("resets")} {resets}
+              </span>
+            )}
+          </div>
+        );
+      })}
+      <span className="small muted">
+        {t("Read")} <When at={quota.read_at} />
+      </span>
+    </div>
   );
 }

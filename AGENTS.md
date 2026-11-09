@@ -96,7 +96,7 @@ These hold everywhere. Reviewers reject changes that break them; `tests/test_lay
 
 | Add | Where | Also |
 |---|---|---|
-| Agent runtime | `agents/adapters/<name>.py` subclassing `ExecRuntime`, registered in `agents/registry.py` | Truthful `Capabilities`; a `Conversation` when the CLI can ask, tested with the `talking_cli` fixture; argv tests per permission mode, a `-m live_agent` test, the adapter table in design 5.7. If the CLI can use a custom endpoint, `provider_env` (and argv) plus its protocols in `PROVIDER_PROTOCOLS`. Verify every flag against `--help` of the installed version. |
+| Agent runtime | `agents/adapters/<name>.py` subclassing `ExecRuntime`, registered in `agents/registry.py` | Truthful `Capabilities`; a `Conversation` when the CLI can ask, tested with the `talking_cli` fixture; argv tests per permission mode, a `-m live_agent` test, the adapter table in design 5.7. If the CLI can use a custom endpoint, `provider_env` (and argv) plus its protocols in `PROVIDER_PROTOCOLS`. `quota()` when the CLI reports its limits without running a task. Verify every flag against `--help` of the installed version. |
 | Playbook | `playbooks/<name>.py`, listed in `playbooks/__init__.py` | Triggers, `key()`, output models, the actions it emits, a flow test in `tests/test_flows.py` or a focused test. |
 | Action kind | `ActionKind` and a payload model in `domain/actions.py`, a handler in `actuator/handlers.py` | `shadow` in `config/defaults/profile.yaml`, a recommended level in design 8.3, hard limits, public text fields in `PUBLIC_TEXT_FIELDS`, idempotency and staleness tests. |
 | Pack | `packs/<name>/pack.yaml` | Only keys a pack may set (`profiles/layers.py`); a test in `tests/test_profiles.py`. |

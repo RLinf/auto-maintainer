@@ -28,9 +28,11 @@ The model and the reasoning level are session config options (``model``,
 
 from __future__ import annotations
 
+import json
+from datetime import UTC, datetime
 from typing import Any
 
-from ...domain.agents import AgentTask, Capabilities
+from ...domain.agents import AgentQuota, AgentTask, Capabilities, QuotaBucket
 from ..acp import AcpRuntime
 from ..exec import RunFiles
 
@@ -100,3 +102,56 @@ class AntigravityRuntime(AcpRuntime):
                 )
             )
         return calls
+
+    async def quota(self) -> AgentQuota | None:
+        """``agy -p /usage --output-format json`` (checked against 1.5.3): the slash
+        command runs no turn and spends no tokens."""
+        out = await self.cli_output("-p", "/usage", "--output-format", "json")
+        now = datetime.now(UTC)
+        if out is None:
+            return AgentQuota(runtime=self.name, read_at=now, note="agy /usage failed")
+        try:
+            data = json.loads(out)
+        except ValueError:
+            return AgentQuota(
+                runtime=self.name, read_at=now, note="agy /usage said no JSON"
+            )
+        return agy_quota(self.name, data, now)
+
+
+def agy_quota(name: str, data: Any, now: datetime) -> AgentQuota:
+    """The limits in ``agy /usage``'s JSON answer: ``command.data.groups``, each with
+    ``buckets`` that carry ``remaining_fraction`` and ``reset_time``."""
+    command = data.get("command") if isinstance(data, dict) else None
+    info = (command or {}).get("data") or {}
+    buckets = []
+    for group in info.get("groups") or []:
+        for b in group.get("buckets") or []:
+            remaining = b.get("remaining_fraction")
+            buckets.append(
+                QuotaBucket(
+                    group=str(group.get("name") or ""),
+                    name=str(b.get("name") or b.get("id") or ""),
+                    remaining=float(remaining)
+                    if isinstance(remaining, int | float)
+                    else None,
+                    resets_at=_time(b.get("reset_time")),
+                )
+            )
+    return AgentQuota(
+        runtime=name,
+        read_at=now,
+        buckets=buckets,
+        note=str(info.get("description") or "")
+        if buckets
+        else "agy reported no limits",
+    )
+
+
+def _time(value: Any) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None

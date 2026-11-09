@@ -582,6 +582,39 @@ export interface UsageRow {
   by_runtime: Record<string, { runs: number; tokens: number }>;
 }
 
+export interface QuotaBucket {
+  group: string;
+  name: string;
+  /** The fraction left, 0 to 1; null when the CLI does not say. */
+  remaining: number | null;
+  resets_at: string | null;
+  /** When it resets, in the CLI's own words, when it gives no exact time. */
+  resets: string;
+}
+
+export interface AgentQuota {
+  runtime: string;
+  read_at: string;
+  buckets: QuotaBucket[];
+  note: string;
+}
+
+export interface AgentUsageRow extends UsageRow {
+  name: string;
+  ready: boolean;
+  /** What the CLI's own /usage says is left; null when it cannot report it. */
+  quota: AgentQuota | null;
+}
+
+export interface AgentsUsage {
+  days: number;
+  since: string;
+  complete: boolean;
+  /** Whether the tokens count every run, or only those in repositories the viewer sees. */
+  everything: boolean;
+  agents: AgentUsageRow[];
+}
+
 export interface RepoUsage {
   days: number;
   since: string;

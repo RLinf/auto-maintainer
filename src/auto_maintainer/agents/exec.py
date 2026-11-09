@@ -60,6 +60,7 @@ from ..domain.agents import (
     AgentEvent,
     AgentEventType,
     AgentQuestion,
+    AgentQuota,
     AgentResult,
     AgentTask,
     Capabilities,
@@ -588,6 +589,45 @@ class ExecRuntime:
         the CLI again."""
         cached = getattr(self, "_choices", None)
         return cached[1] if cached is not None else self.known_choices
+
+    async def quota(self) -> AgentQuota | None:
+        """What the CLI says is left of its account's limits, as its own ``/usage``
+        shows; ``None`` for a CLI that cannot report them without running a task."""
+        return None
+
+    async def cli_output(self, *args: str, timeout: float = 30) -> str | None:
+        """Run the CLI on this host with ``args`` and the agent's own environment, in
+        an empty folder, and return what it printed; ``None`` when it is missing or
+        fails. For quick questions that run no task, such as ``/usage``."""
+        binary = resolve_binary(self.binary, self.search_dirs)
+        if binary is None:
+            return None
+        with tempfile.TemporaryDirectory(prefix="am-cli-") as folder:
+            env = build_env(
+                AgentTask(kind="probe", prompt="", workdir=Path(folder)),
+                self.env_allow,
+            )
+            proc: asyncio.subprocess.Process | None = None
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    binary,
+                    *args,
+                    cwd=folder,
+                    stdin=asyncio.subprocess.DEVNULL,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.DEVNULL,
+                    env=env,
+                    start_new_session=True,
+                )
+                out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            except (TimeoutError, OSError) as exc:
+                if proc is not None:
+                    _kill_group(proc.pid, signal.SIGKILL)
+                log.warning("%s %s failed: %r", self.name, " ".join(args), exc)
+                return None
+        if proc.returncode != 0:
+            return None
+        return out.decode("utf-8", "replace")
 
     def installed(self) -> bool:
         """Whether the CLI's binary is on this host; the router skips the runtime

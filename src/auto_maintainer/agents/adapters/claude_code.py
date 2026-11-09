@@ -41,7 +41,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from collections.abc import Iterable
+from datetime import UTC, datetime
 from typing import Any
 
 from ...domain.agents import (
@@ -50,11 +52,13 @@ from ...domain.agents import (
     AgentEvent,
     AgentEventType,
     AgentQuestion,
+    AgentQuota,
     AgentTask,
     Capabilities,
     ModelChoice,
     QuestionKind,
     QuestionOption,
+    QuotaBucket,
 )
 from ..exec import Ask, Conversation, ExecRuntime, Invocation, RunFiles, Step
 from . import loads_object, partial, short
@@ -311,6 +315,48 @@ class ClaudeCodeRuntime(ExecRuntime):
                 )
             ]
         return []
+
+    async def quota(self) -> AgentQuota | None:
+        """``claude -p /usage --output-format json`` (checked against 2.1.319): the
+        slash command runs no turn and spends no tokens; its ``result`` is text."""
+        out = await self.cli_output("-p", "/usage", "--output-format", "json")
+        now = datetime.now(UTC)
+        try:
+            text = str(json.loads(out)["result"]) if out else ""
+        except (ValueError, KeyError, TypeError):
+            text = ""
+        if not text:
+            return AgentQuota(
+                runtime=self.name, read_at=now, note="claude /usage failed"
+            )
+        return claude_quota(self.name, text, now)
+
+
+_LIMIT_LINE = re.compile(
+    r"^\s*(?P<name>[^:\n]+):\s*(?P<used>\d+(?:\.\d+)?)%\s*used(?:\s*·\s*resets\s*(?P<resets>.+))?$",
+    re.MULTILINE,
+)
+
+
+def claude_quota(name: str, text: str, now: datetime) -> AgentQuota:
+    """The limits in Claude Code's ``/usage`` text: lines such as ``Current week (all
+    models): 39% used · resets Nov 13, 8am (Asia/Shanghai)``. Its reset times are
+    local and without a year, so they stay in its words."""
+    buckets = [
+        QuotaBucket(
+            name=m["name"].strip(),
+            remaining=max(0.0, 1 - float(m["used"]) / 100),
+            resets=(m["resets"] or "").strip(),
+        )
+        for m in _LIMIT_LINE.finditer(text)
+    ]
+    first = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
+    return AgentQuota(
+        runtime=name,
+        read_at=now,
+        buckets=buckets,
+        note=first if buckets else "claude reported no limits",
+    )
 
 
 class ClaudeConversation(Conversation):

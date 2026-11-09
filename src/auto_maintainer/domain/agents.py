@@ -314,6 +314,30 @@ class AgentChoices(BaseModel):
     source: Literal["cli", "known"] = "known"
 
 
+class QuotaBucket(BaseModel):
+    """One limit of an agent CLI's account, as the CLI's own ``/usage`` reports it."""
+
+    group: str = ""
+    """What shares the limit, such as a family of models."""
+    name: str
+    """The limit, such as a weekly or a five-hour one."""
+    remaining: float | None = None
+    """The fraction left, from 0 to 1; ``None`` when the CLI does not say."""
+    resets_at: datetime | None = None
+    resets: str = ""
+    """When it resets, in the CLI's own words, when it gives no exact time."""
+
+
+class AgentQuota(BaseModel):
+    """What an agent CLI says is left of its account's limits."""
+
+    runtime: str
+    read_at: datetime
+    buckets: list[QuotaBucket] = Field(default_factory=list)
+    note: str = ""
+    """Why nothing was read, or what the CLI adds about its limits."""
+
+
 class RuntimeHealth(BaseModel):
     name: str
     available: bool

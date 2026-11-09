@@ -32,6 +32,7 @@ from .actuator.executor import Actuator
 from .actuator.lab_sessions import LabSessions
 from .actuator.pipeline import ActionPipeline
 from .domain.actions import ActionKind, ActionStatus, MemoryChangePayload, make_action
+from .domain.agents import AgentQuota
 from .domain.clock import Clock
 from .domain.events import Event, EventKind
 from .domain.memory import (
@@ -103,6 +104,12 @@ from .profiles.packs import PackLibrary
 from .profiles.service import ProfileService
 
 log = logging.getLogger(__name__)
+
+QUOTA_SECONDS = 300
+"""How long an agent's quota reading is shown before its CLI is asked again."""
+QUOTA_FRESH_SECONDS = 30
+"""The youngest reading a request for a fresh one still gets, so that asking again
+and again does not run the CLI every time."""
 
 
 @dataclass
@@ -200,6 +207,8 @@ class Service:
         playbooks: list[Playbook] | None = None,
     ) -> None:
         self.a = adapters
+        self._quotas: dict[str, AgentQuota] = {}
+        """Each agent's last quota reading (``agent_quota``)."""
         self.settings = settings
         self.store = adapters.store
         self.clock = adapters.clock
@@ -718,6 +727,24 @@ class Service:
             await self.reload_settings()
         if event.repo and lock_path(event.repo) in paths:
             self.poll_now(event.repo)
+
+    async def agent_quota(self, name: str, fresh: bool = False) -> AgentQuota | None:
+        """What agent ``name``'s CLI says is left of its account's limits; ``None``
+        when it cannot report them. A reading is kept for ``QUOTA_SECONDS``, or
+        ``QUOTA_FRESH_SECONDS`` when ``fresh``."""
+        runtimes = getattr(self.a.agents, "runtimes", None) or {}
+        read = getattr(runtimes.get(name), "quota", None)
+        if read is None or not self.agent_ready(name):
+            return None
+        kept = self._quotas.get(name)
+        now = self.clock.now()
+        age = (now - kept.read_at).total_seconds() if kept else None
+        if age is not None and age < (QUOTA_FRESH_SECONDS if fresh else QUOTA_SECONDS):
+            return kept
+        found = await read()
+        if found is not None:
+            self._quotas[name] = found.model_copy(update={"read_at": now})
+        return self._quotas.get(name)
 
     def agent_ready(self, name: str) -> bool:
         """Whether agent ``name`` is enabled and installed on this host; ``True`` for

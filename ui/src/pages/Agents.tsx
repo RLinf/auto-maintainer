@@ -9,6 +9,7 @@ import { useT } from "../i18n";
 import { Icon } from "../icons";
 import { DataTable, ListToolbar, useList, type Column } from "../list";
 import { Skeleton } from "../ui";
+import { AgentsUsageSection } from "../usage";
 
 export function useAgentsData() {
   return useQuery({ queryKey: ["agents"], queryFn: () => api.get<{ health: AgentHealth[]; runs: AgentRun[] }>("/api/agents") });
@@ -92,6 +93,7 @@ export default function AgentsPage() {
         }
       />
       <ErrorBox error={agents.error} />
+      <AgentsUsageSection />
       {agents.isLoading ? (
         <div className="card">
           <Skeleton rows={6} />

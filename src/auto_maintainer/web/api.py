@@ -22,6 +22,7 @@ are answered by its maintainers; questions outside any repository by operators.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -2056,6 +2057,56 @@ def build_router() -> APIRouter:
             "everyone": everyone,
             "total": total,
             "people": rows,
+        }
+
+    @r.get("/agents/usage")
+    async def agents_usage(
+        request: Request,
+        days: int = Query(default=7, ge=1, le=365),
+        fresh: bool = False,
+        user: User = Depends(current_user),
+    ) -> dict[str, Any]:
+        """Each agent's tokens in the last ``days``, and what its CLI says is left of
+        its account's limits (``fresh`` asks the CLI again). Tokens count the runs in
+        repositories the user may view; operators and maintainers of the service's
+        repository see every run, also those outside any repository."""
+        service = service_of(request)
+        since = service.clock.now() - timedelta(days=days)
+        runs = await service.store.list_agent_runs(USAGE_RUNS, since=since)
+        everything = (
+            user.login in service.settings.operators
+            or (await service.service_gate(user.login)).allowed
+        )
+        visible: dict[str, bool] = {}
+        rows: dict[str, dict[str, Any]] = {}
+        for run in runs:
+            if not everything:
+                if run.repo is None:
+                    continue
+                if run.repo not in visible:
+                    visible[run.repo] = await may_view(service, user, run.repo)
+                if not visible[run.repo]:
+                    continue
+            _add_usage(rows.setdefault(run.runtime, _usage_row(None)), run)
+        known = getattr(service.a.agents, "runtimes", None) or {}
+        names = sorted(set(known) | set(rows))
+        quotas = await asyncio.gather(
+            *(service.agent_quota(n, fresh=fresh) for n in names)
+        )
+        return {
+            "days": days,
+            "since": since.isoformat(),
+            "complete": len(runs) < USAGE_RUNS,
+            "everything": everything,
+            "agents": [
+                {
+                    **rows.get(name, _usage_row(None)),
+                    "name": name,
+                    "ready": service.agent_ready(name),
+                    "quota": quota.model_dump(mode="json") if quota else None,
+                }
+                for name, quota in zip(names, quotas, strict=True)
+            ],
         }
 
     @r.get("/repos/{owner}/{name}/assignable")
