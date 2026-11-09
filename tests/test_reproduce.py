@@ -962,3 +962,42 @@ async def test_a_reproduction_asked_for_goes_into_the_waiting_review(demo) -> No
     assert "python check.py" in update.prompt, "the run's record reaches the review"
     [job] = [j for j in await h.store.list_jobs() if j.playbook == "reproduce"]
     assert job.result and job.result["revised"] == draft["action_id"]
+
+
+async def test_an_answer_given_earlier_in_a_job_reaches_its_next_agent(demo) -> None:
+    from auto_maintainer.domain.agents import (
+        AgentAnswer,
+        AgentQuestion,
+        AgentTask,
+        InputQuestion,
+        QuestionKind,
+        QuestionState,
+        TaskKind,
+    )
+    from auto_maintainer.domain.events import Event, EventKind
+    from auto_maintainer.domain.records import Job
+
+    h, _app = demo
+    job = Job(playbook="reproduce", key="k", repo=REPO, number=42)
+    await h.store.save_question(
+        AgentQuestion(
+            kind=QuestionKind.INPUT,
+            title="Which scope?",
+            inputs=[InputQuestion(id="0", question="Which scope?", options=["head"])],
+            repo=REPO,
+            job_id=job.id,
+            state=QuestionState.ANSWERED,
+            answer=AgentAnswer(allow=True, answers={"0": ["head only"]}, by="maria"),
+        )
+    )
+    ctx = await h.service.context_for(
+        job, Event(kind=EventKind.DASHBOARD_COMMAND, repo=REPO, number=42)
+    )
+    h.runner.on("reproduce", lambda task: {"summary": "s", "steps": ["x"]})
+    await ctx.ask(
+        AgentTask(kind=TaskKind.REPRODUCE, prompt="Plan it.", workdir=Path("."))
+    )
+    prompt = h.runner.tasks[-1].prompt
+    assert (
+        "Q: Which scope?\nA: head only" in prompt and "do not ask these again" in prompt
+    )

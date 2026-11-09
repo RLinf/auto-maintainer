@@ -858,3 +858,68 @@ async def test_a_question_the_agent_asks_with_its_own_tool_reaches_a_person(
     assert question.inputs[0].options == ["a800", "none"]
     answer = _sent(cli, "method", "session/prompt")[-1]["params"]["prompt"][0]["text"]
     assert "Q: Which machine should run it?\nA: a800" in answer
+
+
+async def test_a_question_is_withdrawn_when_its_agent_stops_waiting(
+    tmp_path: Path, talking_cli
+) -> None:
+    """The agent's container ends while a person is being asked: the question is
+    withdrawn rather than left for an answer nothing would read, and the run fails
+    as a crash, not as invalid output that a repair turn would retry blind."""
+    ask = {
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {
+            "sessionId": "s1",
+            "update": {
+                "sessionUpdate": "tool_call",
+                "toolCallId": "call-1",
+                "name": "ask_question",
+                "args": {"questions": [{"question": "Which scope?", "options": ["a"]}]},
+            },
+        },
+    }
+    cli = talking_cli(
+        [
+            {
+                "wait": '"initialize"',
+                "emit": [{"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": 1}}],
+            },
+            {
+                "wait": '"session/new"',
+                "emit": [{"jsonrpc": "2.0", "id": 2, "result": {"sessionId": "s1"}}],
+            },
+            {
+                "wait": '"session/set_mode"',
+                "emit": [{"jsonrpc": "2.0", "id": 3, "result": {}}],
+            },
+            {
+                "wait": '"session/prompt"',
+                "emit": [
+                    ask,
+                    {"jsonrpc": "2.0", "id": 4, "result": {"stopReason": "end_turn"}},
+                ],
+            },
+            {"sleep": 0.3, "die": True},
+        ]
+    )
+
+    class SlowDesk:
+        def __init__(self) -> None:
+            self.withdrawn = False
+
+        async def ask(self, question: Any, timeout_seconds: float) -> Any:
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                self.withdrawn = True
+                raise
+
+    desk = SlowDesk()
+    rt = AntigravityRuntime(
+        binary=str(cli.path), runs_dir=tmp_path / "runs", questions=desk
+    )
+    _, result = await _run(rt, _task(tmp_path, output_schema=SCHEMA))
+    assert desk.withdrawn, "the question is withdrawn from the desk"
+    assert not result.ok and result.error_kind == "crash"
+    assert "stopped while it waited for an answer to: Which scope?" in result.error

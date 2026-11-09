@@ -112,6 +112,9 @@ for step in cfg["steps"]:
     for emitted in step.get("emit", []):
         sys.stdout.write((emitted if isinstance(emitted, str) else json.dumps(emitted)) + "\n")
         sys.stdout.flush()
+    if step.get("die"):
+        received.close()
+        os._exit(137)
 for line in sys.stdin:
     received.write(line)
 received.close()
@@ -144,7 +147,8 @@ class TalkingCli:
 def talking_cli(tmp_path: Path) -> Callable[..., TalkingCli]:
     """Build a fake CLI that follows ``steps``: each waits for a standard-input line
     containing ``wait`` (if given), sleeps ``sleep`` seconds (if given), then prints
-    ``emit`` (objects become JSON lines)."""
+    ``emit`` (objects become JSON lines); with ``die`` it then ends at once, as a
+    killed container does."""
     counter = {"n": 0}
 
     def make(steps: list[dict[str, Any]], exit: int = 0) -> TalkingCli:

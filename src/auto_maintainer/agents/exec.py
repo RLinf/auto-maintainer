@@ -820,10 +820,25 @@ class ExecRuntime:
                         for event in self._absorb(step.events, state):
                             yield event
                         await _write_lines(proc.stdin, step.send)
+                        stopped = False
                         for ask in step.asks:
                             asked_at = loop.time()
-                            answer = await self.resolve(task, ask.question)
+                            answer = await self._resolve_while_alive(
+                                task, ask.question, proc
+                            )
                             deadline += loop.time() - asked_at
+                            if answer is None or proc.returncode is not None:
+                                # The CLI ended while a person was being asked (its
+                                # container stopped, say): nothing would read the
+                                # answer, and its question is withdrawn.
+                                state.is_error = True
+                                state.error = (
+                                    "the agent stopped while it waited for an answer "
+                                    f"to: {ask.question.title[:200]}"
+                                )
+                                state.error_kind = "crash"
+                                stopped = True
+                                break
                             transcript.write(
                                 scrub(
                                     json.dumps(
@@ -854,6 +869,8 @@ class ExecRuntime:
                                 },
                             )
                             await _write_lines(proc.stdin, talk.answer(ask, answer))
+                        if stopped:
+                            break
                         if step.done:
                             _close_stdin(proc)
                         continue
@@ -930,6 +947,30 @@ class ExecRuntime:
         )
 
     # -- internals -----------------------------------------------------------------------
+
+    async def _resolve_while_alive(
+        self,
+        task: AgentTask,
+        question: AgentQuestion,
+        proc: asyncio.subprocess.Process,
+    ) -> AgentAnswer | None:
+        """``resolve`` the question, unless the CLI ends first: then the wait is
+        cancelled, which withdraws the question from the desk, and ``None``."""
+        waiting = asyncio.ensure_future(self.resolve(task, question))
+        ended = asyncio.ensure_future(proc.wait())
+        try:
+            done, _ = await asyncio.wait(
+                {waiting, ended}, return_when=asyncio.FIRST_COMPLETED
+            )
+        finally:
+            if not ended.done():
+                ended.cancel()
+        if waiting in done:
+            return waiting.result()
+        waiting.cancel()
+        with contextlib.suppress(BaseException):
+            await waiting
+        return None
 
     def _absorb(self, events: list[AgentEvent], state: RunState) -> list[AgentEvent]:
         visible = []

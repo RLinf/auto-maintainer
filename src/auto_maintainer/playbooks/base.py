@@ -28,7 +28,7 @@ from typing import Any, ClassVar, Protocol
 from pydantic import BaseModel, Field
 
 from ..domain.actions import Action
-from ..domain.agents import AgentResult, AgentTask, TaskKind
+from ..domain.agents import AgentResult, AgentTask, QuestionState, TaskKind
 from ..domain.clock import Clock
 from ..domain.codeowners import (
     CODEOWNERS_LOCATIONS,
@@ -260,6 +260,9 @@ class PlaybookContext:
                 "requested_by": task.requested_by or self.requested_by,
             }
         )
+        earlier = await self._earlier_answers()
+        if earlier:
+            task = task.model_copy(update={"prompt": f"{task.prompt}\n\n{earlier}"})
         task_kind = kind or task.kind
         route = self.route(task_kind)
         if self.agent and task_kind in (
@@ -271,6 +274,33 @@ class PlaybookContext:
             # The requester chose the agent; verification keeps its own route.
             route = route.model_copy(update={"primary": self.agent, "fallback": []})
         return await self.agents.run(task, route, output_model)
+
+    async def _earlier_answers(self) -> str:
+        """What people already answered agents' questions in this job, for a run
+        that starts again (its agent stopped, or the job was retried): it follows
+        them instead of asking again."""
+        try:
+            answered = await self.store.list_questions(
+                QuestionState.ANSWERED, self.repo
+            )
+        except Exception:  # the answers help; a run goes on without them
+            return ""
+        lines: list[str] = []
+        for q in answered:
+            if q.job_id != self.job.id or q.answer is None or q.answer.automatic:
+                continue
+            for item in q.inputs:
+                given = q.answer.answers.get(item.id) or []
+                if given:
+                    lines.append(f"Q: {item.question}\nA: {'; '.join(given)}")
+            if q.answer.message:
+                lines.append(f"{q.answer.by}: {q.answer.message}")
+        if not lines:
+            return ""
+        return (
+            "Answers people already gave to questions asked earlier in this job; "
+            "follow them and do not ask these again:\n" + "\n\n".join(lines)
+        )
 
     async def codeowners(self) -> list[OwnerRule]:
         if self._codeowners is None:
