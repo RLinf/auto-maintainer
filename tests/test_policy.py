@@ -28,7 +28,12 @@ from auto_maintainer.domain.actions import (
 from auto_maintainer.domain.profile import RepoProfile
 from auto_maintainer.domain.visibility import PublicText
 from auto_maintainer.policy.engine import PolicyFacts, decide
-from auto_maintainer.policy.leak_guard import LeakError, check_text, make_public
+from auto_maintainer.policy.leak_guard import (
+    TIER_BLIND,
+    LeakError,
+    check_text,
+    make_public,
+)
 
 REPO = "acme/widget"
 
@@ -194,3 +199,13 @@ def test_leak_guard_rejects_credentials_even_in_code_blocks() -> None:
     ]:
         result = check_text(text, profile, set(), [])
         assert any("looks like" in e for e in result.errors), text
+
+
+def test_tier_names_are_refused_only_where_the_writer_knew_the_tier() -> None:
+    profile = RepoProfile(repo=REPO)
+    finding = "- **P2 (`F1`)**: VPP2 fails at step zero."
+    assert not check_text(finding, profile, set(), []).ok
+    assert check_text(finding, profile, set(), [], tiers=False).ok
+    assert not check_text("score: 78 overall", profile, set(), [], tiers=False).ok
+    assert ActionKind.REVIEW_POST in TIER_BLIND
+    assert ActionKind.COMMENT_UPSERT not in TIER_BLIND

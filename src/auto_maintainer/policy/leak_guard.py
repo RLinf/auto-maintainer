@@ -17,6 +17,11 @@
 It rejects text that names internal fields or entities, mentions people outside
 the allowed set, or is not in the repository's public language. Style phrases
 produce warnings, which the proposal shows to maintainers.
+
+Priority tier names (``P0``, ``P1``, ...) count as a leak only in text that an
+agent who knew the PR's tier could have written. Reviews are not: the agents that
+write and revise them are never shown a PR's priority, and review guides often
+rank findings on the same ``P0``-``P3`` scale (``TIER_BLIND``).
 """
 
 from __future__ import annotations
@@ -24,6 +29,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from ..domain.actions import ActionKind
 from ..domain.profile import RepoProfile
 from ..domain.scoring import Rubric
 from ..domain.secrets import find_secrets
@@ -37,6 +43,12 @@ _MENTION_RE = re.compile(
 )
 _CJK_RE = re.compile(r"[㐀-䶿一-鿿぀-ヿ가-힯]")
 _SCORE_RE = re.compile(r"\b(score|tier)\s*[:=]\s*\d", re.IGNORECASE)
+
+
+TIER_BLIND = frozenset({ActionKind.REVIEW_POST, ActionKind.REVIEW_UPDATE})
+"""Action kinds whose text comes from agents never shown a PR's priority tier or
+score, so a tier name in it is the review's own severity label. Scores stay
+refused there (``_SCORE_RE``)."""
 
 
 class LeakError(ValueError):
@@ -72,7 +84,10 @@ def check_text(
     profile: RepoProfile,
     allowed_mentions: set[str],
     internal_entities: list[str],
+    *,
+    tiers: bool = True,
 ) -> GuardResult:
+    """What is wrong with ``text`` as public text; ``tiers`` refuses tier names."""
     result = GuardResult()
     for kind in find_secrets(text):
         result.errors.append(f"contains what looks like a {kind}")
@@ -89,7 +104,7 @@ def check_text(
             and re.search(rf"(?<!\w){re.escape(name.lower())}(?!\w)", lowered)
         ):
             result.errors.append(f"names the internal entity {name!r}")
-    for tier in _tier_names(profile):
+    for tier in _tier_names(profile) if tiers else []:
         if re.search(rf"(?<![\w-]){re.escape(tier)}(?![\w-])", prose):
             result.errors.append(f"mentions the priority tier {tier!r}")
     if _SCORE_RE.search(prose):
@@ -121,9 +136,11 @@ def make_public(
     profile: RepoProfile,
     allowed_mentions: set[str],
     internal_entities: list[str],
+    *,
+    tiers: bool = True,
 ) -> tuple[PublicText, list[str]]:
     """Return ``PublicText`` and style warnings, or raise ``LeakError``."""
-    result = check_text(text, profile, allowed_mentions, internal_entities)
+    result = check_text(text, profile, allowed_mentions, internal_entities, tiers=tiers)
     if not result.ok:
         raise LeakError(result.errors)
     return PublicText(text, profile.repo, _key=GUARD_KEY), result.warnings

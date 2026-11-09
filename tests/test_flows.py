@@ -724,3 +724,71 @@ async def test_the_chat_agent_scores_every_open_pr_again(
     assert "2 PR(s) in acme/widget" in answer["text"]
     after = len([t for t in harness.runner.tasks if str(t.kind) == "evaluate"])
     assert after - before == 2
+
+
+async def test_a_review_ranking_findings_p0_to_p3_posts(harness: Harness) -> None:
+    """Review guides often rank findings P0 to P3; the review agent never sees the
+    PR's priority, so those labels are not its tier and the review posts."""
+    from auto_maintainer.domain.actions import (
+        ActionKind,
+        ReviewPostPayload,
+        make_action,
+    )
+
+    await _auto(harness, review_post="propose")
+    harness.forge.put_pr(_pr())
+    body = (
+        "### Findings\n\n- **P2 (`F1`)**: the loader drops the last batch.\n"
+        "- **P3 (`F2`)**: a stale alias."
+    )
+    action = make_action(
+        ActionKind.REVIEW_POST,
+        "acme/widget",
+        ReviewPostPayload(body=body),
+        number=42,
+        head_sha="a" * 40,
+    )
+    await harness.service.pipeline.submit(action)
+    [proposal] = await harness.store.list_proposals(ProposalState.PENDING)
+    assert not any("tier" in w for w in proposal.warnings), proposal.warnings
+    await harness.service.pipeline.approve(proposal.id, "maria")
+    await harness.settle()
+    [posted] = harness.forge.writes_of("create_review")
+    assert "**P2 (`F1`)**" in posted["body"]
+
+
+async def test_a_refused_post_comes_back_as_a_draft(harness: Harness) -> None:
+    """Text the leak guard refuses was never written: the draft goes back to the
+    reviewer with the reason, and posts once after an edit."""
+    from auto_maintainer.domain.actions import (
+        ActionKind,
+        ReviewPostPayload,
+        make_action,
+    )
+
+    await _auto(harness, review_post="propose")
+    harness.forge.put_pr(_pr())
+    action = make_action(
+        ActionKind.REVIEW_POST,
+        "acme/widget",
+        ReviewPostPayload(body="Looks fine; score: 78 overall."),
+        number=42,
+        head_sha="a" * 40,
+    )
+    await harness.service.pipeline.submit(action)
+    [proposal] = await harness.store.list_proposals(ProposalState.PENDING)
+    await harness.service.pipeline.approve(proposal.id, "maria")
+    await harness.settle()
+    assert not harness.forge.writes_of("create_review")
+    back = await harness.store.get_proposal(proposal.id)
+    assert back is not None and back.state == ProposalState.PENDING
+    assert back.decided_by is None
+    assert any(w.startswith("not done: leak guard") for w in back.warnings)
+
+    await harness.service.pipeline.approve(
+        proposal.id, "maria", {"body": "Looks fine."}
+    )
+    await harness.settle()
+    assert len(harness.forge.writes_of("create_review")) == 1
+    done = await harness.store.get_proposal(proposal.id)
+    assert done is not None and done.state == ProposalState.EXECUTED

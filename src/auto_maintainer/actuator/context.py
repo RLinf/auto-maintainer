@@ -41,7 +41,7 @@ from ..domain.ports import (
 from ..domain.profile import LabBinding, RepoProfile
 from ..domain.snapshot import PrSnapshot
 from ..domain.visibility import PublicText
-from ..policy.leak_guard import make_public
+from ..policy.leak_guard import TIER_BLIND, make_public
 from ..profiles.knowledge import Knowledge
 from ..profiles.service import ProfileService
 
@@ -161,7 +161,9 @@ class ExecContext:
             allowed.add(pr.author)
             allowed.update(await self.code_owners(profile, pr.paths))
         entities = await self.knowledge.internal_entities(profile.repo, profile)
-        public, _warnings = make_public(text, profile, allowed, entities)
+        public, _warnings = make_public(
+            text, profile, allowed, entities, tiers=action.kind not in TIER_BLIND
+        )
         return public
 
     async def code_owners(self, profile: RepoProfile, paths: list[str]) -> list[str]:

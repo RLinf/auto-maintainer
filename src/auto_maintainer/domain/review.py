@@ -62,10 +62,12 @@ def classify_review_state(
     """Classify where ``pr`` stands relative to the service's own reviews.
 
     ``identities`` are the logins whose reviews count as the service's (lowercase
-    or not). Only reviews and comments carrying a review marker count; a dismissed
-    review with no body does not. A review by anyone else counts too when its marker
-    names one of ``own_actions``: a draft of this service that a maintainer posted
-    as themselves. A marker alone never does, so nobody can fake a review.
+    or not). Only reviews and comments carrying a review marker count, so a review a
+    person wrote by hand never does, even when the service acts as that person's
+    account; a dismissed review with no body does not either. A review by anyone
+    else counts too when its marker names one of ``own_actions``: a draft of this
+    service that a maintainer posted as themselves. A marker alone never does, so
+    nobody can fake a review.
     """
     if pr.state != PrState.OPEN:
         return ReviewClassification(state=ReviewState.CLOSED)
@@ -89,10 +91,12 @@ def classify_review_state(
             continue
         if r.state == ReviewEventState.DISMISSED and not r.body.strip():
             continue
-        sha = r.commit_sha
-        for marker in parse_markers(r.body, legacy_markers):
-            if marker.kind in REVIEW_KINDS and marker.sha:
-                sha = marker.sha
+        markers = [
+            m for m in parse_markers(r.body, legacy_markers) if m.kind in REVIEW_KINDS
+        ]
+        if not markers:
+            continue
+        sha = next((m.sha for m in reversed(markers) if m.sha), r.commit_sha)
         events.append((r.submitted_at or _EPOCH, r.state.value, sha, r.id, None))
     for c in pr.comments:
         if not ours(c.author, c.body):

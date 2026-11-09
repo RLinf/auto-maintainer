@@ -45,7 +45,7 @@ from ..domain.ports import EventSink, Store
 from ..domain.profile import RepoProfile
 from ..domain.records import ActionRecord, AuditEntry
 from ..policy.engine import WRITE_CAP_RULE, PolicyFacts, decide
-from ..policy.leak_guard import check_text
+from ..policy.leak_guard import TIER_BLIND, check_text
 from ..profiles.knowledge import Knowledge
 from ..profiles.service import ProfileService
 from .executor import Actuator
@@ -256,7 +256,9 @@ class ActionPipeline:
         entities = await self.knowledge.internal_entities(profile.repo, profile)
         out: list[str] = []
         for text in _public_texts(action):
-            result = check_text(text, profile, {"*"}, entities)
+            result = check_text(
+                text, profile, {"*"}, entities, tiers=action.kind not in TIER_BLIND
+            )
             out += [
                 f"blocked: {e}" for e in result.errors if "mentions @" not in e
             ] + result.warnings

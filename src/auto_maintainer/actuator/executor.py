@@ -142,6 +142,7 @@ class Actuator:
                 error=f"{action.repo} has no approved profile",
             )
         pr = None
+        running = False  # the handler started, and may have written
         try:
             if spec.needs_pr:
                 if action.number is None:
@@ -189,6 +190,7 @@ class Actuator:
                             f"{record.post_as}'s GitHub sign-in cannot push here; sign in again"
                         )
                     x = dataclasses.replace(x, publisher=publisher)
+            running = True
             ref = await spec.run(x, action, profile, pr, record.approver)
             if record.post_as:
                 ref = {**ref, "posted_as": record.post_as}
@@ -197,13 +199,17 @@ class Actuator:
         except Stale as e:
             return await self._finish(record, ActionStatus.SUPERSEDED, error=str(e))
         except LeakError as e:
+            # Handlers build all their public text before they write anything.
             return await self._finish(
-                record, ActionStatus.FAILED, error=f"leak guard: {e}"
+                record, ActionStatus.FAILED, error=f"leak guard: {e}", unwritten=True
             )
         except Exception as e:
             log.exception("action %s failed", action.id)
             return await self._finish(
-                record, ActionStatus.FAILED, error=f"{type(e).__name__}: {e}"
+                record,
+                ActionStatus.FAILED,
+                error=f"{type(e).__name__}: {e}",
+                unwritten=not running,
             )
         return await self._finish(record, ActionStatus.EXECUTED, ref=ref)
 
@@ -213,7 +219,11 @@ class Actuator:
         status: ActionStatus,
         ref: dict | None = None,
         error: str | None = None,
+        unwritten: bool = False,
     ) -> ActionRecord:
+        """Record how ``record`` ended. A proposal whose action failed before it wrote
+        anything (``unwritten``) goes back to its reviewers as it was, with the reason
+        among its warnings, to edit and approve again; the action runs again then."""
         record.status = status
         record.external_ref = ref or record.external_ref
         record.error = error
@@ -221,7 +231,20 @@ class Actuator:
         await self.x.store.save_action(record)
         action = record.action
         proposal = await self.x.store.proposal_for_action(action.id)
-        if proposal is not None and proposal.state in (
+        if (
+            proposal is not None
+            and status == ActionStatus.FAILED
+            and unwritten
+            and proposal.state == ProposalState.APPROVED
+        ):
+            proposal.state = ProposalState.PENDING
+            proposal.decided_by = proposal.decided_at = None
+            proposal.warnings = [
+                *(w for w in proposal.warnings if not w.startswith("not done: ")),
+                f"not done: {error}",
+            ]
+            await self.x.store.save_proposal(proposal)
+        elif proposal is not None and proposal.state in (
             ProposalState.APPROVED,
             ProposalState.PENDING,
         ):

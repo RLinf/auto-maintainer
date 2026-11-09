@@ -80,15 +80,18 @@ def _review(
     sha: str,
     minutes: int = 0,
     author: str = BOT,
-    body: str = "x",
+    body: str | None = None,
 ) -> Review:
+    """A review; by default one the service posted, with its marker."""
     return Review(
         id=minutes + 1,
         author=author,
         state=state,
         commit_sha=sha,
         submitted_at=T0 + timedelta(minutes=minutes),
-        body=body,
+        body=build_marker("review", 42, sha, f"act_{minutes}") + "\nx"
+        if body is None
+        else body,
     )
 
 
@@ -157,6 +160,18 @@ class TestReviewState:
             ).state
             == ReviewState.FOLLOWUP_REVIEW
         )
+
+    def test_a_review_written_by_hand_does_not_count(self) -> None:
+        """The service may act as a maintainer's own account; that maintainer's own
+        approval is not a review by the service."""
+        lgtm = _review(ReviewEventState.APPROVED, "a" * 40, body="LGTM!")
+        pr = make_pr(sha="a" * 40, reviews=[lgtm])
+        assert classify_review_state(pr, {BOT}).state == ReviewState.NEW_REVIEW
+        ours = _review(ReviewEventState.COMMENTED, "a" * 40, minutes=1)
+        pr = make_pr(sha="a" * 40, reviews=[ours, lgtm])
+        cls = classify_review_state(pr, {BOT})
+        assert cls.state == ReviewState.UP_TO_DATE
+        assert cls.latest_review_state == "COMMENTED"
 
     def test_dismissed_without_body_is_ignored(self) -> None:
         pr = make_pr(reviews=[_review(ReviewEventState.DISMISSED, "a" * 40, body="")])
