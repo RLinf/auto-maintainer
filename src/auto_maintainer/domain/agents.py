@@ -119,6 +119,10 @@ class AgentTask(BaseModel):
     job_id: str | None = None
     requested_by: str | None = None
     """The maintainer who asked for this work; the agent's questions go to them first."""
+    lab_session: str | None = None
+    """The token of a reproduction session on a test machine: the run gets the
+    ``lab`` command and the lab socket (``env`` names it as ``AM_LAB_SOCKET``), and
+    nothing else does (design 5.10)."""
     messages: bool = False
     """Reviewers may talk to the agent while it runs (``AgentRunner.tell`` with
     ``job_id``): set for the agent writing a review or a follow-up."""

@@ -473,9 +473,11 @@ async def _lab_reproduce(
     pr: PrSnapshot | None,
     approver: str | None,
 ) -> dict[str, Any]:
-    """Copy the code before the PR and at its head to the test machine and run the
-    approved script on both. The machine never gets credentials: the service checks
-    the PR out and streams each side's files over."""
+    """Open the approved reproduction's session on the test machine: copy the code
+    before the PR and at its head over (the machine never gets credentials: the
+    service checks the PR out and streams each side's files), and keep the machine
+    for the agent, whose every command is checked against the machine's rules
+    (``labs/sessions.py``). The reproduce playbook runs the agent and closes it."""
     assert pr is not None
     if x.labs is None or x.workspace is None:
         raise RuntimeError("no test machines are configured")
@@ -503,7 +505,7 @@ async def _lab_reproduce(
         if x.lab_progress is not None and job_id:
             await x.lab_progress(job_id, action.repo, pr.number, p.lab, step)
 
-    out = await x.labs.reproduce(
+    out = await x.labs.open_session(
         p,
         action.repo,
         pr.number,

@@ -210,3 +210,24 @@ async def test_prefix_wraps_the_command_and_isolation_hides_credentials(
 def test_isolation_env_is_per_run(tmp_path: Path) -> None:
     a, b = isolation_env(tmp_path / "a"), isolation_env(tmp_path / "b")
     assert a["GH_CONFIG_DIR"] != b["GH_CONFIG_DIR"]
+
+
+async def test_only_a_run_with_a_lab_session_gets_the_lab_command(
+    tmp_path: Path, fake_cli
+) -> None:
+    cli = fake_cli(
+        stdout='{"type":"result","subtype":"success","result":"ok","session_id":"s"}\n',
+        read_stdin=False,
+    )
+    runtime = ClaudeCodeRuntime(binary=str(cli.path), runs_dir=tmp_path / "runs")
+    socket = str(tmp_path / "lab.sock")
+    task = _task(tmp_path, lab_session="t0ken", env={"AM_LAB_SOCKET": socket})
+    [*_, final] = [e async for e in runtime.run(task)]
+    assert final.result is not None and final.result.ok
+    env = cli.env()
+    assert env["AM_LAB_SESSION"] == "t0ken" and env["AM_LAB_SOCKET"] == socket
+    lab = Path(env["PATH"].split(":")[0]) / "lab"
+    assert lab.is_file() and lab.stat().st_mode & 0o111, "an executable lab"
+    plain = _task(tmp_path, env={"AM_LAB_SOCKET": socket})
+    [*_, final] = [e async for e in runtime.run(plain)]
+    assert "AM_LAB_SESSION" not in cli.env() and "AM_LAB_SOCKET" not in cli.env()

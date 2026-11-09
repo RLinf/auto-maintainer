@@ -194,8 +194,29 @@ def _demo_steps() -> dict[str, Any]:
             say("The new test passes on this branch."),
         ],
         "reproduce": lambda task: (
-            [say("Both runs finished; reading their output.")]
-            if "You are reporting" in task.prompt
+            [
+                say("Installing the package on the machine, in the session's folder."),
+                *run(
+                    "Bash",
+                    command="lab -- 'python -m venv .venv && . .venv/bin/activate "
+                    "&& pip install -q -e .'",
+                    out="Successfully installed widget-0.4.0",
+                ),
+                say("Now the check on the code before the PR."),
+                *run(
+                    "Bash",
+                    ok=False,
+                    command="lab --side base -- '. .venv/bin/activate && python check.py'",
+                    out="AssertionError: expected 1 item, got 0",
+                ),
+                *run(
+                    "Bash",
+                    command="lab -- '. .venv/bin/activate && python check.py'",
+                    out="1 passed",
+                ),
+                say("Base fails and head passes: the fix holds."),
+            ]
+            if "carry it out yourself" in task.prompt
             else [
                 say("The claim: loading a batch of one item used to return nothing."),
                 *run("Read", file_path="src/loader.py"),
@@ -204,7 +225,7 @@ def _demo_steps() -> dict[str, Any]:
                     command="git log -1 --format=%s",
                     out="fix(loader): handle empty batches",
                 ),
-                say("A five-line script settles it: load([1]) and count the batches."),
+                say("A short check settles it: load([1]) and count the batches."),
             ]
         ),
     }
@@ -578,7 +599,7 @@ def _answer(task: AgentTask) -> dict[str, Any]:
             "summary": "Adds the boundary test the review asked for.",
             "fixed": [{"id": "F1", "change": "added a test for a batch of one item"}],
         }
-    if kind == "reproduce" and "You are reporting" in task.prompt:
+    if kind == "reproduce" and "carry it out yourself" in task.prompt:
         return {
             "conclusion": "reproduced",
             "comment": (
@@ -591,15 +612,11 @@ def _answer(task: AgentTask) -> dict[str, Any]:
     if kind == "reproduce":
         return {
             "summary": "Load a batch of one item, which the review says is untested.",
-            "setup": "pip install -q -e .",
-            "script": (
-                "python - <<'PY'\n"
-                "from widget.loader import load\n"
-                "items = load([1])\n"
-                "assert len(items) == 1, f'expected 1 item, got {len(items)}'\n"
-                "print('1 passed')\n"
-                "PY"
-            ),
+            "steps": [
+                "Install the package in a virtual environment in the session's folder.",
+                "On the code before the PR, load a batch of one item and count it.",
+                "Do the same at the PR's head.",
+            ],
             "expect": "base raises AssertionError; head prints 1 passed",
             "needs_gpu": False,
             "timeout_minutes": 10,

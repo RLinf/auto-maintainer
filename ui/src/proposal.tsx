@@ -125,6 +125,7 @@ export function ProposalCard({
   const [title, setTitle] = useState(str(payload.title));
   const [script, setScript] = useState(str(payload.script));
   const [setup, setSetup] = useState(str(payload.setup));
+  const [steps, setSteps] = useState(list(payload.steps).join("\n"));
   const [comments, setComments] = useState<InlineComment[]>(Array.isArray(payload.comments) ? (payload.comments as InlineComment[]) : []);
   const [asMe, setAsMe] = useState(readAsMe);
   // The review's live view, where its conversation is, when it is the one open.
@@ -155,7 +156,16 @@ export function ProposalCard({
     ...(typeof payload.body === "string" ? { body } : {}),
     ...(Array.isArray(payload.comments) ? { comments } : {}),
     ...(isFix ? { title, ...(isMerge ? {} : { target }) } : {}),
-    ...(kind === "lab.reproduce" ? { script, setup } : {}),
+    ...(kind === "lab.reproduce"
+      ? str(payload.script)
+        ? { script, setup }
+        : {
+            steps: steps
+              .split("\n")
+              .map((x) => x.trim())
+              .filter(Boolean),
+          }
+      : {}),
   });
   const approve = useAct((as?: boolean) => {
     const edited = editing || changedTarget ? editedPayload() : undefined;
@@ -204,6 +214,8 @@ export function ProposalCard({
       setScript={setScript}
       setup={setup}
       setSetup={setSetup}
+      steps={steps}
+      setSteps={setSteps}
       comments={comments}
       setComments={setComments}
       files={files}
@@ -385,6 +397,8 @@ function KindBody({
   setScript,
   setup,
   setSetup,
+  steps,
+  setSteps,
   comments,
   setComments,
   files,
@@ -402,6 +416,8 @@ function KindBody({
   setScript: (v: string) => void;
   setup: string;
   setSetup: (v: string) => void;
+  steps: string;
+  setSteps: (v: string) => void;
   comments: InlineComment[];
   setComments: (v: InlineComment[]) => void;
   files: ReturnType<typeof parseDiff> | null;
@@ -495,24 +511,48 @@ function KindBody({
   }
   if (kind === "pr.fix" && typeof payload.patch === "string") parts.push(<Diff key="patch" text={payload.patch} />);
   if (kind === "lab.reproduce") {
+    const planned = list(payload.steps);
+    const oneScript = !!str(payload.script);
     parts.push(
       <div key="repro" className="stack" style={{ gap: 8 }}>
         <div>{str(payload.summary)}</div>
         <div className="small muted">
-          {t("Runs on")} <strong>{str(payload.lab)}</strong>, {t("before this PR and at its head, each in a fresh folder that is removed afterwards.")}
+          {oneScript
+            ? t("Runs on")
+            : t("An agent works on")}{" "}
+          <strong>{str(payload.lab)}</strong>,{" "}
+          {list(payload.sides).length === 1 ? t("at the PR's head") : t("before this PR and at its head")}, {t("in a fresh folder that is removed afterwards.")}
+          {!oneScript && ` ${t("Each command it runs is checked against the machine's rules, and you can watch it work.")}`}
           {payload.needs_gpu ? ` ${t("Needs one idle GPU.")}` : ""} {t("At most")} {Math.round(Number(payload.timeout_seconds ?? 1800) / 60)} {t("minutes")}.
         </div>
-        {(editing || str(payload.setup)) && (
+        {oneScript ? (
           <>
-            <span className="small muted">{t("Setup")}</span>
-            {editing ? <textarea className="mono-input" rows={3} value={setup} onChange={(e) => setSetup(e.target.value)} /> : <pre className="md-code">{str(payload.setup)}</pre>}
+            {(editing || str(payload.setup)) && (
+              <>
+                <span className="small muted">{t("Setup")}</span>
+                {editing ? <textarea className="mono-input" rows={3} value={setup} onChange={(e) => setSetup(e.target.value)} /> : <pre className="md-code">{str(payload.setup)}</pre>}
+              </>
+            )}
+            <span className="small muted">{t("Script")}</span>
+            {editing ? (
+              <textarea className="mono-input" rows={Math.min(24, script.split("\n").length + 2)} value={script} onChange={(e) => setScript(e.target.value)} />
+            ) : (
+              <pre className="md-code">{str(payload.script)}</pre>
+            )}
           </>
-        )}
-        <span className="small muted">{t("Script")}</span>
-        {editing ? (
-          <textarea className="mono-input" rows={Math.min(24, script.split("\n").length + 2)} value={script} onChange={(e) => setScript(e.target.value)} />
         ) : (
-          <pre className="md-code">{str(payload.script)}</pre>
+          <>
+            <span className="small muted">{t("The plan")}</span>
+            {editing ? (
+              <textarea rows={Math.min(16, steps.split("\n").length + 2)} value={steps} onChange={(e) => setSteps(e.target.value)} aria-label={t("One step per line")} />
+            ) : (
+              <ol className="plan-steps">
+                {planned.map((x) => (
+                  <li key={x}>{x}</li>
+                ))}
+              </ol>
+            )}
+          </>
         )}
         {str(payload.expect) && (
           <div className="small">

@@ -44,6 +44,8 @@ log = logging.getLogger(__name__)
 
 IMAGE = "auto-maintainer-agent"
 SOCKET = "/run/am/github.sock"
+LAB_SOCKET = "/run/am/lab.sock"
+"""Where a reproduction's agent reaches its session on a test machine."""
 """Where the GitHub read proxy's socket is inside a container."""
 TOOLS_DIR = "/opt/am/bin"
 """Where the agent CLI and the host's tools are mounted inside a container."""
@@ -211,10 +213,21 @@ class ContainerSandbox:
             binds.append((path, f"{TOOLS_DIR}/{tool}", True))
         if self.github_socket is not None and self.github_socket.exists():
             binds.append((self.github_socket, SOCKET, False))
+        lab_socket = env.get("AM_LAB_SOCKET") if env.get("AM_LAB_SESSION") else None
+        if lab_socket and Path(lab_socket).exists():
+            binds.append((Path(lab_socket), LAB_SOCKET, False))
 
         # Not secret, and ``docker`` needs its own PATH and HOME: on the command line.
-        plain = {"HOME": str(self.home), "PATH": PATH}
+        bin_dir = run_dir / "bin"
+        plain = {
+            "HOME": str(self.home),
+            "PATH": f"{bin_dir}:{PATH}" if bin_dir.is_dir() else PATH,
+        }
         inner = {k: v for k, v in env.items() if k not in plain}
+        if lab_socket:
+            inner["AM_LAB_SOCKET"] = LAB_SOCKET
+        else:
+            inner.pop("AM_LAB_SOCKET", None)
         if self.github_socket is not None:
             inner["GH_TOKEN"] = GH_PLACEHOLDER
         cmd = [

@@ -29,6 +29,7 @@ from typing import Any
 
 from .actuator.context import ExecContext, LabRunner
 from .actuator.executor import Actuator
+from .actuator.lab_sessions import LabSessions
 from .actuator.pipeline import ActionPipeline
 from .domain.actions import ActionKind, ActionStatus, MemoryChangePayload, make_action
 from .domain.clock import Clock
@@ -187,6 +188,8 @@ class ServiceSettings:
     """Seconds of running before a fresh deploy counts as healthy (no rollback)."""
     sandbox_repo: str | None = None
     """In dev mode, the only repository the service serves and may act on."""
+    lab_socket: Path | None = None
+    """Where reproductions' agents reach their sessions on test machines."""
 
 
 class Service:
@@ -303,6 +306,7 @@ class Service:
             code_repo=settings.code_repo,
             code_branch=settings.code_branch,
             machines=self.machines,
+            lab_socket=settings.lab_socket,
         )
         self.engine = Engine(
             adapters.store,
@@ -379,6 +383,7 @@ class Service:
             profiles=self.profiles,
             store=self.a.store,
             governance=self.governance,
+            lab_sessions=LabSessions(self.a.lab_runner),
             workspace=self.a.workspace,
             sandbox=self.a.sandbox,
             labs=LabStatus(self.a.labs),

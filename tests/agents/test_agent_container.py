@@ -105,6 +105,36 @@ def test_a_container_holds_the_run_and_nothing_of_the_service(tmp_path: Path) ->
     )
 
 
+def test_only_a_reproductions_agent_gets_the_lab_socket(tmp_path: Path) -> None:
+    from auto_maintainer.agents.container import LAB_SOCKET
+
+    work, run_dir = tmp_path / "work", tmp_path / "run"
+    work.mkdir()
+    (run_dir / "bin").mkdir(parents=True)
+    lab = tmp_path / "lab.sock"
+    lab.write_text("")
+    binary = tmp_path / "agy"
+    binary.write_text("")
+    box = ContainerSandbox("agent:1", home=tmp_path / "home")
+    with_session = box.prepare(
+        "run_1",
+        work,
+        run_dir,
+        str(binary),
+        [str(binary)],
+        {"AM_LAB_SESSION": "t0ken", "AM_LAB_SOCKET": str(lab)},
+    )
+    mounts = _mounts(with_session.argv)
+    assert mounts[LAB_SOCKET] == (str(lab), False)
+    assert with_session.env["AM_LAB_SOCKET"] == LAB_SOCKET
+    assert f"PATH={run_dir / 'bin'}:/opt/am/bin" in " ".join(with_session.argv)
+    without = box.prepare(
+        "run_2", work, run_dir, str(binary), [str(binary)], {"AM_LAB_SOCKET": str(lab)}
+    )
+    assert LAB_SOCKET not in _mounts(without.argv)
+    assert "AM_LAB_SOCKET" not in without.env, "no session, no socket"
+
+
 class FakeBox:
     """Runs the CLI on the host, recording what the runtime asked of the sandbox."""
 

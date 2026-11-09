@@ -38,6 +38,7 @@ from .github import GitHubActionsCi, GitHubClient, GitHubReader, GitHubWriter
 from .github.auth import StaticTokenProvider
 from .labs.executor import GpuThresholds, LabExecutor
 from .labs.hosts import LocalLabHost, SshLabHost
+from .labs.sessions import LabSessionServer
 from .memory.git_store import GitMemoryStore
 from .notify.webhook import ChannelConfig, WebhookNotifier
 from .resources import data_dir, defaults_dir
@@ -183,6 +184,8 @@ async def build_service(cfg: HostConfig, dev: bool = False) -> Service:
         store,
         clock,
     )
+    lab_sessions = LabSessionServer(data / "sandbox" / "lab.sock", lab_runner)
+    background.append(lab_sessions)
 
     channels = {
         k: ChannelConfig.model_validate(v)
@@ -248,6 +251,7 @@ async def build_service(cfg: HostConfig, dev: bool = False) -> Service:
         identities={login},
         routing=routing,
         defaults_profile=defaults,
+        lab_socket=lab_sessions.socket_path,
         defaults_governance=_yaml(defaults_dir() / "governance.yaml") or {},
         skills_dir=data_dir("skills"),
         scratch_dir=data / "scratch",

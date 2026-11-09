@@ -95,6 +95,9 @@ BACKGROUND_ANSWER = (
 MAX_ARG_PROMPT_BYTES = 100_000
 """Prompts longer than this are passed through a file; Linux limits one argument to 128 KiB."""
 
+LAB_CLI = Path(__file__).with_name("lab_cli.py")
+"""The ``lab`` command a run with a reproduction session gets."""
+
 PROMPT_CONTINUES = (
     "\n\n[This task is {size} KB, more than this agent takes in one message, so it "
     "is cut here. The whole task, this part included, is in the file {path}: read the "
@@ -687,6 +690,18 @@ class ExecRuntime:
                 env[name] = value
         if task.permissions == "bypass":
             env.update(self.bypass_env())
+        if task.lab_session:
+            # The agent's door to its reproduction session (``labs/sessions.py``).
+            bin_dir = files.dir / "bin"
+            bin_dir.mkdir(exist_ok=True)
+            lab = bin_dir / "lab"
+            lab.write_text(LAB_CLI.read_text(encoding="utf-8"), encoding="utf-8")
+            lab.chmod(0o755)
+            env["AM_LAB_SESSION"] = task.lab_session
+            env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
+        else:
+            env.pop("AM_LAB_SESSION", None)
+            env.pop("AM_LAB_SOCKET", None)
         container: str | None = None
         if self.container_sandbox is not None:
             if self.container_sandbox.github_socket is not None:

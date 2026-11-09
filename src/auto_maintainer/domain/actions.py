@@ -363,16 +363,20 @@ class FixPrPayload(_Payload):
 
 
 class LabReproducePayload(_Payload):
-    """A reproduction an agent wrote for a PR: the script runs on a test machine in a
-    copy of the code before the PR (``base``) and at its head (``head``), once a
-    maintainer has read and approved it."""
+    """A reproduction of a PR on a test machine, as an agent planned it. Once it is
+    approved (or the repository's rule runs it), the actuator opens a session on the
+    machine with a copy of the code before the PR (``base``) and at its head
+    (``head``), and the agent works there one command at a time, each command
+    checked against the machine's rules (design 5.10)."""
 
     lab: str
     summary: str
-    """What the script checks, in plain words."""
+    """What the reproduction checks, in plain words."""
+    steps: list[str] = Field(default_factory=list)
+    """The plan, step by step in words, that the approver reads."""
     setup: str = ""
-    """Commands that prepare the code, such as installing it; run before ``script``."""
-    script: str
+    """From the one-script reproductions before sessions; kept so they still read."""
+    script: str = ""
     expect: str = ""
     """What result would confirm what the PR claims, on each side."""
     needs_gpu: bool = False

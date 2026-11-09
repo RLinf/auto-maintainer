@@ -21,18 +21,23 @@ only idle GPUs, passes the command guard, and cleans up whatever happens.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import random
 import re
+import secrets
 import shlex
 from collections import deque
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from typing import Any
 
 from pydantic import BaseModel
 
 from ..domain.actions import LabReproducePayload, LabRunPayload
 from ..domain.clock import Clock
+from ..domain.ids import new_id
 from ..domain.labs import (
     LabProgress,
     forbidden,
@@ -48,6 +53,42 @@ from ..domain.settings import LabMachine
 from .hosts import LocalLabHost, SshLabHost
 
 TAIL_LINES = 150
+
+
+SESSIONS_KEY = "lab-sessions:open"
+"""Where open sessions are recorded, so a restart cleans up their run folders."""
+
+
+@dataclass
+class LabSession:
+    """An approved reproduction's hold on a test machine: its run folder with a copy
+    of each side's code, its GPU, and its time limit; the agent's commands run there
+    through ``LabExecutor.run_in_session`` with ``token``."""
+
+    id: str
+    token: str
+    lab: str
+    repo: str
+    number: int
+    holder: str
+    run_dir: str
+    sides: list[str]
+    gpu: int | None
+    env: dict[str, str]
+    before: list[str]
+    forbid: list[str]
+    deadline: datetime
+    progress: Callable[[LabProgress], Awaitable[None]] | None = None
+    log: list[dict[str, Any]] = field(default_factory=list)
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    closed: bool = False
+
+    async def tell(
+        self, side: str | None = None, phase: str = "", line: str = ""
+    ) -> None:
+        if self.progress is not None:
+            with contextlib.suppress(Exception):
+                await self.progress(LabProgress(side=side, phase=phase, line=line))
 
 
 class GpuThresholds(BaseModel):
@@ -113,6 +154,8 @@ class LabExecutor:
         self.clock = clock
         self.machines: dict[str, LabMachine] = {}
         self._fixed = dict(hosts)
+        self._sessions: dict[str, LabSession] = {}
+        self._opening: dict[str, LabSession] = {}
         self._fixed_thresholds = dict(thresholds)
 
     def configure(self, machines: dict[str, LabMachine]) -> None:
@@ -170,7 +213,7 @@ class LabExecutor:
             ],
         }
 
-    async def reproduce(
+    async def open_session(
         self,
         payload: LabReproducePayload,
         repo: str,
@@ -180,11 +223,17 @@ class LabExecutor:
         binding: LabBinding | None = None,
         progress: Callable[[LabProgress], Awaitable[None]] | None = None,
     ) -> dict[str, Any]:
-        """Run an approved reproduction: copy each side's code (base64 tar.gz) into a
-        run folder of its own on the machine, run the machine's setup, the
-        repository's (``binding``), the script's setup, and the script there, and
-        remove the folder whatever happens. ``progress`` hears each phase and each
-        line of output as it comes."""
+        """Open an approved reproduction's session: lease a GPU when it needs one,
+        copy each side's code (base64 tar.gz) into a run folder of its own on the
+        machine, and keep the machine for the agent until ``close_session`` or the
+        time limit. Returns the session's id (its token stays in memory)."""
+        machine = self.machines.get(payload.lab)
+        host = self.hosts.get(payload.lab)
+        why = unusable(repo, payload.lab, machine, binding)
+        if why or machine is None:
+            raise RuntimeError(why)
+        if host is None:
+            raise RuntimeError(f"there is no test machine named {payload.lab!r}")
 
         async def tell(
             side: str | None = None, phase: str = "", line: str = ""
@@ -193,18 +242,6 @@ class LabExecutor:
                 with contextlib.suppress(Exception):
                     await progress(LabProgress(side=side, phase=phase, line=line))
 
-        machine = self.machines.get(payload.lab)
-        host = self.hosts.get(payload.lab)
-        why = unusable(repo, payload.lab, machine, binding)
-        if why or machine is None:
-            raise RuntimeError(why)
-        if host is None:
-            raise RuntimeError(f"there is no test machine named {payload.lab!r}")
-        before = setup_lines(machine, binding)
-        steps = "\n".join([*before, *(x for x in (payload.setup, payload.script) if x)])
-        refused = script_refusals(steps, forbidden(machine, binding))
-        if refused:
-            return {"lab": payload.lab, "refused": refused}
         home = await host.run('printf %s "$HOME"', timeout=60)
         root = machine.workdir.rstrip("/")
         if not root.startswith("/"):
@@ -212,81 +249,223 @@ class LabExecutor:
                 raise RuntimeError(f"cannot find the home folder on {payload.lab}")
             root = f"{home.stdout.strip()}/{root}"
         run_dir = f"{root}/{repo.replace('/', '__')}-{number}-{holder[-8:]}"
+        limit = min(payload.timeout_seconds, time_limit(machine, binding))
         env: dict[str, str] = {}
         gpu: int | None = None
-        timeout = min(payload.timeout_seconds, time_limit(machine, binding))
         if payload.needs_gpu:
             await tell(phase=f"Waiting for an idle GPU on {payload.lab}")
-            gpu = await self._lease_gpu(payload.lab, host, holder, timeout)
-            if gpu is not None:
-                await tell(phase=f"Leased GPU {gpu}")
+            gpu = await self._lease_gpu(payload.lab, host, holder, limit)
             if gpu is None:
                 return {
                     "lab": payload.lab,
                     "deferred": True,
                     "reason": "no idle GPU on the machine; nothing ran",
                 }
+            await tell(phase=f"Leased GPU {gpu}")
             env["CUDA_VISIBLE_DEVICES"] = str(gpu)
-        runs: dict[str, Any] = {}
-        try:
-            for side in payload.sides:
-                where = f"{run_dir}/{side}"
-                await tell(side, phase=f"Copying the {side} code to {payload.lab}")
-                put = await host.run(
-                    f"mkdir -p {shlex.quote(where)} && base64 -d | tar -xzf - -C {shlex.quote(where)}",
-                    timeout=900,
-                    stdin=code[side],
-                )
-                if put.exit_code != 0:
-                    runs[side] = {
-                        "error": "could not copy the code to the machine",
-                        "tail": _tail(put.stdout + "\n" + put.stderr),
-                    }
-                    continue
-                await tell(
-                    side,
-                    phase=f"Setting up and running the script on {side} "
-                    f"(at most {round(timeout / 60)} minutes)",
-                )
-
-                # The last lines in the order they came, stdout and stderr together,
-                # so the step that failed shows next to what it printed.
-                merged: deque[str] = deque(maxlen=TAIL_LINES)
-
-                async def output(
-                    line: str, side: str = side, merged: deque[str] = merged
-                ) -> None:
-                    merged.append(line)
-                    await tell(side, line=line)
-
-                result = await host.run(
-                    steps, cwd=where, env=env, timeout=timeout, on_output=output
-                )
-                await tell(
-                    side,
-                    phase=f"{side}: "
-                    + (
-                        "timed out"
-                        if result.timed_out
-                        else f"exit code {result.exit_code}"
-                    )
-                    + f" after {round(result.duration_seconds)} s",
-                )
-                runs[side] = {
-                    "exit_code": result.exit_code,
-                    "timed_out": result.timed_out,
-                    "duration_seconds": round(result.duration_seconds, 1),
-                    "tail": _tail(
-                        "\n".join(merged)
-                        if merged
-                        else result.stdout + "\n" + result.stderr
-                    ),
+        session = LabSession(
+            id=new_id("lab"),
+            token=secrets.token_urlsafe(32),
+            lab=payload.lab,
+            repo=repo,
+            number=number,
+            holder=holder,
+            run_dir=run_dir,
+            sides=list(payload.sides),
+            gpu=gpu,
+            env=env,
+            before=setup_lines(machine, binding),
+            forbid=forbidden(machine, binding),
+            deadline=self.clock.now() + timedelta(seconds=limit),
+            progress=progress,
+        )
+        await self._remember(session)
+        for side in payload.sides:
+            await tell(side, phase=f"Copying the {side} code to {payload.lab}")
+            put = await host.run(
+                f"mkdir -p {shlex.quote(run_dir + '/' + side)} && base64 -d "
+                f"| tar -xzf - -C {shlex.quote(run_dir + '/' + side)}",
+                timeout=900,
+                stdin=code[side],
+            )
+            if put.exit_code != 0:
+                await self.close_session(session.id)
+                return {
+                    "lab": payload.lab,
+                    "error": f"could not copy the {side} code to the machine",
+                    "tail": _tail(put.stdout + "\n" + put.stderr),
                 }
-        finally:
-            await tell(phase=f"Removing the run folder on {payload.lab}")
-            await host.run(f"rm -rf {shlex.quote(run_dir)}", timeout=300)
-            await self._release(payload.lab, gpu, holder)
-        return {"lab": payload.lab, "gpu": gpu, "runs": runs}
+        self._sessions[session.id] = session
+        self._opening.pop(session.id, None)
+        await tell(
+            phase=f"The agent works on {payload.lab} for at most "
+            f"{round(limit / 60)} minutes"
+        )
+        return {
+            "lab": payload.lab,
+            "session": session.id,
+            "gpu": gpu,
+            "sides": session.sides,
+            "expires_at": session.deadline.isoformat(),
+        }
+
+    def session_token(self, session_id: str) -> str | None:
+        """The secret the agent of ``session_id`` sends with each command."""
+        session = self._sessions.get(session_id)
+        return session.token if session and not session.closed else None
+
+    def session_info(self, token: str) -> dict[str, Any] | None:
+        """What the agent may know about its session."""
+        session = self._by_token(token)
+        if session is None:
+            return None
+        left = (session.deadline - self.clock.now()).total_seconds()
+        return {
+            "lab": session.lab,
+            "sides": session.sides,
+            "gpu": session.gpu,
+            "seconds_left": max(0, int(left)),
+            "run_dir": session.run_dir,
+        }
+
+    async def run_in_session(
+        self,
+        token: str,
+        command: str,
+        *,
+        side: str = "head",
+        timeout_seconds: int | None = None,
+        on_line: Callable[[str], Awaitable[None]] | None = None,
+    ) -> dict[str, Any]:
+        """Run one of the agent's commands in its session: in a fresh shell in the
+        side's folder, after the machine's and the repository's setup, once the
+        command passes the machine's rules, within the session's time. Each line of
+        output goes to ``on_line`` and to the job's live view as it comes."""
+        session = self._by_token(token)
+        if session is None:
+            return {"error": "there is no open session for this token"}
+        if side not in session.sides:
+            return {"error": f"this session has no {side!r} side: {session.sides}"}
+        left = (session.deadline - self.clock.now()).total_seconds()
+        if left <= 0:
+            return {"error": "the session's time is up"}
+        refused = script_refusals(command, session.forbid)
+        if refused:
+            entry = {"command": command, "side": side, "refused": refused}
+            session.log.append(entry)
+            await session.tell(side, phase=f"Refused: {command[:200]}")
+            return {"exit_code": 126, "refused": refused}
+        host = self.hosts.get(session.lab)
+        if host is None:
+            return {"error": f"there is no test machine named {session.lab!r}"}
+        timeout = min(left, timeout_seconds or left)
+        merged: deque[str] = deque(maxlen=TAIL_LINES)
+
+        async def output(line: str) -> None:
+            merged.append(line)
+            await session.tell(side, line=line)
+            if on_line is not None:
+                with contextlib.suppress(Exception):
+                    await on_line(line)
+
+        async with session.lock:
+            await session.tell(side, phase=f"$ {command[:300]}")
+            result = await host.run(
+                "\n".join([*session.before, command]),
+                cwd=f"{session.run_dir}/{side}",
+                env=session.env,
+                timeout=timeout,
+                on_output=output,
+            )
+        outcome = {
+            "exit_code": result.exit_code,
+            "timed_out": result.timed_out,
+            "duration_seconds": round(result.duration_seconds, 1),
+        }
+        session.log.append(
+            {
+                "command": command,
+                "side": side,
+                **outcome,
+                "tail": _tail("\n".join(merged)),
+            }
+        )
+        await session.tell(
+            side,
+            phase=("timed out" if result.timed_out else f"exit code {result.exit_code}")
+            + f" after {round(result.duration_seconds)} s",
+        )
+        return outcome
+
+    async def close_session(self, session_id: str) -> dict[str, Any] | None:
+        """End a session: remove its run folder and release its GPU. Returns what
+        ran in it; ``None`` when there is no such session."""
+        session = self._sessions.pop(session_id, None) or self._opening.pop(
+            session_id, None
+        )
+        if session is None:
+            return None
+        self._opening.pop(session_id, None)
+        if not session.closed:
+            session.closed = True
+            await session.tell(phase=f"Removing the run folder on {session.lab}")
+            await self._clean(session.lab, session.run_dir, session.gpu, session.holder)
+            await self._forget(session_id)
+        return {"lab": session.lab, "gpu": session.gpu, "commands": session.log}
+
+    async def expire_sessions(self) -> int:
+        """Close the sessions past their time limit; how many."""
+        now = self.clock.now()
+        late = [s.id for s in self._sessions.values() if s.deadline <= now]
+        for session_id in late:
+            await self.close_session(session_id)
+        return len(late)
+
+    async def recover_sessions(self) -> int:
+        """After a restart: clean up the sessions the last process left open (their
+        agents are gone); how many."""
+        left = await self.store.get_state(SESSIONS_KEY) or {}
+        for record in left.values():
+            with contextlib.suppress(Exception):
+                await self._clean(
+                    record["lab"],
+                    record["run_dir"],
+                    record.get("gpu"),
+                    record["holder"],
+                )
+        await self.store.set_state(SESSIONS_KEY, {})
+        return len(left)
+
+    def _by_token(self, token: str) -> LabSession | None:
+        for session in self._sessions.values():
+            if not session.closed and secrets.compare_digest(session.token, token):
+                return session
+        return None
+
+    async def _clean(
+        self, lab: str, run_dir: str, gpu: int | None, holder: str
+    ) -> None:
+        host = self.hosts.get(lab)
+        if host is not None:
+            with contextlib.suppress(Exception):
+                await host.run(f"rm -rf {shlex.quote(run_dir)}", timeout=300)
+        await self._release(lab, gpu, holder)
+
+    async def _remember(self, session: LabSession) -> None:
+        self._opening[session.id] = session
+        open_ = await self.store.get_state(SESSIONS_KEY) or {}
+        open_[session.id] = {
+            "lab": session.lab,
+            "run_dir": session.run_dir,
+            "gpu": session.gpu,
+            "holder": session.holder,
+        }
+        await self.store.set_state(SESSIONS_KEY, open_)
+
+    async def _forget(self, session_id: str) -> None:
+        open_ = await self.store.get_state(SESSIONS_KEY) or {}
+        open_.pop(session_id, None)
+        await self.store.set_state(SESSIONS_KEY, open_)
 
     async def run(
         self,

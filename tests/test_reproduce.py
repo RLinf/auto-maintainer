@@ -81,15 +81,14 @@ def _payload(**kw: Any) -> LabReproducePayload:
     data: dict[str, Any] = {
         "lab": "gpu-01",
         "summary": "a batch of one item",
-        "setup": "pip install -e .",
-        "script": "python -m pytest -q tests/test_loader.py -k one",
+        "steps": ["install it", "run the check on base and head"],
         "expect": "base fails, head passes",
     }
     data.update(kw)
     return LabReproducePayload.model_validate(data)
 
 
-async def test_both_sides_run_in_a_folder_of_their_own_that_is_removed(
+async def test_a_session_runs_each_command_in_its_sides_folder_and_is_removed(
     tmp_path: Path,
 ) -> None:
     host = FakeLabHost("gpu-01")
@@ -97,8 +96,8 @@ async def test_both_sides_run_in_a_folder_of_their_own_that_is_removed(
     host.results = [
         CommandResult(exit_code=0, stdout="/home/ci"),
         CommandResult(exit_code=0),
-        CommandResult(exit_code=1, stdout=f"FAILED test_one\ntoken {secret}"),
         CommandResult(exit_code=0),
+        CommandResult(exit_code=1, stdout=f"FAILED test_one\ntoken {secret}"),
         CommandResult(exit_code=0, stdout="1 passed"),
     ]
     machine = LabMachine(setup="module load cuda/12.4", timeout_seconds=3600)
@@ -109,7 +108,7 @@ async def test_both_sides_run_in_a_folder_of_their_own_that_is_removed(
     async def progress(p) -> None:  # type: ignore[no-untyped-def]
         heard.append((p.side, p.phase, p.line))
 
-    out = await executor.reproduce(
+    opened = await executor.open_session(
         _payload(timeout_seconds=1800),
         REPO,
         42,
@@ -118,50 +117,62 @@ async def test_both_sides_run_in_a_folder_of_their_own_that_is_removed(
         binding=used,
         progress=progress,
     )
-    phases = [phase for _, phase, _ in heard if phase]
-    assert phases[0] == "Copying the base code to gpu-01"
-    assert phases[1].startswith("Setting up and running the script on base")
-    assert "base: exit code 1 after 0 s" in phases
-    assert phases[-1] == "Removing the run folder on gpu-01"
-    assert ("head", "", "1 passed") in heard, "each line of output is heard as it comes"
     run_dir = "/home/ci/am-labs/acme__widget-42-12345678"
-    commands = [c for c, _, _ in host.commands]
     assert host.stdin == ["QkFTRQ==", "SEVBRA=="]
-    assert f"mkdir -p {run_dir}/base" in commands[1]
-    # the machine's setup, then the repository's, then the script's own
-    assert commands[2].startswith(
-        "module load cuda/12.4\nsource ~/venv/bin/activate\npip install -e .\n"
+    assert f"mkdir -p {run_dir}/base" in host.commands[1][0]
+    assert "token" not in opened, "the token stays in memory"
+    token = executor.session_token(opened["session"])
+    assert token and executor.session_info(token)["seconds_left"] == 600
+    lines: list[str] = []
+
+    async def on_line(line: str) -> None:
+        lines.append(line)
+
+    failed = await executor.run_in_session(
+        token, "pytest -q -k one", side="base", on_line=on_line
     )
-    assert host.commands[2][1] == f"{run_dir}/base"
-    assert commands[-1] == f"rm -rf {run_dir}"
-    assert out["runs"]["base"]["exit_code"] == 1
-    assert out["runs"]["head"]["tail"] == ["1 passed"]
-    assert secret not in "\n".join(out["runs"]["base"]["tail"])
+    assert failed["exit_code"] == 1 and lines[0] == "FAILED test_one"
+    command, cwd, _ = host.commands[3]
+    # the machine's setup, then the repository's, then the agent's command
+    assert (
+        command == "module load cuda/12.4\nsource ~/venv/bin/activate\npytest -q -k one"
+    )
+    assert cwd == f"{run_dir}/base"
+    assert (await executor.run_in_session(token, "python check.py"))["exit_code"] == 0
+    assert host.commands[4][1] == f"{run_dir}/head", "head by default"
+    assert ("base", "$ pytest -q -k one", "") in heard
+    closed = await executor.close_session(opened["session"])
+    assert closed is not None
+    assert host.commands[-1][0] == f"rm -rf {run_dir}"
+    assert [c["exit_code"] for c in closed["commands"]] == [1, 0]
+    assert secret not in str(closed), "output kept is scrubbed"
+    assert executor.session_token(opened["session"]) is None
+    assert "error" in await executor.run_in_session(token, "ls")
 
 
-async def test_a_script_the_guard_refuses_never_reaches_the_machine(
+async def test_a_command_the_machines_rules_refuse_never_reaches_it(
     tmp_path: Path,
 ) -> None:
     host = FakeLabHost("gpu-01")
+    host.results = [CommandResult(exit_code=0, stdout="/home/ci")]
     executor = await _executor(tmp_path, LabMachine(forbid=[r"\bdocker\b"]), host)
     used = LabBinding(guard={"forbid": [r"\bwget\b"]}, protected_paths=["/data/ckpt"])
-    for script in (
+    opened = await executor.open_session(
+        _payload(), REPO, 42, {"base": "", "head": ""}, "act_1", binding=used
+    )
+    token = executor.session_token(opened["session"])
+    assert token
+    before = len(host.commands)
+    for command in (
         "sudo rm -rf build",
         "ray stop --force",
         "docker run x",
         "wget http://example.com/x",
         "cp out.pt /data/ckpt/latest.pt",
     ):
-        out = await executor.reproduce(
-            _payload(script=script),
-            REPO,
-            42,
-            {"base": "", "head": ""},
-            "act_1",
-            binding=used,
-        )
-        assert out["refused"], script
-    assert host.commands == []
+        out = await executor.run_in_session(token, command)
+        assert out["refused"] and out["exit_code"] == 126, command
+    assert len(host.commands) == before
 
 
 async def test_a_machine_for_other_repositories_or_without_a_free_gpu_runs_nothing(
@@ -172,15 +183,17 @@ async def test_a_machine_for_other_repositories_or_without_a_free_gpu_runs_nothi
     )
     executor = await _executor(tmp_path, LabMachine(repos=["acme/other"]), host)
     with pytest.raises(RuntimeError, match="not offered to acme/widget"):
-        await executor.reproduce(
+        await executor.open_session(
             _payload(), REPO, 42, {}, "act_1", binding=LabBinding()
         )
     executor = await _executor(tmp_path / "2", LabMachine(), host)
     for unused in (None, LabBinding(use=False)):
         with pytest.raises(RuntimeError, match="does not use"):
-            await executor.reproduce(_payload(), REPO, 42, {}, "act_1", binding=unused)
+            await executor.open_session(
+                _payload(), REPO, 42, {}, "act_1", binding=unused
+            )
     host.results = [CommandResult(exit_code=0, stdout="/home/ci")]
-    out = await executor.reproduce(
+    out = await executor.open_session(
         _payload(needs_gpu=True),
         REPO,
         42,
@@ -189,6 +202,43 @@ async def test_a_machine_for_other_repositories_or_without_a_free_gpu_runs_nothi
         binding=LabBinding(),
     )
     assert out["deferred"] and not host.stdin
+
+
+async def test_a_session_ends_at_its_time_limit_and_after_a_restart(
+    tmp_path: Path,
+) -> None:
+    host = FakeLabHost("gpu-01")
+    host.results = [CommandResult(exit_code=0, stdout="/home/ci")]
+    executor = await _executor(tmp_path, LabMachine(), host)
+    first = await executor.open_session(
+        _payload(timeout_seconds=300, sides=["head"]),
+        REPO,
+        42,
+        {"head": ""},
+        "act_aaaaaaaa",
+        binding=LabBinding(),
+    )
+    token = executor.session_token(first["session"])
+    assert token
+    executor.clock.advance(seconds=301)  # type: ignore[attr-defined]
+    assert "time is up" in (await executor.run_in_session(token, "ls"))["error"]
+    assert await executor.expire_sessions() == 1
+    assert host.commands[-1][0].startswith("rm -rf ")
+    host.results = [CommandResult(exit_code=0, stdout="/home/ci")]
+    await executor.open_session(
+        _payload(sides=["head"]),
+        REPO,
+        43,
+        {"head": ""},
+        "act_bbbbbbbb",
+        binding=LabBinding(),
+    )
+    # A new process finds the session the last one left open and cleans it up.
+    again = LabExecutor({}, {}, executor.store, executor.clock)
+    again.configure({"gpu-01": LabMachine()})
+    again.hosts["gpu-01"] = host
+    assert await again.recover_sessions() == 1
+    assert host.commands[-1][0] == "rm -rf /home/ci/am-labs/acme__widget-43-bbbbbbbb"
 
 
 # -- the flow --------------------------------------------------------------------------
@@ -264,7 +314,7 @@ async def test_only_service_maintainers_add_machines(demo) -> None:
         assert denied.status_code == 403
 
 
-async def test_a_reproduction_runs_once_the_requester_approves_its_script(
+async def test_an_agent_does_the_reproduction_in_its_session_once_approved(
     demo,
 ) -> None:
     h, app = demo
@@ -278,6 +328,7 @@ async def test_a_reproduction_runs_once_the_requester_approves_its_script(
         await h.settle()
         [plan_task] = [t for t in h.runner.tasks if t.kind == "reproduce"]
         assert "the batch of one" in plan_task.prompt and plan_task.mode == "read_only"
+        assert plan_task.lab_session is None, "planning gets no machine"
         [job] = [j for j in await h.store.list_jobs() if j.playbook == "reproduce"]
         assert job.status == JobStatus.WAITING
         [draft] = [
@@ -286,22 +337,36 @@ async def test_a_reproduction_runs_once_the_requester_approves_its_script(
             if p["action"]["action"]["kind"] == "lab.reproduce"
         ]
         assert draft["requested_by"] == "maria"
-        assert "load([1])" in draft["action"]["action"]["payload"]["script"]
+        steps = draft["action"]["action"]["payload"]["steps"]
+        assert steps and "Install the package" in steps[0], "the plan is approved"
         assert runner.reproduced == []
         ok = await maria.post(f"/api/proposals/{draft['id']}/approve", json={})
         assert ok.status_code == 200, ok.text
         await h.settle()
-        [ran] = runner.reproduced
-        assert set(ran["code"]) == {"base", "head"}
-        steps = await h.service.progress.steps(job.id)
-        assert [s.text for s in steps if s.kind == "output"] == [
+        [opened] = runner.reproduced
+        assert set(opened["code"]) == {"base", "head"}
+        [_, worker] = [t for t in h.runner.tasks if t.kind == "reproduce"]
+        assert worker.lab_session == f"token-{opened['session']}"
+        assert worker.env["AM_LAB_SOCKET"], "the agent reaches its session"
+        assert (
+            "lab -- 'COMMAND'" in worker.prompt
+            and "Install the package" in worker.prompt
+        )
+        assert "find the cause in the output" in worker.prompt
+        assert "ask maria with your tool for asking the user" in worker.prompt
+        assert worker.requested_by == "maria", "its questions go to maria"
+        assert runner.closed == [opened["session"]], (
+            "the session closes when it is done"
+        )
+        progress = await h.service.progress.steps(job.id)
+        assert [s.text for s in progress if s.kind == "output"] == [
             "gpu-01 · base",
             "gpu-01 · head",
-        ], "the job that asked for the run shows its output as it comes"
-        assert any(s.kind == "message" and s.text == "Running head" for s in steps)
+        ], "the job shows the machine's output as it comes"
         job = await h.store.get_job(job.id)
         assert job is not None and job.status == JobStatus.DONE
         assert job.result and job.result["conclusion"] == "reproduced"
+        assert job.result["commands"][0]["command"] == "python check.py"
         [report] = [
             p
             for p in (await maria.get("/api/proposals")).json()
@@ -311,7 +376,45 @@ async def test_a_reproduction_runs_once_the_requester_approves_its_script(
         assert "batch of one" in report["action"]["action"]["payload"]["body"]
 
 
-async def test_a_rejected_script_ends_the_job_and_runs_nothing(demo) -> None:
+async def test_an_agent_that_fails_for_now_leaves_its_session_for_the_next_try(
+    demo,
+) -> None:
+    from auto_maintainer.domain.agents import AgentResult
+
+    h, app = demo
+    runner = h.service.a.lab_runner
+    calls: list[int] = []
+
+    def agent(task: Any) -> Any:
+        if "carry it out yourself" not in task.prompt:
+            return {
+                "summary": "check it",
+                "steps": ["run the check"],
+                "sides": ["head"],
+            }
+        calls.append(1)
+        if len(calls) == 1:
+            return AgentResult(
+                runtime="scripted", ok=False, error="rate limited", error_kind="quota"
+            )
+        return {"conclusion": "reproduced", "comment": "Reproduced."}
+
+    h.runner.on("reproduce", agent)
+    async with _as(app, "maria") as maria:
+        await maria.post(f"/api/prs/{REPO}/42/reproduce", json={"lab": "gpu-01"})
+        await h.settle()
+        [draft] = [
+            p
+            for p in (await maria.get("/api/proposals")).json()
+            if p["action"]["action"]["kind"] == "lab.reproduce"
+        ]
+        await maria.post(f"/api/proposals/{draft['id']}/approve", json={})
+        await h.settle()
+    [opened] = runner.reproduced
+    assert runner.closed == [] and opened["session"] in runner.sessions
+
+
+async def test_a_rejected_plan_ends_the_job_and_runs_nothing(demo) -> None:
     h, app = demo
     async with _as(app, "maria") as maria:
         await maria.post(f"/api/prs/{REPO}/42/reproduce", json={"lab": "gpu-01"})
@@ -327,30 +430,8 @@ async def test_a_rejected_script_ends_the_job_and_runs_nothing(demo) -> None:
         await h.settle()
     [job] = [j for j in await h.store.list_jobs() if j.playbook == "reproduce"]
     assert job.status == JobStatus.DONE and job.result
-    assert job.result["skipped"] == "the script was not approved"
+    assert job.result["skipped"] == "the plan was not approved"
     assert h.service.a.lab_runner.reproduced == []
-
-
-async def test_a_script_the_machine_would_refuse_is_never_proposed(demo) -> None:
-    h, app = demo
-    h.runner.on(
-        "reproduce",
-        lambda task: {
-            "summary": "restart the cluster",
-            "script": "ray stop && python check.py",
-            "expect": "x",
-        },
-    )
-    async with _as(app, "maria") as maria:
-        await maria.post(f"/api/prs/{REPO}/42/reproduce", json={"lab": "gpu-01"})
-        await h.settle()
-        kinds = [
-            p["action"]["action"]["kind"]
-            for p in (await maria.get("/api/proposals")).json()
-        ]
-    assert "lab.reproduce" not in kinds
-    [job] = [j for j in await h.store.list_jobs() if j.playbook == "reproduce"]
-    assert job.result and job.result["refused"]
 
 
 # -- each repository decides --------------------------------------------------------------
@@ -537,7 +618,7 @@ async def test_an_outside_prs_reproduction_waits_for_a_maintainer(demo) -> None:
             for t in h.runner.tasks
             if t.kind == "review" and "That reproduction has ended" not in t.prompt
         ]
-        assert "waits for a maintainer to approve its script" in review.prompt
+        assert "waits for a maintainer to approve its plan" in review.prompt
         assert h.service.a.lab_runner.reproduced == []
         [script] = [
             p
@@ -762,13 +843,13 @@ async def test_a_run_on_a_test_machine_does_not_hold_up_posting(demo) -> None:
     h, app = demo
     runner = h.service.a.lab_runner
     machine_free = asyncio.Event()
-    finish = runner.reproduce
+    finish = runner.open_session
 
-    async def slow_reproduce(*args, **kwargs):
+    async def slow_open(*args, **kwargs):
         await machine_free.wait()
         return await finish(*args, **kwargs)
 
-    runner.reproduce = slow_reproduce
+    runner.open_session = slow_open
     async with _as(app, "maria") as maria:
         await maria.post(f"/api/prs/{REPO}/42/reproduce", json={"lab": "gpu-01"})
         await h.settle()
@@ -878,77 +959,6 @@ async def test_a_reproduction_asked_for_goes_into_the_waiting_review(demo) -> No
         c for c in comments if c.action.payload.get("purpose") == "reproduction"
     ]
     [update] = [t for t in h.runner.tasks if "That reproduction has ended" in t.prompt]
-    assert "load([1])" in update.prompt, "the run's record reaches the review"
+    assert "python check.py" in update.prompt, "the run's record reaches the review"
     [job] = [j for j in await h.store.list_jobs() if j.playbook == "reproduce"]
     assert job.result and job.result["revised"] == draft["action_id"]
-
-
-def _plan(script: str) -> dict[str, Any]:
-    return {
-        "summary": "Load a batch of one item.",
-        "setup": "pip install -e .",
-        "script": script,
-        "expect": "head prints 1 passed",
-        "sides": ["head"],
-    }
-
-
-async def test_a_run_that_fails_on_the_machine_is_fixed_and_run_again(demo) -> None:
-    h, app = demo
-    reports: list[str] = []
-
-    def agent(task: Any) -> dict[str, Any]:
-        if "You are reporting" not in task.prompt:
-            return _plan("python check.py")
-        reports.append(task.prompt)
-        if len(reports) == 1:
-            return {
-                "conclusion": "inconclusive",
-                "comment": "The setup failed before the check ran.",
-                "retry": _plan("pip install numpy && python check.py"),
-                "changed": "install numpy, which the machine lacks",
-            }
-        return {"conclusion": "reproduced", "comment": "Reproduced: 1 passed."}
-
-    h.runner.on("reproduce", agent)
-    async with _as(app, "maria") as maria:
-        await maria.post(f"/api/prs/{REPO}/43/reproduce", json={"lab": "gpu-01"})
-        await h.settle()
-        assert await _approve_scripts(h, maria) == 1
-        assert await _approve_scripts(h, maria) == 1, "the corrected plan comes back"
-    runner = h.service.a.lab_runner
-    assert [r["payload"].script for r in runner.reproduced] == [
-        "python check.py",
-        "pip install numpy && python check.py",
-    ]
-    assert "2 more attempts after this one" in reports[0]
-    assert "ask maria with your tool for asking the user" in reports[0]
-    assert "find the cause in the output and fix it" in reports[0]
-    [job] = [j for j in await h.store.list_jobs() if j.playbook == "reproduce"]
-    assert job.result and job.result["conclusion"] == "reproduced"
-    assert job.result["attempt"] == 2
-
-
-async def test_retries_stop_after_the_last_attempt(demo) -> None:
-    h, app = demo
-
-    def agent(task: Any) -> dict[str, Any]:
-        if "You are reporting" not in task.prompt:
-            return _plan("python check.py")
-        return {
-            "conclusion": "inconclusive",
-            "comment": "Still failing in setup.",
-            "retry": _plan("python check.py --again"),
-            "changed": "try again",
-        }
-
-    h.runner.on("reproduce", agent)
-    async with _as(app, "maria") as maria:
-        await maria.post(f"/api/prs/{REPO}/43/reproduce", json={"lab": "gpu-01"})
-        await h.settle()
-        for _ in range(5):
-            if not await _approve_scripts(h, maria):
-                break
-    assert len(h.service.a.lab_runner.reproduced) == 3
-    last = [t for t in h.runner.tasks if "You are reporting" in t.prompt][-1]
-    assert "This was the last attempt" in last.prompt

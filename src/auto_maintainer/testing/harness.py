@@ -190,6 +190,7 @@ class Harness:
             ),
             skills_dir=data_dir("skills"),
             scratch_dir=tmp / "scratch",
+            lab_socket=tmp / "sandbox" / "lab.sock",
             pack_dirs=[data_dir("packs")],
             schedules=schedules,
             dev_mode=dev_mode,

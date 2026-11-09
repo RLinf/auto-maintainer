@@ -148,6 +148,18 @@ class ServiceInfo:
     code_branch: str = "main"
     machines: dict[str, LabMachine] = field(default_factory=dict)
     """Test machines from the service settings, by name; changed in place."""
+    lab_socket: Path | None = None
+    """Where a reproduction's agent reaches its session (``labs/sessions.py``)."""
+
+
+class LabSessionControl(Protocol):
+    """The actuator's hold on the reproduction sessions it opened. Playbooks use it
+    to hand a session's token to its agent and to close the session when the agent
+    is done; the actuator alone opens one, for an approved ``lab.reproduce``."""
+
+    def token(self, session_id: str) -> str | None: ...
+
+    async def close(self, session_id: str) -> dict[str, Any] | None: ...
 
 
 class DraftEditor(Protocol):
@@ -192,6 +204,8 @@ class PlaybookContext:
     own_reviews: frozenset[str] = frozenset()
     """This service's review actions that maintainers posted as themselves."""
     drafts: DraftEditor | None = None
+    lab_sessions: LabSessionControl | None = None
+    """Reproduction sessions on test machines (design 5.10)."""
     governance: GovernanceRecords | None = None
     """The repository's governance record and its skeleton (design 2.6)."""
     """Revises the service's own pending drafts, such as a review a reproduction

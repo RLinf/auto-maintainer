@@ -19,19 +19,23 @@ Two requests start it. A maintainer asks from the PR (``dashboard.command`` with
 (``review.reproduce``), when the repository uses a machine and its ``lab.reproduce``
 rule lets the PR run (``auto_reproduction``). In three steps, each from fresh reads:
 
-1. An agent reads the PR in a checkout of its head and writes a reproduction that
-   follows the PR's documentation the way a user would: setup commands, a script, and
-   what each result would mean; or it says what the machine lacks (``blocked``). The
-   playbook checks the script against the machine's and the repository's guards and
-   submits it as ``lab.reproduce``: drafted for the maintainer who asked, or, for a
-   review, decided by the repository's rule (a team PR may run at once, an outside
-   contributor's waits for a maintainer). Then it waits.
-2. Once the script is approved (or at once), the actuator runs it on the machine on
-   the code before the PR and at its head.
-3. The agent reads the runs. For a maintainer it drafts a comment. For a review it
-   adds the result to the review draft while that waits for a decision, and drafts a
-   comment once the review was posted; a run that did not happen (blocked, refused,
-   not approved) is reported the same way. The runs themselves stay on the job.
+1. An agent reads the PR in a checkout of its head and plans a reproduction that
+   follows the PR's documentation the way a user would: the steps in plain words,
+   which sides to run, and what each result would mean; or it says what the machine
+   lacks (``blocked``). The playbook submits the plan as ``lab.reproduce``: drafted
+   for the maintainer who asked, or, for a review, decided by the repository's rule
+   (a team PR may run at once, an outside contributor's waits for a maintainer).
+2. Once the plan is approved (or at once), the actuator opens a session on the
+   machine with the code before the PR and at its head, and an agent does the
+   reproduction there itself, one command at a time through ``lab``: each command is
+   checked against the machine's rules, and its output comes back to the agent and
+   to the job's live view as it runs. When a step fails for a reason in the machine's
+   environment, the agent finds the cause and fixes it, or asks the maintainer who
+   asked what to do. The playbook closes the session when the agent is done.
+3. The agent's report goes into the PR's review: the review draft while it waits for
+   a decision, an edit of the review once it was posted, and a comment only for a PR
+   with no review. A run that did not happen (blocked, not approved, no free GPU) is
+   reported the same way.
 """
 
 from __future__ import annotations
@@ -58,8 +62,6 @@ from ..domain.actions import (
 from ..domain.agents import AgentTask, TaskKind
 from ..domain.events import Event, EventKind
 from ..domain.labs import (
-    forbidden,
-    script_refusals,
     setup_lines,
     time_limit,
     unusable,
@@ -68,7 +70,13 @@ from ..domain.profile import RepoProfile
 from ..domain.records import ActionRecord, JobStatus
 from ..domain.snapshot import PrSnapshot, PrState
 from ..policy.engine import PolicyFacts, level_for
-from .base import Playbook, PlaybookContext, PlaybookResult, Wait
+from .base import (
+    Playbook,
+    PlaybookContext,
+    PlaybookResult,
+    Wait,
+    may_succeed_later,
+)
 from .prompts import (
     pr_block,
     reproduction_block,
@@ -88,29 +96,39 @@ from .review_revise import (
 
 WAIT_SECONDS = 7 * 24 * 3600
 
-MAX_ATTEMPTS = 3
-"""Runs of one reproduction: the first, and corrected plans after runs that failed
-for a reason the agent could fix (a missing package, a wrong command)."""
+SESSION_GRACE_SECONDS = 600
+"""How much longer than its session the agent's run may take, to write its report."""
 
 PLAN = """You are planning a reproduction of a PR for {who} inside an automated maintainer service. The working directory is a checkout of the PR's head commit.
-The service runs your setup and script on test machine {lab}, in a fresh folder that holds only the repository's files, at the PR's head ("head") and, when comparing helps, on the code before the PR ("base").
-- Reproduce it the way a user would. When the PR adds or changes a user-facing workflow (a model, an environment, an algorithm, a feature with docs) or claims a result, follow its documentation and description step by step: install, configure, fetch what the docs say to fetch, and run the documented commands, without changing the code to make them work. Have the script print each step it starts, so the first failure and anything the docs left out show in the output. Follow the repository's review skill where it says how to reproduce.
-- When the PR only fixes a bug or changes behavior without a documented workflow, write the smallest check that settles it (a focused test or a short script) and run it on base and head.
-- Set sides to ["head"] for a new workflow and to ["base", "head"] when comparing settles the claim (a fix, a speed-up).
-- Say in expect what each side should show if the PR is right: the functional result and, when it claims one, the metric result, so the outcome can be read without you.
-- The script must not need credentials, change anything outside its folder, or stop other people's work on the machine. Install what it needs in a throwaway environment inside its folder when the machine's environment lacks it.
-- Set needs_gpu only when the run cannot happen without a GPU.
-- When the machine cannot run it at all (it lacks the hardware, such as GPUs, an accelerator, or a robot, or assets or access the documented steps need), say so in blocked: what is missing and what a run would need; leave the script empty.
-- Read the code and its git history here, and run nothing else on this machine: the script runs on the test machine, never here. Do not commit, push, or post, and never ask whether to run it: {decides}
+Once the plan is approved, an agent does the reproduction itself on test machine {lab}: the service copies the code before the PR ("base") and at its head ("head") there, and the agent runs commands one at a time, reads their output, and decides the next step. Plan it now:
+- Reproduce it the way a user would. When the PR adds or changes a user-facing workflow (a model, an environment, an algorithm, a feature with docs) or claims a result, follow its documentation and description step by step: install, configure, fetch what the docs say to fetch, and run the documented commands, without changing the code to make them work. Follow the repository's review skill where it says how to reproduce.
+- When the PR only fixes a bug or changes behavior without a documented workflow, plan the smallest check that settles it (a focused test or a short script), on base and head.
+- List the steps in `steps`, in plain words, as the person approving reads them. Set sides to ["head"] for a new workflow and to ["base", "head"] when comparing settles the claim. Say in expect what each side should show if the PR is right: the functional result and, when it claims one, the metric result. Set needs_gpu only when the run cannot happen without a GPU, and timeout_minutes for the whole session.
+- When the machine cannot run it at all (it lacks the hardware, such as GPUs, an accelerator, or a robot, or assets or access the documented steps need), say so in blocked: what is missing and what a run would need.
+- Read the code and its git history here, and run nothing on this machine. Do not commit, push, or post, and never ask whether to run it: {decides}
 - {unclear}
 {machine}"""
 
-REPORT = """You are reporting a reproduction to {who} inside an automated maintainer service. The script below ran on test machine {lab} on the sides listed (the code before the PR, "base", and at its head, "head"); the end of each run's output follows. The working directory is a checkout of the PR's head, to read.
-- Decide whether the runs confirm what the PR claims: reproduced (head shows the documented or promised behavior, and base shows the problem when it ran), not_reproduced, or inconclusive (the script failed for reasons unrelated to the PR, timed out, or the output does not decide it).
-- {retry}
-- {ask}
-- Write a short comment for the PR in {public_language}: what was run and how (the documented steps followed), on what kind of machine, what each side did, the first failure and any step the docs left out, the functional and the metric result, and the conclusion. Quote at most a few lines of output. Plain and specific; no scores, priorities, or internal names.
-- Put anything only maintainers need (for example a broken environment on the machine) in notes."""
+SESSION = """You are reproducing PR #{number} in {repo} for {who} on test machine {lab}, inside an automated maintainer service. The plan below was approved; carry it out yourself.
+- Run commands on the machine with `lab -- 'COMMAND'` (one quoted string) for the PR's head{base_note}. Each runs in a fresh shell in that side's folder on the machine, after the machine's own setup: chain what needs the same shell with `&&`, and keep virtual environments, caches, and downloads inside the folder (activate an environment in each command that needs it). `lab --timeout MINUTES -- 'COMMAND'` gives a long step more time, and `lab --info` says how long the session has left. A command's output comes back as it runs, and `lab` exits with its exit code.
+- The working directory here is a checkout of the PR's head, to read the code and docs; the PR's code runs only on the machine, through `lab`.
+- Go step by step: run a step, read its output, decide the next. Follow the documentation the way a user would, and note every step it leaves out.
+- When a step fails for a reason in the machine's environment or the setup rather than in the PR (a missing package, a wrong path or command, a mirror, proxy, or download problem), find the cause in the output, or run what finds it (versions, paths, the failing command alone), fix it, and say what you changed. {ask}
+- A failure the PR itself causes is the result: report it; do not work around it.
+- Never use sudo, change anything outside the session's folders, or stop other people's work on the machine; the machine refuses commands that would.
+- Finish within the session's time with the JSON your task asks for: the conclusion (reproduced: head shows the documented or promised behavior, and base shows the problem when it ran; not_reproduced; or inconclusive), a short comment for the PR in {public_language} (what was run and how, on what kind of machine, what each side did, the first failure and any step the docs left out, the functional and the metric result, and the conclusion; quote at most a few lines of output; no scores, priorities, or internal names), and notes for maintainers only (for example what the machine lacks)."""
+
+ASK = (
+    "When you cannot fix it, because the machine needs a change only its "
+    "administrators can make, or you cannot tell whether the PR or the machine causes "
+    "it, ask {by} with your tool for asking the user what to do, with what you found "
+    "and the choices you see, and follow the answer."
+)
+NO_ASK = (
+    "When you cannot fix it, because the machine needs a change only its "
+    "administrators can make, say so in notes, with what the machine needs and why, "
+    "and finish."
+)
 
 UPDATE = """You wrote the {what} of PR #{number} in {repo} given below, and it said a reproduction on a test machine would follow. That reproduction has ended; its record is below. Revise the {what} with it:
 - Fill in where the skill asks how the PR was reproduced, what came out, and whether the documentation could be followed: the steps run and how, the functional and the metric result, the first failure and every step the docs left out; or, when no run happened, why and what a run would need.
@@ -127,7 +145,7 @@ class AutoReproduction:
     lab: str | None = None
     """The machine the run goes to; ``None`` when no run starts."""
     at_once: bool = False
-    """It runs without anyone approving its script: the repository's
+    """It runs without anyone approving its plan: the repository's
     ``lab.reproduce`` rule says ``auto`` for this PR (for example, for its team)."""
     no_machine: bool = False
     """No run starts because the repository uses no machine that can take it."""
@@ -139,7 +157,7 @@ class AutoReproduction:
         return (
             "it runs at once"
             if self.at_once
-            else "it waits for a maintainer to approve its script before it runs"
+            else "it waits for a maintainer to approve its plan before it runs"
         )
 
 
@@ -148,7 +166,7 @@ async def auto_reproduction(
 ) -> AutoReproduction:
     """Whether reviewing ``pr`` starts a reproduction (design 5.10): the repository
     uses a machine that can take it, its ``lab.reproduce`` rule lets this PR run or be
-    proposed (an outside contributor's script waits for a maintainer), and no
+    proposed (an outside contributor's plan waits for a maintainer), and no
     reproduction is on record or underway at this head."""
     machine_for = next(
         (
@@ -185,14 +203,12 @@ async def auto_reproduction(
 
 
 class ReproPlan(BaseModel):
-    summary: str = Field(description="What the script checks, in one or two sentences.")
-    setup: str = Field(
-        default="",
-        description="Commands that prepare the code, such as installing it; may be empty.",
+    summary: str = Field(
+        description="What the reproduction checks, in one or two sentences."
     )
-    script: str = Field(
-        default="",
-        description="The bash script that follows the documented steps or checks the claim; empty when blocked.",
+    steps: list[str] = Field(
+        default_factory=list,
+        description="The plan, step by step in plain words, for the person approving it.",
     )
     expect: str = Field(
         default="",
@@ -203,7 +219,7 @@ class ReproPlan(BaseModel):
         description='["head"] for a new workflow; ["base", "head"] when comparing settles it.',
     )
     needs_gpu: bool = False
-    timeout_minutes: int = Field(default=20, ge=1, le=360)
+    timeout_minutes: int = Field(default=30, ge=1, le=360)
     blocked: str = Field(
         default="",
         description="When the machine cannot run it at all: what it lacks and what a run would need. Empty otherwise.",
@@ -214,44 +230,6 @@ class ReproReport(BaseModel):
     conclusion: Literal["reproduced", "not_reproduced", "inconclusive"]
     comment: str = Field(description="The comment for the PR.")
     notes: str = Field(default="", description="For maintainers only.")
-    retry: ReproPlan | None = Field(
-        default=None,
-        description="A corrected plan to run again, when the run failed before it "
-        "could test the PR for a reason you can fix in the setup or the script.",
-    )
-    changed: str = Field(
-        default="", description="With `retry`: what you changed and why, briefly."
-    )
-
-
-RETRY = (
-    "When the run failed before it could test the PR, for a reason in the setup, the "
-    "script, or the machine's environment rather than in the PR (a missing system or "
-    "Python package, a wrong path or command, a mirror, proxy, or download problem, a "
-    "step the docs left out), find the cause in the output and fix it: set conclusion to "
-    "inconclusive and return a corrected plan in `retry`, the whole plan, changed only "
-    "where it must be, with the same rules as the first, and say in `changed` what you "
-    "changed and why. When the output does not show the cause, have the corrected plan "
-    "print what finds it (versions, paths, the failing command's full output) before the "
-    "step that failed. The service runs it again ({left} more attempts after this one). "
-    "Never use `retry` to work around a failure the PR itself causes: that is the result "
-    "to report."
-)
-NO_RETRY = (
-    "This was the last attempt: report what happened and, for a failure you could have "
-    "fixed, what the next run should change."
-)
-ASK = (
-    "When you cannot fix it in the setup or the script, because the machine needs a "
-    "change only its administrators can make, or you cannot tell whether the PR or the "
-    "machine causes it, ask {by} with your tool for asking the user what to do, with "
-    "what you found and the choices you see; then follow the answer, with a corrected "
-    "plan in `retry` or a report."
-)
-NO_ASK = (
-    "Nobody waits on this run to answer questions: when you cannot fix it in the setup "
-    "or the script, say in notes what the machine needs and why."
-)
 
 
 def _request(ctx: PlaybookContext, event: Event) -> Event:
@@ -305,21 +283,17 @@ class ReproducePlaybook(Playbook):
                 kinds=[ActionKind.LAB_REPRODUCE, ActionKind.COMMENT_UPSERT],
             )
             if r.action.discriminator == discriminator
-            or r.action.discriminator.startswith(f"{discriminator}:try")
         ]
-        attempts = sorted(
-            (r for r in mine if r.action.kind == ActionKind.LAB_REPRODUCE),
-            key=lambda r: r.action.created_at,
+        planned = next(
+            (r for r in mine if r.action.kind == ActionKind.LAB_REPRODUCE), None
         )
         reported = next(
             (r for r in mine if r.action.kind == ActionKind.COMMENT_UPSERT), None
         )
         if reported is not None:
             return PlaybookResult(result={"reported": reported.action.id})
-        if attempts:
-            return await self._after_run(
-                ctx, request, event, attempts[-1], by, lab, len(attempts)
-            )
+        if planned is not None:
+            return await self._after_run(ctx, request, event, planned, by, lab)
 
         pr = await ctx.forge.get_pr(request.repo, request.number)
         if pr is None or pr.state != PrState.OPEN:
@@ -375,11 +349,11 @@ class ReproducePlaybook(Playbook):
                         lab=lab,
                         machine=about,
                         decides=(
-                            "it runs on its own, so it must be safe to run unattended."
+                            "it runs on its own, so plan only what is safe to run unattended."
                             if at_once
-                            else f"{by} reads the script and decides whether it runs."
+                            else f"{by} reads the plan and decides whether it runs."
                             if by and not for_review
-                            else "a maintainer reads the script and decides whether it runs."
+                            else "a maintainer reads the plan and decides whether it runs."
                         ),
                         unclear=(
                             f"When the claim is unclear or several checks are equally plausible, ask {by} with your tool for asking the user."
@@ -415,28 +389,14 @@ class ReproducePlaybook(Playbook):
         if not answer.ok or answer.structured is None:
             raise RuntimeError(f"reproduction agent failed: {answer.error}")
         plan = ReproPlan.model_validate(answer.structured)
-        if plan.blocked.strip() or not plan.script.strip():
+        if plan.blocked.strip() or not (plan.steps or plan.summary.strip()):
             return await self._not_run(
                 ctx,
                 request,
                 pr,
-                f"the machine cannot run it: {plan.blocked.strip() or 'no script was written'}",
+                f"the machine cannot run it: {plan.blocked.strip() or 'no plan was written'}",
                 reason="blocked",
                 plan=plan,
-            )
-        refused = script_refusals(
-            "\n".join([*before, plan.setup, plan.script]), forbidden(machine, binding)
-        )
-        if refused:
-            return await self._not_run(
-                ctx,
-                request,
-                pr,
-                "the documented steps need commands the test machine does not allow: "
-                + "; ".join(refused),
-                reason="the script would not be allowed on the machine",
-                plan=plan,
-                refused=refused,
             )
         action = _plan_action(
             pr,
@@ -472,7 +432,6 @@ class ReproducePlaybook(Playbook):
         planned: ActionRecord,
         by: str | None,
         lab: str,
-        attempt: int = 1,
     ) -> PlaybookResult:
         record = await ctx.store.get_action(planned.action.id) or planned
         payload = LabReproducePayload.model_validate(record.action.payload)
@@ -488,8 +447,8 @@ class ReproducePlaybook(Playbook):
                     ctx,
                     request,
                     pr,
-                    "nobody approved the reproduction's script in time",
-                    reason="nobody approved the script in time",
+                    "nobody approved the reproduction's plan in time",
+                    reason="nobody approved the plan in time",
                 )
             return PlaybookResult(
                 wait=Wait(
@@ -509,8 +468,8 @@ class ReproducePlaybook(Playbook):
                 ctx,
                 request,
                 pr,
-                "a maintainer did not approve the reproduction's script",
-                reason="the script was not approved",
+                "a maintainer did not approve the reproduction's plan",
+                reason="the plan was not approved",
             )
         if record.status == ActionStatus.SHADOWED:
             return await self._not_run(
@@ -530,6 +489,14 @@ class ReproducePlaybook(Playbook):
                 error=record.error,
             )
         outcome = record.external_ref
+        if outcome.get("error"):
+            return await self._not_run(
+                ctx,
+                request,
+                pr,
+                f"the session did not open: {outcome['error']}",
+                reason="the session did not open",
+            )
         if outcome.get("refused") or outcome.get("deferred"):
             return await self._not_run(
                 ctx,
@@ -540,100 +507,32 @@ class ReproducePlaybook(Playbook):
                 refused=outcome.get("refused"),
                 machine_reason=outcome.get("reason"),
             )
-        profile = ctx.require_profile()
-        runs = outcome.get("runs") or {}
-        who = f"{by}, a maintainer" if by else "the repository's maintainers"
-        left = MAX_ATTEMPTS - attempt
-        prompt = "\n\n".join(
-            [
-                REPORT.format(
-                    who=who,
-                    lab=lab,
-                    public_language=profile.languages.public,
-                    retry=RETRY.format(left=left) if left > 0 else NO_RETRY,
-                    ask=ASK.format(by=by) if by else NO_ASK,
-                ),
-                "The reproduction: "
-                + untrusted(
-                    "reproduction.plan",
-                    json.dumps(
-                        {
-                            "summary": payload.summary,
-                            "setup": payload.setup,
-                            "script": payload.script,
-                            "expect": payload.expect,
-                            "sides": payload.sides,
-                        },
-                        ensure_ascii=False,
-                        indent=1,
-                    ),
-                    20_000,
-                ),
-                "The runs: "
-                + untrusted(
-                    "reproduction.runs",
-                    json.dumps(runs, ensure_ascii=False, indent=1),
-                    30_000,
-                ),
-                schema_hint(ReproReport.model_json_schema()),
-            ]
+        session_id = str(outcome.get("session") or "")
+        token = (
+            ctx.lab_sessions.token(session_id)
+            if session_id and ctx.lab_sessions is not None
+            else None
         )
-        workdir = (
-            await ctx.workspace.prepare(
-                pr.repo,
-                pr.number,
-                record.action.head_sha or pr.head_sha,
-                (await ctx.forge.get_repo(pr.repo)).default_branch,
+        if token is None or pr is None or ctx.lab_sessions is None:
+            if session_id and ctx.lab_sessions is not None:
+                await ctx.lab_sessions.close(session_id)
+            return await self._not_run(
+                ctx,
+                request,
+                pr,
+                "the session on the machine ended before an agent could work in it "
+                "(the service restarted or its time ran out); ask for it again",
+                reason="the session ended before the agent worked",
             )
-            if pr is not None
-            else ctx.scratch()
+        report, runtime, commands = await self._work(
+            ctx, request, pr, payload, record, by, lab, session_id, token
         )
-        try:
-            answer = await ctx.ask(
-                AgentTask(
-                    kind=TaskKind.REPRODUCE,
-                    prompt=prompt,
-                    workdir=workdir,
-                    mode="read_only",
-                    output_schema=ReproReport.model_json_schema(),
-                    repo=request.repo,
-                    timeout_seconds=900,
-                ),
-                ReproReport,
-            )
-        finally:
-            if pr is not None:
-                await ctx.workspace.release(workdir)
-        if not answer.ok or answer.structured is None:
-            raise RuntimeError(f"reproduction report failed: {answer.error}")
-        report = ReproReport.model_validate(answer.structured)
         summary = {
             "conclusion": report.conclusion,
             "notes": report.notes,
-            "attempt": attempt,
-            "runs": {
-                side: {k: v for k, v in run.items() if k != "tail"}
-                for side, run in runs.items()
-            },
+            "commands": [{k: v for k, v in c.items() if k != "tail"} for c in commands],
         }
-        again = await self._retry(
-            ctx, request, pr, report, attempt, by, lab, answer.runtime
-        )
-        if again is not None:
-            return PlaybookResult(
-                actions=[again],
-                wait=Wait(
-                    kinds=[
-                        EventKind.ACTION_EXECUTED,
-                        EventKind.ACTION_FAILED,
-                        EventKind.PROPOSAL_DECIDED,
-                    ],
-                    seconds=WAIT_SECONDS,
-                    reason=_waiting(by, _for_review(request)),
-                    action_ids=[again.id],
-                ),
-                result={**summary, "retry": attempt + 1, "changed": report.changed},
-            )
+        runs = {"commands": commands}
         if pr is not None:
             machine = ctx.service.machines.get(lab)
             record_text = untrusted(
@@ -644,12 +543,11 @@ class ReproducePlaybook(Playbook):
                         "commit": record.action.head_sha,
                         "plan": {
                             "summary": payload.summary,
-                            "setup": payload.setup,
-                            "script": payload.script,
+                            "steps": payload.steps,
                             "expect": payload.expect,
                             "sides": payload.sides,
                         },
-                        "runs": runs,
+                        "commands": runs["commands"],
                         "conclusion": report.conclusion,
                         "report": report.comment,
                     },
@@ -675,11 +573,107 @@ class ReproducePlaybook(Playbook):
         return PlaybookResult(
             actions=[
                 self._comment(
-                    request, record.action.head_sha, report.comment, by, answer.runtime
+                    request, record.action.head_sha, report.comment, by, runtime
                 )
             ],
             result=summary,
         )
+
+    async def _work(
+        self,
+        ctx: PlaybookContext,
+        request: Event,
+        pr: PrSnapshot,
+        payload: LabReproducePayload,
+        record: ActionRecord,
+        by: str | None,
+        lab: str,
+        session_id: str,
+        token: str,
+    ) -> tuple[ReproReport, str | None, list[dict[str, Any]]]:
+        """Have an agent do the reproduction in its session on the machine; close the
+        session when it is done, and return its report, its runtime, and the commands
+        that ran. A failure that may pass later leaves the session open for the
+        job's next try, until its time limit."""
+        assert ctx.lab_sessions is not None
+        profile = ctx.require_profile()
+        machine = ctx.service.machines.get(lab)
+        who = f"{by}, a maintainer" if by else "the repository's maintainers"
+        prompt = "\n\n".join(
+            part
+            for part in [
+                SESSION.format(
+                    number=pr.number,
+                    repo=pr.repo,
+                    who=who,
+                    lab=lab,
+                    base_note=(
+                        ", and `lab --side base -- 'COMMAND'` for the code before the PR"
+                        if "base" in payload.sides
+                        else ""
+                    ),
+                    ask=ASK.format(by=by) if by else NO_ASK,
+                    public_language=profile.languages.public,
+                ),
+                f"The environment and rules of {lab}, from its maintainers; follow "
+                f"them:\n{machine.description.strip()}"
+                if machine and machine.description.strip()
+                else "",
+                "The approved plan:\n"
+                + json.dumps(
+                    {
+                        "summary": payload.summary,
+                        "steps": payload.steps,
+                        "expect": payload.expect,
+                        "sides": payload.sides,
+                        "minutes": payload.timeout_seconds // 60,
+                    },
+                    ensure_ascii=False,
+                    indent=1,
+                ),
+                f"What {by} wants checked: "
+                + untrusted("maintainer.note", str(request.payload.get("note")), 2000)
+                if request.payload.get("note")
+                else "",
+                pr_block(pr),
+                schema_hint(ReproReport.model_json_schema()),
+            ]
+            if part
+        )
+        info = await ctx.forge.get_repo(pr.repo)
+        workdir = await ctx.workspace.prepare(
+            pr.repo,
+            pr.number,
+            record.action.head_sha or pr.head_sha,
+            info.default_branch,
+        )
+        answer = None
+        try:
+            answer = await ctx.ask(
+                AgentTask(
+                    kind=TaskKind.REPRODUCE,
+                    prompt=prompt,
+                    workdir=workdir,
+                    mode="workspace_write",
+                    output_schema=ReproReport.model_json_schema(),
+                    skill_dirs=ctx.skill_dirs(),
+                    repo=pr.repo,
+                    timeout_seconds=payload.timeout_seconds + SESSION_GRACE_SECONDS,
+                    lab_session=token,
+                    env={"AM_LAB_SOCKET": str(ctx.service.lab_socket or "")},
+                ),
+                ReproReport,
+            )
+        finally:
+            await ctx.workspace.release(workdir)
+            keep = answer is not None and not answer.ok and may_succeed_later(answer)
+            closed = None if keep else await ctx.lab_sessions.close(session_id)
+        if answer is None or not answer.ok or answer.structured is None:
+            raise RuntimeError(
+                f"the reproduction agent failed: {answer.error if answer else 'no answer'}"
+            )
+        commands = list((closed or {}).get("commands") or [])
+        return ReproReport.model_validate(answer.structured), answer.runtime, commands
 
     async def _not_run(
         self,
@@ -696,7 +690,7 @@ class ReproducePlaybook(Playbook):
         need; for a maintainer, the job's result does."""
         result: dict[str, object] = {"skipped": reason or why, **extra}
         if plan is not None:
-            result["script"] = plan.script
+            result["steps"] = plan.steps
             if plan.blocked:
                 result["blocked"] = plan.blocked
         if _for_review(request) and pr is not None:
@@ -747,60 +741,6 @@ class ReproducePlaybook(Playbook):
             ):
                 return record, None
         return None
-
-    async def _retry(
-        self,
-        ctx: PlaybookContext,
-        request: Event,
-        pr: PrSnapshot | None,
-        report: ReproReport,
-        attempt: int,
-        by: str | None,
-        lab: str,
-        runtime: str | None,
-    ) -> Action | None:
-        """The next attempt, when the agent corrected a plan that failed for a
-        reason it could fix and attempts remain; it is allowed (or drafted for the
-        requester) as the first was."""
-        plan = report.retry
-        if (
-            plan is None
-            or attempt >= MAX_ATTEMPTS
-            or report.conclusion != "inconclusive"
-            or pr is None
-            or pr.state != PrState.OPEN
-            or plan.blocked.strip()
-            or not plan.script.strip()
-        ):
-            return None
-        profile = ctx.require_profile()
-        machine = ctx.service.machines.get(lab)
-        binding = profile.labs.get(lab)
-        if machine is None or unusable(pr.repo, lab, machine, binding):
-            return None
-        before = setup_lines(machine, binding)
-        if script_refusals(
-            "\n".join([*before, plan.setup, plan.script]), forbidden(machine, binding)
-        ):
-            return None
-        ctx.trusted_input = await ctx.author_is_team(pr)
-        if report.changed.strip():
-            plan = plan.model_copy(
-                update={
-                    "summary": f"{plan.summary} (attempt {attempt + 1}: {report.changed.strip()})"
-                }
-            )
-        return _plan_action(
-            pr,
-            plan,
-            lab=lab,
-            limit=time_limit(machine, binding),
-            by=by,
-            for_review=_for_review(request),
-            discriminator=f"req:{request.id}:try{attempt + 1}",
-            runtime=runtime,
-            team=ctx.trusted_input,
-        )
 
     async def _update_posted(
         self,
@@ -967,8 +907,7 @@ def _plan_action(
         LabReproducePayload(
             lab=lab,
             summary=plan.summary,
-            setup=plan.setup,
-            script=plan.script,
+            steps=plan.steps,
             expect=plan.expect,
             needs_gpu=plan.needs_gpu,
             timeout_seconds=min(plan.timeout_minutes * 60, limit),
@@ -991,5 +930,5 @@ def _plan_action(
 
 def _waiting(by: str | None, for_review: bool) -> str:
     if for_review:
-        return "waiting for the reproduction to run, or for a maintainer to approve its script"
-    return f"waiting for {by} to approve the script"
+        return "waiting for the reproduction to run, or for a maintainer to approve its plan"
+    return f"waiting for {by} to approve the plan"

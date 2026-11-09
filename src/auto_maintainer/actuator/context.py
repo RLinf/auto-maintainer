@@ -67,7 +67,7 @@ class LabRunner(Protocol):
         holder: str,
     ) -> dict[str, Any]: ...
 
-    async def reproduce(
+    async def open_session(
         self,
         payload: LabReproducePayload,
         repo: str,
@@ -77,6 +77,10 @@ class LabRunner(Protocol):
         binding: LabBinding | None = None,
         progress: Callable[[LabProgress], Awaitable[None]] | None = None,
     ) -> dict[str, Any]: ...
+
+    def session_token(self, session_id: str) -> str | None: ...
+
+    async def close_session(self, session_id: str) -> dict[str, Any] | None: ...
 
     async def check(self, lab: str) -> dict[str, Any]: ...
 

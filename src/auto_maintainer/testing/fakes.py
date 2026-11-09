@@ -866,6 +866,18 @@ class FakeLabRunner:
     def __init__(self) -> None:
         self.machines: dict[str, Any] = {}
         self.reproduced: list[dict[str, Any]] = []
+        """Sessions opened, with what they were opened for."""
+        self.sessions: dict[str, str] = {}
+        self.closed: list[str] = []
+        self.commands: list[dict[str, Any]] = [
+            {
+                "command": "python check.py",
+                "side": "head",
+                "exit_code": 0,
+                "tail": ["1 passed"],
+            }
+        ]
+        """What a session's agent ran, as ``close_session`` reports it."""
         self.outcome: dict[str, Any] = {
             "runs": {
                 "base": {
@@ -889,7 +901,7 @@ class FakeLabRunner:
     async def run(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
         raise RuntimeError("template lab runs are not faked")
 
-    async def reproduce(
+    async def open_session(
         self,
         payload: Any,
         repo: str,
@@ -899,22 +911,36 @@ class FakeLabRunner:
         binding: Any = None,
         progress: Any = None,
     ) -> dict[str, Any]:
+        """Open a session at once; the agent's commands are not run here."""
         if progress is not None:
             from ..domain.labs import LabProgress
 
             for side in getattr(payload, "sides", []) or []:
-                await progress(LabProgress(side=side, phase=f"Running {side}"))
-                await progress(LabProgress(side=side, line=f"{side}: collecting tests"))
+                await progress(LabProgress(side=side, phase=f"Copying {side}"))
+                await progress(LabProgress(side=side, line=f"{side}: ready"))
+        session_id = f"lab_{len(self.reproduced) + 1}"
         self.reproduced.append(
             {
                 "payload": payload,
                 "repo": repo,
                 "number": number,
                 "code": code,
+                "holder": holder,
                 "binding": binding,
+                "session": session_id,
             }
         )
-        return {"lab": payload.lab, "gpu": None, **self.outcome}
+        self.sessions[session_id] = f"token-{session_id}"
+        return {"lab": payload.lab, "session": session_id, "sides": payload.sides}
+
+    def session_token(self, session_id: str) -> str | None:
+        return self.sessions.get(session_id)
+
+    async def close_session(self, session_id: str) -> dict[str, Any] | None:
+        if self.sessions.pop(session_id, None) is None:
+            return None
+        self.closed.append(session_id)
+        return {"commands": list(self.commands)}
 
     async def check(self, lab: str) -> dict[str, Any]:
         if lab not in self.machines:
