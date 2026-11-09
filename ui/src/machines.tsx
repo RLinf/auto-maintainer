@@ -42,7 +42,8 @@ export interface RepoMachine {
 export interface RepoMachines {
   repo: string;
   machines: RepoMachine[];
-  reproduce_policy?: ReproducePolicy | null;
+  /** The repository's ``lab.review`` rule: whose PRs reviews test on its machines. */
+  review_policy?: ReproducePolicy | null;
   can_configure: boolean;
   reason: string;
 }
@@ -88,49 +89,37 @@ export function useSetMachine(repo: string) {
   return { save, act };
 }
 
-const REPRODUCE_PRESETS = [
+/** Whose PRs a review tests on the machine, in its own session (``lab.review``). */
+const REVIEW_PRESETS = [
   {
-    id: "off",
-    label: "Off",
-    body: { level: "off", conditions: { author: "any" }, otherwise: "shadow" },
-  },
-  {
-    id: "shadow",
-    label: "Record only",
-    body: { level: "shadow", conditions: { author: "any" }, otherwise: "shadow" },
-  },
-  {
-    id: "propose",
-    label: "Ask first",
-    body: { level: "propose", conditions: { author: "any" }, otherwise: "shadow" },
+    id: "auto",
+    label: "Every PR",
+    body: { level: "auto", conditions: { author: "any" }, otherwise: "shadow" },
   },
   {
     id: "team_auto",
-    label: "Automatic for team PRs, ask first for others",
-    body: { level: "auto", conditions: { author: "team" }, otherwise: "propose" },
+    label: "Team PRs only",
+    body: { level: "auto", conditions: { author: "team" }, otherwise: "off" },
   },
   {
-    id: "auto",
-    label: "Automatic",
-    body: { level: "auto", conditions: { author: "any" }, otherwise: "shadow" },
+    id: "off",
+    label: "Off",
+    body: { level: "off", conditions: { author: "any" }, otherwise: "off" },
   },
 ] as const;
 
 function activePreset(policy: ReproducePolicy): string {
   const author = policy.conditions?.author ?? "any";
-  const otherwise = policy.otherwise ?? "shadow";
-  if (policy.level === "auto" && author === "team" && otherwise === "propose") {
-    return "team_auto";
-  }
-  return policy.level;
+  if (policy.level === "auto" && author === "team") return "team_auto";
+  return policy.level === "auto" ? "auto" : "off";
 }
 
-function ReproducePolicyBar({ repo, policy, canConfigure }: { repo: string; policy: ReproducePolicy; canConfigure: boolean }) {
+function ReviewPolicyBar({ repo, policy, canConfigure }: { repo: string; policy: ReproducePolicy; canConfigure: boolean }) {
   const t = useT();
   const toast = useToast();
   const set = useAct(
-    (body: (typeof REPRODUCE_PRESETS)[number]["body"]) =>
-      api.put<{ applied: boolean; reason: string }>(`/api/repos/${repo}/policy/lab.reproduce`, body),
+    (body: (typeof REVIEW_PRESETS)[number]["body"]) =>
+      api.put<{ applied: boolean; reason: string }>(`/api/repos/${repo}/policy/lab.review`, body),
     [["labs"], ["profile"], ["memory"]],
   );
   const current = activePreset(policy);
@@ -138,16 +127,16 @@ function ReproducePolicyBar({ repo, policy, canConfigure }: { repo: string; poli
     <div className="card stack" style={{ gap: 8, padding: "12px 14px", background: "var(--surface-2)" }}>
       <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-start" }}>
         <div className="stack" style={{ gap: 2 }}>
-          <strong className="small">{t("When a review asks to reproduce a PR")}</strong>
+          <strong className="small">{t("Which PRs reviews test on the machine")}</strong>
           <span className="small muted">
-            {t("Anyone with access can always click Reproduce on a PR and approve the script. This rule controls whether reviews also trigger reproduction on their own.")}
+            {t("The reviewing agent tests and reproduces the PR in a session of its own on the machine, as it sees fit. An outside contributor's PR is code nobody has checked yet. Anyone with access can still click Reproduce on a PR.")}
             {!canConfigure && ` ${t("Changes you make here are proposals for a maintainer of the repository.")}`}
           </span>
         </div>
-        <code className="small muted">lab.reproduce</code>
+        <code className="small muted">lab.review</code>
       </div>
-      <div className="segmented" role="radiogroup" aria-label={t("When a review asks to reproduce a PR")}>
-        {REPRODUCE_PRESETS.map((p) => (
+      <div className="segmented" role="radiogroup" aria-label={t("Which PRs reviews test on the machine")}>
+        {REVIEW_PRESETS.map((p) => (
           <button
             key={p.id}
             type="button"
@@ -211,7 +200,7 @@ export function RepoMachinesSection({ repo }: { repo: string }) {
           {t("The service offers these machines; this repository decides which it uses and how. A machine it does not use is not offered when someone reproduces a PR here.")}{" "}
           {d && !d.can_configure && `${t("Changes you make here are proposals for a maintainer of the repository.")}`}
         </p>
-        {d?.reproduce_policy && <ReproducePolicyBar repo={repo} policy={d.reproduce_policy} canConfigure={d.can_configure} />}
+        {d?.review_policy && <ReviewPolicyBar repo={repo} policy={d.review_policy} canConfigure={d.can_configure} />}
         {view.isLoading ? (
           <Skeleton rows={2} />
         ) : !d?.machines.length ? (

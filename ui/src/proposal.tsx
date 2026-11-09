@@ -64,6 +64,7 @@ const KIND_LABELS: Record<string, string> = {
   "issue.comment": "Comment on an issue",
   "lab.run": "Run a lab test",
   "lab.reproduce": "Reproduce on a test machine",
+  "lab.review": "Test during reviews on a test machine",
   "memory.commit": "Commit to memory",
   "memory.change": "Change memory",
   "code.pr": "Open a service PR",

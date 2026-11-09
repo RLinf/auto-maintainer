@@ -36,7 +36,14 @@ from ..domain.review import (
     render_followup,
 )
 from ..domain.snapshot import PrSnapshot, PrState
-from .base import PR_EVENTS, Playbook, PlaybookContext, PlaybookResult, in_scope
+from .base import (
+    PR_EVENTS,
+    Playbook,
+    PlaybookContext,
+    PlaybookResult,
+    in_scope,
+    may_succeed_later,
+)
 from .prompts import (
     accepted_labels,
     headless,
@@ -45,15 +52,14 @@ from .prompts import (
     label_choices,
     pr_block,
     quality_block,
-    reproduction_block,
     review_skill_block,
     schema_hint,
     untrusted,
     writing_block,
 )
-from .reproduce import auto_reproduction
 from .requests import FOLLOWUP_STATES, review_key, review_request, starts_review
-from .review import reproduce_after, reproduction_record
+from .review import reproduction_record
+from .review_session import close, review_machine, session_task_fields, testing_block
 
 
 class Followup(Playbook):
@@ -67,8 +73,10 @@ class Followup(Playbook):
     def key(self, event: Event) -> str:
         return review_key(self.name, event)
 
-    async def run(self, ctx: PlaybookContext, event: Event) -> PlaybookResult:
+    async def run(self, ctx: PlaybookContext, wake: Event) -> PlaybookResult:
         profile = ctx.require_profile()
+        # The request that started the job; later events (its session opening) wake it.
+        event = Event.model_validate(ctx.job.events[0]) if ctx.job.events else wake
         assert event.repo and event.number
         request = review_request(event)
         if request is not None and request.manual:
@@ -112,11 +120,22 @@ class Followup(Playbook):
         info = await ctx.forge.get_repo(pr.repo)
         choices = label_choices(info.labels, profile, pr)
         limit = profile.review.max_suggested_labels
-        repro = await auto_reproduction(ctx, pr, profile, ctx.trusted_input)
+        machine = await review_machine(
+            ctx,
+            pr,
+            profile,
+            event.id,
+            ctx.requested_by,
+            timed_out=wake.kind == EventKind.JOB_TIMEOUT,
+        )
+        if machine.wait is not None:
+            return machine.wait
         workdir = await ctx.workspace.prepare(
             pr.repo, pr.number, pr.head_sha, info.default_branch
         )
+        answer = None
         try:
+            testing = machine.testing(ctx.requested_by) if machine.token else None
             incremental = (
                 await ctx.workspace.diff(workdir, previous_sha, pr.head_sha)
                 if previous_sha
@@ -128,9 +147,9 @@ class Followup(Playbook):
             spot = cls.state == ReviewState.APPROVED_NEW_COMMITS
             prompt = "\n\n".join(
                 [
-                    interactive(profile, ctx.requested_by)
+                    interactive(profile, ctx.requested_by, testing)
                     if ctx.requested_by
-                    else headless(profile),
+                    else headless(profile, testing),
                     review_skill_block(profile, ctx.service.skills_dir, workdir),
                     (
                         "This PR was approved earlier; new commits arrived since. Check only whether they introduce "
@@ -149,10 +168,9 @@ class Followup(Playbook):
                     writing_block(profile),
                     quality_block(profile, followup=True),
                     f"Last reviewed commit: {previous_sha or 'unknown'}. Head: {pr.head_sha}.",
-                    reproduction_block(
+                    testing_block(
+                        machine,
                         await reproduction_record(ctx.store, pr.repo, pr.number),
-                        upcoming=repro.upcoming(),
-                        no_machine=repro.no_machine,
                     ),
                     untrusted(
                         "diff.since_review", incremental or "(not available)", 80_000
@@ -174,6 +192,7 @@ class Followup(Playbook):
                 skill_dirs=ctx.skill_dirs(),
                 repo=pr.repo,
                 messages=True,
+                **session_task_fields(ctx, machine),
             )
             answer = await ctx.ask(task, FollowupResult)
             if not answer.ok or answer.structured is None:
@@ -181,6 +200,9 @@ class Followup(Playbook):
             result = FollowupResult.model_validate(answer.structured)
         finally:
             await ctx.workspace.release(workdir)
+            # A run that may succeed on the job's next try keeps its session for it.
+            if answer is None or answer.ok or not may_succeed_later(answer):
+                await close(ctx, machine)
 
         result.labels = accepted_labels(result.labels, choices, limit)
         meaning = profile.review.meaning_of(result.recommendation)
@@ -261,12 +283,11 @@ class Followup(Playbook):
             )
         return PlaybookResult(
             actions=actions,
-            events=reproduce_after(repro, pr, actions[0].id, request),
             result={
                 "statuses": len(result.statuses),
                 "new": len(result.new_findings),
                 "labels": result.labels,
-                **({"reproduce_on": repro.lab} if repro.lab else {}),
+                **machine.summary(),
             },
         )
 

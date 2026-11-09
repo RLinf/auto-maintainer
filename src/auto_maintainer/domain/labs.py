@@ -63,6 +63,11 @@ def script_refusals(text: str, extra: list[str] | None = None) -> list[str]:
     return out
 
 
+FIX_CI_SESSION = "fix-ci:"
+"""How a ``lab.reproduce`` that only holds a machine for fixing CI starts its
+discriminator: it is no reproduction of the PR."""
+
+
 def unusable(
     repo: str, name: str, machine: LabMachine | None, binding: LabBinding | None
 ) -> str | None:

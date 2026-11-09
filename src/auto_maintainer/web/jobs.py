@@ -54,6 +54,7 @@ AGENT_PLAYBOOKS = {
     "quality": "review",
     "quick_quality": "evaluate",
     "merge_base": "fix",
+    "fix_ci": "fix",
 }
 """Playbooks whose work is an agent's, and the task kind of their main agent run."""
 
@@ -274,8 +275,8 @@ def build_router() -> APIRouter:
         return {
             "repo": repo,
             "machines": out,
-            "reproduce_policy": (
-                profile.rule(ActionKind.LAB_REPRODUCE).model_dump(mode="json")
+            "review_policy": (
+                profile.rule(ActionKind.LAB_REVIEW).model_dump(mode="json")
                 if profile
                 else None
             ),

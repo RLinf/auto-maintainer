@@ -49,7 +49,9 @@ AS_PERSON = frozenset(
 ONLY_AS_PERSON = frozenset({ActionKind.PR_FIX, ActionKind.PR_APPROVE})
 """Kinds that run only as the person who approves them, never as the service."""
 
-ON_TEST_MACHINES = frozenset({ActionKind.LAB_REPRODUCE, ActionKind.LAB_RUN})
+ON_TEST_MACHINES = frozenset(
+    {ActionKind.LAB_REPRODUCE, ActionKind.LAB_REVIEW, ActionKind.LAB_RUN}
+)
 """Actions that hold a test machine, for up to an hour: each repository runs them in
 a lane of their own, so its reviews, labels, and comments go out meanwhile."""
 

@@ -14,18 +14,18 @@
 
 """Reproduce what a PR claims on a test machine, without changing it (design 5.10).
 
-Two requests start it. A maintainer asks from the PR (``dashboard.command`` with
-``command: reproduce``), naming a machine; or a review asks once it is drafted
-(``review.reproduce``), when the repository uses a machine and its ``lab.reproduce``
-rule lets the PR run (``auto_reproduction``). In three steps, each from fresh reads:
+A person asks for it from the PR (``dashboard.command`` with ``command: reproduce``),
+naming a machine, or in the conversation about a review. A review tests and
+reproduces its PR itself, in its own session (``playbooks/review_session.py``); this
+playbook is for a reproduction asked for on its own. In three steps, each from fresh
+reads:
 
 1. An agent reads the PR in a checkout of its head and plans a reproduction that
    follows the PR's documentation the way a user would: the steps in plain words,
    which sides to run, and what each result would mean; or it says what the machine
-   lacks (``blocked``). The playbook submits the plan as ``lab.reproduce``: drafted
-   for the maintainer who asked, or, for a review, decided by the repository's rule
-   (a team PR may run at once, an outside contributor's waits for a maintainer).
-2. Once the plan is approved (or at once), the actuator opens a session on the
+   lacks (``blocked``). The playbook submits the plan as ``lab.reproduce``, drafted
+   for the person who asked.
+2. Once they approve the plan, the actuator opens a session on the
    machine with the code before the PR and at its head, and an agent does the
    reproduction there itself, one command at a time through ``lab``: each command is
    checked against the machine's rules, and its output comes back to the agent and
@@ -34,14 +34,13 @@ rule lets the PR run (``auto_reproduction``). In three steps, each from fresh re
    asked what to do. The playbook closes the session when the agent is done.
 3. The agent's report goes into the PR's review: the review draft while it waits for
    a decision, an edit of the review once it was posted, and a comment only for a PR
-   with no review. A run that did not happen (blocked, not approved, no free GPU) is
-   reported the same way.
+   with no review. Why a run did not happen (blocked, not approved, no free GPU) is
+   the job's result.
 """
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -51,7 +50,6 @@ from ..domain.actions import (
     ActionHints,
     ActionKind,
     ActionStatus,
-    Autonomy,
     CommentUpsertPayload,
     LabReproducePayload,
     Proposal,
@@ -66,10 +64,8 @@ from ..domain.labs import (
     time_limit,
     unusable,
 )
-from ..domain.profile import RepoProfile
-from ..domain.records import ActionRecord, JobStatus
+from ..domain.records import ActionRecord
 from ..domain.snapshot import PrSnapshot, PrState
-from ..policy.engine import PolicyFacts, level_for
 from .base import (
     Playbook,
     PlaybookContext,
@@ -112,6 +108,7 @@ Once the plan is approved, an agent does the reproduction itself on test machine
 SESSION = """You are reproducing PR #{number} in {repo} for {who} on test machine {lab}, inside an automated maintainer service. The plan below was approved; carry it out yourself.
 - Run commands on the machine with `lab -- 'COMMAND'` (one quoted string) for the PR's head{base_note}. Each runs in a fresh shell in that side's folder on the machine, after the machine's own setup: chain what needs the same shell with `&&`, and keep virtual environments, caches, and downloads inside the folder (activate an environment in each command that needs it). `lab --timeout MINUTES -- 'COMMAND'` gives a long step more time, and `lab --info` says how long the session has left. A command's output comes back as it runs, and `lab` exits with its exit code.
 - The working directory here is a checkout of the PR's head, to read the code and docs; the PR's code runs only on the machine, through `lab`.
+- Run each `lab` command in the foreground and wait until it exits, even when it takes many minutes: give your tool for running commands enough time for it, and if the tool moves it to the background anyway, wait on that task with the tool until it ends (not by watching processes: the command runs on the machine). Never end your turn while a command still runs or to continue later: the end of your turn ends the reproduction, and nothing resumes it.
 - Go step by step: run a step, read its output, decide the next. Follow the documentation the way a user would, and note every step it leaves out.
 - When a step fails for a reason in the machine's environment or the setup rather than in the PR (a missing package, a wrong path or command, a mirror, proxy, or download problem), find the cause in the output, or run what finds it (versions, paths, the failing command alone), fix it, and say what you changed. {ask}
 - A failure the PR itself causes is the result: report it; do not work around it.
@@ -136,70 +133,6 @@ UPDATE = """You wrote the {what} of PR #{number} in {repo} given below, and it s
 - Keep everything else word for word, including edits the reviewers made to the draft by hand.
 - Return the whole revised {what} in `{field}`, and say in `reply`, in a sentence or two, what you changed.
 - The {what} is public, in {public_language}: machine names, scores, and other internal details never go in it."""
-
-
-@dataclass(frozen=True)
-class AutoReproduction:
-    """Whether a review's PR is reproduced on a test machine after the review."""
-
-    lab: str | None = None
-    """The machine the run goes to; ``None`` when no run starts."""
-    at_once: bool = False
-    """It runs without anyone approving its plan: the repository's
-    ``lab.reproduce`` rule says ``auto`` for this PR (for example, for its team)."""
-    no_machine: bool = False
-    """No run starts because the repository uses no machine that can take it."""
-
-    def upcoming(self) -> str | None:
-        """How the run starts, for the review's prompt; ``None`` when none starts."""
-        if self.lab is None:
-            return None
-        return (
-            "it runs at once"
-            if self.at_once
-            else "it waits for a maintainer to approve its plan before it runs"
-        )
-
-
-async def auto_reproduction(
-    ctx: PlaybookContext, pr: PrSnapshot, profile: RepoProfile, trusted: bool
-) -> AutoReproduction:
-    """Whether reviewing ``pr`` starts a reproduction (design 5.10): the repository
-    uses a machine that can take it, its ``lab.reproduce`` rule lets this PR run or be
-    proposed (an outside contributor's plan waits for a maintainer), and no
-    reproduction is on record or underway at this head."""
-    machine_for = next(
-        (
-            name
-            for name, binding in profile.labs.items()
-            if binding.use
-            and unusable(pr.repo, name, ctx.service.machines.get(name), binding) is None
-        ),
-        None,
-    )
-    if machine_for is None:
-        return AutoReproduction(no_machine=True)
-    level = level_for(
-        ActionKind.LAB_REPRODUCE,
-        profile,
-        PolicyFacts(author_is_team=trusted, changed_paths=pr.paths),
-    )
-    if level.rank < Autonomy.PROPOSE.rank:
-        return AutoReproduction()
-    for record in await ctx.store.list_actions(
-        repo=pr.repo, number=pr.number, kinds=[ActionKind.LAB_REPRODUCE], limit=100
-    ):
-        if (
-            record.action.head_sha == pr.head_sha
-            and record.status != ActionStatus.SHADOWED
-        ):
-            return AutoReproduction()
-    for job in await ctx.store.list_jobs(
-        [JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.WAITING], repo=pr.repo
-    ):
-        if job.playbook == "reproduce" and job.number == pr.number:
-            return AutoReproduction()
-    return AutoReproduction(lab=machine_for, at_once=level == Autonomy.AUTO)
 
 
 class ReproPlan(BaseModel):
@@ -237,22 +170,12 @@ def _request(ctx: PlaybookContext, event: Event) -> Event:
     return Event.model_validate(ctx.job.events[0]) if ctx.job.events else event
 
 
-def _for_review(request: Event) -> bool:
-    return request.kind == EventKind.REVIEW_REPRODUCE
-
-
 class ReproducePlaybook(Playbook):
     name = "reproduce"
-    triggers = (EventKind.DASHBOARD_COMMAND, EventKind.REVIEW_REPRODUCE)
+    triggers = (EventKind.DASHBOARD_COMMAND,)
     pool = "agent"
 
     def accepts(self, event, profile) -> bool:  # type: ignore[no-untyped-def]
-        if event.kind == EventKind.REVIEW_REPRODUCE:
-            return (
-                bool(event.payload.get("lab"))
-                and bool(event.payload.get("review"))
-                and event.number is not None
-            )
         return (
             event.payload.get("command") == "reproduce"
             and bool(event.payload.get("by"))
@@ -261,8 +184,6 @@ class ReproducePlaybook(Playbook):
         )
 
     def key(self, event: Event) -> str:
-        if event.kind == EventKind.REVIEW_REPRODUCE:
-            return f"reproduce:{event.repo}#{event.number}:review:{event.payload.get('review')}"
         return f"reproduce:{event.repo}#{event.number}:req:{event.id}"
 
     async def run(self, ctx: PlaybookContext, event: Event) -> PlaybookResult:
@@ -271,9 +192,8 @@ class ReproducePlaybook(Playbook):
         assert request.repo and request.number
         by: str | None = request.payload.get("by") or None
         lab = str(request.payload["lab"])
-        for_review = _for_review(request)
         ctx.requested_by = by
-        ctx.agent = None if for_review else (request.payload.get("agent") or None)
+        ctx.agent = request.payload.get("agent") or None
         discriminator = f"req:{request.id}"
         mine = [
             r
@@ -308,15 +228,6 @@ class ReproducePlaybook(Playbook):
         before = setup_lines(machine, binding)
         limit = time_limit(machine, binding)
         ctx.trusted_input = await ctx.author_is_team(pr)
-        at_once = (
-            for_review
-            and level_for(
-                ActionKind.LAB_REPRODUCE,
-                profile,
-                PolicyFacts(author_is_team=ctx.trusted_input, changed_paths=pr.paths),
-            )
-            == Autonomy.AUTO
-        )
         who = f"{by}, a maintainer" if by else "the repository's maintainers"
         info = await ctx.forge.get_repo(pr.repo)
         workdir = await ctx.workspace.prepare(
@@ -349,10 +260,8 @@ class ReproducePlaybook(Playbook):
                         lab=lab,
                         machine=about,
                         decides=(
-                            "it runs on its own, so plan only what is safe to run unattended."
-                            if at_once
-                            else f"{by} reads the plan and decides whether it runs."
-                            if by and not for_review
+                            f"{by} reads the plan and decides whether it runs."
+                            if by
                             else "a maintainer reads the plan and decides whether it runs."
                         ),
                         unclear=(
@@ -404,7 +313,6 @@ class ReproducePlaybook(Playbook):
             lab=lab,
             limit=limit,
             by=by,
-            for_review=for_review,
             discriminator=discriminator,
             runtime=answer.runtime,
             team=ctx.trusted_input,
@@ -418,7 +326,7 @@ class ReproducePlaybook(Playbook):
                     EventKind.PROPOSAL_DECIDED,
                 ],
                 seconds=WAIT_SECONDS,
-                reason=_waiting(by, for_review),
+                reason=_waiting(by),
                 action_ids=[action.id],
             ),
             result={"planned": plan.summary, "action": action.id},
@@ -458,7 +366,7 @@ class ReproducePlaybook(Playbook):
                         EventKind.PROPOSAL_DECIDED,
                     ],
                     seconds=WAIT_SECONDS,
-                    reason=_waiting(by, _for_review(request)),
+                    reason=_waiting(by),
                     action_ids=[record.action.id],
                 ),
                 result={"action": record.action.id},
@@ -658,7 +566,12 @@ class ReproducePlaybook(Playbook):
                     output_schema=ReproReport.model_json_schema(),
                     skill_dirs=ctx.skill_dirs(),
                     repo=pr.repo,
-                    timeout_seconds=payload.timeout_seconds + SESSION_GRACE_SECONDS,
+                    # The agent may use the whole session, then write its report.
+                    min_timeout_seconds=max(
+                        payload.timeout_seconds,
+                        ctx.lab_sessions.seconds_left(session_id),
+                    )
+                    + SESSION_GRACE_SECONDS,
                     lab_session=token,
                     env={"AM_LAB_SOCKET": str(ctx.service.lab_socket or "")},
                 ),
@@ -693,25 +606,6 @@ class ReproducePlaybook(Playbook):
             result["steps"] = plan.steps
             if plan.blocked:
                 result["blocked"] = plan.blocked
-        if _for_review(request) and pr is not None:
-            record_text = untrusted(
-                "reproduction",
-                json.dumps(
-                    {
-                        "ran": False,
-                        "why": why,
-                        "what_was_planned": plan.summary if plan else "",
-                    },
-                    ensure_ascii=False,
-                    indent=1,
-                ),
-                10_000,
-            )
-            target = await self._review_of(ctx, request, pr)
-            if target is not None and target[1] is not None:
-                revised = await self._revise(ctx, target[0], target[1], pr, record_text)
-                if revised is not None:
-                    result["revised"] = revised
         return PlaybookResult(result=result)
 
     async def _review_of(
@@ -894,13 +788,12 @@ def _plan_action(
     lab: str,
     limit: int,
     by: str | None,
-    for_review: bool,
     discriminator: str,
     runtime: str | None,
     team: bool,
 ) -> Action:
-    """The ``lab.reproduce`` action that runs ``plan``: drafted for the maintainer
-    who asked, or decided by the repository's rule for a review's reproduction."""
+    """The ``lab.reproduce`` action that runs ``plan``, drafted for the person who
+    asked."""
     return make_action(
         ActionKind.LAB_REPRODUCE,
         pr.repo,
@@ -918,17 +811,11 @@ def _plan_action(
         number=pr.number,
         head_sha=pr.head_sha,
         discriminator=discriminator,
-        rationale=(
-            f"a reproduction on {lab} for the review at {pr.head_sha[:7]}: {plan.summary}"
-            if for_review
-            else f"a reproduction on {lab}, asked by {by}: {plan.summary}"
-        ),
+        rationale=f"a reproduction on {lab}, asked by {by}: {plan.summary}",
         hints=ActionHints(author_is_team=team, changed_paths=pr.paths),
-        draft_for=None if for_review else by,
+        draft_for=by,
     )
 
 
-def _waiting(by: str | None, for_review: bool) -> str:
-    if for_review:
-        return "waiting for the reproduction to run, or for a maintainer to approve its plan"
+def _waiting(by: str | None) -> str:
     return f"waiting for {by} to approve the plan"

@@ -23,6 +23,7 @@ from collections.abc import Awaitable, Callable
 from datetime import timedelta
 
 from ..actuator.pipeline import ActionPipeline
+from ..domain.actions import ActionStatus
 from ..domain.clock import Clock
 from ..domain.events import Event, EventKind
 from ..domain.ports import EventSink, Store
@@ -330,10 +331,11 @@ class Engine:
             self._changed(job)
             return None
 
+        submitted = {}
         for action in result.actions:
             action.provenance.job_id = job.id
             action.provenance.playbook = job.playbook
-            await self.pipeline.submit(action)
+            submitted[action.id] = await self.pipeline.submit(action)
         for signal in result.signals:
             await self.store.add_signal(signal)
         now = self.clock.now()
@@ -341,8 +343,22 @@ class Engine:
         job.error = result.failed
         job.lease_until = None
         job.updated_at = now
+        # An action the job waits for that the policy shadowed or denied at once sends
+        # no event: the job runs again now and finds out.
+        settled = (
+            result.wait is not None
+            and bool(result.wait.action_ids)
+            and all(
+                (r := submitted.get(a)) is not None
+                and r.status in (ActionStatus.SHADOWED, ActionStatus.DENIED)
+                for a in result.wait.action_ids
+            )
+        )
         if result.failed is not None:
             job.status = JobStatus.FAILED
+        elif settled:
+            job.status = JobStatus.QUEUED
+            job.not_before = now
         elif result.wait is not None:
             job.status = JobStatus.WAITING
             job.attempts = 0

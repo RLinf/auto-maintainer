@@ -1,12 +1,34 @@
-// GitHub users' avatars, by login: GitHub serves each user's picture at a stable URL,
-// so a login nobody signed in with still shows its face.
+// GitHub users' avatars, by login: GitHub's avatar host serves each user's picture by
+// login, so a login nobody signed in with still shows its face. It answers directly;
+// github.com/<login>.png redirects there and can take many seconds from some networks.
+
+import { useState } from "react";
 
 export function avatarUrl(login: string, size: number): string {
-  return `https://github.com/${encodeURIComponent(login)}.png?size=${size * 2}`;
+  return `https://avatars.githubusercontent.com/${encodeURIComponent(login)}?s=${size * 2}`;
 }
 
 export function Avatar({ login, size = 22, title }: { login: string; size?: number; title?: string }) {
-  return <img className="avatar-img" src={avatarUrl(login, size)} width={size} height={size} alt="" title={title} loading="lazy" />;
+  const [failed, setFailed] = useState(false);
+  if (failed) {
+    // GitHub could not be reached, or the login has no picture: its first letter.
+    return (
+      <span className="avatar-img avatar-letter" style={{ width: size, height: size, fontSize: Math.round(size * 0.5) }} title={title} aria-hidden>
+        {login.slice(0, 1).toUpperCase()}
+      </span>
+    );
+  }
+  return <img className="avatar-img" src={avatarUrl(login, size)} width={size} height={size} alt="" title={title} loading="lazy" onError={() => setFailed(true)} />;
+}
+
+/** A login with its avatar, inline in a line of text. */
+export function Person({ login, size = 16 }: { login: string; size?: number }) {
+  return (
+    <span className="person-inline">
+      <Avatar login={login} size={size} />
+      {login}
+    </span>
+  );
 }
 
 /** Overlapping avatars for a tight cell, with a count for the rest. */

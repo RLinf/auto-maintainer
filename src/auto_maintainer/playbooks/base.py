@@ -159,6 +159,15 @@ class LabSessionControl(Protocol):
 
     def token(self, session_id: str) -> str | None: ...
 
+    def seconds_left(self, session_id: str) -> int:
+        """How long the session has before it closes on its own; 0 when it is gone."""
+        ...
+
+    def allow_sync(self, session_id: str, workdir: Path) -> None:
+        """Let the session's agent copy ``workdir``, the checkout it edits, to the
+        machine (``lab --sync``)."""
+        ...
+
     async def close(self, session_id: str) -> dict[str, Any] | None: ...
 
 

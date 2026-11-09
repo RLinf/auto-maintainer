@@ -173,11 +173,13 @@ def test_default_profile_keeps_every_repository_action_in_shadow() -> None:
     data = yaml.safe_load(
         (ROOT / "config" / "defaults" / "profile.yaml").read_text(encoding="utf-8")
     )
-    from auto_maintainer.domain.actions import ActionKind
+    from auto_maintainer.domain.actions import ON_BY_DEFAULT, ActionKind
 
     for kind in ActionKind:
         level = data["policy"][kind.value]["level"]
-        if kind.touches_repository:
+        if kind in ON_BY_DEFAULT:
+            assert level == "auto", kind
+        elif kind.touches_repository:
             assert level == "shadow", kind
 
 

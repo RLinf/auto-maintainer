@@ -22,6 +22,7 @@ from .ci_doctor import CiDoctor
 from .commands import Commands
 from .evaluate import EvaluatePlaybook
 from .fix import FixPlaybook
+from .fix_ci import FixCiPlaybook
 from .followup import Followup
 from .governance import GovernancePlaybook
 from .housekeeping import Journal, LabTest, Stale
@@ -61,6 +62,7 @@ def all_playbooks() -> list[Playbook]:
         Journal(),
         SelfImprove(),
         FixPlaybook(),
+        FixCiPlaybook(),
         MergeBasePlaybook(),
         GovernancePlaybook(),
         ReproducePlaybook(),

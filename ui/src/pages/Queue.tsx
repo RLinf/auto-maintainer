@@ -16,7 +16,7 @@ import { openJob } from "../openJob";
 import { ScoringProgress } from "../jobs";
 import { BulkBar, DataTable, ListToolbar, useList, type Column } from "../list";
 import { MenuItem, Popover, Skeleton, Tabs, useTab, useToast } from "../ui";
-import { AvatarStack } from "../avatar";
+import { AvatarStack, Person } from "../avatar";
 
 const NEEDS_REVIEW = new Set(["NEW_REVIEW", "FOLLOWUP_REVIEW", "APPROVED_NEW_COMMITS"]);
 
@@ -144,7 +144,7 @@ export default function QueuePage({ me }: { me: Me }) {
             {p.title}
           </Link>
           <div className="small muted">
-            {p.repo}#{p.number} · {p.author} · <When at={p.updated_at} />
+            {p.repo}#{p.number} · <Person login={p.author} /> · <When at={p.updated_at} />
             {p.draft ? ` · ${t("draft")}` : ""}
           </div>
           {p.summary && (

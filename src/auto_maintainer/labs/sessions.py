@@ -51,7 +51,7 @@ JANITOR_SECONDS = 30
 
 
 class LabSessionServer:
-    """Serves ``POST /run`` and ``GET /session`` on ``socket_path``."""
+    """Serves ``POST /run``, ``POST /sync``, and ``GET /session`` on ``socket_path``."""
 
     def __init__(self, socket_path: Path, labs: LabExecutor) -> None:
         self.socket_path = socket_path
@@ -63,6 +63,7 @@ class LabSessionServer:
             routes=[
                 Route("/run", self._run, methods=["POST"]),
                 Route("/session", self._session, methods=["GET"]),
+                Route("/sync", self._sync, methods=["POST"]),
             ]
         )
 
@@ -115,6 +116,21 @@ class LabSessionServer:
         if info is None:
             return JSONResponse({"error": "no open session for this token"}, 403)
         return JSONResponse(info)
+
+    async def _sync(self, request: Request) -> Response:
+        token = request.headers.get("x-lab-session", "")
+        if self.labs.session_info(token) is None:
+            return JSONResponse({"error": "no open session for this token"}, 403)
+        try:
+            body = json.loads(await request.body() or b"{}")
+        except ValueError:
+            body = {}
+        try:
+            out = await self.labs.sync_session(token, str(body.get("side") or "head"))
+        except Exception as e:  # reported to the agent, not raised into the server
+            log.exception("copying a checkout to a test machine failed")
+            out = {"error": f"the copy failed: {e}"}
+        return JSONResponse(out)
 
     async def _run(self, request: Request) -> Response:
         token = request.headers.get("x-lab-session", "")

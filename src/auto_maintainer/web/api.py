@@ -44,6 +44,7 @@ from ..domain.actions import (
     Autonomy,
     CodeMergePayload,
     LabelPayload,
+    LabReproducePayload,
     MemoryChangePayload,
     Proposal,
     ProposalState,
@@ -57,6 +58,7 @@ from ..domain.actions import (
 from ..domain.agents import AgentAnswer, AgentQuestion, QuestionState, SkillInfo
 from ..domain.events import Event, EventKind
 from ..domain.ids import check_login, check_repo, new_id, same_commit
+from ..domain.labs import FIX_CI_SESSION, time_limit, unusable
 from ..domain.memory import (
     MemoryChange,
     MemoryChangeState,
@@ -637,6 +639,15 @@ class RefreshBody(BaseModel):
 class MergeBaseBody(BaseModel):
     agent: str | None = None
     """The agent that resolves conflicts, when there are any."""
+
+
+class FixCiBody(BaseModel):
+    agent: str | None = None
+    lab: str | None = None
+    """A test machine to test the fix on; none tests nothing."""
+    gpu: bool = False
+    """Whether the tests need a GPU: the session leases an idle one."""
+    note: str = Field(default="", max_length=2000)
 
 
 class FixBody(BaseModel):
@@ -2165,6 +2176,96 @@ def build_router() -> APIRouter:
         )
         await service.bus.publish(event)
         return {"repo": repo, "number": number, "event": event.id, "review": review}
+
+    @r.post("/prs/{owner}/{name}/{number}/fix-ci")
+    async def request_ci_fix(
+        request: Request,
+        owner: str,
+        name: str,
+        number: int,
+        body: FixCiBody,
+        user: User = Depends(current_user),
+    ) -> dict[str, Any]:
+        """Have an agent fix the PR's failing CI (``playbooks/fix_ci.py``); the result
+        is a diff the person pushes as themselves. With ``lab``, the press also
+        approves a session on that test machine, where the agent tests its fix: it is
+        submitted as a ``lab.reproduce`` drafted for them and approved at once, so the
+        repository's rule still decides (``off`` refuses it) and every command passes
+        the machine's checks."""
+        service = service_of(request)
+        repo = _repo(owner, name)
+        await require_view(service, user, repo)
+        pr = await service.a.forge.get_pr(repo, number)
+        if pr is None or pr.state != PrState.OPEN:
+            raise HTTPException(409, f"{repo}#{number} is not open")
+        failed = [c for c in pr.checks if c.failed]
+        if not failed:
+            raise HTTPException(409, "no CI job failed at this PR's head")
+        session: dict[str, Any] | None = None
+        if body.lab:
+            profile = await service.profiles.active(repo)
+            machine = service.machines.get(body.lab)
+            binding = profile.labs.get(body.lab) if profile else None
+            why = unusable(repo, body.lab, machine, binding)
+            if why or machine is None:
+                raise HTTPException(
+                    409, why or f"there is no test machine {body.lab!r}"
+                )
+            names = ", ".join(sorted({c.name for c in failed}))
+            record = await _run_now(
+                service,
+                user,
+                make_action(
+                    ActionKind.LAB_REPRODUCE,
+                    repo,
+                    LabReproducePayload(
+                        lab=body.lab,
+                        summary=f"Fix the failing CI of #{number} and test the fix",
+                        steps=[
+                            f"Read why these jobs fail: {names}",
+                            "Fix the cause in the PR's code",
+                            "Copy the fix to the machine and run the failing jobs' "
+                            "steps there until they pass",
+                        ],
+                        needs_gpu=body.gpu,
+                        timeout_seconds=time_limit(machine, binding),
+                        sides=["head"],
+                        requested_by=user.login,
+                    ),
+                    number=number,
+                    head_sha=pr.head_sha,
+                    discriminator=f"{FIX_CI_SESSION}{new_id('req')}",
+                    rationale=f"{user.login} asked for a fix of the failing CI, "
+                    f"tested on {body.lab}",
+                    draft_for=user.login,
+                    provenance=Provenance(requested_by=user.login),
+                ),
+            )
+            session = {
+                "action": record.action.id,
+                "status": record.status,
+                "reason": record.error
+                or (record.decision.reason if record.decision else None),
+            }
+        event = Event(
+            kind=EventKind.DASHBOARD_COMMAND,
+            repo=repo,
+            number=number,
+            payload={
+                "command": "fix_ci",
+                "by": user.login,
+                **({"agent": body.agent} if body.agent else {}),
+                **({"note": body.note} if body.note else {}),
+                **(
+                    {"lab": body.lab, "lab_action": session["action"]}
+                    if session
+                    else {}
+                ),
+            },
+            source="dashboard",
+        )
+        await service.bus.publish(event)
+        return {"repo": repo, "number": number, "event": event.id, "session": session}
 
     @r.post("/prs/{owner}/{name}/{number}/lab")
     async def lab(

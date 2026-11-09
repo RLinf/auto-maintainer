@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from auto_maintainer.domain.actions import Autonomy
+from auto_maintainer.domain.actions import ON_BY_DEFAULT, Autonomy
 from auto_maintainer.domain.events import Event, EventKind
 from auto_maintainer.domain.memory import (
     MemoryChange,
@@ -59,8 +59,9 @@ def test_defaults_keep_repository_actions_in_shadow() -> None:
     profile = build_profile(REPO, _layers()).profile
     assert profile.access.configure == Permission.ADMIN
     for kind, rule in profile.policy.items():
-        if kind.touches_repository:
+        if kind.touches_repository and kind not in ON_BY_DEFAULT:
             assert rule.level == Autonomy.SHADOW, kind
+    assert profile.rule("lab.review").level == Autonomy.AUTO
     assert profile.rule("notify").level == Autonomy.AUTO
 
 

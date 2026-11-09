@@ -22,15 +22,19 @@ only idle GPUs, passes the command guard, and cleans up whatever happens.
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
+import io
 import random
 import re
 import secrets
 import shlex
+import tarfile
 from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel
@@ -50,6 +54,7 @@ from ..domain.ports import GpuStatus, LabHost, Store
 from ..domain.profile import LabBinding, RepoProfile
 from ..domain.secrets import redact_secrets
 from ..domain.settings import LabMachine
+from ..subproc import run
 from .hosts import LocalLabHost, SshLabHost
 
 TAIL_LINES = 150
@@ -57,6 +62,31 @@ TAIL_LINES = 150
 
 SESSIONS_KEY = "lab-sessions:open"
 """Where open sessions are recorded, so a restart cleans up their run folders."""
+
+
+async def checkout_files(source: str) -> tuple[list[str], list[str]]:
+    """The files of a git checkout to copy (tracked and new, without what git
+    ignores) and the tracked ones deleted from it."""
+    listed = await run(
+        ["git", "-C", source, "ls-files", "-z", "-c", "-o", "--exclude-standard"],
+        timeout=120,
+    )
+    deleted = await run(["git", "-C", source, "ls-files", "-z", "-d"], timeout=120)
+    gone = [p for p in deleted.stdout.split("\0") if p]
+    missing = set(gone)
+    files = sorted({p for p in listed.stdout.split("\0") if p and p not in missing})
+    return files, gone
+
+
+def tar_base64(source: str, files: list[str]) -> str:
+    """``files`` under ``source`` as a gzipped tar, in base64, for ``tar -xzf``."""
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+        for path in files:
+            full = Path(source) / path
+            if full.is_symlink() or full.is_file():
+                tar.add(full, arcname=path, recursive=False)
+    return base64.b64encode(buffer.getvalue()).decode()
 
 
 @dataclass
@@ -82,6 +112,9 @@ class LabSession:
     log: list[dict[str, Any]] = field(default_factory=list)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     closed: bool = False
+    source: str | None = None
+    """The checkout on the service host that the agent edits, when it changes the
+    code (fixing CI): ``sync_session`` copies it to the head side."""
 
     async def tell(
         self, side: str | None = None, phase: str = "", line: str = ""
@@ -252,17 +285,21 @@ class LabExecutor:
         limit = min(payload.timeout_seconds, time_limit(machine, binding))
         env: dict[str, str] = {}
         gpu: int | None = None
-        if payload.needs_gpu:
+        if payload.needs_gpu or payload.wants_gpu:
             await tell(phase=f"Waiting for an idle GPU on {payload.lab}")
             gpu = await self._lease_gpu(payload.lab, host, holder, limit)
-            if gpu is None:
+            if gpu is None and payload.needs_gpu:
                 return {
                     "lab": payload.lab,
                     "deferred": True,
                     "reason": "no idle GPU on the machine; nothing ran",
                 }
-            await tell(phase=f"Leased GPU {gpu}")
-            env["CUDA_VISIBLE_DEVICES"] = str(gpu)
+            if gpu is None:
+                await tell(phase="No idle GPU; the session runs without one")
+            else:
+                await tell(phase=f"Leased GPU {gpu}")
+            # Without a lease, the GPUs stay hidden: they are other people's work.
+            env["CUDA_VISIBLE_DEVICES"] = "" if gpu is None else str(gpu)
         session = LabSession(
             id=new_id("lab"),
             token=secrets.token_urlsafe(32),
@@ -394,6 +431,63 @@ class LabExecutor:
             side,
             phase=("timed out" if result.timed_out else f"exit code {result.exit_code}")
             + f" after {round(result.duration_seconds)} s",
+        )
+        return outcome
+
+    def allow_sync(self, session_id: str, source: str) -> None:
+        """Let the session's agent copy ``source``, the checkout it edits, to the
+        machine's head side (``lab --sync``)."""
+        session = self._sessions.get(session_id)
+        if session is not None and not session.closed:
+            session.source = source
+
+    async def sync_session(self, token: str, side: str = "head") -> dict[str, Any]:
+        """Copy the agent's checkout to the side's folder on the machine: its tracked
+        and new files (not what git ignores), and remove the files it deleted, so the
+        side runs the code as the agent left it. Environments and caches the agent
+        made inside the folder stay."""
+        session = self._by_token(token)
+        if session is None:
+            return {"error": "there is no open session for this token"}
+        if side not in session.sides:
+            return {"error": f"this session has no {side!r} side: {session.sides}"}
+        if not session.source:
+            return {"error": "this session has no checkout to copy; its code is fixed"}
+        left = (session.deadline - self.clock.now()).total_seconds()
+        if left <= 0:
+            return {"error": "the session's time is up"}
+        host = self.hosts.get(session.lab)
+        if host is None:
+            return {"error": f"there is no test machine named {session.lab!r}"}
+        files, gone = await checkout_files(session.source)
+        archive = await asyncio.to_thread(tar_base64, session.source, files)
+        folder = f"{session.run_dir}/{side}"
+        removal = (
+            "rm -f -- " + " ".join(shlex.quote(p) for p in gone) + " && "
+            if gone
+            else ""
+        )
+        async with session.lock:
+            await session.tell(side, phase=f"Copying the agent's changes to {side}")
+            put = await host.run(
+                f"cd {shlex.quote(folder)} && {removal}base64 -d | tar -xzf -",
+                timeout=min(left, 900),
+                stdin=archive,
+            )
+        outcome: dict[str, Any] = {
+            "exit_code": put.exit_code,
+            "files": len(files),
+            "removed": len(gone),
+        }
+        if put.exit_code != 0:
+            outcome["error"] = "could not copy the checkout to the machine: " + _tail(
+                put.stdout + "\n" + put.stderr
+            )
+        session.log.append({"command": "lab --sync", "side": side, **outcome})
+        await session.tell(
+            side,
+            phase=f"Copied {len(files)} files"
+            + (f", removed {len(gone)}" if gone else ""),
         )
         return outcome
 

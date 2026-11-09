@@ -20,9 +20,11 @@ session (``AgentTask.lab_session``) and puts it on the agent's ``PATH``. It uses
 the standard library, so any Python 3 in the agent's container runs it. Each command
 runs in a fresh shell in the session's folder for one side of the PR (``head`` by
 default, or ``base``) on the machine; its output streams here as it comes, and
-``lab`` exits with the command's exit code.
+``lab`` exits with the command's exit code. When the agent changes the code (fixing
+CI), ``lab --sync`` copies its working directory to the head side first.
 
     lab [--side head|base] [--timeout MINUTES] -- COMMAND ...
+    lab --sync
     lab --info
 """
 
@@ -65,6 +67,24 @@ def main(argv: list[str]) -> int:
         reply = conn.getresponse()
         print(reply.read().decode())
         return 0 if reply.status == 200 else 1
+    if rest[:1] == ["--sync"]:
+        conn = _UnixConnection(path)
+        conn.request(
+            "POST",
+            "/sync",
+            body=json.dumps({"side": "head"}),
+            headers={"x-lab-session": token, "content-type": "application/json"},
+        )
+        reply = conn.getresponse()
+        out = json.loads(reply.read().decode() or "{}")
+        if reply.status != 200 or out.get("error"):
+            print(f"lab: {out.get('error') or reply.status}", file=sys.stderr)
+            return 1
+        print(
+            f"copied {out.get('files', 0)} files to the machine"
+            + (f", removed {out['removed']}" if out.get("removed") else "")
+        )
+        return 0
     while rest and rest[0] != "--":
         flag = rest.pop(0)
         if flag == "--side" and rest:

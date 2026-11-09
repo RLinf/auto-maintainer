@@ -903,6 +903,12 @@ class FakeLabRunner:
         self.reproduced: list[dict[str, Any]] = []
         """Sessions opened, with what they were opened for."""
         self.sessions: dict[str, str] = {}
+        self.seconds_left = 3600
+        """What ``session_info`` says a session has left."""
+        self.synced: dict[str, str] = {}
+        """The checkout each session's agent may copy to the machine."""
+        self.cannot_open: str | None = None
+        """When set, sessions do not open, for this reason (as with no idle GPU)."""
         self.closed: list[str] = []
         self.commands: list[dict[str, Any]] = [
             {
@@ -947,6 +953,8 @@ class FakeLabRunner:
         progress: Any = None,
     ) -> dict[str, Any]:
         """Open a session at once; the agent's commands are not run here."""
+        if self.cannot_open:
+            return {"lab": payload.lab, "deferred": True, "reason": self.cannot_open}
         if progress is not None:
             from ..domain.labs import LabProgress
 
@@ -970,6 +978,14 @@ class FakeLabRunner:
 
     def session_token(self, session_id: str) -> str | None:
         return self.sessions.get(session_id)
+
+    def allow_sync(self, session_id: str, source: str) -> None:
+        self.synced[session_id] = source
+
+    def session_info(self, token: str) -> dict[str, Any] | None:
+        if token not in self.sessions.values():
+            return None
+        return {"seconds_left": self.seconds_left}
 
     async def close_session(self, session_id: str) -> dict[str, Any] | None:
         if self.sessions.pop(session_id, None) is None:

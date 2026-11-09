@@ -792,6 +792,9 @@ HANDLERS: dict[ActionKind, HandlerSpec] = {
     ActionKind.LAB_REPRODUCE: HandlerSpec(
         _lab_reproduce, needs_pr=True, needs_current_head=True
     ),
+    ActionKind.LAB_REVIEW: HandlerSpec(
+        _lab_reproduce, needs_pr=True, needs_current_head=True
+    ),
     ActionKind.MEMORY_COMMIT: HandlerSpec(_memory_commit),
     ActionKind.MEMORY_CHANGE: HandlerSpec(_memory_change),
     ActionKind.PR_FIX: HandlerSpec(_pr_fix, needs_pr=True, needs_current_head=True),

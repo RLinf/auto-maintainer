@@ -37,6 +37,7 @@ import { CommentOnDiff, parseDiff, usePrDiff } from "../diffview";
 import { DataTable, ListToolbar, useList, type Column } from "../list";
 import { ApproveButton, FixButton, MergeBaseButton, type InlineComment } from "../proposal";
 import { ReproduceButton } from "../reproduce";
+import { failedChecks, FixCiButton } from "../fixCi";
 import { ReviewersCard } from "../assignees";
 import { ACTIVE, PrWork, usePrWork } from "../jobs";
 import { openJob } from "../openJob";
@@ -190,6 +191,7 @@ export default function PrPage({ me }: { me: Me }) {
             )}
             <ReproduceButton repo={full} number={pr.number} />
             <RunCiButton repo={full} number={pr.number} plan={d.run_ci} />
+            {pr.state === "OPEN" && <FixCiButton repo={full} number={pr.number} failed={failedChecks(pr.checks)} canPush={!!me.can_post_as_me} />}
             <RefreshButton base={base} />
           </>
         }

@@ -44,8 +44,15 @@ from ..domain.review import (
     classify_review_state,
     render_review,
 )
-from ..domain.snapshot import PrSnapshot, PrState
-from .base import PR_EVENTS, Playbook, PlaybookContext, PlaybookResult, in_scope
+from ..domain.snapshot import PrState
+from .base import (
+    PR_EVENTS,
+    Playbook,
+    PlaybookContext,
+    PlaybookResult,
+    in_scope,
+    may_succeed_later,
+)
 from .prompts import (
     accepted_labels,
     headless,
@@ -54,7 +61,6 @@ from .prompts import (
     label_choices,
     pr_block,
     quality_block,
-    reproduction_block,
     review_skill_block,
     schema_hint,
     skill_format_block,
@@ -63,13 +69,17 @@ from .prompts import (
     untrusted,
     writing_block,
 )
-from .reproduce import AutoReproduction, auto_reproduction
 from .requests import (
     FOLLOWUP_STATES,
-    ReviewRequest,
     review_key,
     review_request,
     starts_review,
+)
+from .review_session import (
+    close,
+    review_machine,
+    session_task_fields,
+    testing_block,
 )
 
 
@@ -94,8 +104,10 @@ class ReviewPlaybook(Playbook):
     def key(self, event: Event) -> str:
         return review_key(self.name, event)
 
-    async def run(self, ctx: PlaybookContext, event: Event) -> PlaybookResult:
+    async def run(self, ctx: PlaybookContext, wake: Event) -> PlaybookResult:
         profile = ctx.require_profile()
+        # The request that started the job; later events (its session opening) wake it.
+        event = Event.model_validate(ctx.job.events[0]) if ctx.job.events else wake
         assert event.repo and event.number
         request = review_request(event)
         if request is not None and request.manual:
@@ -147,31 +159,41 @@ class ReviewPlaybook(Playbook):
         info = await ctx.forge.get_repo(pr.repo)
         choices = label_choices(info.labels, profile, pr)
         limit = profile.review.max_suggested_labels
-        repro = await auto_reproduction(ctx, pr, profile, ctx.trusted_input)
+        machine = await review_machine(
+            ctx,
+            pr,
+            profile,
+            event.id,
+            ctx.requested_by,
+            timed_out=wake.kind == EventKind.JOB_TIMEOUT,
+        )
+        if machine.wait is not None:
+            return machine.wait
         workdir = await ctx.workspace.prepare(
             pr.repo, pr.number, pr.head_sha, info.default_branch
         )
+        answer = None
         try:
             diff = await ctx.workspace.diff(
                 workdir, f"origin/{info.default_branch}", pr.head_sha
             )
             lessons = await ctx.knowledge.review_lessons(pr.repo, profile)
             own_format = skill_owns_format(profile, workdir)
+            testing = machine.testing(ctx.requested_by) if machine.token else None
             prompt = "\n\n".join(
                 [
-                    interactive(profile, ctx.requested_by)
+                    interactive(profile, ctx.requested_by, testing)
                     if ctx.requested_by
-                    else headless(profile),
+                    else headless(profile, testing),
                     review_skill_block(profile, ctx.service.skills_dir, workdir),
                     skill_format_block(profile)
                     if own_format
                     else template_block(profile),
                     writing_block(profile),
                     quality_block(profile),
-                    reproduction_block(
+                    testing_block(
+                        machine,
                         await reproduction_record(ctx.store, pr.repo, pr.number),
-                        upcoming=repro.upcoming(),
-                        no_machine=repro.no_machine,
                     ),
                     f"Review lessons from this repository's maintainers:\n{lessons}"
                     if lessons
@@ -191,16 +213,21 @@ class ReviewPlaybook(Playbook):
                 skill_dirs=ctx.skill_dirs(),
                 repo=pr.repo,
                 messages=True,
+                **session_task_fields(ctx, machine),
             )
             answer = await ctx.ask(task, ReviewResult)
             if not answer.ok or answer.structured is None:
                 raise RuntimeError(f"review agent failed: {answer.error}")
+            await close(ctx, machine)
             result = ReviewResult.model_validate(answer.structured)
             runtime = answer.runtime
             if profile.review.verify and result.findings:
                 result = await self._verify(ctx, result, pr_block(pr, diff), workdir)
         finally:
             await ctx.workspace.release(workdir)
+            # A run that may succeed on the job's next try keeps its session for it.
+            if answer is None or answer.ok or not may_succeed_later(answer):
+                await close(ctx, machine)
 
         result.labels = accepted_labels(result.labels, choices, limit)
         meaning = profile.review.meaning_of(result.recommendation)
@@ -300,13 +327,12 @@ class ReviewPlaybook(Playbook):
             )
         return PlaybookResult(
             actions=actions,
-            events=reproduce_after(repro, pr, actions[0].id, request),
             result={
                 "findings": len(result.findings),
                 "dismissed": len(result.dismissed),
                 "recommendation": result.recommendation,
                 "labels": result.labels,
-                **({"reproduce_on": repro.lab} if repro.lab else {}),
+                **machine.summary(),
             },
         )
 
@@ -351,31 +377,6 @@ class ReviewPlaybook(Playbook):
                     )
                 )
         return result.model_copy(update={"findings": kept, "dismissed": dismissed})
-
-
-def reproduce_after(
-    repro: AutoReproduction,
-    pr: PrSnapshot,
-    review_action: str,
-    request: ReviewRequest | None,
-) -> list[Event]:
-    """The request that reproduces ``pr`` once its review is drafted, when one runs;
-    it names the review draft, which the reproduction adds its result to."""
-    if repro.lab is None:
-        return []
-    return [
-        Event(
-            kind=EventKind.REVIEW_REPRODUCE,
-            repo=pr.repo,
-            number=pr.number,
-            sha=pr.head_sha,
-            payload={
-                "lab": repro.lab,
-                "review": review_action,
-                "by": request.by if request is not None and request.manual else None,
-            },
-        )
-    ]
 
 
 async def reproduction_record(store: Store, repo: str, number: int) -> str | None:

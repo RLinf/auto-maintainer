@@ -49,6 +49,9 @@ class ActionKind(StrEnum):
     PR_CLOSE = "pr.close"
     PR_FIX = "pr.fix"
     LAB_REPRODUCE = "lab.reproduce"
+    LAB_REVIEW = "lab.review"
+    """A review's session on a test machine the repository uses: the reviewing agent
+    tests and reproduces the PR in it as it sees fit, while it reviews."""
     ISSUE_LABEL = "issue.label"
     ISSUE_COMMENT = "issue.comment"
     LAB_RUN = "lab.run"
@@ -77,6 +80,13 @@ _INTERNAL_KINDS = {
     ActionKind.SERVICE_DEPLOY,
     ActionKind.NOTIFY,
 }
+
+ON_BY_DEFAULT = frozenset({ActionKind.LAB_REVIEW})
+"""The one kind that runs a repository's code and is on by default (``auto``): a
+review's session on a test machine. It runs only on a machine the repository's
+maintainers turned on for it (``labs.<machine>.use``), writes nothing to the
+repository, and checks every command against the machine's rules; a repository
+sets it lower, for example to its team's PRs, like any level."""
 
 
 class Autonomy(StrEnum):
@@ -388,6 +398,9 @@ class LabReproducePayload(_Payload):
     expect: str = ""
     """What result would confirm what the PR claims, on each side."""
     needs_gpu: bool = False
+    wants_gpu: bool = False
+    """Lease an idle GPU when there is one; without one the session opens with the
+    GPUs hidden (``CUDA_VISIBLE_DEVICES`` empty), so it never takes a busy one."""
     timeout_seconds: int = 1800
     sides: list[Literal["base", "head"]] = Field(
         default_factory=lambda: ["base", "head"]
@@ -454,6 +467,7 @@ PAYLOADS: dict[ActionKind, type[BaseModel]] = {
     ActionKind.CODE_PR: CodePrPayload,
     ActionKind.PR_FIX: FixPrPayload,
     ActionKind.LAB_REPRODUCE: LabReproducePayload,
+    ActionKind.LAB_REVIEW: LabReproducePayload,
     ActionKind.CODE_MERGE: CodeMergePayload,
     ActionKind.SERVICE_DEPLOY: ServiceDeployPayload,
     ActionKind.NOTIFY: NotifyPayload,

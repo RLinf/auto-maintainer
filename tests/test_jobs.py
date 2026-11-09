@@ -148,7 +148,12 @@ async def test_the_requester_follows_their_review_step_by_step(demo) -> None:
         assert [p["kind"] for p in mine["produced"]].count("review.post") == 1
         job = (await maria.get(f"/api/jobs/{mine['id']}")).json()
         kinds = [s["kind"] for s in job["steps"]]
-        assert kinds[0] == "start" and "tool" in kinds and kinds[-1] == "done"
+        start = kinds.index("start")
+        before = [(s["kind"], s.get("text", "")) for s in job["steps"][:start]]
+        assert ("message", "Copying head") in before, (
+            "the review's session on the test machine opens before its agent starts"
+        )
+        assert "tool" in kinds[start:] and kinds[-1] == "done"
         assert any("pytest" in s["detail"] for s in job["steps"])
     async with _as(app, "walt") as walt:
         assert (await walt.get("/api/work")).json() == []
@@ -162,7 +167,9 @@ async def test_the_requester_follows_their_review_step_by_step(demo) -> None:
 async def test_a_job_is_stopped_by_its_requester_or_a_maintainer(demo) -> None:
     h, app = demo
     h.runner.steps["review"] = [
-        AgentEvent(type=AgentEventType.MESSAGE, text=f"step {i}") for i in range(20)
+        # Long enough to be stopped midway however slow the machine running the tests.
+        AgentEvent(type=AgentEventType.MESSAGE, text=f"step {i}")
+        for i in range(400)
     ]
     h.runner.step_delay = 0.05
     async with _as(app, "walt") as walt:
@@ -293,8 +300,10 @@ async def test_a_job_the_service_stops_runs_again_after_it_starts(demo) -> None:
         j for j in await h.store.list_jobs([JobStatus.QUEUED]) if j.playbook == "review"
     ]
     engine.start()
-    for _ in range(200):
-        if len(await h.service.progress.steps(job.id)) > 2:
+    for _ in range(300):
+        # The agent is at work (its session on the test machine opened first).
+        steps = await h.service.progress.steps(job.id)
+        if any(s.text.startswith("step ") for s in steps):
             break
         await asyncio.sleep(0.02)
     await engine.stop()  # a deploy

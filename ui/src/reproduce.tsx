@@ -1,6 +1,6 @@
 // Reproduce a PR on a test machine: pick a machine, say what to check if the PR does
-// not make it obvious, and an agent writes the script. Nothing runs until the person who
-// asked approves the script; the report comes back as a draft comment for them.
+// not make it obvious, and an agent plans the reproduction. Nothing runs until the
+// person who asked approves the plan; then the agent does it on the machine.
 
 import { useState } from "react";
 import { Link } from "react-router-dom";
@@ -50,7 +50,7 @@ export function ReproduceButton({ repo, number, align = "right" }: { repo: strin
     >
       {(close) => (
         <div className="stack" style={{ gap: 10, padding: 6, width: 360, maxWidth: "calc(100vw - 48px)" }}>
-          <span className="small muted">{t("An agent writes a script that checks what the PR claims. You read and approve it; then it runs on the machine before and after the change, and you get a draft report.")}</span>
+          <span className="small muted">{t("An agent plans how to check what the PR claims. You approve the plan; then the agent does it on the machine step by step, and the result goes into the PR's review.")}</span>
           {view.isLoading ? (
             <Skeleton rows={2} />
           ) : !used.length ? (
@@ -104,7 +104,7 @@ export function ReproduceButton({ repo, number, align = "right" }: { repo: strin
                         setNote("");
                         toast({
                           title: t("Reproduction started"),
-                          body: `${t("The agent writes a script; you approve it before it runs on")} ${out.lab}.`,
+                          body: `${t("The agent plans the reproduction; you approve the plan before it runs on")} ${out.lab}.`,
                           icon: "server",
                           action: { label: t("Watch"), onClick: () => openJob(out.event) },
                         });

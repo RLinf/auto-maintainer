@@ -25,6 +25,7 @@ const PLAYBOOK: Record<string, { label: string; icon: IconName }> = {
   review: { label: "Review", icon: "pr" },
   followup: { label: "Follow-up review", icon: "pr" },
   fix: { label: "Fix", icon: "sparkles" },
+  fix_ci: { label: "CI fix", icon: "activity" },
   reproduce: { label: "Reproduction", icon: "server" },
   onboard: { label: "Onboarding", icon: "repo" },
   self_improve: { label: "Self-improvement", icon: "settings" },

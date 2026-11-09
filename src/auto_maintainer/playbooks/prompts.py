@@ -108,9 +108,11 @@ HEADLESS = """You are running headless inside an automated maintainer service.
 - Public text you write is in {public_language}. Write plainly and specifically."""
 
 
-def headless(profile: RepoProfile) -> str:
+def headless(profile: RepoProfile, testing: str | None = None) -> str:
+    """Instructions for a review nobody waits on; ``testing`` replaces the rule
+    against running code when the review has a test machine."""
     return HEADLESS.format(
-        public_language=profile.languages.public, no_code=NO_CODE_RULE
+        public_language=profile.languages.public, no_code=testing or NO_CODE_RULE
     )
 
 
@@ -122,12 +124,13 @@ INTERACTIVE = """You are reviewing for {reviewer}, a maintainer, inside an autom
 - Public text you write is in {public_language}. Write plainly and specifically."""
 
 
-def interactive(profile: RepoProfile, reviewer: str) -> str:
-    """Instructions for a review a maintainer asked for: questions go to them."""
+def interactive(profile: RepoProfile, reviewer: str, testing: str | None = None) -> str:
+    """Instructions for a review a maintainer asked for: questions go to them.
+    ``testing`` replaces the rule against running code when it has a test machine."""
     return INTERACTIVE.format(
         reviewer=reviewer,
         public_language=profile.languages.public,
-        no_code=NO_CODE_RULE,
+        no_code=testing or NO_CODE_RULE,
     )
 
 
