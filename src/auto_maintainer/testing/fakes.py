@@ -244,7 +244,7 @@ class FakeForge:
         )
 
     async def update_comment(
-        self, repo: str, comment_id: int, body: PublicText
+        self, repo: str, number: int, comment_id: int, body: PublicText
     ) -> None:
         text = self._text(body)
         self._record("update_comment", repo=repo, comment_id=comment_id, body=text)
@@ -260,7 +260,7 @@ class FakeForge:
             if comments != pr.comments:
                 self._update_pr(r, n, comments=comments)
 
-    async def delete_comment(self, repo: str, comment_id: int) -> None:
+    async def delete_comment(self, repo: str, number: int, comment_id: int) -> None:
         self._record("delete_comment", repo=repo, comment_id=comment_id)
 
     async def create_review(

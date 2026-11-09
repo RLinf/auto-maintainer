@@ -30,6 +30,8 @@ import os
 import secrets
 import shutil
 import time
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -38,6 +40,8 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel
+
+from ..domain.forges import person_on
 
 SESSION_COOKIE = "am_session"
 CSRF_COOKIE = "am_csrf"
@@ -226,11 +230,26 @@ async def _github_user(api_url: str, token: str) -> User:
     )
 
 
+@dataclass(frozen=True)
+class ForgeSignIn:
+    """Signing in with an account on one more forge (design 5.16): its CLI's device
+    flow, or a personal access token pasted once."""
+
+    forge: str
+    name: str
+    who: Callable[[str], Awaitable[dict[str, str]]]
+    """A token to its person: ``login`` as the forge spells it, ``name``,
+    ``avatar_url``; raises when the token does not work."""
+    device: Callable[[str], Any] | None = None
+    """A flow id to a CLI login (``start``, ``state``, ``token``, ``discard``)."""
+
+
 def router(
     api_url: str,
     dev: bool,
     links_path: Path | None = None,
     gh_signin: Any = None,
+    forges: Mapping[str, ForgeSignIn] | None = None,
 ) -> APIRouter:
     """Sign-in routes: the GitHub CLI's one-time code (``gh_signin``), one-time links
     from ``am login`` (``links_path``), and, in the demo only, ``/auth/dev``."""
@@ -313,14 +332,94 @@ def router(
             raise HTTPException(502, str(e)) from e
         return {"installed": True, "path": path}
 
+    other = dict(forges or {})
+    forge_flows: dict[str, dict[str, Any]] = {}
+
+    def _forge(forge: str) -> ForgeSignIn:
+        found = other.get(forge)
+        if found is None:
+            raise HTTPException(404, f"no sign-in with forge {forge!r} here")
+        return found
+
+    async def _sign_in(
+        request: Request, f: ForgeSignIn, token: str, source: str
+    ) -> Any:
+        try:
+            who = await f.who(token)
+        except Exception as e:
+            raise HTTPException(401, f"{f.name} did not accept the token") from e
+        login = person_on(f.forge, who["login"])
+        await remember_token(request, login, token, source)
+        user = User(
+            login=login,
+            name=who.get("name") or login,
+            avatar_url=who.get("avatar_url", ""),
+        )
+        return _login_response(request, user, redirect=None)
+
+    @r.post("/auth/forges/{forge}/start")
+    async def forge_start(forge: str) -> dict[str, Any]:
+        """Sign in on another forge with its CLI's one-time code (device flow)."""
+        f = _forge(forge)
+        if f.device is None:
+            raise HTTPException(404, f"{f.name} takes a token here, not a device code")
+        now = time.time()
+        for fid, flow in list(forge_flows.items()):
+            if flow["exp"] < now:
+                flow["login"].discard()
+                forge_flows.pop(fid, None)
+        if len(forge_flows) >= 10:
+            raise HTTPException(429, "too many sign-ins in progress; try again shortly")
+        flow_id = secrets.token_urlsafe(12)
+        login = f.device(flow_id)
+        try:
+            started = await login.start()
+        except ValueError as e:
+            login.discard()
+            raise HTTPException(503, str(e)) from e
+        forge_flows[flow_id] = {"login": login, "exp": now + 900, "forge": forge}
+        return {"flow_id": flow_id, **started}
+
+    @r.post("/auth/forges/{forge}/poll")
+    async def forge_poll(request: Request, forge: str, body: dict[str, str]) -> Any:
+        f = _forge(forge)
+        flow = forge_flows.get(body.get("flow_id", ""))
+        if flow is None or flow["forge"] != forge:
+            raise HTTPException(404, "unknown or expired sign-in")
+        login = flow["login"]
+        state = login.state()
+        if state == "pending":
+            return JSONResponse({"pending": True}, status_code=202)
+        token = await login.token() if state == "done" else None
+        login.discard()
+        forge_flows.pop(body.get("flow_id", ""), None)
+        if not token:
+            raise HTTPException(
+                401, f"{f.name} did not complete the sign-in; try again"
+            )
+        return await _sign_in(request, f, token, "device")
+
+    @r.post("/auth/forges/{forge}/token")
+    async def forge_token(request: Request, forge: str, body: dict[str, str]) -> Any:
+        """Sign in on another forge with a personal access token, which the service
+        keeps as it keeps a device sign-in's token."""
+        token = (body.get("token") or "").strip()
+        if not token or len(token) > 4000:
+            raise HTTPException(422, "paste a personal access token")
+        return await _sign_in(request, _forge(forge), token, "token")
+
     @r.get("/auth/config")
-    async def auth_config() -> dict[str, bool]:
+    async def auth_config() -> dict[str, Any]:
         """Which sign-in methods this instance offers."""
         return {
             "dev_login": dev,
             "links": links_path is not None,
             "gh": gh_signin is not None and not gh_missing(),
             "gh_missing": gh_missing(),
+            "forges": [
+                {"id": f.forge, "name": f.name, "device": f.device is not None}
+                for f in other.values()
+            ],
         }
 
     @r.post("/auth/logout")

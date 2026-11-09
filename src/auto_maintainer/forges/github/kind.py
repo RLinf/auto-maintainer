@@ -17,6 +17,8 @@ reached as the GitHub CLI's login."""
 
 from __future__ import annotations
 
+import httpx
+
 from ...domain.forges import ForgeCapabilities, ForgeInfo, ForgeTerms
 from ..base import ForgeEndpoints, ForgeKind, ForgeSite
 from .auth import StaticTokenProvider
@@ -68,8 +70,10 @@ async def build(site: ForgeSite) -> ForgeEndpoints:
     tokens = StaticTokenProvider(None, gh_config_dir=site.cli_config_dir)
     client = GitHubClient(tokens, api_url=site.api_url)
     reader = GitHubReader(client)
-    socket = site.data_dir / "sandbox" / (
-        "github.sock" if site.id == "github" else f"{site.id}.sock"
+    socket = (
+        site.data_dir
+        / "sandbox"
+        / ("github.sock" if site.id == "github" else f"{site.id}.sock")
     )
     api_host = site.api_url.split("://", 1)[-1].split("/", 1)[0]
 
@@ -90,14 +94,37 @@ async def build(site: ForgeSite) -> ForgeEndpoints:
         token=tokens.token,
         git_user="x-access-token",
         writer_for_token=writer_for_token,
-        read_proxy=GitHubReadProxy(socket, lambda: tokens.token(None), api_host=api_host),
+        read_proxy=GitHubReadProxy(
+            socket, lambda: tokens.token(None), api_host=api_host
+        ),
     )
+
+
+async def who(api_url: str, token: str) -> dict[str, str]:
+    async with httpx.AsyncClient(timeout=20, trust_env=True) as client:
+        r = await client.get(
+            f"{api_url.rstrip('/')}/user",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "User-Agent": "auto-maintainer",
+            },
+        )
+        r.raise_for_status()
+        data = r.json()
+    return {
+        "login": str(data["login"]),
+        "name": str(data.get("name") or data["login"]),
+        "avatar_url": str(data.get("avatar_url") or ""),
+    }
 
 
 GITHUB = ForgeKind(
     name="github",
+    title="GitHub",
     describe=describe,
     build=build,
     verify_webhook=verify_signature,
     webhook_target=hint,
+    who=who,
+    webhook_headers=("X-Hub-Signature-256", "X-GitHub-Event"),
 )

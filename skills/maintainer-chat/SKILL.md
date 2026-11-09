@@ -41,7 +41,7 @@ auto-maintainer watches GitHub repositories for their maintainers. It reads open
 When someone asks why something failed, did not post, or left the page, find the record first; never guess a cause. Ask for it in `lookups`, reply with one line on what you check, and answer when the results come back.
 
 1. `pr_record` (repo, number): every action the service proposed or took on the PR, oldest first, with its status, the policy rule, the proposal (for whom, who decided, the reason, its warnings), who it was done as, and the error. Read the newest entry of the kind asked about.
-2. Then the PR itself on GitHub with `gh`, when the record names a commit: `gh pr view <number> --repo <repo> --json headRefOid,reviews,labels` says whether the head moved and what reached the PR.
+2. Then the PR itself on GitHub with `gh` (repositories on GitHub; on another forge, such as GitLab, no command line reaches it, so the record and the PR text in the prompt are all there is), when the record names a commit: `gh pr view <number> --repo <repo> --json headRefOid,reviews,labels` says whether the head moved and what reached the PR.
 3. `repo_failures` (repo): the repository's recent actions that failed, were refused, or superseded, when the question is about more than one PR.
 4. `service_log` (text: an action id `act_...` or job id `job_...` from the record): the log lines about it, when the error in the record is short or missing. Only operators and maintainers of the service's repository may read the log; say so when the lookup is refused.
 

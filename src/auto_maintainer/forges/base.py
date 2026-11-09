@@ -77,11 +77,18 @@ class ForgeKind:
     """One kind of forge: how to describe a site and build its adapters."""
 
     name: str
+    title: str
+    """How people call it: GitHub, GitLab."""
     describe: Callable[[ForgeSite], ForgeInfo]
     build: Callable[[ForgeSite], Awaitable[ForgeEndpoints]]
     verify_webhook: Callable[[bytes, bytes, str | None], bool] | None = None
     """Whether a delivery's body matches its signature header for a secret."""
-    webhook_target: Callable[[str, dict[str, Any]], tuple[str, int | None] | None] | None = (
-        None
-    )
+    webhook_target: (
+        Callable[[str, dict[str, Any]], tuple[str, int | None] | None] | None
+    ) = None
     """Which repository (as the forge names it) and change a delivery is about."""
+    who: Callable[[str, str], Awaitable[dict[str, str]]] | None = None
+    """``(api_url, token)`` to the token's person: ``login`` as the forge spells it,
+    ``name``, ``avatar_url``; raises when the token does not work."""
+    webhook_headers: tuple[str, str] = ("X-Hub-Signature-256", "X-GitHub-Event")
+    """The headers carrying a delivery's signature (or token) and its event name."""

@@ -33,7 +33,7 @@ from ..domain.events import Event, EventKind
 from ..domain.ids import short_sha
 from ..domain.snapshot import PrState
 from .base import Playbook, PlaybookContext, PlaybookResult, may_succeed_later
-from .prompts import NO_CODE_RULE, pr_block, untrusted
+from .prompts import no_code_rule, pr_block, untrusted
 
 RESOLVE = """You are resolving merge conflicts for {reviewer}, a maintainer, inside an automated maintainer service. The working directory is a checkout of PR #{number}'s head with `{base}` merged into it; the files listed below still have conflict markers.
 - Resolve every conflict in those files, keeping what both sides meant: the PR's change and what landed on `{base}` since it branched. When they cannot both stand, keep `{base}`'s behavior and adapt the PR's change to it.
@@ -110,7 +110,7 @@ class MergeBasePlaybook(Playbook):
                                 reviewer=by,
                                 number=pr.number,
                                 base=base,
-                                no_code=NO_CODE_RULE,
+                                no_code=no_code_rule(pr.repo),
                                 public_language=profile.languages.public,
                             ),
                             "Files with conflicts:\n"

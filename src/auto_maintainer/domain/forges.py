@@ -289,7 +289,11 @@ class ForgeInfo:
     web_url: str = "https://github.com"
     capabilities: ForgeCapabilities = field(default_factory=ForgeCapabilities)
     terms: ForgeTerms = field(default_factory=ForgeTerms)
-    codeowners: tuple[str, ...] = (".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS")
+    codeowners: tuple[str, ...] = (
+        ".github/CODEOWNERS",
+        "CODEOWNERS",
+        "docs/CODEOWNERS",
+    )
     """Where the forge looks for CODEOWNERS, first to last."""
     change_url: str = "{web}/{path}/pull/{number}"
     file_url: str = "{web}/{path}/blob/{ref}/{file}"

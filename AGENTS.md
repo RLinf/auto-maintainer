@@ -32,6 +32,7 @@ uv run am logs -f | am status | am stop   # follow the log, check, stop the back
 uv run am supervise [serve options]       # the same in the foreground: restarts after a deploy, rolls back a failed one
 uv run am serve --dev                     # real forge: only sandbox_repo, or every repository at shadow
 uv run am repo add <owner>/<repo>         # start onboarding (needs your gh identity to pass the gate)
+uv run am forge add|login|list            # serve another forge (GitLab), sign the service in there
 uv run am repo rename <old> <new>         # fix a repository's letter case to GitHub's (stop the service first)
 uv run am profile show|doctor <owner>/<repo>
 uv run am import evaluations <file> --repo <owner>/<repo>
@@ -56,7 +57,7 @@ pre-commit run --all-files
 - `actuator/` – `pipeline.py` (policy, proposals, approvals), `executor.py` (per-repository queues, intents, staleness), `handlers.py` (one per action kind), `memory_gate.py`.
 - `engine/` – event bus, jobs and waits, poller, scheduler, the question desk (`questions.py`) where agents' questions wait for reviewers, and each job's live agent steps (`progress.py`).
 - Adapters: `forges/` (one package per forge kind, such as `github/` with its read proxy for agents; `registry.py`, and `router.py` handing each call to the repository's forge), `agents/` (`exec.py` with two-way `Conversation`s, `acp.py`, `approver.py`, `container.py` and `agent.Dockerfile` for each run's container, `adapters/`, `router.py`), `memory/`, `workspace/` (worktrees, and `publish` for the actuator), `labs/`, `store/` (SQLite, and `secrets.py` for API keys), `notify/`, `selfupdate/` (`updater.py` deploys the service's own checkout, `supervise.py`), plus `subproc.py`.
-- `hostsetup.py` – the steps of the setup page (the GitHub CLI login the service acts as, memory repo), which write `local.yaml`; `config.py` reads and writes it. `ghcli.py` installs the GitHub CLI into the data folder when the host has none. `tls.py` makes the HTTPS certificate when the host has none.
+- `hostsetup.py` – the steps of the setup page (the GitHub CLI login the service acts as, memory repo), which write `local.yaml`; `config.py` reads and writes it. `ghcli.py` and `glabcli.py` install the GitHub and GitLab CLIs into the data folder when the host has none. `tls.py` makes the HTTPS certificate when the host has none.
 - `web/` – FastAPI app, sign-in (the GitHub CLI's one-time code, and one-time links), the dashboard API, chat, `jobs.py` (agents' work, live), `settings.py` (the service settings and test machines), `setup.py` (the setup page). `testing/` – fakes of every port, `Harness`, the demo data.
 - `packs/<name>/pack.yaml` – built-in packs. `skills/<name>/SKILL.md` – skills the service gives its runtime agents. `config/defaults/` – default profile (every repository action in `shadow`), routing, schedules.
 - `ui/` – React, TypeScript, Vite dashboard; `npm run build` writes into `src/auto_maintainer/web/static/`, which is not in git. `am serve` runs that build at startup whenever it is missing or older than `ui/` (`web/dashboard.py`), so Node 20+ is needed wherever the service runs from a checkout.

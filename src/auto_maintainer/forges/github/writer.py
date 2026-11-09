@@ -89,7 +89,7 @@ class GitHubWriter:
         return CommentRef(id=int(data["id"]), url=data.get("html_url") or "")
 
     async def update_comment(
-        self, repo: str, comment_id: int, body: PublicText
+        self, repo: str, number: int, comment_id: int, body: PublicText
     ) -> None:
         await self._client.patch(
             f"/repos/{repo}/issues/comments/{comment_id}",
@@ -97,7 +97,7 @@ class GitHubWriter:
             json={"body": _public(body, repo, "body")},
         )
 
-    async def delete_comment(self, repo: str, comment_id: int) -> None:
+    async def delete_comment(self, repo: str, number: int, comment_id: int) -> None:
         await self._client.delete(
             f"/repos/{repo}/issues/comments/{comment_id}", repo=repo, allow=(404,)
         )

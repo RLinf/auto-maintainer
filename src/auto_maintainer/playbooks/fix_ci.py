@@ -30,6 +30,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..domain import forges
 from ..domain.actions import ActionKind, ActionStatus, FixPrPayload, make_action
 from ..domain.agents import AgentTask, TaskKind
 from ..domain.events import Event, EventKind
@@ -40,8 +41,22 @@ from .base import Playbook, PlaybookContext, PlaybookResult, Wait, may_succeed_l
 from .fix import DESCRIBE, FixResult
 from .prompts import pr_block, review_skill_block, schema_hint, untrusted
 
+
+def _read_log(repo: str) -> str:
+    """How the agent reads a failed job, on the forge ``repo`` is on."""
+    if forges.info_of(repo).kind == "github":
+        return (
+            f"read its log (`gh run view RUN_ID --log-failed --repo {repo}`, or `gh api` "
+            "for a job's log), the workflow that runs it under `.github/workflows/`"
+        )
+    return (
+        "read the failure the service quotes for it below, and the CI configuration "
+        "that runs it in the checkout (such as `.gitlab-ci.yml`)"
+    )
+
+
 FIX_CI = """You are fixing the failing CI of a pull request for {who}, inside an automated maintainer service. The working directory is a checkout of the PR's head commit.
-- Find why each failed job below fails: read its log (`gh run view RUN_ID --log-failed --repo {repo}`, or `gh api` for a job's log), the workflow that runs it under `.github/workflows/`, and the service's diagnosis when there is one.
+- Find why each failed job below fails: {read_log}, and the service's diagnosis when there is one.
 - Fix what the PR's change causes, in the PR's code, with the smallest change that makes the job pass; keep the PR author's approach. A failure the PR does not cause (a flaky test, the CI runner, a base branch that fails without this PR) is not yours to fix: say so and leave it.
 - Do not commit, push, or post, and never ask whether to: the service shows your changes to {who}, who decides whether to push them.
 {test}
@@ -173,7 +188,7 @@ class FixCiPlaybook(Playbook):
                 for part in [
                     FIX_CI.format(
                         who=f"{by}, a maintainer",
-                        repo=pr.repo,
+                        read_log=_read_log(pr.repo),
                         test=ON_MACHINE.format(lab=lab) if token else NO_MACHINE,
                         public_language=profile.languages.public,
                     ),

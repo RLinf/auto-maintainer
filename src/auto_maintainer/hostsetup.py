@@ -219,6 +219,190 @@ class GhLogin:
         self.proc = None
 
 
+class GlabLogin:
+    """``glab auth login --device`` run for a browser: GitLab's OAuth device flow, in
+    which the person enters a one-time code on the GitLab site (GitLab 17.9 or later;
+    a self-managed instance also needs an OAuth application, whose ``client_id`` is
+    set for its host first). The login lands in ``config_dir`` (``GLAB_CONFIG_DIR``),
+    never in the host user's own GitLab CLI configuration. ``throwaway`` is for a
+    person signing in to the dashboard: ``discard`` deletes the folder afterwards.
+
+    ``with_token`` signs in with a personal access token instead, for instances
+    without the device flow; the token goes in on standard input.
+    """
+
+    CODE = re.compile(r"one-time code:\s*([A-Za-z0-9-]{4,})")
+    URL = re.compile(r"(https://\S+/oauth/device)")
+
+    def __init__(
+        self,
+        config_dir: Path,
+        web_url: str = "https://gitlab.com",
+        *,
+        throwaway: bool = False,
+        client_id: str | None = None,
+    ) -> None:
+        self.config_dir = config_dir
+        self.throwaway = throwaway
+        self.client_id = client_id
+        self.host = web_url.split("://", 1)[-1].split("/", 1)[0]
+        self.proc: asyncio.subprocess.Process | None = None
+        self.output: list[str] = []
+        self._done: asyncio.Task[None] | None = None
+
+    def env(self) -> dict[str, str]:
+        self.config_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GITLAB_")}
+        return {
+            **env,
+            "GLAB_CONFIG_DIR": str(self.config_dir),
+            "GIT_CONFIG_GLOBAL": str(self.config_dir / "gitconfig"),
+            "BROWSER": "true",
+            "NO_COLOR": "1",
+        }
+
+    async def _client_id(self, binary: str) -> None:
+        if self.client_id:
+            await subproc.run(
+                [
+                    binary,
+                    "config",
+                    "set",
+                    "client_id",
+                    self.client_id,
+                    "--host",
+                    self.host,
+                ],
+                env=self.env(),
+                timeout=20,
+            )
+
+    async def start(self, timeout: float = 30) -> dict[str, str]:
+        """Start the device flow and return the code and the page to enter it on."""
+        binary = shutil.which("glab")
+        if binary is None:
+            raise SetupError("the GitLab CLI is not installed on this host")
+        self.cancel()
+        self.output = []
+        await self._client_id(binary)
+        self.proc = await asyncio.create_subprocess_exec(
+            binary,
+            "auth",
+            "login",
+            "--hostname",
+            self.host,
+            "--device",
+            "--git-protocol",
+            "https",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            env=self.env(),
+            start_new_session=True,
+        )
+        assert self.proc.stdout
+        code = url = None
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while code is None or url is None:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            try:
+                raw = await asyncio.wait_for(self.proc.stdout.readline(), remaining)
+            except TimeoutError:
+                break
+            if not raw:
+                break
+            line = raw.decode("utf-8", "replace").strip()
+            self.output.append(line)
+            code = code or (m.group(1) if (m := self.CODE.search(line)) else None)
+            url = url or (m.group(1) if (m := self.URL.search(line)) else None)
+        if code is None or url is None:
+            self.cancel()
+            raise SetupError(
+                "the GitLab CLI did not start a device login (GitLab 17.9 or later, "
+                "and on a self-managed instance an OAuth application's client id, are "
+                "needed; or sign in with a token): " + " ".join(self.output[-3:])
+            )
+        self._done = asyncio.create_task(self._drain())
+        return {"code": code, "url": url}
+
+    async def with_token(self, token: str) -> None:
+        """Sign in with a personal access token, given on standard input."""
+        binary = shutil.which("glab")
+        if binary is None:
+            raise SetupError("the GitLab CLI is not installed on this host")
+        result = await subproc.run(
+            [
+                binary,
+                "auth",
+                "login",
+                "--hostname",
+                self.host,
+                "--stdin",
+                "--git-protocol",
+                "https",
+            ],
+            env=self.env(),
+            stdin=token.strip() + "\n",
+            timeout=60,
+        )
+        if not result.ok:
+            raise SetupError("the GitLab CLI did not accept the token")
+
+    async def _drain(self) -> None:
+        assert self.proc and self.proc.stdout
+        async for raw in self.proc.stdout:
+            self.output.append(raw.decode("utf-8", "replace").strip())
+        await self.proc.wait()
+
+    def state(self) -> Literal["idle", "pending", "done", "failed"]:
+        if self.proc is None:
+            return "idle"
+        if self.proc.returncode is None:
+            return "pending"
+        return "done" if self.proc.returncode == 0 else "failed"
+
+    async def token(self) -> str | None:
+        binary = shutil.which("glab")
+        if binary is None:
+            return None
+        result = await subproc.run(
+            [binary, "config", "get", "token", "--host", self.host],
+            env=self.env(),
+            timeout=20,
+        )
+        return result.stdout.strip() if result.ok and result.stdout.strip() else None
+
+    def discard(self) -> None:
+        """Stop the login and delete everything it wrote."""
+        self.cancel()
+        shutil.rmtree(self.config_dir, ignore_errors=True)
+
+    def cancel(self) -> None:
+        if self.proc is not None and self.proc.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(self.proc.pid, signal.SIGTERM)
+        if self._done is not None:
+            self._done.cancel()
+        self.proc = None
+
+
+def cli_login(
+    kind: str,
+    config_dir: Path,
+    web_url: str,
+    *,
+    throwaway: bool = False,
+    client_id: str | None = None,
+) -> GhLogin | GlabLogin:
+    """The forge CLI's sign-in for a forge of ``kind`` (design 5.16)."""
+    if kind == "gitlab":
+        return GlabLogin(config_dir, web_url, throwaway=throwaway, client_id=client_id)
+    return GhLogin(config_dir, web_url, throwaway=throwaway)
+
+
 class HostSetup:
     """One setup in progress. Choices stay in memory until ``finish`` writes them."""
 

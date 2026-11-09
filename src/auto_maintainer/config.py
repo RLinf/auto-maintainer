@@ -77,6 +77,9 @@ class ForgeConfig(_Cfg):
     """The forge CLI's login the service acts as (``gh``, ``glab``), made on the
     setup page; unset, the host user's own login with that CLI is used."""
     webhook_secret_env: str = "AM_WEBHOOK_SECRET"
+    oauth_client_id: str | None = None
+    """For a self-managed GitLab: the client id of the OAuth application its device
+    sign-in uses (GitLab 17.9 or later); without one, people sign in with a token."""
 
     @property
     def web(self) -> str:

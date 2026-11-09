@@ -49,9 +49,9 @@ async def test_comment_create_update_delete(client, router):
     writer = GitHubWriter(client)
     ref = await writer.create_comment("acme/widget", 3, public("hi"))
     assert ref.id == 11 and _json(create) == {"body": "hi"}
-    await writer.update_comment("acme/widget", 11, public("edited"))
+    await writer.update_comment("acme/widget", 42, 11, public("edited"))
     assert _json(update) == {"body": "edited"}
-    await writer.delete_comment("acme/widget", 11)
+    await writer.delete_comment("acme/widget", 42, 11)
     assert delete.called
 
 

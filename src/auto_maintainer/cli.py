@@ -42,6 +42,10 @@ profile_app = typer.Typer(help="Repository profiles.", no_args_is_help=True)
 import_app = typer.Typer(
     help="Import state from other tools (design 7.4).", no_args_is_help=True
 )
+forge_app = typer.Typer(
+    help="Forges the service serves (design 5.16).", no_args_is_help=True
+)
+app.add_typer(forge_app, name="forge")
 app.add_typer(repo_app, name="repo")
 app.add_typer(profile_app, name="profile")
 app.add_typer(import_app, name="import")
@@ -300,6 +304,110 @@ def tls(
     typer.echo("Restart the service to serve it: am stop && am start")
 
 
+@forge_app.command("list")
+def forge_list() -> None:
+    """The forges this host serves, the default first, and whether the service is
+    signed in on each."""
+    cfg = _cfg()
+    for i, forge in enumerate(cfg.forges):
+        login = forge.cli_config_dir or "the host user's own CLI login"
+        mark = " (default)" if i == 0 else ""
+        typer.echo(f"{forge.id}{mark}: {forge.kind} at {forge.web}, as {login}")
+
+
+@forge_app.command("add")
+def forge_add(
+    forge_id: str,
+    kind: str = typer.Option("gitlab", help="github or gitlab"),
+    web_url: str = typer.Option("", help="Its web address; empty for the public one."),
+    api_url: str = typer.Option("", help="Its API's address; empty for the usual one."),
+    oauth_client_id: str = typer.Option(
+        "", help="A self-managed GitLab's OAuth application, for device sign-in."
+    ),
+) -> None:
+    """Serve repositories on one more forge; then sign the service in there with
+    ``am forge login``. Names on it begin with ``<forge_id>:``."""
+    from .config import ForgeConfig, is_configured, save_host_config
+
+    if not is_configured():
+        typer.echo("set the host up first (am serve, then the setup page)", err=True)
+        raise typer.Exit(1)
+    cfg = load_host_config()
+    if any(f.id == forge_id for f in cfg.forges):
+        typer.echo(f"there is a forge {forge_id!r} already", err=True)
+        raise typer.Exit(1)
+    web = web_url.rstrip("/")
+    try:
+        forge = ForgeConfig(
+            id=forge_id,
+            kind=kind,  # type: ignore[arg-type]
+            web_url=web,
+            api_url=api_url or (f"{web}/api/v4" if kind == "gitlab" and web else ""),
+            oauth_client_id=oauth_client_id or None,
+        )
+        cfg.forges.append(forge)
+        cfg = type(cfg).model_validate(cfg.model_dump())
+    except ValueError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(1) from e
+    save_host_config(cfg)
+    typer.echo(
+        f"added {forge_id}: {kind} at {forge.web}. Next: am forge login {forge_id}"
+    )
+
+
+@forge_app.command("login")
+def forge_login(
+    forge_id: str,
+    token_stdin: bool = typer.Option(
+        False, "--token-stdin", help="Read a personal access token from standard input."
+    ),
+) -> None:
+    """Sign the service in on a forge, as the account it acts as there: the forge
+    CLI's one-time code, or a personal access token. The login is kept in the
+    service's own CLI folder for that forge, never the host user's."""
+    import sys
+
+    from .config import CONFIG_DIR, save_host_config
+    from .hostsetup import GlabLogin, cli_login
+
+    cfg = _cfg()
+    try:
+        forge = cfg.forge(forge_id)
+    except KeyError:
+        typer.echo(f"no forge {forge_id!r}; see am forge list", err=True)
+        raise typer.Exit(1) from None
+    if forge.kind == "gitlab" and shutil.which("glab") is None:
+        from . import glabcli
+
+        typer.echo("installing the GitLab CLI into the data folder")
+        asyncio.run(glabcli.install(cfg.data_path))
+    folder = CONFIG_DIR / ("gh" if forge.kind == "github" else f"glab/{forge_id}")
+    login = cli_login(forge.kind, folder, forge.web, client_id=forge.oauth_client_id)
+
+    async def run() -> bool:
+        if token_stdin:
+            if not isinstance(login, GlabLogin):
+                typer.echo("--token-stdin is for GitLab forges", err=True)
+                return False
+            await login.with_token(sys.stdin.read())
+            return True
+        started = await login.start()
+        typer.echo(f"Open {started['url']} and enter the code {started['code']}")
+        while login.state() == "pending":
+            await asyncio.sleep(2)
+        return login.state() == "done"
+
+    if not asyncio.run(run()):
+        typer.echo("the sign-in did not complete", err=True)
+        raise typer.Exit(1)
+    forge.cli_config_dir = str(folder)
+    save_host_config(cfg)
+    typer.echo(
+        f"signed in on {forge_id}. Restart the service to use it: am stop && am start"
+    )
+
+
 STOP_SECONDS = 15.0
 """How long the service may take to stop after the web server has."""
 
@@ -318,6 +426,65 @@ def _gh_signin(cfg: HostConfig) -> Any:
     return lambda flow_id: GhLogin(
         root / flow_id, cfg.default_forge.web, throwaway=True
     )
+
+
+def _webhooks(cfg: HostConfig) -> dict[str, Any]:
+    """How each forge's webhook deliveries are checked (``/webhooks/<forge>``)."""
+    from .forges.registry import kind
+    from .web.app import WebhookCheck
+
+    checks = {}
+    for forge in cfg.forges:
+        k = kind(forge.kind)
+        if k.verify_webhook and k.webhook_target:
+            checks[forge.id] = WebhookCheck(
+                k.verify_webhook,
+                k.webhook_target,
+                forge.webhook_secret_env,
+                k.webhook_headers[0].lower(),
+                k.webhook_headers[1].lower(),
+            )
+    return checks
+
+
+def _forge_signins(cfg: HostConfig) -> dict[str, Any]:
+    """Signing in with an account on each forge besides the default one, whose people
+    sign in with the GitHub CLI (``_gh_signin``): the forge CLI's device code, each in
+    a throwaway folder, or a personal access token."""
+    from functools import partial
+
+    from .forges.registry import kind
+    from .hostsetup import cli_login
+    from .web.auth import ForgeSignIn
+
+    root = cfg.data_path / "sign-in"
+    out = {}
+    for forge in cfg.forges[1:]:
+        k = kind(forge.kind)
+        if k.who is None:
+            continue
+        device_ok = (
+            forge.kind != "gitlab"
+            or forge.web == "https://gitlab.com"
+            or bool(forge.oauth_client_id)
+        )
+        out[forge.id] = ForgeSignIn(
+            forge=forge.id,
+            name=f"{k.title} ({forge.host})",
+            who=partial(k.who, forge.api),
+            device=(
+                lambda flow_id, f=forge: cli_login(
+                    f.kind,
+                    root / flow_id,
+                    f.web,
+                    throwaway=True,
+                    client_id=f.oauth_client_id,
+                )
+            )
+            if device_ok
+            else None,
+        )
+    return out
 
 
 class _Switch:
@@ -370,7 +537,6 @@ class _Host:
         """Build the service for ``cfg`` and put it in place of the current one. If
         building fails, the current one keeps running and the error goes to the caller."""
         from .app import build_service
-        from .forges.github.webhooks import hint, verify_signature
         from .web.app import create_app
 
         new = await build_service(cfg, dev=self.dev)
@@ -378,10 +544,9 @@ class _Host:
             new,
             data_dir=cfg.data_path,
             api_url=cfg.default_forge.api,
-            webhook_secret_env=cfg.default_forge.webhook_secret_env,
             cookie_secure=cfg.cookie_secure or self.https,
-            verify_webhook=verify_signature,
-            webhook_target=hint,
+            webhooks=_webhooks(cfg),
+            forge_signins=_forge_signins(cfg),
             links_path=cfg.data_path / LINKS_FILE,
             gh_signin=_gh_signin(cfg),
             setup_steps=self.steps,

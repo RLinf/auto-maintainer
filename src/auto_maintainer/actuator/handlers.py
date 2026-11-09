@@ -209,7 +209,7 @@ async def _review_update(
     if p.target == "review":
         await x.writer.update_review(action.repo, pr.number, p.target_id, body)
     else:
-        await x.writer.update_comment(action.repo, p.target_id, body)
+        await x.writer.update_comment(action.repo, pr.number, p.target_id, body)
     if p.revises:
         # The posted review now says something else: keep what follow-ups, scores,
         # and the conversation read in step with it.
@@ -274,7 +274,7 @@ async def _comment_upsert(
     if existing is not None:
         if _strip_marker(existing.body) == _strip_marker(body.text):
             raise Noop(f"the {p.purpose} comment is already up to date")
-        await x.writer.update_comment(action.repo, existing.id, body)
+        await x.writer.update_comment(action.repo, pr.number, existing.id, body)
         return {"comment_id": existing.id, "updated": True}
     ref = await x.writer.create_comment(action.repo, pr.number, body)
     return {"comment_id": ref.id, "url": ref.url, "updated": False}

@@ -168,3 +168,92 @@ async def test_the_dashboard_learns_the_forges(tmp_path: Path) -> None:
         assert github["change_url"] == "{web}/{path}/pull/{number}"
     finally:
         await h.close()
+
+
+async def test_a_forge_sees_only_its_own_people(two_forges) -> None:
+    from auto_maintainer.domain.permissions import Permission
+    from auto_maintainer.forges.router import ForgeRouter
+
+    class Perms:
+        def __init__(self) -> None:
+            self.asked: list[tuple] = []
+
+        async def get_permission(self, repo: str, login: str) -> Permission:
+            self.asked.append((repo, login))
+            return Permission.ADMIN
+
+        async def request_reviewers(self, repo, number, logins) -> None:
+            self.asked.append((repo, number, logins))
+
+    hub, corp = Perms(), Perms()
+    router = ForgeRouter({"github": hub, "corp": corp})
+    assert await router.get_permission("corp:a/b", "corp:alice") == Permission.ADMIN
+    assert corp.asked == [("corp:a/b", "alice")], "the forge's own spelling"
+    assert await router.get_permission("corp:a/b", "alice") == Permission.NONE
+    assert await router.get_permission("RLinf/RLinf", "corp:alice") == Permission.NONE
+    assert hub.asked == [], "never asked about someone from another forge"
+    await router.request_reviewers("corp:a/b", 7, ["corp:bob", "carol"])
+    assert corp.asked[-1] == ("corp:a/b", 7, ["bob"])
+
+
+async def test_people_sign_in_on_another_forge_as_that_forges_people(
+    two_forges, tmp_path: Path, monkeypatch
+) -> None:
+    from auto_maintainer.forges.gitlab.webhooks import hint, verify_token
+    from auto_maintainer.web.app import WebhookCheck
+    from auto_maintainer.web.auth import ForgeSignIn
+
+    async def who(token: str) -> dict[str, str]:
+        if token != "glpat-good":
+            raise ValueError("bad token")
+        return {"login": "alice", "name": "Alice", "avatar_url": ""}
+
+    monkeypatch.setenv("AM_CORP_HOOK", "s3cret")
+    h = await build_demo(tmp_path)
+    try:
+        app = create_app(
+            h.service,
+            data_dir=tmp_path,
+            forge_signins={"corp": ForgeSignIn(forge="corp", name="GitLab", who=who)},
+            webhooks={
+                "corp": WebhookCheck(
+                    verify_token,
+                    hint,
+                    "AM_CORP_HOOK",
+                    "x-gitlab-token",
+                    "x-gitlab-event",
+                )
+            },
+        )
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as browser:
+            config = (await browser.get("/auth/config")).json()
+            assert config["forges"] == [
+                {"id": "corp", "name": "GitLab", "device": False}
+            ]
+            bad = await browser.post("/auth/forges/corp/token", json={"token": "nope"})
+            assert bad.status_code == 401
+            ok = await browser.post(
+                "/auth/forges/corp/token", json={"token": "glpat-good"}
+            )
+            assert ok.json() == {"login": "corp:alice"}
+            me = (await browser.get("/api/me")).json()
+            assert me["login"] == "corp:alice"
+            payload = {
+                "object_kind": "merge_request",
+                "project": {"path_with_namespace": "grp/proj"},
+                "object_attributes": {"iid": 3},
+            }
+            wrong = await browser.post(
+                "/webhooks/corp", json=payload, headers={"X-Gitlab-Token": "x"}
+            )
+            right = await browser.post(
+                "/webhooks/corp", json=payload, headers={"X-Gitlab-Token": "s3cret"}
+            )
+            nowhere = await browser.post("/webhooks/other", json=payload)
+        assert wrong.status_code == 401
+        assert right.json() == {"ignored": True}, "corp:grp/proj is not served here"
+        assert nowhere.status_code == 404
+    finally:
+        await h.close()

@@ -27,7 +27,8 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
-from ..domain.forges import default_forge, parse_repo
+from ..domain.forges import default_forge, parse_person, parse_repo
+from ..domain.permissions import Permission
 
 
 class ForgeRouter:
@@ -53,6 +54,36 @@ class ForgeRouter:
     async def service_login(self) -> str:
         """The login the service acts as on the default forge."""
         return await self.at(default_forge()).service_login()
+
+    # People are named by forge (``domain/forges.py``); a forge sees only its own
+    # people, by the login it knows them by.
+
+    def _here(self, repo: str, login: str) -> str | None:
+        """``login`` as ``repo``'s forge spells it; ``None`` for someone elsewhere."""
+        try:
+            person = parse_person(login)
+        except ValueError:
+            return None
+        return person.login if person.forge == parse_repo(repo).forge else None
+
+    async def get_permission(self, repo: str, login: str) -> Permission:
+        local = self._here(repo, login)
+        if local is None:
+            return Permission.NONE
+        return await self.for_repo(repo).get_permission(repo, local)
+
+    async def is_team_member(self, repo: str, team: str, login: str) -> bool:
+        local = self._here(repo, login)
+        if local is None:
+            return False
+        return await self.for_repo(repo).is_team_member(repo, team, local)
+
+    async def request_reviewers(
+        self, repo: str, number: int, logins: list[str]
+    ) -> None:
+        local = [x for x in (self._here(repo, login) for login in logins) if x]
+        if local:
+            await self.for_repo(repo).request_reviewers(repo, number, local)
 
     def __getattr__(self, name: str) -> Callable[..., Awaitable[Any]]:
         if name.startswith("_"):

@@ -438,9 +438,7 @@ class GitWorkspace:
                 await run(["git", "rev-parse", "HEAD"], cwd=path, check=True)
             ).stdout.strip()
             remote = (
-                self.remote_url(push_to)
-                if push_to and push_to != repo
-                else "origin"
+                self.remote_url(push_to) if push_to and push_to != repo else "origin"
             )
             await self._git(
                 repo, "push", "-q", remote, f"HEAD:refs/heads/{branch}", cwd=path

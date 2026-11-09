@@ -45,7 +45,7 @@ from ..domain.memory import MemoryChangeState
 from ..domain.records import ChatMessage, ChatThread
 from ..domain.secrets import redact_secrets
 from ..playbooks.governance import TALK, PeopleTurn, base_record, record_block, revised
-from ..playbooks.prompts import NO_CODE_RULE, schema_hint, told_block
+from ..playbooks.prompts import no_code_rule, schema_hint, told_block
 from ..service import Service
 from .api import _repo, require_view, service_of
 from .auth import User, current_user
@@ -218,7 +218,7 @@ async def _turn(
             TALK.format(
                 repo=repo,
                 by=user.login,
-                no_code=NO_CODE_RULE,
+                no_code=no_code_rule(repo),
                 language=profile.languages.internal,
             ),
             # Reviewers' messages are the task, earlier ones included; the

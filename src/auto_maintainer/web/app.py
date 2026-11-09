@@ -19,7 +19,8 @@ from __future__ import annotations
 import hmac
 import json
 import os
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
+from ..domain.forges import check_repo, default_forge
 from ..service import Service
 from . import (
     api,
@@ -44,6 +46,17 @@ from . import (
 from .dashboard import STATIC, missing_page
 
 
+@dataclass(frozen=True)
+class WebhookCheck:
+    """How one forge's webhook deliveries are checked and read (its ``ForgeKind``)."""
+
+    verify: Callable[[bytes, bytes, str | None], bool]
+    target: Callable[[str, dict[str, Any]], tuple[str, int | None] | None]
+    secret_env: str = "AM_WEBHOOK_SECRET"
+    signature_header: str = "x-hub-signature-256"
+    event_header: str = "x-github-event"
+
+
 def create_app(
     service: Service,
     *,
@@ -57,6 +70,8 @@ def create_app(
     allow_dev_login: bool = False,
     links_path: Path | None = None,
     gh_signin: Callable[[str], Any] | None = None,
+    forge_signins: Mapping[str, auth.ForgeSignIn] | None = None,
+    webhooks: Mapping[str, WebhookCheck] | None = None,
     setup_steps: Callable[[], Any] | None = None,
     on_host_change: Callable[[Any], Awaitable[None]] | None = None,
     log_path: Path | None = None,
@@ -89,7 +104,15 @@ def create_app(
 
     install_csrf(app)
 
-    app.include_router(auth.router(api_url, allow_dev_login, links_path, gh_signin))
+    app.include_router(
+        auth.router(api_url, allow_dev_login, links_path, gh_signin, forge_signins)
+    )
+    checks = dict(webhooks or {})
+    if verify_webhook is not None and webhook_target is not None:
+        checks.setdefault(
+            "github",
+            WebhookCheck(verify_webhook, webhook_target, webhook_secret_env),
+        )
     app.include_router(api.build_router())
     app.include_router(chat.build_router())
     app.include_router(settings.build_router())
@@ -135,22 +158,29 @@ def create_app(
 
     install_authority(app, ca_cert)
 
-    @app.post("/webhooks/github")
-    async def webhook(request: Request) -> dict[str, Any]:
-        if verify_webhook is None or webhook_target is None:
+    @app.post("/webhooks/{forge}")
+    async def webhook(request: Request, forge: str) -> dict[str, Any]:
+        """A forge's delivery: checked as its kind checks them, it starts a poll of
+        the repository it names, which is trusted for nothing else."""
+        check = checks.get(forge)
+        if check is None:
             raise HTTPException(404, "webhooks are not enabled")
-        secret = os.environ.get(webhook_secret_env)
+        secret = os.environ.get(check.secret_env)
         body = await request.body()
-        if not secret or not verify_webhook(
-            secret.encode(), body, request.headers.get("x-hub-signature-256")
+        if not secret or not check.verify(
+            secret.encode(), body, request.headers.get(check.signature_header)
         ):
             raise HTTPException(401, "bad signature")
-        target = webhook_target(
-            request.headers.get("x-github-event", ""), json.loads(body or b"{}")
+        target = check.target(
+            request.headers.get(check.event_header, ""), json.loads(body or b"{}")
         )
         if target is None:
             return {"ignored": True}
-        repo, _number = target
+        path, _number = target
+        try:
+            repo = check_repo(path if forge == default_forge() else f"{forge}:{path}")
+        except ValueError:
+            return {"ignored": True}
         record = await service.store.get_repo(repo)
         if record is None or not record.active:
             return {"ignored": True}

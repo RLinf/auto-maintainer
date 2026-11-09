@@ -19,8 +19,9 @@ from __future__ import annotations
 
 from .base import ForgeKind
 from .github.kind import GITHUB
+from .gitlab.kind import GITLAB
 
-KINDS: dict[str, ForgeKind] = {GITHUB.name: GITHUB}
+KINDS: dict[str, ForgeKind] = {GITHUB.name: GITHUB, GITLAB.name: GITLAB}
 
 
 def kind(name: str) -> ForgeKind:

@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from ..domain import forges
 from ..domain.agents import REPO_SKILL_FOLDERS, parse_skill
 from ..domain.profile import DEFAULT_SECTIONS, RepoProfile
 from ..domain.snapshot import PrSnapshot
@@ -87,18 +88,39 @@ def skill_instruction(profile: RepoProfile, skills_dir: Path) -> str:
     return f"Follow the review skill {skill!r}."
 
 
-NO_CODE_RULE = (
+_NO_CODE = (
     "- Do not run the PR's tests, builds, or workflow here: its code is reproduced on "
     "the repository's test machines, through the service's reproduction (its record is "
     "below, or there is none). Read the code and its git history instead, and say what "
     "a run on a test machine should check; the scripts in the repository's skill folders "
-    "may run. To read GitHub (this PR's reviews and comments, other PRs, issues, CI "
-    "runs), use gh, such as gh pr view --comments, gh pr diff, gh issue view, gh run "
-    "view, or gh api; it reads only."
+    "may run."
 )
-"""What every agent working on a target repository reads about running code. It is
-guidance: the agent runs in its own container (design 5.7), where nothing it does
-reaches the service, and a reproduction runs on a test machine."""
+_READ_GITHUB = (
+    " To read GitHub (this PR's reviews and comments, other PRs, issues, CI runs), use "
+    "gh, such as gh pr view --comments, gh pr diff, gh issue view, gh run view, or gh "
+    "api; it reads only."
+)
+
+
+def no_code_rule(repo: str | None = None) -> str:
+    """What every agent working on a target repository reads about running code, and
+    how it reads the forge ``repo`` is on: ``gh`` through the service's read proxy on
+    GitHub; elsewhere no forge CLI reaches the forge from the agent's container, so it
+    works from what its prompt includes and the checkout. It is guidance: the agent
+    runs in its own container (design 5.7), where nothing it does reaches the service,
+    and a reproduction runs on a test machine."""
+    forge = forges.info_of(repo) if repo else forges.info(forges.default_forge())
+    if forge.kind == "github":
+        return _NO_CODE + _READ_GITHUB
+    return (
+        f"{_NO_CODE} This repository is on {forge.terms.forge_name}, which no command "
+        "line here reaches: read its change, discussion, and CI from what this prompt "
+        "includes, and the code and its history from the checkout."
+    )
+
+
+NO_CODE_RULE = no_code_rule()
+"""``no_code_rule`` for a repository on a GitHub forge."""
 
 HEADLESS = """You are running headless inside an automated maintainer service.
 - Do not ask questions, do not post anything, do not push, and do not edit files.
@@ -112,7 +134,8 @@ def headless(profile: RepoProfile, testing: str | None = None) -> str:
     """Instructions for a review nobody waits on; ``testing`` replaces the rule
     against running code when the review has a test machine."""
     return HEADLESS.format(
-        public_language=profile.languages.public, no_code=testing or NO_CODE_RULE
+        public_language=profile.languages.public,
+        no_code=testing or no_code_rule(profile.repo),
     )
 
 
@@ -130,7 +153,7 @@ def interactive(profile: RepoProfile, reviewer: str, testing: str | None = None)
     return INTERACTIVE.format(
         reviewer=reviewer,
         public_language=profile.languages.public,
-        no_code=testing or NO_CODE_RULE,
+        no_code=testing or no_code_rule(profile.repo),
     )
 
 

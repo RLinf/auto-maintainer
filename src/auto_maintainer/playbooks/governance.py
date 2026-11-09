@@ -44,7 +44,7 @@ from ..domain.governance import Governance, role_changes, with_history
 from ..domain.memory import MemoryChange, MemoryChangeState
 from ..profiles.governance import GovernanceRecords, Loaded, render
 from .base import Playbook, PlaybookContext, PlaybookResult, may_succeed_later
-from .prompts import NO_CODE_RULE, schema_hint
+from .prompts import no_code_rule, schema_hint
 
 Mode = Literal["edit", "members"]
 
@@ -202,7 +202,7 @@ class GovernancePlaybook(Playbook):
                     template.format(
                         repo=repo,
                         by=by,
-                        no_code=NO_CODE_RULE,
+                        no_code=no_code_rule(repo),
                         language=profile.languages.internal,
                     ),
                     request_block(by, instruction),
