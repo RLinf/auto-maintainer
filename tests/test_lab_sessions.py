@@ -103,3 +103,30 @@ async def test_lab_refuses_what_the_machine_forbids_and_unknown_tokens(door) -> 
     code, _, err = await _lab(server, token, "--side", "base", "--", "ls")
     assert code == 1 and "no 'base' side" in err
     assert len(host.commands) == before, "nothing ran on the machine"
+
+
+async def test_what_a_login_shell_prints_before_the_command_is_dropped() -> None:
+    from auto_maintainer.labs.hosts import START, LocalLabHost, _AfterStart, after_start
+
+    lines: list[str] = []
+
+    async def seen(text: str) -> None:
+        lines.append(text)
+
+    kept = _AfterStart(seen)
+    for text in [
+        "=== welcome to the cluster ===",
+        "PATH  /opt/bin",
+        START,
+        "ok",
+        "done",
+    ]:
+        await kept.line(text)
+    await kept.flush()
+    assert lines == ["ok", "done"]
+    assert after_start(f"banner\n{START}\nok\n") == "ok\n"
+    assert after_start("no marker\n") == "no marker\n", "nothing is lost without it"
+
+    lines.clear()
+    result = await LocalLabHost("here").run("echo one; exit 3", on_output=seen)
+    assert (result.exit_code, result.stdout, lines) == (3, "one\n", ["one"])

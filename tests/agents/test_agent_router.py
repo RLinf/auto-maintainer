@@ -242,20 +242,47 @@ async def test_adapter_exceptions_become_crash_results() -> None:
 
 
 async def test_health_reports_breakers() -> None:
-    a = ScriptedAgentRuntime("a", [_fail("timeout")])
+    a = ScriptedAgentRuntime("a", [_fail("crash")])
     router, _ = _router(a)
     await router.run(_task(), Route(primary="a"), Verdict)
     [health] = await router.health()
     assert health.available and "circuit open" in health.detail
 
 
-@pytest.mark.parametrize("kind", ["auth", "quota", "crash", "timeout"])
+@pytest.mark.parametrize("kind", ["auth", "quota", "crash"])
 async def test_breaking_failures_open_immediately(kind: str) -> None:
     a = ScriptedAgentRuntime("a", [_fail(kind)], default={"ok": True})
     router, _ = _router(a)
     await router.run(_task(), Route(primary="a"), Verdict)
     second = await router.run(_task(), Route(primary="a"), Verdict)
     assert not second.ok and "circuit open" in (second.error or "")
+
+
+async def test_a_timeout_pauses_only_its_kind_of_task() -> None:
+    a = ScriptedAgentRuntime("a", [_fail("timeout")], default={"ok": True})
+    router, _ = _router(a)
+    long = _task(kind=TaskKind.REPRODUCE)
+    await router.run(long, Route(primary="a"), Verdict)
+    again = await router.run(long, Route(primary="a"), Verdict)
+    assert not again.ok and "circuit open (timeout)" in (again.error or "")
+    review = await router.run(_task(), Route(primary="a"), Verdict)
+    assert review.ok, "a reproduction that ran out of time leaves reviews running"
+
+
+async def test_a_turn_that_ends_early_is_asked_to_finish_the_work() -> None:
+    a = ScriptedAgentRuntime(
+        "a",
+        [_ok("I started the install and will continue once it ends.", session="s1")],
+        default={"ok": True},
+    )
+    router, _ = _router(a)
+    result = await router.run(_task(), Route(primary="a"), Verdict)
+    assert result.ok
+    repair = a.tasks[-1]
+    assert repair.resume_session == "s1"
+    assert (
+        "finish it now" in repair.prompt and "wait for every command" in repair.prompt
+    )
 
 
 async def test_an_agents_own_effort_wins_over_the_routes() -> None:
@@ -268,4 +295,15 @@ async def test_an_agents_own_effort_wins_over_the_routes() -> None:
     assert [t.effort for t in a.tasks] == ["high", "high"]
     assert b.tasks[0].effort == "low", (
         "an agent without its own level follows the route"
+    )
+
+
+async def test_a_task_in_a_session_gets_at_least_the_sessions_time() -> None:
+    a = ScriptedAgentRuntime("a", default={"ok": True})
+    router, _ = _router(a)
+    route = Route(primary="a", timeout_seconds=1800)
+    await router.run(_task(min_timeout_seconds=5400), route, Verdict)
+    await router.run(_task(), route, Verdict)
+    assert [t.timeout_seconds for t in a.tasks] == [5400, 1800], (
+        "the route's timeout holds unless the task needs longer"
     )

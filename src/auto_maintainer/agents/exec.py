@@ -72,7 +72,7 @@ from ..domain.ports import AgentQuestions
 from ..domain.settings import ProviderBinding
 from .approver import POSTING_ANSWER, posting_request
 from .sandbox import build_env, scrub
-from .structured import extract_json
+from .structured import NO_JSON, extract_json
 
 log = logging.getLogger(__name__)
 
@@ -1011,7 +1011,7 @@ class ExecRuntime:
             if structured is None:
                 ok, error, kind = (
                     False,
-                    "expected one JSON object in the final message, found none",
+                    NO_JSON,
                     "invalid_output",
                 )
         result = AgentResult(

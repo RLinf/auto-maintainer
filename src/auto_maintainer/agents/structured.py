@@ -73,7 +73,7 @@ def validate(
         what was expected and what was found.
     """
     if data is None:
-        return None, "expected one JSON object in the final message, found none"
+        return None, NO_JSON
     try:
         return model.model_validate(data), None
     except ValidationError as exc:
@@ -94,6 +94,11 @@ def schema_instructions(schema: dict[str, Any]) -> str:
     )
 
 
+NO_JSON = "expected one JSON object in the final message, found none"
+"""The error of a final message without a result: the agent stopped, perhaps before it
+was done."""
+
+
 def repair_prompt(error: str, previous_text: str, schema: dict[str, Any]) -> str:
     """A follow-up turn asking the agent to fix an invalid structured answer."""
     excerpt = previous_text.strip()
@@ -104,7 +109,14 @@ def repair_prompt(error: str, previous_text: str, schema: dict[str, Any]) -> str
         f"{error}.\n\n"
         "Previous answer (end of it):\n\n"
         f"<previous_answer>\n{excerpt}\n</previous_answer>\n"
-        "Reply again with only the corrected JSON object." + schema_instructions(schema)
+        + (
+            "Your turn ended without the result. If the task is not done, finish it "
+            "now: wait for every command you started until it ends, and do the steps "
+            "left. Then end your turn with only the JSON object."
+            if error == NO_JSON
+            else "Reply again with only the corrected JSON object."
+        )
+        + schema_instructions(schema)
     )
 
 

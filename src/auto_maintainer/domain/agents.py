@@ -142,6 +142,9 @@ class AgentTask(BaseModel):
     """``quick`` caps the run whatever its route and agent say: low effort and
     ``QUICK_TIMEOUT_SECONDS``, for checks that must cost far less than a review."""
     timeout_seconds: int = 1800
+    min_timeout_seconds: int | None = None
+    """The least time the task needs, over its route's timeout: the time left in the
+    test machine session the agent works in, and some to report."""
     env: dict[str, str] = Field(default_factory=dict)
     """Extra environment for the subprocess, on top of the sandbox allowlist."""
     repo: str | None = None

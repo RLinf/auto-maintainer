@@ -18,10 +18,10 @@ A route names a primary runtime and fallbacks. The router tries them in order an
 skips a runtime that is unknown, disabled, not installed (its ``installed()`` says
 so), over its daily budget, or whose circuit breaker is open. A missing CLI opens
 no breaker, so installing it makes it usable at once. A breaker opens for the whole
-runtime after an ``auth``, ``quota``, ``crash``, or ``timeout`` failure, and for one
-task kind on that runtime after two invalid structured answers in a row (a CLI that
-cannot answer one kind of task still runs the others); both close after the
-cool-down. ``route.model`` applies to the primary runtime only, since
+runtime after an ``auth``, ``quota``, or ``crash`` failure, and for one task kind on
+that runtime after a ``timeout`` or two invalid structured answers in a row (a long
+reproduction that runs out of time, or a CLI that cannot answer one kind of task,
+leaves the others running); both close after the cool-down. ``route.model`` applies to the primary runtime only, since
 model names differ between CLIs; ``route.effort`` (unless the agent has its own
 ``effort``) and ``route.timeout_seconds`` apply to every attempt.
 """
@@ -73,7 +73,9 @@ def _scrubbed(value: Any) -> Any:
     return value
 
 
-_BREAKING_KINDS = frozenset({"auth", "quota", "crash", "timeout"})
+_BREAKING_KINDS = frozenset({"auth", "quota", "crash"})
+"""Failures that say the runtime itself is unusable: its breaker opens for every task.
+A timeout says the task took too long, so it pauses only that kind of task there."""
 
 
 @dataclass
@@ -239,7 +241,7 @@ class AgentRouter:
                     or task.effort,
                     "timeout_seconds": min(route.timeout_seconds, QUICK_TIMEOUT_SECONDS)
                     if task.budget == "quick"
-                    else route.timeout_seconds,
+                    else max(route.timeout_seconds, task.min_timeout_seconds or 0),
                     "question_timeout_seconds": route.question_timeout_seconds,
                     "permissions": effective_permissions(route, runtime, task),
                 }
@@ -488,6 +490,11 @@ class AgentRouter:
             breaker = self.breakers.setdefault(name, BreakerState())
             breaker.open_until = self.clock.now() + self.cooldown
             breaker.reason = str(result.error_kind)
+            return
+        if result.error_kind == "timeout":
+            breaker = self.output_breakers.setdefault((name, kind), BreakerState())
+            breaker.open_until = self.clock.now() + self.cooldown
+            breaker.reason = "timeout"
             return
         if result.error_kind == "invalid_output":
             breaker = self.output_breakers.setdefault((name, kind), BreakerState())

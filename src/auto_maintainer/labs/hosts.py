@@ -52,10 +52,50 @@ def parse_gpus(gpus_csv: str, apps_csv: str) -> list[GpuStatus]:
     return out
 
 
+START = "\x1eam: command starts"
+"""What the login shell prints once its profile ran, just before the command: what a
+machine's profile prints (a welcome banner, notices) comes before it and is dropped."""
+
+
 def _script(command: str, cwd: str | None, env: dict[str, str] | None) -> str:
     exports = " ".join(f"{k}={shlex.quote(v)}" for k, v in (env or {}).items())
     prefix = f"cd {shlex.quote(cwd)} && " if cwd else ""
-    return f"{prefix}{'env ' + exports + ' ' if exports else ''}bash -lc {shlex.quote(command)}"
+    body = f"printf '\\036am: command starts\\n'; {command}"
+    return f"{prefix}{'env ' + exports + ' ' if exports else ''}bash -lc {shlex.quote(body)}"
+
+
+class _AfterStart:
+    """Passes on the lines a command prints after ``START``, holding back what the
+    login shell printed before it; when ``START`` never comes, nothing is dropped."""
+
+    def __init__(self, on_output: Callable[[str], Awaitable[None]] | None) -> None:
+        self._on_output = on_output
+        self._held: list[str] = []
+        self.started = False
+
+    async def line(self, text: str) -> None:
+        if self.started:
+            if self._on_output is not None:
+                await self._on_output(text)
+        elif text == START:
+            self.started = True
+            self._held.clear()
+        else:
+            self._held.append(text)
+
+    async def flush(self) -> None:
+        if not self.started and self._on_output is not None:
+            for text in self._held:
+                await self._on_output(text)
+        self._held.clear()
+
+
+def after_start(stdout: str) -> str:
+    """``stdout`` from ``START`` on, or all of it when the marker is missing."""
+    head, sep, rest = stdout.partition(START + "\n")
+    if sep:
+        return rest
+    return stdout[: -len(START)] if stdout.endswith(START) else stdout
 
 
 class _Host:
@@ -80,7 +120,12 @@ class _Host:
         stdin: str | None = None,
         on_output: Callable[[str], Awaitable[None]] | None = None,
     ) -> CommandResult:
-        return await self._shell(_script(command, cwd, env), timeout, stdin, on_output)
+        filtered = _AfterStart(on_output)
+        result = await self._shell(
+            _script(command, cwd, env), timeout, stdin, filtered.line
+        )
+        await filtered.flush()
+        return result.model_copy(update={"stdout": after_start(result.stdout)})
 
     async def gpu_status(self) -> list[GpuStatus]:
         gpus = await self._shell(GPU_QUERY, 30)
