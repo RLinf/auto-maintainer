@@ -1527,7 +1527,6 @@ const zh: Record<string, string> = {
   "All repositories": "所有仓库",
   "Work directory": "工作目录",
   "Time limit in minutes": "时间上限（分钟）",
-    "有权限的人随时可以在 PR 页面点击“复现”并批准脚本。这项规则控制评审是否也会自行触发复现。",
   "Manage machines": "管理测试机器",
   "machine setup": "机器准备命令",
   "machine forbids": "机器禁止匹配",
