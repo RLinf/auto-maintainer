@@ -121,7 +121,19 @@ class Member(_Model):
         description="For a scoped role: the paths or components held.",
     )
     since: date | None = None
-    note: str = ""
+    score: float | None = Field(
+        default=None,
+        description="The member's score under the repository's process, when it "
+        "keeps one (the record's `score_label` names it).",
+    )
+    next_step: str = Field(
+        default="",
+        description="What the member needs for their next role, in one sentence; "
+        "empty at the top or when nothing applies.",
+    )
+    note: str = Field(
+        default="", description="Anything else about the member, briefly."
+    )
 
 
 class RoleChange(_Model):
@@ -155,6 +167,10 @@ class Governance(_Model):
         description="False while this is still the skeleton nobody has filled in.",
     )
     sources: list[Source] = Field(default_factory=list)
+    score_label: str = Field(
+        default="",
+        description="What the process calls a member's score, when it keeps one.",
+    )
     roles: list[Role] = Field(default_factory=list)
     transitions: list[Transition] = Field(default_factory=list)
     members: list[Member] = Field(default_factory=list)

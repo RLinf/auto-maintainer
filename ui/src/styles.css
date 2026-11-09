@@ -794,3 +794,41 @@ details.pv-section[open] > summary { margin-bottom: 6px; }
 /* The People conversation: the latest exchange by default; history scrolls in its box. */
 .talk-log.all { max-height: 60vh; overflow-y: auto; padding-right: 4px; }
 .clamped { max-height: 15em; overflow: hidden; -webkit-mask-image: linear-gradient(to bottom, #000 65%, transparent); mask-image: linear-gradient(to bottom, #000 65%, transparent); }
+
+/* People: roles coloured by level, the ladder, the people list, and a person's panel */
+.role-badge { display: inline-flex; align-items: center; max-width: 100%; font-size: 12px; font-weight: 600; padding: 1px 9px; border-radius: 999px; line-height: 20px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lvl-0 { --lvl-bg: var(--surface-2); --lvl-fg: var(--muted); }
+.lvl-1 { --lvl-bg: var(--surface-2); --lvl-fg: var(--text-2); }
+.lvl-2 { --lvl-bg: var(--info-bg); --lvl-fg: var(--info); }
+.lvl-3 { --lvl-bg: var(--ok-bg); --lvl-fg: var(--ok); }
+.lvl-4 { --lvl-bg: var(--warn-bg); --lvl-fg: var(--warn); }
+.lvl-5 { --lvl-bg: var(--accent-soft); --lvl-fg: var(--accent); }
+.lvl-6 { --lvl-bg: var(--accent); --lvl-fg: var(--accent-text); }
+.role-badge, .ladder-step { background: var(--lvl-bg); color: var(--lvl-fg); }
+.ladder { display: flex; gap: 6px; flex-wrap: wrap; }
+.ladder-step { border: 0; height: auto; min-height: 30px; padding: 4px 10px; border-radius: 10px; gap: 8px; font-weight: 600; font-size: 13px; max-width: 100%; }
+.ladder-step .n { font-variant-numeric: tabular-nums; padding: 0 7px; border-radius: 999px; background: color-mix(in srgb, currentColor 14%, transparent); }
+.ladder-step:hover { filter: brightness(0.97); }
+.avatar-img { border-radius: 50%; flex-shrink: 0; background: var(--surface-2); }
+.clamp2 { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+.score-num { font-variant-numeric: tabular-nums; font-weight: 600; }
+.score-big { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1; }
+.area-chip { font-size: 12px; padding: 2px 8px; border-radius: 6px; background: var(--surface-2); color: var(--text); overflow-wrap: anywhere; }
+.area-chip:hover { background: var(--accent-soft); text-decoration: none; }
+.strip-details { padding: 8px 12px; border-radius: var(--r); background: var(--warn-bg); color: var(--warn); }
+.strip-details summary { cursor: pointer; }
+.person-panel { z-index: 60; }
+.people .role-row { border: 1px solid var(--border); border-radius: var(--r); background: var(--surface); }
+.people .role-row > summary { display: flex; align-items: center; gap: 10px; padding: 10px 14px; cursor: pointer; list-style: none; min-width: 0; }
+.people .role-row > summary::-webkit-details-marker { display: none; }
+.people .role-row[open] > summary { border-bottom: 1px solid var(--border); }
+.people .role-desc { flex: 1 1 auto; min-width: 0; }
+.people .role-body { display: flex; flex-direction: column; gap: 12px; padding: 12px 14px; }
+.people .role-cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr)); gap: 12px; }
+.people .role-cols ul { margin: 4px 0 0; padding-left: 18px; }
+@media (max-width: 640px) {
+  .people .role-row > summary { flex-wrap: wrap; }
+  .people .role-desc { display: none; }
+}
+.nowrap { white-space: nowrap; }
+.people .role-row > summary > .role-badge { flex-shrink: 0; }

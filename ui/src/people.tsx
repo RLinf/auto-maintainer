@@ -8,8 +8,9 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Fragment, useEffect, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { api, type ChatMessage, type JobStep } from "./api";
-import { Empty, ErrorBox, Section } from "./components";
+import { ErrorBox, Section } from "./components";
 import { useQuestions } from "./data";
 import { useT } from "./i18n";
 import { Icon } from "./icons";
@@ -17,7 +18,8 @@ import { Steps } from "./jobs";
 import { Markdown } from "./markdown";
 import { QuestionCard } from "./pages/Questions";
 import { ChangeById } from "./settingsChange";
-import { Skeleton } from "./ui";
+import { DataTable, ListToolbar, useList, type Column } from "./list";
+import { Skeleton, Tabs, useTab } from "./ui";
 
 interface Role {
   id: string;
@@ -49,6 +51,8 @@ interface Member {
   role: string;
   areas?: string[];
   since?: string | null;
+  score?: number | null;
+  next_step?: string;
   note?: string;
 }
 interface RoleChange {
@@ -70,6 +74,7 @@ export interface Governance {
   summary?: string;
   established?: boolean;
   sources?: Source[];
+  score_label?: string;
   roles?: Role[];
   transitions?: Transition[];
   members?: Member[];
@@ -95,6 +100,28 @@ export function PeopleTab({ repo }: { repo: string }) {
     queryFn: () => api.get<PeopleResponse>(`/api/repos/${repo}/governance`),
   });
   const [showCurrent, setShowCurrent] = useState(false);
+  const [person, setPerson] = useState<string | null>(null);
+  const [seed, setSeed] = useState<{ text: string; n: number } | null>(null);
+  const views = [
+    { id: "members", label: t("People"), count: (data.data?.governance.members ?? []).length },
+    { id: "roles", label: t("Roles & process") },
+    { id: "history", label: t("History"), count: (data.data?.governance.history ?? []).length },
+    { id: "talk", label: t("Talk with the agent") },
+  ];
+  const [view, setView] = useTab(views, "view");
+  const [, setParams] = useSearchParams();
+  // A step of the ladder shows the people who hold that role.
+  const pickRole = (roleName: string) =>
+    setParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.delete("view");
+        next.set("p.f.role", roleName);
+        next.delete("p.page");
+        return next;
+      },
+      { replace: true },
+    );
   if (data.isLoading) return <Skeleton rows={6} />;
   if (data.error || !data.data) return <ErrorBox error={data.error} />;
   const d = data.data;
@@ -104,10 +131,15 @@ export function PeopleTab({ repo }: { repo: string }) {
   const gov = viewingDraft && draft?.governance ? draft.governance : d.governance;
   const roles = [...(gov.roles ?? [])].sort((a, b) => b.level - a.level);
   const name = (id: string | null | undefined) => (id ? (roles.find((r) => r.id === id)?.name ?? id) : null);
-  const flagged = new Set(d.checks.map((c) => c.login?.toLowerCase()).filter(Boolean));
+  const ask = (text: string) => {
+    setPerson(null);
+    setSeed({ text, n: (seed?.n ?? 0) + 1 });
+    setView("talk");
+  };
+  const open = person ? (gov.members ?? []).find((m) => m.login === person) : undefined;
 
   return (
-    <div className="stack people" style={{ gap: 16 }}>
+    <div className="stack people" style={{ gap: 14 }}>
       {draft && (
         <div className="strip question">
           <Icon name="shield" />
@@ -120,7 +152,10 @@ export function PeopleTab({ repo }: { repo: string }) {
       {!draft && !gov.established && (
         <div className="strip question">
           <Icon name="sparkles" />
-          <span>{t("This is the starting skeleton. Tell the agent below where your process is written, or describe it, and it fills this in for a maintainer to approve.")}</span>
+          <span>{t("This is the starting skeleton. Tell the agent where your process is written, or describe it, and it fills this in for a maintainer to approve.")}</span>
+          <button className="sm right" onClick={() => setView("talk")}>
+            {t("Talk with the agent")}
+          </button>
         </div>
       )}
       {d.error && (
@@ -128,30 +163,416 @@ export function PeopleTab({ repo }: { repo: string }) {
           {t("The stored record does not read, so the skeleton is shown")}: {d.error}
         </div>
       )}
-      <PeopleTalk repo={repo} questions={(draft?.governance ?? d.governance).open_questions ?? []} established={!!(draft?.governance ?? d.governance).established} hasProfile={d.has_profile} />
-      {d.pending.length > 0 && (
-        <Section title={t("Changes waiting for a maintainer")} hint={d.can_configure ? t("you can apply them") : t("a maintainer applies them")}>
-          <div className="stack" style={{ gap: 12 }}>
-            {d.pending.map((p) => (
-              <div key={p.id} className="stack" style={{ gap: 8 }}>
-                {p.role_changes.length > 0 && (
-                  <ul className="role-changes">
-                    {p.role_changes.map((c) => (
-                      <li key={`${c.login}-${c.from}-${c.to}`}>
-                        <strong>@{c.login}</strong> <Move from={name(c.from)} to={name(c.to)} />
-                      </li>
-                    ))}
-                  </ul>
-                )}
-                <ChangeById id={p.id} />
-              </div>
-            ))}
-          </div>
-        </Section>
+      {d.pending.length > 0 && <PendingChanges pending={d.pending} name={name} canConfigure={d.can_configure} />}
+      <Ladder roles={roles} members={gov.members ?? []} onPick={pickRole} />
+      <Tabs tabs={views} active={view} onChange={(v) => setView(v)} />
+      {view === "members" && <MembersView repo={repo} gov={gov} roles={roles} checks={viewingDraft ? [] : d.checks} permissions={d.permissions} onOpen={setPerson} />}
+      {view === "roles" && <RolesView repo={repo} gov={gov} roles={roles} name={name} />}
+      {view === "history" && <HistoryView gov={gov} name={name} onOpen={setPerson} />}
+      {view === "talk" && (
+        <PeopleTalk repo={repo} questions={(draft?.governance ?? d.governance).open_questions ?? []} established={!!(draft?.governance ?? d.governance).established} hasProfile={d.has_profile} seed={seed} />
       )}
+      {open && (
+        <PersonPanel
+          repo={repo}
+          member={open}
+          gov={gov}
+          name={name}
+          permission={d.permissions[open.login.toLowerCase()]}
+          checks={viewingDraft ? [] : d.checks.filter((c) => c.login?.toLowerCase() === open.login.toLowerCase())}
+          onClose={() => setPerson(null)}
+          onAsk={() => ask(`@${open.login}: `)}
+        />
+      )}
+    </div>
+  );
+}
+
+type Named = (id: string | null | undefined) => string | null;
+
+/** The drafts that wait for a maintainer, with whose role each would change. */
+function PendingChanges({ pending, name, canConfigure }: { pending: PeopleResponse["pending"]; name: Named; canConfigure: boolean }) {
+  const t = useT();
+  return (
+    <Section title={t("Changes waiting for a maintainer")} hint={canConfigure ? t("you can apply them") : t("a maintainer applies them")}>
+      <div className="stack" style={{ gap: 12 }}>
+        {pending.map((p) => (
+          <div key={p.id} className="stack" style={{ gap: 8 }}>
+            {p.role_changes.length > 0 && (
+              <details>
+                <summary className="small">
+                  {p.role_changes.length} {t("changes of role")}:{" "}
+                  {p.role_changes
+                    .slice(0, 4)
+                    .map((c) => `@${c.login}`)
+                    .join(", ")}
+                  {p.role_changes.length > 4 ? " …" : ""}
+                </summary>
+                <ul className="role-changes" style={{ marginTop: 8 }}>
+                  {p.role_changes.map((c) => (
+                    <li key={`${c.login}-${c.from}-${c.to}`}>
+                      <strong>@{c.login}</strong> <Move from={name(c.from)} to={name(c.to)} />
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            )}
+            <ChangeById id={p.id} />
+          </div>
+        ))}
+      </div>
+    </Section>
+  );
+}
+
+/** Each role with how many hold it, highest first; a click filters the people. */
+function Ladder({ roles, members, onPick }: { roles: Role[]; members: Member[]; onPick: (role: string) => void }) {
+  const counts = new Map<string, number>();
+  for (const m of members) counts.set(m.role, (counts.get(m.role) ?? 0) + 1);
+  return (
+    <div className="ladder" role="list">
+      {roles.map((r) => (
+        <button key={r.id} role="listitem" className={`ladder-step lvl-${Math.min(r.level, 6)}`} onClick={() => onPick(r.name)} title={r.description}>
+          <span className="ellipsis">{shortName(r.name)}</span>
+          <span className="n">{counts.get(r.id) ?? 0}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/** A role's name without a translation in brackets, for tight places. */
+function shortName(name: string): string {
+  return name.replace(/\s*[（(][^）)]*[）)]\s*$/, "") || name;
+}
+
+function RoleBadge({ role }: { role: Role | undefined }) {
+  if (!role) return null;
+  return (
+    <span className={`role-badge lvl-${Math.min(role.level, 6)}`} title={role.name}>
+      {shortName(role.name)}
+    </span>
+  );
+}
+
+function Avatar({ login, size = 22 }: { login: string; size?: number }) {
+  return <img className="avatar-img" src={`https://github.com/${encodeURIComponent(login)}.png?size=${size * 2}`} width={size} height={size} alt="" loading="lazy" />;
+}
+
+interface PersonRow extends Member {
+  level: number;
+  roleName: string;
+  last?: RoleChange;
+}
+
+function MembersView({
+  repo,
+  gov,
+  roles,
+  checks,
+  permissions,
+  onOpen,
+}: {
+  repo: string;
+  gov: Governance;
+  roles: Role[];
+  checks: PeopleResponse["checks"];
+  permissions: Record<string, string>;
+  onOpen: (login: string) => void;
+}) {
+  const t = useT();
+  const byId = new Map(roles.map((r) => [r.id, r]));
+  const lastChange = new Map<string, RoleChange>();
+  for (const c of gov.history ?? []) lastChange.set(c.login.toLowerCase(), c);
+  const rows: PersonRow[] = (gov.members ?? []).map((m) => ({
+    ...m,
+    level: byId.get(m.role)?.level ?? 0,
+    roleName: byId.get(m.role)?.name ?? m.role,
+    last: lastChange.get(m.login.toLowerCase()),
+  }));
+  const scored = rows.some((r) => r.score != null);
+  const flagged = new Set(checks.map((c) => c.login?.toLowerCase()).filter(Boolean));
+  const list = useList<PersonRow>({
+    rows,
+    key: (r) => `${r.login}:${r.role}`,
+    search: (r) => [r.login, r.roleName, ...(r.areas ?? []), r.next_step ?? "", r.note ?? ""].join(" "),
+    facets: [
+      { id: "role", label: t("Role"), values: (r) => r.roleName },
+      { id: "area", label: t("Area"), values: (r) => (r.areas ?? []).map(topArea) },
+    ],
+    sorts: [
+      { id: "role", label: t("Role"), value: (r) => r.level * 1e6 + (r.score ?? 0) },
+      ...(scored ? [{ id: "score", label: gov.score_label || t("Score"), value: (r: PersonRow) => r.score ?? null }] : []),
+      { id: "name", label: t("Name"), value: (r) => r.login.toLowerCase() },
+      { id: "since", label: t("Since"), value: (r) => r.since ?? null },
+      { id: "changed", label: t("Last change"), value: (r) => r.last?.on ?? null },
+    ],
+    defaultSort: "-role",
+    pageSize: 25,
+    param: "p",
+  });
+  const columns: Column<PersonRow>[] = [
+    {
+      id: "person",
+      header: t("Person"),
+      primary: true,
+      sort: "name",
+      cell: (r) => (
+        <span className="row" style={{ gap: 8, minWidth: 0, flexWrap: "nowrap" }}>
+          <Avatar login={r.login} />
+          <strong className="ellipsis">@{r.login}</strong>
+          {flagged.has(r.login.toLowerCase()) && (
+            <span title={t("Differs from GitHub")}>
+              <Icon name="shield" size={13} />
+            </span>
+          )}
+        </span>
+      ),
+    },
+    { id: "role", header: t("Role"), label: t("Role"), sort: "role", cell: (r) => <RoleBadge role={byId.get(r.role)} /> },
+    {
+      id: "areas",
+      header: t("Areas"),
+      label: t("Areas"),
+      cell: (r) =>
+        (r.areas ?? []).length ? (
+          <span className="small mono ellipsis" title={(r.areas ?? []).join("\n")}>
+            {(r.areas ?? []).slice(0, 2).join(", ")}
+            {(r.areas ?? []).length > 2 && <span className="muted"> +{(r.areas ?? []).length - 2}</span>}
+          </span>
+        ) : (
+          <span className="muted small">—</span>
+        ),
+    },
+    ...(scored
+      ? [
+          {
+            id: "score",
+            header: gov.score_label || t("Score"),
+            label: gov.score_label || t("Score"),
+            sort: "score",
+            className: "num",
+            cell: (r: PersonRow) => (r.score != null ? <span className="score-num">{formatScore(r.score)}</span> : <span className="muted">—</span>),
+          },
+        ]
+      : []),
+    {
+      id: "next",
+      header: t("Next step"),
+      label: t("Next step"),
+      cell: (r) => (r.next_step ? <span className="small clamp2">{r.next_step}</span> : <span className="muted small">—</span>),
+    },
+    { id: "since", header: t("Since"), label: t("Since"), sort: "since", cell: (r) => <span className="small muted nowrap">{r.since ?? "—"}</span> },
+    {
+      id: "changed",
+      header: t("Last change"),
+      label: t("Last change"),
+      sort: "changed",
+      cell: (r) => (r.last ? <span className="small muted nowrap">{r.last.on}</span> : <span className="muted small">—</span>),
+    },
+  ];
+  return (
+    <div className="stack" style={{ gap: 10 }}>
+      {checks.length > 0 && (
+        <details className="strip-details">
+          <summary className="small">
+            <Icon name="shield" size={13} /> {checks.length} {t("differences from GitHub")}
+          </summary>
+          <ul className="small" style={{ margin: "6px 0 0", paddingLeft: 18 }}>
+            {checks.map((c) => (
+              <li key={`${c.kind}-${c.login}`}>{c.text}</li>
+            ))}
+          </ul>
+        </details>
+      )}
+      <ListToolbar list={list} placeholder={t("Search people, areas, notes")} />
+      <DataTable
+        list={list}
+        columns={columns}
+        onOpen={(r) => onOpen(r.login)}
+        empty={(gov.members ?? []).length ? t("Nobody matches.") : t("Nobody is listed yet. Tell the agent who holds each role.")}
+      />
+      <span className="small muted">
+        {t("GitHub permissions decide who may approve and configure in the service; roles here describe people.")} {Object.keys(permissions).length > 0 && `${t("Checked against GitHub for")} ${Object.keys(permissions).length} ${t("people")}.`}{" "}
+        <a href={`https://github.com/${repo}/graphs/contributors`} target="_blank" rel="noreferrer">
+          {t("Contributors on GitHub")}
+        </a>
+      </span>
+    </div>
+  );
+}
+
+function topArea(path: string): string {
+  const parts = path.replace(/^\/+/, "").split("/").filter(Boolean);
+  return parts.length > 1 ? `${parts[0]}/${parts[1]}` : parts[0] || path;
+}
+
+function formatScore(n: number): string {
+  return Number.isInteger(n) ? String(n) : n.toFixed(1);
+}
+
+/** One person: role, areas, score, next step, note, GitHub, and their history. */
+function PersonPanel({
+  repo,
+  member,
+  gov,
+  name,
+  permission,
+  checks,
+  onClose,
+  onAsk,
+}: {
+  repo: string;
+  member: Member;
+  gov: Governance;
+  name: Named;
+  permission: string | undefined;
+  checks: PeopleResponse["checks"];
+  onClose: () => void;
+  onAsk: () => void;
+}) {
+  const t = useT();
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  const role = (gov.roles ?? []).find((r) => r.id === member.role);
+  const history = (gov.history ?? []).filter((c) => c.login.toLowerCase() === member.login.toLowerCase()).reverse();
+  return (
+    <aside className="job-panel person-panel" aria-label={`@${member.login}`}>
+      <div className="agent-head">
+        <Avatar login={member.login} size={32} />
+        <div className="stack" style={{ gap: 2, minWidth: 0, flex: 1 }}>
+          <strong>
+            <a href={`https://github.com/${member.login}`} target="_blank" rel="noreferrer">
+              @{member.login}
+            </a>
+          </strong>
+          <span className="row small" style={{ gap: 6 }}>
+            <RoleBadge role={role} />
+            {member.since && (
+              <span className="muted">
+                {t("since")} {member.since}
+              </span>
+            )}
+          </span>
+        </div>
+        <button className="ghost icon" onClick={onClose} aria-label={t("Close")} title={t("Close")}>
+          <Icon name="x" />
+        </button>
+      </div>
+      <div className="agent-body stack" style={{ gap: 14 }}>
+        {member.score != null && (
+          <div className="row" style={{ gap: 8, alignItems: "baseline" }}>
+            <span className="score-big">{formatScore(member.score)}</span>
+            <span className="small muted">{gov.score_label || t("Score")}</span>
+          </div>
+        )}
+        {member.next_step && (
+          <div className="stack" style={{ gap: 2 }}>
+            <span className="kind-chip">{t("Next step")}</span>
+            <span>{member.next_step}</span>
+          </div>
+        )}
+        {(member.areas ?? []).length > 0 && (
+          <div className="stack" style={{ gap: 4 }}>
+            <span className="kind-chip">
+              {t("Areas")} · {(member.areas ?? []).length}
+            </span>
+            <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+              {(member.areas ?? []).map((a) => (
+                <a key={a} className="area-chip mono" href={`https://github.com/${repo}/tree/HEAD/${a.replace(/^\/+/, "")}`} target="_blank" rel="noreferrer">
+                  {a}
+                </a>
+              ))}
+            </div>
+          </div>
+        )}
+        {member.note && (
+          <div className="stack" style={{ gap: 2 }}>
+            <span className="kind-chip">{t("Note")}</span>
+            <Markdown text={member.note.replace(/\s*｜\s*/g, "\n\n")} className="chat-md" />
+          </div>
+        )}
+        <div className="stack" style={{ gap: 2 }}>
+          <span className="kind-chip">GitHub</span>
+          <span className="small">
+            {permission ? `${t("permission")}: ${permission}` : t("Not checked")}
+            {role?.github_permission && (
+              <span className="muted">
+                {" "}
+                · {t("the role expects")} {role.github_permission}
+              </span>
+            )}
+          </span>
+          {checks.map((c) => (
+            <span key={c.kind} className="small" style={{ color: "var(--warn)" }}>
+              {c.text}
+            </span>
+          ))}
+        </div>
+        <div className="stack" style={{ gap: 6 }}>
+          <span className="kind-chip">
+            {t("History")} · {history.length}
+          </span>
+          {history.length === 0 ? (
+            <span className="small muted">{t("No changes of role recorded yet.")}</span>
+          ) : (
+            <ul className="history">
+              {history.map((c, i) => (
+                <li key={`${c.on}-${i}`}>
+                  <span className="muted mono small">{c.on}</span> <Move from={name(c.from_role)} to={name(c.to_role)} />
+                  <div className="small muted">
+                    {t("by")} {c.by}
+                    {c.reason && ` · ${c.reason}`}
+                  </div>
+                  {(c.evidence ?? []).length > 0 && (
+                    <div className="small row" style={{ gap: 6, flexWrap: "wrap" }}>
+                      {(c.evidence ?? []).map((e) =>
+                        /^https?:\/\//.test(e) ? (
+                          <a key={e} href={e} target="_blank" rel="noreferrer">
+                            {e.replace(/^https:\/\/github\.com\/[^/]+\/[^/]+\/pull\//, "#")}
+                          </a>
+                        ) : (
+                          <span key={e} className="muted">
+                            {e}
+                          </span>
+                        ),
+                      )}
+                    </div>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </div>
+      <div className="agent-foot">
+        <div className="row">
+          <span className="small muted">{t("Changes go through the agent and a maintainer's approval.")}</span>
+          <button className="primary right" onClick={onAsk}>
+            <Icon name="message" size={14} />
+            {t("Ask the agent about")} @{member.login}
+          </button>
+        </div>
+      </div>
+    </aside>
+  );
+}
+
+/** The roles, highest first; each opens to what it involves and how people get in and out. */
+function RolesView({ repo, gov, roles, name }: { repo: string; gov: Governance; roles: Role[]; name: Named }) {
+  const t = useT();
+  const counts = new Map<string, number>();
+  for (const m of gov.members ?? []) counts.set(m.role, (counts.get(m.role) ?? 0) + 1);
+  const ways = (r: Role, dir: "in" | "out") => (gov.transitions ?? []).filter((tr) => (dir === "in" ? tr.to_role === r.id : tr.from_role === r.id));
+  const joining = (gov.transitions ?? []).filter((tr) => !tr.to_role || !roles.some((r) => r.id === tr.to_role));
+  return (
+    <div className="stack" style={{ gap: 14 }}>
       {gov.summary && (
         <Section title={t("How this repository is run")}>
-          <Markdown text={gov.summary} />
+          <Clamped text={gov.summary} />
           {(gov.sources ?? []).length > 0 && (
             <div className="small muted" style={{ marginTop: 8 }}>
               {t("From")}:{" "}
@@ -165,145 +586,160 @@ export function PeopleTab({ repo }: { repo: string }) {
           )}
         </Section>
       )}
-      {!viewingDraft && d.checks.length > 0 && (
-        <Section title={t("Where this differs from GitHub")} hint={t("checked now")}>
-          <ul className="stack" style={{ gap: 4, margin: 0, paddingLeft: 18 }}>
-            {d.checks.map((c) => (
-              <li key={`${c.kind}-${c.login}`} className="small">
-                {c.text}
-              </li>
+      <div className="stack role-list" style={{ gap: 8 }}>
+        {roles.map((r) => (
+          <details key={r.id} className="role-row">
+            <summary>
+              <RoleBadge role={r} />
+              <span className="ellipsis role-desc small muted">{r.description}</span>
+              <span className="row small" style={{ gap: 6, marginLeft: "auto", flexShrink: 0 }}>
+                {r.github_permission && <span className="pill tag">GitHub: {r.github_permission}</span>}
+                {r.scoped && <span className="pill tag">{t("by area")}</span>}
+                <span className="pill tag">
+                  {counts.get(r.id) ?? 0} {t("people")}
+                </span>
+              </span>
+            </summary>
+            <div className="role-body">
+              {r.description && <p style={{ margin: 0 }}>{r.description}</p>}
+              <div className="role-cols">
+                {(r.responsibilities ?? []).length > 0 && (
+                  <div>
+                    <span className="kind-chip">{t("Responsible for")}</span>
+                    <ul>
+                      {(r.responsibilities ?? []).map((x) => (
+                        <li key={x}>{x}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {(r.privileges ?? []).length > 0 && (
+                  <div>
+                    <span className="kind-chip">{t("May")}</span>
+                    <ul>
+                      {(r.privileges ?? []).map((x) => (
+                        <li key={x}>{x}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+              {(["in", "out"] as const).map((dir) =>
+                ways(r, dir).length ? (
+                  <div key={dir} className="stack" style={{ gap: 8 }}>
+                    <span className="kind-chip">{dir === "in" ? t("How to get here") : t("How to leave or move on")}</span>
+                    {ways(r, dir).map((tr) => (
+                      <TransitionCard key={tr.id} tr={tr} name={name} />
+                    ))}
+                  </div>
+                ) : null,
+              )}
+            </div>
+          </details>
+        ))}
+      </div>
+      {joining.length > 0 && (
+        <Section title={t("Leaving")}>
+          <div className="stack" style={{ gap: 8 }}>
+            {joining.map((tr) => (
+              <TransitionCard key={tr.id} tr={tr} name={name} />
+            ))}
+          </div>
+        </Section>
+      )}
+      {(gov.open_questions ?? []).length > 0 && (
+        <Section title={t("Open questions")} hint={t("answer them in Talk with the agent")}>
+          <ul style={{ margin: 0, paddingLeft: 18 }}>
+            {(gov.open_questions ?? []).map((q) => (
+              <li key={q}>{q}</li>
             ))}
           </ul>
         </Section>
       )}
-      <Section title={t("Roles")} hint={t("highest first")}>
-        {roles.length === 0 ? (
-          <Empty icon="shield">{t("No roles yet.")}</Empty>
-        ) : (
-          <div className="role-grid">
-            {roles.map((r) => {
-              const members = (gov.members ?? []).filter((m) => m.role === r.id);
-              return (
-                <div key={r.id} className="role-card">
-                  <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
-                    <strong>{r.name}</strong>
-                    <span className="pill tag">{t("level")} {r.level}</span>
-                    {r.github_permission && (
-                      <span className="pill tag" title={t("The GitHub permission a holder is expected to have")}>
-                        GitHub: {r.github_permission}
-                      </span>
-                    )}
-                    {r.scoped && <span className="pill tag">{t("by area")}</span>}
-                  </div>
-                  {r.description && <span className="small muted">{r.description}</span>}
-                  {(r.responsibilities ?? []).length > 0 && (
-                    <div className="stack" style={{ gap: 2 }}>
-                      <span className="kind-chip">{t("Responsible for")}</span>
-                      <ul>
-                        {(r.responsibilities ?? []).map((x) => (
-                          <li key={x}>{x}</li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-                  {(r.privileges ?? []).length > 0 && (
-                    <div className="stack" style={{ gap: 2 }}>
-                      <span className="kind-chip">{t("May")}</span>
-                      <ul>
-                        {(r.privileges ?? []).map((x) => (
-                          <li key={x}>{x}</li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-                  <div className="stack" style={{ gap: 4 }}>
-                    <span className="kind-chip">
-                      {t("Members")} · {members.length}
-                    </span>
-                    {members.length === 0 ? (
-                      <span className="small muted">{t("Nobody yet.")}</span>
-                    ) : (
-                      <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
-                        {members.map((m) => (
-                          <span
-                            key={m.login}
-                            className={`member${flagged.has(m.login.toLowerCase()) ? " flagged" : ""}`}
-                            title={[d.permissions[m.login.toLowerCase()] && `GitHub: ${d.permissions[m.login.toLowerCase()]}`, m.since && `${t("since")} ${m.since}`, m.note].filter(Boolean).join(" · ")}
-                          >
-                            @{m.login}
-                            {(m.areas ?? []).length > 0 && <span className="muted"> · {(m.areas ?? []).join(", ")}</span>}
-                          </span>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
+    </div>
+  );
+}
+
+function TransitionCard({ tr, name }: { tr: Transition; name: Named }) {
+  const t = useT();
+  return (
+    <div className="transition">
+      <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+        <Move from={name(tr.from_role)} to={name(tr.to_role)} strong />
+        {(tr.decided_by ?? []).length > 0 && (
+          <span className="small muted">
+            · {t("decided by")} {(tr.decided_by ?? []).map(name).join(t(" or "))}
+            {(tr.approvals ?? 1) > 1 && ` (${tr.approvals} ${t("must agree")})`}
+          </span>
         )}
-      </Section>
-      <Section title={t("How roles change")}>
-        {(gov.transitions ?? []).length === 0 ? (
-          <Empty icon="activity">{t("No rules yet.")}</Empty>
-        ) : (
-          <div className="stack" style={{ gap: 12 }}>
-            {(gov.transitions ?? []).map((tr) => (
-              <div key={tr.id} className="transition">
-                <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
-                  <Move from={name(tr.from_role)} to={name(tr.to_role)} strong />
-                  {(tr.decided_by ?? []).length > 0 && (
-                    <span className="small muted">
-                      · {t("decided by")} {(tr.decided_by ?? []).map(name).join(t(" or "))}
-                      {(tr.approvals ?? 1) > 1 && ` (${tr.approvals} ${t("must agree")})`}
-                    </span>
-                  )}
-                </div>
-                {(tr.criteria ?? []).length > 0 && (
-                  <ul>
-                    {(tr.criteria ?? []).map((c) => (
-                      <li key={c.text}>
-                        {c.text}
-                        {c.measure && c.threshold != null && (
-                          <span className="pill tag" style={{ marginLeft: 6 }} title={t("What the agent checks on GitHub")}>
-                            {measureText(c, t)}
-                          </span>
-                        )}
-                      </li>
-                    ))}
-                  </ul>
-                )}
-                {(tr.process ?? []).length > 0 && (
-                  <ol>
-                    {(tr.process ?? []).map((s) => (
-                      <li key={s}>{s}</li>
-                    ))}
-                  </ol>
-                )}
-              </div>
-            ))}
-          </div>
-        )}
-      </Section>
-      <Section title={t("History")} hint={t("newest first")}>
-        {(gov.history ?? []).length === 0 ? (
-          <Empty icon="clock">{t("No changes of role recorded yet.")}</Empty>
-        ) : (
-          <ul className="history">
-            {[...(gov.history ?? [])].reverse().map((c, i) => (
-              <li key={`${c.login}-${c.on}-${i}`}>
-                <span className="muted mono small">{c.on}</span> <strong>@{c.login}</strong> <Move from={name(c.from_role)} to={name(c.to_role)} />
-                <span className="small muted">
-                  {" "}
-                  · {t("by")} {c.by}
-                  {c.reason && ` · ${c.reason}`}
+      </div>
+      {(tr.criteria ?? []).length > 0 && (
+        <ul>
+          {(tr.criteria ?? []).map((c) => (
+            <li key={c.text}>
+              {c.text}
+              {c.measure && c.threshold != null && (
+                <span className="pill tag" style={{ marginLeft: 6 }} title={t("What the agent checks on GitHub")}>
+                  {measureText(c, t)}
                 </span>
-                {(c.evidence ?? []).length > 0 && <div className="small muted">{(c.evidence ?? []).join("; ")}</div>}
-              </li>
-            ))}
-          </ul>
-        )}
-      </Section>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+      {(tr.process ?? []).length > 0 && (
+        <ol>
+          {(tr.process ?? []).map((s) => (
+            <li key={s}>{s}</li>
+          ))}
+        </ol>
+      )}
+    </div>
+  );
+}
+
+interface HistoryRow extends RoleChange {
+  i: number;
+}
+
+function HistoryView({ gov, name, onOpen }: { gov: Governance; name: Named; onOpen: (login: string) => void }) {
+  const t = useT();
+  const rows: HistoryRow[] = (gov.history ?? []).map((c, i) => ({ ...c, i }));
+  const list = useList<HistoryRow>({
+    rows,
+    key: (r) => String(r.i),
+    search: (r) => [r.login, r.by, r.reason ?? "", name(r.from_role) ?? "", name(r.to_role) ?? ""].join(" "),
+    facets: [{ id: "to", label: t("To"), values: (r) => name(r.to_role) ?? t("Leaves") }],
+    sorts: [
+      { id: "on", label: t("Date"), value: (r) => `${r.on}:${String(r.i).padStart(6, "0")}` },
+      { id: "name", label: t("Name"), value: (r) => r.login.toLowerCase() },
+    ],
+    defaultSort: "-on",
+    pageSize: 25,
+    param: "h",
+  });
+  const columns: Column<HistoryRow>[] = [
+    { id: "on", header: t("Date"), label: t("Date"), sort: "on", cell: (r) => <span className="mono small">{r.on}</span> },
+    {
+      id: "who",
+      header: t("Person"),
+      primary: true,
+      sort: "name",
+      cell: (r) => (
+        <span className="row" style={{ gap: 8, minWidth: 0, flexWrap: "nowrap" }}>
+          <Avatar login={r.login} size={20} />
+          <strong className="ellipsis">@{r.login}</strong>
+        </span>
+      ),
+    },
+    { id: "move", header: t("Change"), label: t("Change"), cell: (r) => <span className="small"><Move from={name(r.from_role)} to={name(r.to_role)} /></span> },
+    { id: "by", header: t("By"), label: t("By"), cell: (r) => <span className="small">{r.by}</span> },
+    { id: "why", header: t("Reason"), label: t("Reason"), cell: (r) => <span className="small muted clamp2" title={r.reason}>{r.reason || "—"}</span> },
+  ];
+  return (
+    <div className="stack" style={{ gap: 10 }}>
+      <ListToolbar list={list} placeholder={t("Search the history")} />
+      <DataTable list={list} columns={columns} onOpen={(r) => onOpen(r.login)} empty={t("No changes of role recorded yet.")} />
     </div>
   );
 }
@@ -335,7 +771,19 @@ type TalkState = { thread: string | null; live_run: string | null; listening: bo
 type TurnSteps = { run: string | null; live: boolean; steps: JobStep[] };
 
 /** The conversation with the agent that keeps the record, shared by the repository's reviewers. */
-function PeopleTalk({ repo, questions, established, hasProfile }: { repo: string; questions: string[]; established: boolean; hasProfile: boolean }) {
+function PeopleTalk({
+  repo,
+  questions,
+  established,
+  hasProfile,
+  seed,
+}: {
+  repo: string;
+  questions: string[];
+  established: boolean;
+  hasProfile: boolean;
+  seed?: { text: string; n: number } | null;
+}) {
   const t = useT();
   const client = useQueryClient();
   const box = useRef<HTMLTextAreaElement>(null);
@@ -345,6 +793,15 @@ function PeopleTalk({ repo, questions, established, hasProfile }: { repo: string
   const [allQuestions, setAllQuestions] = useState(false);
   const log = useRef<HTMLDivElement>(null);
   const base = `/api/repos/${repo}/governance/talk`;
+  // Asking about someone from the people list starts the message here.
+  useEffect(() => {
+    if (!seed) return;
+    setText(seed.text);
+    window.setTimeout(() => {
+      box.current?.focus();
+      box.current?.setSelectionRange(seed.text.length, seed.text.length);
+    }, 50);
+  }, [seed]);
   const talk = useQuery({ queryKey: ["people", repo, "talk"], queryFn: () => api.get<TalkState>(base) });
   const send = useMutation({
     mutationFn: (said: string) => api.post<ChatMessage>(base, { text: said }),

@@ -53,6 +53,7 @@ KEEPING = """You keep the record of the people of {repo} for its maintainers: th
 RULES = """- The repository's process is written down in its governance, maintainers, owners, or committers files, contributing guides, `CODEOWNERS`, the docs, and the pages they link to; read the ones that matter, and every source {by} names, files and web pages alike.
 - A record you return is whole, in the structure of the record below: keep what is still true, change what the sources or {by} say differently, and drop the skeleton's guesses that this repository's process does not have. Use the repository's own role names and words, and write responsibilities and steps plainly.
 - List as members only people the sources or {by} name, by GitHub login; never guess a login. For a role held for areas, list the areas.
+- When the process keeps a score or points per person, put each member's number in `score` (and its name in `score_label`), what they need for their next role in `next_step`, and anything else in a short `note`; how scores are counted belongs in the transitions' criteria, not in each note.
 - `history` only grows: keep every entry, and add one for each change of someone's role you make, with `by` set to whoever decided it ({by} when they told you) and the reason.
 - Give each criterion that GitHub activity can show a `measure` and a `threshold`, and a `window_months` when it counts over a period.
 - List every place you took the process from in `sources`. Set `established` to true once the record describes this repository's real process rather than the skeleton.

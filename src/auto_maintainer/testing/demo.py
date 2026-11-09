@@ -715,9 +715,23 @@ DEMO_GOVERNANCE: dict[str, Any] = {
             "decided_by": ["maintainer"],
         },
     ],
+    "score_label": "Contribution points",
     "members": [
-        {"login": "maria", "role": "maintainer", "since": "2025-01-10"},
-        {"login": "bob", "role": "reviewer", "areas": ["docs/"], "since": "2025-09-01"},
+        {
+            "login": "maria",
+            "role": "maintainer",
+            "since": "2025-01-10",
+            "score": 412.5,
+        },
+        {
+            "login": "bob",
+            "role": "reviewer",
+            "areas": ["docs/"],
+            "since": "2025-09-01",
+            "score": 96.0,
+            "next_step": "Thirty reviews in a year and six months as a reviewer make "
+            "him a maintainer candidate; he has 18 reviews.",
+        },
     ],
     "history": [],
     "open_questions": ["Does the project lead also count as a maintainer for merges?"],
