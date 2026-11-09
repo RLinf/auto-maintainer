@@ -2066,8 +2066,9 @@ def build_router() -> APIRouter:
         fresh: bool = False,
         user: User = Depends(current_user),
     ) -> dict[str, Any]:
-        """Each agent's tokens in the last ``days``, and what its CLI says is left of
-        its account's limits (``fresh`` asks the CLI again). Tokens count the runs in
+        """Each agent installed and turned on here: its tokens in the last ``days``, and
+        what its CLI says is left of its account's limits (``fresh`` asks the CLI
+        again). Tokens count the runs in
         repositories the user may view; operators and maintainers of the service's
         repository see every run, also those outside any repository."""
         service = service_of(request)
@@ -2089,7 +2090,7 @@ def build_router() -> APIRouter:
                     continue
             _add_usage(rows.setdefault(run.runtime, _usage_row(None)), run)
         known = getattr(service.a.agents, "runtimes", None) or {}
-        names = sorted(set(known) | set(rows))
+        names = sorted(n for n in set(known) | set(rows) if service.agent_ready(n))
         quotas = await asyncio.gather(
             *(service.agent_quota(n, fresh=fresh) for n in names)
         )

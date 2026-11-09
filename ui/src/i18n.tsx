@@ -53,7 +53,6 @@ const zh: Record<string, string> = {
   "tokens": "token",
   "runs": "次运行",
   "This CLI does not report its limits.": "这个 CLI 不报告额度。",
-  "Not installed or turned off.": "未安装或已停用。",
   "left": "剩余",
   "resets": "重置于",
   "Read": "读取于",

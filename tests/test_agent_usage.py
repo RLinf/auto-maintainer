@@ -131,7 +131,8 @@ async def test_usage_counts_tokens_per_agent_and_reads_each_cli_sparingly(
     h = await build_demo(tmp_path)
     try:
         cli = _Runtime()
-        h.runner.runtimes = {"antigravity": cli}
+        h.runner.runtimes = {"antigravity": cli, "codex": _Runtime()}
+        h.runner.ready = lambda name: name == "antigravity"
         now = h.service.clock.now()
         for i, (repo, tokens) in enumerate(
             [("acme/widget", 1000), ("acme/widget", 500), ("acme/secret", 9000)]
@@ -156,7 +157,7 @@ async def test_usage_counts_tokens_per_agent_and_reads_each_cli_sparingly(
             await walt.get("/auth/dev?login=walt")
             first = (await walt.get("/api/agents/usage?days=7")).json()
             again = (await walt.get("/api/agents/usage?days=7&fresh=true")).json()
-        [agy] = [a for a in first["agents"] if a["name"] == "antigravity"]
+        [agy] = first["agents"]  # codex is not installed here, so it is left out
         assert not first["everything"]
         assert (agy["runs"], agy["input_tokens"]) == (2, 1500), "only repos walt sees"
         assert agy["quota"]["buckets"][0]["remaining"] == 0.5

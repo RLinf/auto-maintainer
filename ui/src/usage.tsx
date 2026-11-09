@@ -204,7 +204,7 @@ export function AgentsUsageSection() {
                   {tokens(a.input_tokens)} {t("in")} · {tokens(a.output_tokens)} {t("out")}
                 </span>
               </span>
-              <QuotaView quota={a.quota} ready={a.ready} />
+              <QuotaView quota={a.quota} />
             </div>
           ))}
         </div>
@@ -213,9 +213,9 @@ export function AgentsUsageSection() {
   );
 }
 
-function QuotaView({ quota, ready }: { quota: AgentQuota | null; ready: boolean }) {
+function QuotaView({ quota }: { quota: AgentQuota | null }) {
   const t = useT();
-  if (!quota) return <span className="small muted">{ready ? t("This CLI does not report its limits.") : t("Not installed or turned off.")}</span>;
+  if (!quota) return <span className="small muted">{t("This CLI does not report its limits.")}</span>;
   if (!quota.buckets.length) return <span className="small muted">{quota.note}</span>;
   return (
     <div className="stack" style={{ gap: 6, flex: "1 1 280px", minWidth: 0 }}>
