@@ -392,6 +392,58 @@ async def test_an_agent_resolves_conflicts_and_the_merge_is_pushed_as_the_approv
     assert pushed["author"][0] == "maria"
 
 
+async def test_a_merge_goes_as_a_pr_into_the_pr_when_its_fork_refuses_pushes(
+    demo,
+) -> None:
+    from auto_maintainer.domain.snapshot import Mergeable
+
+    h, app = demo
+    pr = h.forge.prs[(REPO, 42)].model_copy(
+        update={
+            "mergeable": Mergeable.CONFLICTING,
+            "head_repo": "alice/widget",
+            "maintainer_can_modify": False,
+        }
+    )
+    h.forge.put_pr(pr)
+    await h.store.save_snapshot(pr)
+    h.service.a.workspace.merge_conflicts = {  # type: ignore[attr-defined]
+        "src/loader.py": "<<<<<<< HEAD\nmine\n=======\ntheirs\n>>>>>>> main\n"
+    }
+
+    def resolve(task: Any) -> Any:
+        (Path(task.workdir) / "src" / "loader.py").write_text("mine and theirs\n")
+        return AgentResult(runtime="scripted", ok=True, text="Kept both changes.")
+
+    h.runner.on("fix", resolve)
+    await h.service.a.user_tokens.set("maria", UserToken(token="t"))
+    async with _as(app, "maria") as maria:
+        await maria.post(f"/api/prs/{REPO}/42/merge-base", json={})
+        await h.settle()
+        [draft] = [
+            p
+            for p in (await maria.get("/api/proposals")).json()
+            if p["action"]["action"]["kind"] == "pr.fix"
+        ]
+        assert draft["can_push"] is False, "the fork does not let maintainers push"
+        payload = {**draft["action"]["action"]["payload"], "target": "pr"}
+        ok = await maria.post(
+            f"/api/proposals/{draft['id']}/approve",
+            json={"as_me": True, "payload": payload},
+        )
+        assert ok.status_code == 200, ok.text
+        await h.settle()
+    publisher = h.service.a.publisher
+    assert publisher is not None
+    [pushed] = publisher.published
+    assert pushed["branch"].startswith("am/merge-42-")
+    assert pushed["merge_sha"] == "d" * 40
+    assert pushed["resolved"] == {"src/loader.py": "mine and theirs\n"}
+    [opened] = h.forge.writes_of("create_pr")
+    assert opened["repo"] == "alice/widget" and opened["base"] == pr.head_ref
+    assert opened["head"] == f"acme:{pushed['branch']}"
+
+
 # -- labels the review suggests ----------------------------------------------------------
 
 

@@ -355,6 +355,8 @@ export interface ProposalWithAction extends Proposal {
   requester?: string | null;
   /** Whether the viewer may approve, edit, or reject it: a maintainer, or the person who asked. */
   can_decide?: boolean;
+  /** For a fix or merge: whether the viewer may push to the PR's branch (``null``: unknown). */
+  can_push?: boolean | null;
 }
 
 export interface Evaluation {

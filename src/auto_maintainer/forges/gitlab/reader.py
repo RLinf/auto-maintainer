@@ -401,6 +401,7 @@ class GitLabReader:
             head_ref=str(mr.get("source_branch") or ""),
             head_sha=head,
             head_repo=check_repo(repo) if same else await self._fork_of(mr),
+            maintainer_can_modify=True if same else mr.get("allow_collaboration"),
             url=str(mr.get("web_url") or ""),
             created_at=_time(mr.get("created_at")),
             updated_at=_time(mr.get("updated_at")),

@@ -74,7 +74,9 @@ def _payload(job: Job) -> dict[str, Any]:
     return (first.get("payload") if isinstance(first, dict) else None) or {}
 
 
-async def _default_agent(service: Service, job: Job) -> str | None:
+async def _default_agent(service: Service, job: Job, by: str | None) -> str | None:
+    """The agent ``job`` runs on before it says: its requester's own, else its
+    route's."""
     kind = AGENT_PLAYBOOKS.get(job.playbook)
     if kind is None:
         return None
@@ -84,7 +86,7 @@ async def _default_agent(service: Service, job: Job) -> str | None:
         if profile
         else service.info.routing.get(kind)
     )
-    return service.runs_on(route)
+    return await service.runs_on_for(route, by, kind)
 
 
 async def job_view(
@@ -135,7 +137,7 @@ async def job_view(
         "title": pr.title if pr else None,
         "by": by,
         "mine": bool(me and by and by.lower() == me.lower()),
-        "agent": payload.get("agent") or ran or await _default_agent(service, job),
+        "agent": payload.get("agent") or ran or await _default_agent(service, job, by),
         "note": payload.get("note") or None,
         "batch": payload.get("batch"),
         "created_at": job.created_at.isoformat(),

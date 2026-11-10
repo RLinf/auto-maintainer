@@ -144,10 +144,13 @@ export function ProposalCard({
     setComments(Array.isArray(payload.comments) ? (payload.comments as InlineComment[]) : []);
   }, [payload.body, payload.comments, editing]);
   const isFix = kind === "pr.fix";
-  // A merge of the base branch always goes onto the PR's branch; a fix may do either.
+  // A fix, or a merge of the base branch, goes onto the PR's branch or as a PR into
+  // it; one who cannot push to the branch (a fork that does not let them) opens a PR.
   const isMerge = isFix && !!str(payload.merge_ref);
-  const [target, setTarget] = useState(str(payload.target) || "pr");
-  const changedTarget = isFix && !isMerge && target !== (str(payload.target) || "pr");
+  const cannotPush = proposal.can_push === false;
+  const drafted = str(payload.target) || "pr";
+  const [target, setTarget] = useState(cannotPush ? "pr" : drafted);
+  const changedTarget = isFix && target !== drafted;
   const canAsMe = !!me?.can_post_as_me && AS_ME.has(kind);
   // An edit of a posted review is done by whoever posted it: GitHub lets only the author edit it.
   const reviewAuthor = kind === "review.update" ? str(payload.author) : "";
@@ -162,7 +165,7 @@ export function ProposalCard({
     ...payload,
     ...(typeof payload.body === "string" ? { body } : {}),
     ...(Array.isArray(payload.comments) ? { comments } : {}),
-    ...(isFix ? { title, ...(isMerge ? {} : { target }) } : {}),
+    ...(isFix ? { title, target } : {}),
     ...(dropped.length ? { labels: list(payload.labels).filter((l) => !dropped.includes(l)) } : {}),
     ...(kind === "lab.reproduce"
       ? str(payload.script)
@@ -192,11 +195,11 @@ export function ProposalCard({
   const editable = typeof payload.body === "string" || kind === "lab.reproduce" || (Array.isArray(payload.comments) && comments.length > 0);
   const findings = ((payload.result as { findings?: unknown[] } | undefined)?.findings ?? []).length;
   const approveLabel = isFix
-    ? isMerge
-      ? t("Push the merge as me")
-      : target === "branch"
-        ? t("Push to the PR as me")
-        : t("Open the PR as me")
+    ? target === "branch"
+      ? isMerge
+        ? t("Push the merge as me")
+        : t("Push to the PR as me")
+      : t("Open the PR as me")
     : kind === "lab.reproduce"
       ? `${t("Run on")} ${str(payload.lab)}`
       : kind === "review.post"
@@ -351,10 +354,13 @@ export function ProposalCard({
               </Popover>
             )}
           </div>
-          {isFix && !isMerge && (
+          {isFix && (
             <select value={target} onChange={(e) => setTarget(e.target.value)} aria-label={t("Where the fix goes")}>
               <option value="pr">{t("As a PR into this PR")}</option>
-              <option value="branch">{t("As a commit on the PR's branch")}</option>
+              <option value="branch" disabled={cannotPush} title={cannotPush ? t("You cannot push to this PR's branch: its fork does not let maintainers, or you cannot write to the repository") : undefined}>
+                {isMerge ? t("As a merge commit on the PR's branch") : t("As a commit on the PR's branch")}
+                {cannotPush ? ` (${t("you cannot push there")})` : ""}
+              </option>
             </select>
           )}
           {editing && (
@@ -700,7 +706,7 @@ export function MergeBaseButton({
         <div className="stack" style={{ gap: 10, padding: 6, width: 340, maxWidth: "calc(100vw - 48px)" }}>
           <span className="small muted">
             {conflicting
-              ? t("An agent merges the base branch into the PR and resolves the conflicts. You read the resolution, then push the merge onto the PR's branch as yourself.")
+              ? t("An agent merges the base branch into the PR and resolves the conflicts. You read the resolution, then push the merge onto the PR's branch as yourself, or open it as a PR into this PR when you cannot push there.")
               : t("GitHub merges the base branch into the PR's branch now, as you.")}
           </span>
           <div className="row">

@@ -685,8 +685,9 @@ async def _pr_fix(
 ) -> dict[str, Any]:
     """Push the change as the approving maintainer (the executor gives this handler
     their writer and publisher; the service's own account never runs it): straight
-    onto the PR's branch, or to a new branch with a PR into the PR's branch. A merge
-    of the base branch always goes onto the PR's branch."""
+    onto the PR's branch, or to a new branch with a PR into the PR's branch, which
+    the PR's author merges. A merge of the base branch goes either way too, for an
+    approver who cannot push to the PR's branch (a fork that does not let them)."""
     assert profile is not None and pr is not None and approver
     p = FixPrPayload.model_validate(action.payload)
     if x.publisher is None:
@@ -699,7 +700,7 @@ async def _pr_fix(
         f"Signed-off-by: {approver} <{email}>"
     )
     head_repo = pr.head_repo or action.repo
-    if p.target == "branch" or p.merge_ref:
+    if p.target == "branch":
         if not same_commit(pr.head_sha, p.base_sha):
             raise Stale(
                 f"the PR moved from {p.base_sha[:7]} to {pr.head_sha[:7]} since this "
@@ -717,9 +718,16 @@ async def _pr_fix(
             push_to=head_repo,
         )
         return {"pushed": f"{head_repo}:{pr.head_ref}", "sha": sha}
-    branch = f"am/fix-{pr.number}-{action.id[-6:]}"
+    branch = f"am/{'merge' if p.merge_ref else 'fix'}-{pr.number}-{action.id[-6:]}"
     sha = await x.publisher.publish(
-        action.repo, p.base_sha, p.patch, branch, message, author=(approver, email)
+        action.repo,
+        p.base_sha,
+        p.patch,
+        branch,
+        message,
+        author=(approver, email),
+        merge_sha=p.merge_sha,
+        resolved=p.resolved,
     )
     body = await x.public(
         action, profile, p.body, marker_kind="fix", pr=pr, runtime=p.runtime

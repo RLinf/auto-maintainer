@@ -95,6 +95,9 @@ class GitWorkspace:
         self._forge_url = forge_url.rstrip("/")
         self._remote = remote
         self._locks: dict[str, asyncio.Lock] = {}
+        self._steering: dict[Path, str] = {}
+        """Each prepared checkout's default branch ref, whose instruction files it
+        holds (``_restore_instructions``)."""
 
     def remote_url(self, repo: str) -> str:
         """Where ``repo`` is cloned from and pushed to."""
@@ -197,6 +200,7 @@ class GitWorkspace:
                 repo, "worktree", "add", "-q", "--detach", str(path), sha, cwd=mirror
             )
         await self._restore_instructions(repo, path, sha, f"origin/{default_branch}")
+        self._steering[path] = f"origin/{default_branch}"
         return path
 
     async def _restore_instructions(
@@ -253,6 +257,7 @@ class GitWorkspace:
 
     async def release(self, path: Any) -> None:
         p = Path(path)
+        self._steering.pop(p, None)
         common = (
             await run(["git", "rev-parse", "--git-common-dir"], cwd=p)
             if p.exists()
@@ -299,14 +304,28 @@ class GitWorkspace:
         merge_sha = (
             await run(["git", "rev-parse", ref], cwd=path, check=True)
         ).stdout.strip()
-        return MergeAttempt(
-            merge_sha=merge_sha, conflicts=await self._merge(path, merge_sha)
-        )
+        steering_ref = self._steering.get(path)
+        # The checkout holds the default branch's instruction files, which git
+        # would refuse to merge over: merge the PR's own commit as it is.
+        await run(["git", "reset", "-q", "--hard", "HEAD"], cwd=path, check=True)
+        conflicts = await self._merge(path, merge_sha)
+        steering = [c for c in conflicts if is_instruction_path(c)]
+        if steering_ref is not None:
+            # The agent that resolves the rest works from the default branch's
+            # instructions, as every agent does; a conflicted instruction file is
+            # not its to resolve (``MergeAttempt.steering``).
+            await self._restore_instructions(repo, path, "HEAD", steering_ref)
+        return MergeAttempt(merge_sha=merge_sha, conflicts=conflicts, steering=steering)
 
     async def _merge(self, path: Path, sha: str) -> list[str]:
-        """Merge ``sha`` into the worktree without committing; the conflicted files."""
+        """Merge ``sha`` into the worktree without committing; the conflicted files.
+
+        Raises:
+            RuntimeError: git could not merge for a reason other than conflicts
+                (an empty list would read as a clean merge).
+        """
         name, email = self.author
-        await run(
+        merged = await run(
             [
                 "git",
                 "-c",
@@ -326,7 +345,11 @@ class GitWorkspace:
             cwd=path,
             check=True,
         )
-        return [p for p in listed.stdout.split("\0") if p]
+        conflicts = [p for p in listed.stdout.split("\0") if p]
+        if not merged.ok and not conflicts:
+            tail = " ".join((merged.stderr or merged.stdout).strip().splitlines()[-3:])
+            raise RuntimeError(f"git could not merge {sha[:12]}: {tail}")
+        return conflicts
 
     async def merge_base(self, path: Any, a: str, b: str) -> str | None:
         result = await run(["git", "merge-base", a, b], cwd=Path(path), timeout=120)

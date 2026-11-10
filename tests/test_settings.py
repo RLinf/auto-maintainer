@@ -827,3 +827,23 @@ async def test_one_owner_acts_while_an_admin_of_the_service_repo(demo) -> None:
     assert (await h.service.service_gate("maria")).allowed is False
     h.service.settings.code_repo = None
     assert "no repository of its own" in (await h.service.service_gate("ada")).reason
+
+
+async def test_a_persons_work_is_shown_on_their_own_agent_before_it_runs(demo) -> None:
+    """What the dashboard names before an agent starts (a job's agent, the review
+    button's): the requester's own agent, which the router tries first."""
+    from auto_maintainer.domain.profile import Route
+
+    h, _ = demo
+
+    async def own(login: str) -> list[str]:
+        return ["claude-code"] if login == "maria" else []
+
+    h.runner.own_agents = own  # type: ignore[attr-defined]
+    route = Route(primary="antigravity")
+    assert await h.service.runs_on_for(route, "maria", "fix") == "claude-code"
+    assert await h.service.runs_on_for(route, "walt", "fix") == h.service.runs_on(route)
+    assert await h.service.runs_on_for(route, "maria", "verify") == (
+        h.service.runs_on(route)
+    ), "a verification keeps its route's agent"
+    assert await h.service.runs_on_for(route, None, "fix") == h.service.runs_on(route)

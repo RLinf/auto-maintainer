@@ -90,3 +90,81 @@ async def test_a_resolved_merge_lands_on_the_forks_branch(tmp_path: Path) -> Non
     assert git(fork, "log", "-1", "--format=%P", sha).split() == [head, main]
     assert git(fork, "show", f"{sha}:loader.py") == "one, from the PR and main"
     assert git(fork, "log", "-1", "--format=%an", sha) == "maria"
+
+
+def _repo_with_pr(tmp_path: Path) -> tuple[Path, Path, str]:
+    """An upstream whose PR #7 branched from a seed with ``AGENTS.md``; returns the
+    forge, a work clone on ``main``, and the PR's head."""
+    forge = tmp_path / "forge"
+    upstream = forge / "acme" / "widget.git"
+    git(tmp_path, "init", "-q", "--bare", "-b", "main", str(upstream))
+    work = tmp_path / "work"
+    git(tmp_path, "clone", "-q", str(upstream), str(work))
+    (work / "AGENTS.md").write_text("seed rules\n")
+    _commit(work, "one\n", "seed")
+    git(work, "push", "-q", "origin", "HEAD:main")
+    git(work, "checkout", "-q", "-b", "feature")
+    return forge, work, ""
+
+
+async def test_a_merge_finds_the_conflicts_when_main_changed_agent_instructions(
+    tmp_path: Path,
+) -> None:
+    """The checkout holds main's instruction files, which git would refuse to merge
+    over; the merge still runs, finds the PR's conflicts, and leaves main's
+    instructions for the agent."""
+    forge, work, _ = _repo_with_pr(tmp_path)
+    head = _commit(work, "one, from the PR\n", "pr change")
+    git(work, "push", "-q", "origin", "feature:refs/pull/7/head")
+    git(work, "checkout", "-q", "main")
+    (work / "AGENTS.md").write_text("main's newer rules\n")
+    main = _commit(work, "one, on main\n", "main change")
+    git(work, "push", "-q", "origin", "main")
+
+    ws = GitWorkspace(tmp_path / "data", forge_url=f"file://{forge}")
+    path = await ws.prepare("acme/widget", 7, head, "main")
+    attempt = await ws.merge(path, "main")
+    assert attempt.merge_sha == main
+    assert (attempt.conflicts, attempt.steering) == (["loader.py"], [])
+    assert (path / "AGENTS.md").read_text() == "main's newer rules\n"
+    await ws.release(path)
+
+
+async def test_a_conflict_in_agent_instructions_is_left_to_a_person(
+    tmp_path: Path,
+) -> None:
+    forge, work, _ = _repo_with_pr(tmp_path)
+    (work / "AGENTS.md").write_text("the PR's rules\n")
+    head = _commit(work, "one\n", "pr change")
+    git(work, "push", "-q", "origin", "feature:refs/pull/7/head")
+    git(work, "checkout", "-q", "main")
+    (work / "AGENTS.md").write_text("main's rules\n")
+    _commit(work, "one\n", "main change")
+    git(work, "push", "-q", "origin", "main")
+
+    ws = GitWorkspace(tmp_path / "data", forge_url=f"file://{forge}")
+    path = await ws.prepare("acme/widget", 7, head, "main")
+    attempt = await ws.merge(path, "main")
+    assert attempt.steering == ["AGENTS.md"]
+    assert (path / "AGENTS.md").read_text() == "main's rules\n", (
+        "no agent reads the PR's side"
+    )
+    await ws.release(path)
+
+
+async def test_a_merge_git_refuses_is_not_read_as_a_clean_one(tmp_path: Path) -> None:
+    forge, work, _ = _repo_with_pr(tmp_path)
+    head = _commit(work, "one, from the PR\n", "pr change")
+    git(work, "push", "-q", "origin", "feature:refs/pull/7/head")
+    git(work, "checkout", "-q", "--orphan", "other")
+    git(work, "rm", "-q", "-rf", ".")
+    (work / "else.txt").write_text("unrelated\n")
+    git(work, "add", ".")
+    git(work, "commit", "-q", "-m", "unrelated history")
+    git(work, "push", "-q", "origin", "other")
+
+    ws = GitWorkspace(tmp_path / "data", forge_url=f"file://{forge}")
+    path = await ws.prepare("acme/widget", 7, head, "main")
+    with pytest.raises(RuntimeError, match="could not merge"):
+        await ws.merge(path, "other")
+    await ws.release(path)

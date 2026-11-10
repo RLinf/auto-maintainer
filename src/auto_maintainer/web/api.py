@@ -397,6 +397,23 @@ def service_of(request: Request) -> Service:
     return request.app.state.service
 
 
+async def _can_push(service: Service, user: User, record: ActionRecord) -> bool | None:
+    """Whether ``user`` may push to the branch of the PR ``record`` changes: they
+    write to its repository, and for a fork, its author lets maintainers push. Only
+    a hint for where the approval card sends a change; the push itself decides."""
+    action = record.action
+    if action.number is None:
+        return None
+    pr = await service.store.get_snapshot(action.repo, action.number)
+    if pr is None:
+        return None
+    if not (await permission(service, user, action.repo)).at_least(Permission.WRITE):
+        return False
+    if pr.head_repo in (None, "", action.repo):
+        return True
+    return pr.maintainer_can_modify
+
+
 async def permission(service: Service, user: User, repo: str) -> Permission:
     """The user's permission on ``repo``, cached for ten minutes, for viewing only."""
     now = service.clock.now()
@@ -2695,6 +2712,9 @@ def build_router() -> APIRouter:
                     "can_decide": await may_decide(
                         service, user, p, record, maintainer=maintains[p.repo]
                     ),
+                    "can_push": await _can_push(service, user, record)
+                    if record is not None and record.action.kind == ActionKind.PR_FIX
+                    else None,
                 }
             )
         return out
@@ -3290,7 +3310,7 @@ async def _request_review(
         "followup" if state in ("FOLLOWUP_REVIEW", "APPROVED_NEW_COMMITS") else "review"
     )
     route = profile.route(run, service.settings.routing)
-    default_agent = service.runs_on(route)
+    default_agent = await service.runs_on_for(route, user.login, run)
     chosen = agent or default_agent
     known = getattr(service.a.agents, "runtimes", None)
     if agent and known is not None and agent not in known:

@@ -410,6 +410,10 @@ class MergeAttempt(BaseModel):
     merge_sha: str
     """The commit of the merged branch."""
     conflicts: list[str] = Field(default_factory=list)
+    steering: list[str] = Field(default_factory=list)
+    """The conflicted files that steer coding agents (``AGENTS.md``, skills). The
+    checkout holds the default branch's version of them, so no agent reads a PR's own
+    instructions, and none resolves them: a person does."""
 
 
 class WorkChanges(BaseModel):

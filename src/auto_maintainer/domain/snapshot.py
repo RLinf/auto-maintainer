@@ -204,6 +204,9 @@ class PrSnapshot(_Model):
     head_ref: str = ""
     head_sha: str
     head_repo: str | None = None
+    maintainer_can_modify: bool | None = None
+    """Whether people who may write to the PR's repository may push to its branch:
+    for a fork, whether its author allowed it; ``None`` when the forge did not say."""
     url: str = ""
     created_at: datetime | None = None
     updated_at: datetime | None = None

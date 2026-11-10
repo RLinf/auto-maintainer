@@ -80,6 +80,7 @@ fragment PrFields on PullRequest {
   author { login }
   baseRefName headRefName headRefOid
   headRepository { nameWithOwner }
+  maintainerCanModify
   mergeable mergeStateStatus additions deletions
   labels(first: 50) { nodes { name } }
   files(first: 100) { nodes { path additions deletions changeType } }
@@ -287,6 +288,7 @@ def snapshot_from_graphql(repo: str, node: dict[str, Any]) -> PrSnapshot:
         head_ref=node.get("headRefName") or "",
         head_sha=node["headRefOid"],
         head_repo=(node.get("headRepository") or {}).get("nameWithOwner"),
+        maintainer_can_modify=node.get("maintainerCanModify"),
         url=node.get("url") or "",
         created_at=_dt(node.get("createdAt")),
         updated_at=_dt(node.get("updatedAt")),

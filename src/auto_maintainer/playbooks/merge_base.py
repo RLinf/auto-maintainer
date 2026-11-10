@@ -100,6 +100,14 @@ class MergeBasePlaybook(Playbook):
                         "update the branch instead"
                     }
                 )
+            if attempt.steering:
+                return PlaybookResult(
+                    failed=f"{base} conflicts with the PR in files that steer coding "
+                    "agents, which no agent resolves from a PR's side: "
+                    + ", ".join(attempt.steering)
+                    + ". Resolve the merge by hand, or have the author do it.",
+                    result={"steering": attempt.steering},
+                )
             listing = "\n".join(f"- {name}" for name in attempt.conflicts)
             answer = await ctx.ask(
                 AgentTask(
