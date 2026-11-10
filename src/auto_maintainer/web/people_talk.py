@@ -49,6 +49,7 @@ from ..playbooks.prompts import no_code_rule, schema_hint, told_block
 from ..service import Service
 from .api import _repo, require_view, service_of
 from .auth import User, current_user
+from .records import open_door, reading_line
 
 log = logging.getLogger(__name__)
 
@@ -171,7 +172,14 @@ def build_router() -> APIRouter:
                 return await _tell(service, user, thread, body.text)
             raise HTTPException(409, "the agent is still answering the last message")
         async with lock:
-            return await _turn(service, user, thread, repo, body.text)
+            return await _turn(
+                service,
+                user,
+                thread,
+                repo,
+                body.text,
+                getattr(request.app.state, "records", None),
+            )
 
     return r
 
@@ -197,7 +205,12 @@ async def _tell(
 
 
 async def _turn(
-    service: Service, user: User, thread: ChatThread, repo: str, said: str
+    service: Service,
+    user: User,
+    thread: ChatThread,
+    repo: str,
+    said: str,
+    door: Any = None,
 ) -> dict[str, Any]:
     profile = await service.profiles.active(repo)
     assert profile is not None
@@ -235,11 +248,13 @@ async def _turn(
             ),
             f"The newest message, from {user.login}, which you answer:\n{text}",
             record_block(current, draft=replaced is not None, loaded=loaded),
+            *([reading_line(user.login)] if door is not None else []),
             schema_hint(PeopleTurn.model_json_schema()),
             f"Answer the newest message, from {user.login}, above.",
         ]
     )
     run = new_id("run")
+    token, door_env = await open_door(door, user.login)
     route = profile.route(str(TaskKind.GOVERNANCE), service.info.routing)
     if route is None:
         raise HTTPException(500, "no agent route for the People record")
@@ -255,12 +270,16 @@ async def _turn(
         untrusted_input=False,
         resume_session=thread.session,
         messages=True,
+        records_token=token,
+        env=door_env,
     )
     thread.live_run = run
     await service.store.save_thread(thread)
     try:
         result = await service.a.agents.run(task, route, PeopleTurn)
     finally:
+        if door is not None:
+            door.revoke(token)
         thread.live_run = None
         await service.store.save_thread(thread)
     if not result.ok or result.structured is None:

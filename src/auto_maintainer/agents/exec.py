@@ -99,6 +99,7 @@ MAX_ARG_PROMPT_BYTES = 100_000
 """Prompts longer than this are passed through a file; Linux limits one argument to 128 KiB."""
 
 LAB_CLI = Path(__file__).with_name("lab_cli.py")
+RECORDS_CLI = Path(__file__).with_name("records_cli.py")
 """The ``lab`` command a run with a reproduction session gets."""
 
 PROMPT_CONTINUES = (
@@ -797,6 +798,19 @@ class ExecRuntime:
         else:
             env.pop("AM_LAB_SESSION", None)
             env.pop("AM_LAB_SOCKET", None)
+        if task.records_token:
+            # The agent's read-only door to the dashboard (``web/records.py``).
+            bin_dir = files.dir / "bin"
+            bin_dir.mkdir(exist_ok=True)
+            reader = bin_dir / "am-read"
+            reader.write_text(RECORDS_CLI.read_text(encoding="utf-8"), encoding="utf-8")
+            reader.chmod(0o755)
+            env["AM_RECORDS_TOKEN"] = task.records_token
+            if str(bin_dir) not in env.get("PATH", "").split(os.pathsep):
+                env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
+        else:
+            env.pop("AM_RECORDS_TOKEN", None)
+            env.pop("AM_RECORDS_SOCKET", None)
         container: str | None = None
         if self.container_sandbox is not None:
             if self.container_sandbox.github_socket is not None:

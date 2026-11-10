@@ -52,6 +52,8 @@ from . import (
     translate,
 )
 from .dashboard import STATIC, missing_page
+from .records import RecordsDoor
+from .records import build_router as records_router
 
 
 @dataclass(frozen=True)
@@ -111,6 +113,8 @@ def create_app(
     """The log ``am start`` keeps, which the Service page shows to its maintainers."""
     app.state.sessions = auth.Sessions(data_dir / ".session_secret")
     app.state.cookie_secure = cookie_secure
+    app.state.records = RecordsDoor(app, data_dir / "sandbox" / "records.sock")
+    """The agents' read-only door to this dashboard, started by the first conversation."""
 
     install_csrf(app)
 
@@ -124,6 +128,7 @@ def create_app(
             WebhookCheck(verify_webhook, webhook_target, webhook_secret_env),
         )
     app.include_router(api.build_router())
+    app.include_router(records_router())
     app.include_router(chat.build_router())
     app.include_router(settings.build_router())
     app.include_router(jobs.build_router())

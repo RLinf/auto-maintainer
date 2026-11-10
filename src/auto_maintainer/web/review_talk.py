@@ -73,6 +73,7 @@ from .api import is_maintainer, service_of
 from .auth import User, current_user
 from .chat import ProposedAction, save_lesson
 from .jobs import _job, _payload
+from .records import open_door, reading_line
 
 log = logging.getLogger(__name__)
 
@@ -283,7 +284,16 @@ def build_router() -> APIRouter:
         if lock.locked():
             raise HTTPException(409, "the agent is still answering the last message")
         async with lock:
-            return await _turn(service, user, job, record, profile, pr, body.text)
+            return await _turn(
+                service,
+                user,
+                job,
+                record,
+                profile,
+                pr,
+                body.text,
+                getattr(request.app.state, "records", None),
+            )
 
     return r
 
@@ -332,6 +342,7 @@ async def _turn(
     profile: RepoProfile,
     pr: PrSnapshot,
     said: str,
+    door: Any = None,
 ) -> dict[str, Any]:
     assert job.repo and job.number is not None
     thread = await service.store.get_thread(thread_id_of(job)) or ChatThread(
@@ -405,12 +416,14 @@ async def _turn(
                 payload=payload,
                 diff_limit=TALK_DIFF_LIMIT,
             ),
+            reading_line(user.login) if door is not None else "",
             schema_hint(model.model_json_schema()),
             f"Answer the newest message, from {user.login}, above.",
         ]
         if part
     )
     run = new_id("run")
+    token, door_env = await open_door(door, user.login)
     task = AgentTask(
         kind=kind,
         prompt=prompt,
@@ -423,6 +436,8 @@ async def _turn(
         requested_by=user.login,
         untrusted_input=not await author_is_team(service.a.forge, profile, pr),
         resume_session=thread.session,
+        records_token=token,
+        env=door_env,
     )
     thread.live_run = run
     await service.store.save_thread(thread)
@@ -431,6 +446,8 @@ async def _turn(
             task, _route(service, profile, kind, payload.runtime), model
         )
     finally:
+        if door is not None:
+            door.revoke(token)
         thread.live_run = None
         await service.store.save_thread(thread)
     if not result.ok or result.structured is None:

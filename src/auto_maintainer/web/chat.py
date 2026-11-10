@@ -78,6 +78,7 @@ from .api import (
     visible_repos,
 )
 from .auth import User, current_user
+from .records import open_door, reading_line
 
 log = logging.getLogger(__name__)
 
@@ -142,30 +143,9 @@ class ProposedAction(BaseModel):
     )
 
 
-class Lookup(BaseModel):
-    """A record the agent asks the service for before it answers (the service guide's
-    "Diagnosing" section says which to read for what)."""
-
-    kind: Literal["pr_record", "repo_failures", "service_log"] = Field(
-        description="pr_record: every action on one PR with its status, error, "
-        "proposal, and jobs. repo_failures: the repository's recent actions that "
-        "failed, were refused, or were superseded. service_log: the service's log "
-        "lines that contain `text`, such as an action or job id."
-    )
-    repo: str = ""
-    number: int | None = None
-    text: str = Field("", description="For service_log: what the lines contain.")
-
-
 class ChatAnswer(BaseModel):
     reply: str
     proposals: list[ProposedAction] = Field(default_factory=list)
-    lookups: list[Lookup] = Field(
-        default_factory=list,
-        description="Records to read before answering. With lookups, leave proposals "
-        "empty and reply with one line on what you check: the service sends the "
-        "results back and you answer then.",
-    )
 
 
 class PageContext(BaseModel):
@@ -367,7 +347,7 @@ def build_router() -> APIRouter:
         prompt = "\n\n".join(
             [
                 f"You are the maintainers' assistant for {', '.join(repos) or 'no repositories yet'}. You are talking to {user.login}. "
-                "Answer from the data below. You cannot act directly: put any change you suggest in `proposals`. "
+                "You cannot act directly: put any change you suggest in `proposals`. "
                 "Each proposal appears as a card under your answer, and they differ in what happens next: actions on a PR "
                 "(label, comment, rerun, ...) and configuration changes wait for the maintainer to approve the card; "
                 "review and evaluate (score a PR's priority again, or every open PR's when number is empty, with "
@@ -385,6 +365,7 @@ def build_router() -> APIRouter:
                 "runs one such change at a time: if the history shows one pending or running, do not propose it again.",
                 await _guide(service),
                 f"Your working directory is {where}.",
+                reading_line(user.login),
                 f"Memory index:\n{memory_index or '(empty)'}",
                 "Review queue (internal):\n" + ("\n".join(queue) or "(empty)"),
                 await _page_block(service, user, body.context, repos),
@@ -401,6 +382,8 @@ def build_router() -> APIRouter:
         if route is None:
             raise HTTPException(500, "no chat route is configured")
         run = new_id("run")
+        door = request.app.state.records
+        token, door_env = await open_door(door, user.login)
         task = AgentTask(
             kind=TaskKind.CHAT,
             prompt=prompt,
@@ -409,41 +392,18 @@ def build_router() -> APIRouter:
             resume_session=thread.session,
             job_id=run,
             requested_by=user.login,
+            records_token=token,
+            env=door_env,
         )
         thread.live_run = run
         await service.store.save_thread(thread)
         try:
-            for turn in range(LOOKUP_TURNS + 1):
-                result = await service.a.agents.run(task, route, ChatAnswer)
-                if not result.ok or result.structured is None:
-                    raise HTTPException(502, f"the chat agent failed: {result.error}")
-                answer = ChatAnswer.model_validate(result.structured)
-                if not answer.lookups or turn == LOOKUP_TURNS:
-                    break
-                found = [
-                    await _lookup(service, user, q, repos, request.app.state.log_path)
-                    for q in answer.lookups[:MAX_LOOKUPS]
-                ]
-                follow = "\n\n".join(
-                    [
-                        "Results of your lookups:\n" + "\n\n".join(found),
-                        "Answer now, from these results; no more lookups."
-                        if turn == LOOKUP_TURNS - 1
-                        else "Answer now, or ask for more lookups if these do not "
-                        "settle it.",
-                        schema_hint(ChatAnswer.model_json_schema()),
-                    ]
-                )
-                task = task.model_copy(
-                    update={
-                        # A resumed session holds the first prompt; else send it again.
-                        "prompt": follow
-                        if result.session
-                        else prompt + "\n\n" + follow,
-                        "resume_session": result.session,
-                    }
-                )
+            result = await service.a.agents.run(task, route, ChatAnswer)
+            if not result.ok or result.structured is None:
+                raise HTTPException(502, f"the chat agent failed: {result.error}")
+            answer = ChatAnswer.model_validate(result.structured)
         finally:
+            door.revoke(token)
             thread.live_run = None
             await service.store.save_thread(thread)
         thread.session = result.session or thread.session
@@ -572,141 +532,6 @@ def _where(service: Any, thread: ChatThread) -> str:
             "changing it changes nothing that runs"
         )
     return "an empty folder of this conversation's own"
-
-
-RECORD_ACTIONS = 40
-"""The most recent actions of a PR the chat agent sees, with how each ended."""
-RECORD_JOBS = 12
-
-
-def _draft_summary(payload: dict[str, Any]) -> str:
-    """A review draft in a line: its kind and where each inline comment is, to check
-    against the PR's diff."""
-    comments = payload.get("comments") or []
-    places = [
-        f"{c.get('path')}:"
-        + (
-            f"{c['start_line']}-{c.get('line')}"
-            if c.get("start_line")
-            else str(c.get("line"))
-        )
-        + ("" if c.get("side", "RIGHT") == "RIGHT" else " (old side)")
-        for c in comments
-    ]
-    return f"draft: {payload.get('event', 'COMMENT')} review, " + (
-        f"{len(places)} inline comments at " + ", ".join(places)
-        if places
-        else "no inline comments"
-    )
-
-
-async def _service_record(service: Any, repo: str, number: int) -> str:
-    """The service's own record of ``repo#number``, oldest first: each action it
-    proposed or took, when it last changed, how it ended (status, error, the
-    policy's rule), the proposal behind it (who decided, why, its warnings), for a
-    review draft its kind and where its inline comments are, and its recent jobs
-    (the ``pr_record`` lookup)."""
-    actions = await service.store.list_actions(
-        repo=repo, number=number, limit=RECORD_ACTIONS
-    )
-    lines = []
-    for record in sorted(actions, key=lambda r: r.action.created_at):
-        a = record.action
-        parts = [
-            f"{a.created_at:%Y-%m-%d %H:%M} UTC {a.kind} "
-            f"at {(a.head_sha or '-')[:7]}: {record.status}"
-        ]
-        if record.decision is not None:
-            parts.append(f"policy {record.decision.kind} ({record.decision.rule})")
-        proposal = await service.store.proposal_for_action(a.id)
-        if proposal is not None:
-            parts.append(
-                f"proposal {proposal.state}"
-                + (f" for {proposal.requested_by}" if proposal.requested_by else "")
-                + (f", decided by {proposal.decided_by}" if proposal.decided_by else "")
-            )
-            if proposal.reason:
-                parts.append(f"reason: {proposal.reason}")
-            if proposal.warnings:
-                parts.append("warnings: " + "; ".join(proposal.warnings))
-        if record.post_as:
-            parts.append(f"as {record.post_as}")
-        if a.kind in (ActionKind.REVIEW_POST, ActionKind.REVIEW_UPDATE):
-            parts.append(_draft_summary(a.payload))
-        if record.updated_at and record.updated_at > a.created_at:
-            parts.append(f"last changed {record.updated_at:%Y-%m-%d %H:%M} UTC")
-        if record.error:
-            parts.append(f"error: {record.error}")
-        lines.append(" | ".join(parts))
-    jobs = [j for j in await service.store.list_jobs(repo=repo) if j.number == number]
-    for job in sorted(jobs, key=lambda j: j.updated_at)[-RECORD_JOBS:]:
-        lines.append(
-            f"{job.updated_at:%Y-%m-%d %H:%M} UTC job {job.playbook}: {job.status}"
-            + (f" | error: {job.error}" if job.error else "")
-        )
-    return "\n".join(lines) or "nothing yet"
-
-
-LOOKUP_TURNS = 2
-"""How many times one answer may ask for lookups before it must answer."""
-MAX_LOOKUPS = 4
-LOG_LINES = 5000
-"""How far back in the service's log a ``service_log`` lookup reads."""
-LOG_MATCHES = 60
-
-
-async def _lookup(
-    service: Any, user: User, q: Lookup, repos: list[str], log_path: Path | None
-) -> str:
-    """Run one lookup the agent asked for, with ``user``'s permissions: records of a
-    repository they see; the service's log only for operators and maintainers of the
-    service's repository. The answer is redacted of credentials and marked as data."""
-    target = f"{q.repo}#{q.number}" if q.number else q.repo
-    what = " ".join(x for x in (q.kind, target, q.text) if x)
-    if q.kind in ("pr_record", "repo_failures"):
-        if q.repo not in repos:
-            return f"{what}: not a repository {user.login} can see"
-        if q.kind == "pr_record":
-            if q.number is None:
-                return f"{what}: pr_record needs a number"
-            text = await _service_record(service, q.repo, q.number)
-        else:
-            text = await _repo_failures(service, q.repo)
-    else:
-        allowed = (
-            user.login in service.settings.operators
-            or (await service.service_gate(user.login)).allowed
-        )
-        if not allowed:
-            return f"{what}: only operators and the owner of this service read its log"
-        if not q.text.strip() or log_path is None:
-            return f"{what}: say what the lines contain"
-        text = await asyncio.to_thread(_log_lines, log_path, q.text.strip())
-    return f"{what}:\n" + untrusted(f"lookup.{q.kind}", redact_secrets(text)[0], 16000)
-
-
-async def _repo_failures(service: Any, repo: str) -> str:
-    """The repository's latest actions that did not run as planned."""
-    statuses = ["failed", "denied", "superseded"]
-    records = await service.store.list_actions(repo=repo, statuses=statuses, limit=30)
-    lines = [
-        f"{r.action.created_at:%Y-%m-%d %H:%M} UTC {r.action.kind} "
-        f"#{r.action.number}: {r.status}" + (f" | error: {r.error}" if r.error else "")
-        for r in sorted(records, key=lambda r: r.action.created_at)
-    ]
-    return "\n".join(lines) or "nothing failed recently"
-
-
-def _log_lines(path: Path, needle: str) -> str:
-    """The service log's latest lines that contain ``needle``, ignoring case."""
-    try:
-        with path.open(encoding="utf-8", errors="replace") as f:
-            tail = f.readlines()[-LOG_LINES:]
-    except OSError:
-        return "the service's log cannot be read"
-    low = needle.lower()
-    hits = [ln.rstrip() for ln in tail if low in ln.lower()]
-    return "\n".join(hits[-LOG_MATCHES:]) or f"no recent line contains {needle!r}"
 
 
 async def _page_block(

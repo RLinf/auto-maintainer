@@ -477,22 +477,23 @@ async def test_the_agent_knows_the_page_it_is_asked_from(demo) -> None:
     assert "Internal quality" in seen[0] and "88/100" in seen[0]
 
 
-async def test_the_agent_looks_up_why_a_post_failed(demo) -> None:
-    """The chat agent reads the PR's record when it asks for it, with the asker's
-    permissions, and answers from it; nothing is put in its first prompt."""
+async def test_the_agent_reads_the_dashboard_as_the_person_it_talks_with(demo) -> None:
+    """A conversation's agent reads what the person may see on the dashboard, through
+    the records door, beyond the page they have open: a PR's record with its review
+    draft's comments; not another repository; the log only for operators and the
+    owner. The token ends with the turn."""
+    from datetime import timedelta
+
     from auto_maintainer.domain.actions import (
         ActionKind,
         ActionStatus,
+        InlineComment,
         ReviewPostPayload,
         make_action,
     )
     from auto_maintainer.domain.records import ActionRecord
 
     h, app = demo
-    from datetime import timedelta
-
-    from auto_maintainer.domain.actions import InlineComment
-
     action = make_action(
         ActionKind.REVIEW_POST,
         "acme/widget",
@@ -514,19 +515,10 @@ async def test_the_agent_looks_up_why_a_post_failed(demo) -> None:
             updated_at=action.created_at + timedelta(days=1),
         )
     )
-    prompts: list[str] = []
+    tasks: list = []
 
     def answer(task):
-        prompts.append(task.prompt)
-        if "Results of your lookups" not in task.prompt:
-            return {
-                "reply": "Checking the PR's record.",
-                "lookups": [
-                    {"kind": "pr_record", "repo": "acme/widget", "number": 42},
-                    {"kind": "pr_record", "repo": "other/secret", "number": 1},
-                    {"kind": "service_log", "text": action.id},
-                ],
-            }
+        tasks.append(task)
         return {"reply": "The leak guard refused it.", "proposals": []}
 
     h.runner.on("chat", answer)
@@ -535,28 +527,35 @@ async def test_the_agent_looks_up_why_a_post_failed(demo) -> None:
         thread = (
             await walt.post("/api/chat/threads", json={"text": "x", "context": context})
         ).json()
-        prompts.clear()
         reply = await walt.post(
             f"/api/chat/threads/{thread['id']}/messages",
             json={"text": "Why did the review not post?", "context": context},
         )
     assert reply.json()["text"] == "The leak guard refused it."
-    first, second = prompts
-    assert "tier 'P2'" not in first, "the record is looked up, not put in up front"
-    assert "Diagnosing what the service did" in first
-    assert "review.post at aaaaaaa: failed" in second and "priority tier" in second
-    # What it needs to check a refused review against the diff, and when it last ran.
+    task = tasks[-1]
+    assert task.records_token and "am-read /api/<path>" in task.prompt
+    assert task.env["AM_RECORDS_SOCKET"].endswith("records.sock")
+    door = app.state.records
+    assert (await door.read(task.records_token, "/api/prs"))[0] == 403, "turn over"
+    token = await door.grant("walt")
+    status, text = await door.read(token, "/api/prs/acme/widget/42/record")
+    assert status == 200 and "review.post at aaaaaaa: failed" in text
     assert (
-        "draft: COMMENT review, 2 inline comments at src/a.py:9-12, src/b.py:3"
-        in second
+        "draft: COMMENT review, 2 inline comments at src/a.py:9-12, src/b.py:3" in text
     )
-    assert "last changed" in second
-    assert "other/secret#1: not a repository walt can see" in second
-    assert "only operators and the owner" in second
+    assert "last changed" in text
+    assert (await door.read(token, "/api/prs/other/secret/1/record"))[0] in (403, 404)
+    assert (await door.read(token, "/api/service/log?text=act_"))[0] == 403
+    assert (await door.read(token, "/api/events"))[0] == 400
+    assert (await door.read(token, "http://elsewhere/api/prs"))[0] == 400
+    assert (await door.read(token, "/auth/logout"))[0] == 400
+    owner = await door.grant("maria")
+    assert (await door.read(owner, "/api/service/log?text=act_"))[0] == 200
+    await door.stop()
 
 
 def test_a_log_lookup_returns_the_latest_lines_about_it(tmp_path: Path) -> None:
-    from auto_maintainer.web.chat import LOG_MATCHES, _log_lines
+    from auto_maintainer.web.records import LOG_MATCHES, _log_lines
 
     log = tmp_path / "service.log"
     log.write_text(
@@ -566,3 +565,28 @@ def test_a_log_lookup_returns_the_latest_lines_about_it(tmp_path: Path) -> None:
     assert len(found) == LOG_MATCHES and found[-1] == f"line {LOG_MATCHES + 4} job_x"
     assert "no recent line" in _log_lines(log, "act_missing")
     assert "cannot be read" in _log_lines(tmp_path / "none.log", "x")
+
+
+async def test_am_read_reads_through_the_door_socket(demo, monkeypatch, capsys) -> None:
+    """The command an agent runs: a path of the dashboard's API, answered as the
+    person over the door's socket; --index lists what it can read."""
+    import asyncio
+    import json
+
+    from auto_maintainer.agents import records_cli
+
+    _, app = demo
+    door = app.state.records
+    token = await door.grant("walt")
+    monkeypatch.setenv("AM_RECORDS_TOKEN", token)
+    monkeypatch.setenv("AM_RECORDS_SOCKET", str(door.socket_path))
+    assert await asyncio.to_thread(records_cli.main, ["/api/prs"]) == 0
+    rows = json.loads(capsys.readouterr().out)
+    assert {r["repo"] for r in rows} == {"acme/widget"}
+    assert await asyncio.to_thread(records_cli.main, ["--index"]) == 0
+    index = capsys.readouterr().out
+    assert "/api/prs/{repo}/{number}/record" in index and "/api/events" not in index
+    assert await asyncio.to_thread(records_cli.main, ["/etc/passwd"]) == 2
+    door.revoke(token)
+    assert await asyncio.to_thread(records_cli.main, ["/api/prs"]) == 1
+    await door.stop()

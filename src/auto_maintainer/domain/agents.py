@@ -158,6 +158,11 @@ class AgentTask(BaseModel):
     job_id: str | None = None
     requested_by: str | None = None
     """The maintainer who asked for this work; the agent's questions go to them first."""
+    records_token: str | None = None
+    """For a conversation with a person: the token of the service's records door
+    (``web/records.py``) for that person. The run gets the ``am-read`` command and the
+    door's socket (``env`` names it as ``AM_RECORDS_SOCKET``), and reads the dashboard
+    as that person, read-only."""
     lab_session: str | None = None
     """The token of a reproduction session on a test machine: the run gets the
     ``lab`` command and the lab socket (``env`` names it as ``AM_LAB_SOCKET``), and

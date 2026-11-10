@@ -228,3 +228,11 @@ def test_an_agents_approved_commands_reach_its_answers(tmp_path: Path) -> None:
     )
     problems = check_settings(config, {"review": Route(primary="antigravity")})
     assert any("approve_commands.0" in p and "needs the script" in p for p in problems)
+
+
+def test_am_read_is_a_read_of_the_dashboard_not_of_a_file(tmp_path: Path) -> None:
+    assert safe_command("am-read /api/prs?mine=true", "read_only", [tmp_path])
+    assert safe_command(
+        "am-read /api/prs/acme/widget/42/record | jq .", "read_only", [tmp_path]
+    )
+    assert not safe_command("am-read /api/prs; rm -rf /", "read_only", [tmp_path])

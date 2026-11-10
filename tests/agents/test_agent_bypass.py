@@ -231,3 +231,23 @@ async def test_only_a_run_with_a_lab_session_gets_the_lab_command(
     plain = _task(tmp_path, env={"AM_LAB_SOCKET": socket})
     [*_, final] = [e async for e in runtime.run(plain)]
     assert "AM_LAB_SESSION" not in cli.env() and "AM_LAB_SOCKET" not in cli.env()
+
+
+async def test_only_a_conversations_run_gets_am_read(tmp_path: Path, fake_cli) -> None:
+    cli = fake_cli(
+        stdout='{"type":"result","subtype":"success","result":"ok","session_id":"s"}\n',
+        read_stdin=False,
+    )
+    runtime = ClaudeCodeRuntime(binary=str(cli.path), runs_dir=tmp_path / "runs")
+    socket = str(tmp_path / "records.sock")
+    task = _task(tmp_path, records_token="t0ken", env={"AM_RECORDS_SOCKET": socket})
+    [*_, final] = [e async for e in runtime.run(task)]
+    assert final.result is not None and final.result.ok
+    env = cli.env()
+    assert env["AM_RECORDS_TOKEN"] == "t0ken" and env["AM_RECORDS_SOCKET"] == socket
+    reader = Path(env["PATH"].split(":")[0]) / "am-read"
+    assert reader.is_file() and reader.stat().st_mode & 0o111, "an executable am-read"
+    assert reader.read_text().startswith("#!/usr/bin/env python3")
+    plain = _task(tmp_path, env={"AM_RECORDS_SOCKET": socket})
+    [*_, final] = [e async for e in runtime.run(plain)]
+    assert "AM_RECORDS_TOKEN" not in cli.env() and "AM_RECORDS_SOCKET" not in cli.env()

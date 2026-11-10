@@ -389,6 +389,13 @@ def _forge_signins(cfg: HostConfig) -> dict[str, Any]:
     return out
 
 
+async def _close_web(app: Any) -> None:
+    """Stop what a dashboard serves beside its routes: its agents' records door."""
+    door = getattr(getattr(app, "state", None), "records", None)
+    if door is not None:
+        await door.stop()
+
+
 class _Switch:
     """An ASGI app that forwards to the current one: the setup page until the host is
     set up, then the running service's dashboard and API."""
@@ -469,7 +476,9 @@ class _Host:
             await self._stop(old)
         await new.start()
         self._steps = None
+        previous = self.switch.app
         self.adopt(new, web)
+        await _close_web(previous)
 
     def _watch_service(self, service: Any) -> None:
         if self._watch is not None:
@@ -533,6 +542,7 @@ class _Host:
                 self._steps.cancel()
             if self._watch is not None:
                 self._watch.cancel()
+            await _close_web(self.switch.app)
             if self.service is not None:
                 await self._stop(self.service)
 

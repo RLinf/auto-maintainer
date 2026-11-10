@@ -45,6 +45,7 @@ log = logging.getLogger(__name__)
 IMAGE = "auto-maintainer-agent"
 SOCKET = "/run/am/github.sock"
 LAB_SOCKET = "/run/am/lab.sock"
+RECORDS_SOCKET = "/run/am/records.sock"
 """Where a reproduction's agent reaches its session on a test machine."""
 """Where the GitHub read proxy's socket is inside a container."""
 TOOLS_DIR = "/opt/am/bin"
@@ -244,6 +245,9 @@ class ContainerSandbox:
         lab_socket = env.get("AM_LAB_SOCKET") if env.get("AM_LAB_SESSION") else None
         if lab_socket and Path(lab_socket).exists():
             binds.append((Path(lab_socket), LAB_SOCKET, False))
+        records = env.get("AM_RECORDS_SOCKET") if env.get("AM_RECORDS_TOKEN") else None
+        if records and Path(records).exists():
+            binds.append((Path(records), RECORDS_SOCKET, False))
 
         # Not secret, and ``docker`` needs its own PATH and HOME: on the command line.
         bin_dir = run_dir / "bin"
@@ -256,6 +260,10 @@ class ContainerSandbox:
             inner["AM_LAB_SOCKET"] = LAB_SOCKET
         else:
             inner.pop("AM_LAB_SOCKET", None)
+        if records:
+            inner["AM_RECORDS_SOCKET"] = RECORDS_SOCKET
+        else:
+            inner.pop("AM_RECORDS_SOCKET", None)
         if self.github_socket is not None:
             inner["GH_TOKEN"] = GH_PLACEHOLDER
         cmd = [

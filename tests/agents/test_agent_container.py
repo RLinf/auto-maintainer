@@ -251,3 +251,37 @@ async def test_agent_containers_a_killed_service_left_are_removed(
         "ps -aq --filter name=^am-run_",
         "rm -f c1 c2",
     ]
+
+
+def test_only_a_conversations_agent_gets_the_records_door(tmp_path: Path) -> None:
+    from auto_maintainer.agents.container import RECORDS_SOCKET
+
+    work, run_dir = tmp_path / "work", tmp_path / "run"
+    work.mkdir()
+    (run_dir / "bin").mkdir(parents=True)
+    door = tmp_path / "records.sock"
+    door.write_text("")
+    binary = tmp_path / "agy"
+    binary.write_text("")
+    box = ContainerSandbox("agent:1", home=tmp_path / "home")
+    talking = box.prepare(
+        "run_1",
+        work,
+        run_dir,
+        str(binary),
+        [str(binary)],
+        {"AM_RECORDS_TOKEN": "t0ken", "AM_RECORDS_SOCKET": str(door)},
+    )
+    assert _mounts(talking.argv)[RECORDS_SOCKET] == (str(door), False)
+    assert talking.env["AM_RECORDS_SOCKET"] == RECORDS_SOCKET
+    assert "t0ken" not in " ".join(talking.argv), "the token is not on the command line"
+    other = box.prepare(
+        "run_2",
+        work,
+        run_dir,
+        str(binary),
+        [str(binary)],
+        {"AM_RECORDS_SOCKET": str(door)},
+    )
+    assert RECORDS_SOCKET not in _mounts(other.argv)
+    assert "AM_RECORDS_SOCKET" not in other.env, "no token, no door"

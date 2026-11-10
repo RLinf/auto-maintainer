@@ -38,7 +38,7 @@ READ_COMMANDS = frozenset(
     {
         "ls", "cat", "head", "tail", "wc", "grep", "rg", "find", "fd", "tree",
         "pwd", "stat", "file", "du", "sort", "uniq", "cut", "diff", "jq", "realpath",
-        "basename", "dirname", "nl", "which", "true", "echo", "printf",
+        "basename", "dirname", "nl", "which", "true", "echo", "printf", "am-read",
     }
 )  # fmt: skip
 GIT_READ = frozenset(
@@ -167,6 +167,8 @@ def safe_command(
             return False
         if not (_safe_words(words, mode) or _approved(words, approved)):
             return False
+        if os.path.basename(words[0]) == "am-read":
+            continue  # its argument is a path of the dashboard's API, not a file
         for word in words[1:]:
             value = _path_value(word)
             if value is None:
