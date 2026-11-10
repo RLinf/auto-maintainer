@@ -73,7 +73,9 @@ export function useApprovalSummary() {
     if (a.missing) missing.push(`${t("Needs")} ${a.missing} ${a.missing === 1 ? t("more approval") : t("more approvals")}`);
     if (a.code_owners_waiting.length && a.code_owners_required !== false)
       missing.push(
-        `${t("code owners")}: ${a.code_owners_waiting.map((g) => (g.length === 0 ? "?" : g.length === 1 ? name(g[0]) : `${t("one of")} ${g.map(name).join(" / ")}`)).join(", ")}`,
+        `${t("Waiting on")} ${a.code_owners_waiting
+          .map((g) => (g.length === 0 ? t("another approver for the author's files") : g.length === 1 ? name(g[0]) : `${t("one of")} ${g.map(name).join(" / ")}`))
+          .join(", ")} (${t("code owner")})`,
       );
     if (a.decision === "APPROVED" || (!missing.length && a.decision !== "REVIEW_REQUIRED"))
       return a.approved_by.length || a.decision === "APPROVED"
