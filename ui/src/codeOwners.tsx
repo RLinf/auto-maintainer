@@ -5,7 +5,8 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { api, type CodeOwnerStanding, type CodeOwners } from "./api";
-import { Avatar } from "./avatar";
+import { useAliasOf } from "./aliases";
+import { Avatar, Named } from "./avatar";
 import { ErrorBox, Section } from "./components";
 import { forgeOf, links } from "./forges";
 import { useT } from "./i18n";
@@ -44,6 +45,7 @@ export function CodeOwnersCard({ repo, number, head }: { repo: string; number: n
   const approved = (d?.parts ?? []).filter((p) => p.approved_by.length > 0).length;
   const total = d?.parts.length ?? 0;
   const prefix = repo.includes(":") ? repo.slice(0, repo.indexOf(":") + 1) : "";
+  const aliasOf = useAliasOf();
   return (
     <Section
       title={t("Code owners")}
@@ -88,7 +90,7 @@ export function CodeOwnersCard({ repo, number, head }: { repo: string; number: n
                   <span className={done ? "check-ok" : "check-wait"}>
                     <Icon name={done ? "check" : "clock"} size={13} />
                   </span>
-                  {done ? `${t("Approved by")} ${part.approved_by.join(", ")}` : part.owners.length > 1 ? t("Needs an approval from one of:") : t("Needs an approval from:")}
+                  {done ? `${t("Approved by")} ${part.approved_by.map((l) => aliasOf(l) ?? l).join(", ")}` : part.owners.length > 1 ? t("Needs an approval from one of:") : t("Needs an approval from:")}
                 </span>
                 <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
                   {part.owners.map((login) => {
@@ -98,7 +100,7 @@ export function CodeOwnersCard({ repo, number, head }: { repo: string; number: n
                     const name = (
                       <>
                         {o.team ? <Icon name="list" size={13} /> : <Avatar login={prefix + o.login} size={18} />}
-                        {o.login}
+                        <Named login={o.login} alias={o.team ? undefined : aliasOf(o.login)} />
                       </>
                     );
                     return (
@@ -143,7 +145,7 @@ export function CodeOwnersCard({ repo, number, head }: { repo: string; number: n
               {d.requested.map((l) => (
                 <span key={l} className="row" style={{ gap: 4 }}>
                   <Avatar login={prefix + l} size={18} />
-                  {l}
+                  <Named login={l} alias={aliasOf(l)} />
                 </span>
               ))}
             </div>

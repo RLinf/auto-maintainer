@@ -15,6 +15,7 @@ import { ACTIVE, needsMe, ScoringRow, useWork, WorkRow } from "../jobs";
 import { openJob } from "../openJob";
 import { Popover, Skeleton, useToast } from "../ui";
 import { holds, OwnerAvatars, Person } from "../avatar";
+import { useAliasOf } from "../aliases";
 
 // ---- getting started ---------------------------------------------------------------------------
 
@@ -159,8 +160,9 @@ function activity(p: PrRow, me: Me, t: (s: string) => string): ReactNode {
 
 /** Whether a PR matches every word of a search: its title, repository and number,
  *  author, labels, summary, and the reviewers on it. */
-function matches(p: PrRow, words: string[]): boolean {
-  const hay = `${p.title} ${p.repo}#${p.number} #${p.number} ${p.author} ${p.labels.join(" ")} ${p.summary} ${p.assignees.map((a) => a.login).join(" ")}`.toLowerCase();
+function matches(p: PrRow, words: string[], aliasOf: (login: string) => string | undefined): boolean {
+  const names = [p.author, ...p.assignees.map((a) => a.login)].map((l) => `${l} ${aliasOf(l) ?? ""}`).join(" ");
+  const hay = `${p.title} ${p.repo}#${p.number} #${p.number} ${p.labels.join(" ")} ${p.summary} ${names}`.toLowerCase();
   return words.every((w) => hay.includes(w));
 }
 
@@ -208,12 +210,13 @@ export function ReviewCard({ rows, all, loading, me, automations }: { rows: PrRo
   const [showAll, setShowAll] = useState(false);
   const [query, setQuery] = useState("");
   const [only, setOnly] = useState<"owner" | "reviewer" | null>(null);
+  const aliasOf = useAliasOf();
   const [order, setOrder] = useReviewOrder();
   const words = query.toLowerCase().split(/\s+/).filter(Boolean);
   const searching = words.length > 0;
   const ownedCount = rows.filter((p) => holds(p.assignees, me.login, "owner")).length;
   const reviewingCount = rows.filter((p) => holds(p.assignees, me.login, "reviewer")).length;
-  const pool = (searching ? all.filter((p) => matches(p, words)) : rows).filter((p) => !only || holds(p.assignees, me.login, only));
+  const pool = (searching ? all.filter((p) => matches(p, words, aliasOf)) : rows).filter((p) => !only || holds(p.assignees, me.login, only));
   const sorted = [...pool].sort(REVIEW_ORDERS[order].compare);
   const shown = showAll || searching ? sorted : sorted.slice(0, 8);
   const waiting = new Set(rows.map(prKey));
@@ -331,6 +334,18 @@ export function ReviewCard({ rows, all, loading, me, automations }: { rows: PrRo
                 </Link>
                 <span className="meta">
                   {p.repo}#{p.number} · <Person login={p.author} /> · <When at={p.updated_at} />
+                  {p.progress && p.progress.threads > 0 && (
+                    <span title={`${p.progress.resolved}/${p.progress.threads} ${t("review threads resolved")}`}>
+                      {" · "}
+                      {Math.round((p.progress.addressed ?? 0) * 100)}% {t("addressed")}
+                    </span>
+                  )}
+                  {p.progress && p.progress.approved > 0 && (
+                    <span>
+                      {" · "}
+                      <span className="check-ok">✓{p.progress.approved}</span>
+                    </span>
+                  )}
                   {(["owner", "reviewer"] as const).map((role) => {
                     const people = p.assignees.filter((a) => a.role === role);
                     return people.length > 0 ? (

@@ -3,6 +3,7 @@
 // A forge without such an address shows the login's first letter.
 
 import { useState } from "react";
+import { useAliasOf } from "./aliases";
 import { links } from "./forges";
 
 export function avatarUrl(login: string, size: number): string {
@@ -23,22 +24,35 @@ export function Avatar({ login, size = 22, title }: { login: string; size?: numb
   return <img className="avatar-img" src={src} width={size} height={size} alt="" title={title} loading="lazy" onError={() => setFailed(true)} />;
 }
 
-/** A login with its avatar, inline in a line of text. */
+/** A login with its avatar and the name it goes by, inline in a line of text. */
 export function Person({ login, size = 16 }: { login: string; size?: number }) {
+  const alias = useAliasOf()(login);
   return (
-    <span className="person-inline">
+    <span className="person-inline" title={alias ? `${alias} (${login})` : undefined}>
       <Avatar login={login} size={size} />
-      {login}
+      <Named login={login} alias={alias} />
     </span>
   );
 }
 
-/** Overlapping avatars for a tight cell, with a count for the rest. */
+/** A name with its login beside it, or the login alone. */
+export function Named({ login, alias }: { login: string; alias?: string }) {
+  return alias ? (
+    <>
+      {alias} <span className="muted login-beside">{login}</span>
+    </>
+  ) : (
+    <>{login}</>
+  );
+}
+
 /** A PR's owners (who claimed it or was assigned to it here), as avatars; each one's
  * tooltip says how. */
-export function OwnerAvatars({ owners, me, size = 20, t }: { owners: { login: string; kind: string; by: string }[]; me?: string; size?: number; t: (s: string) => string }) {
-  const how = (o: { kind: string; by: string }) => (o.kind === "assigned" ? `${t("assigned by")} ${o.by}` : t("claimed"));
-  return <AvatarStack logins={owners.map((o) => o.login)} me={me} size={size} max={4} title={owners.map((o) => `${o.login} (${how(o)})`).join("\n")} />;
+export function OwnerAvatars({ owners, me, size = 20, compact, t }: { owners: { login: string; kind: string; by: string }[]; me?: string; size?: number; compact?: boolean; t: (s: string) => string }) {
+  const aliasOf = useAliasOf();
+  const how = (o: { kind: string; by: string }) => (o.kind === "assigned" ? `${t("assigned by")} ${aliasOf(o.by) ?? o.by}` : t("claimed"));
+  const label = (l: string) => (aliasOf(l) ? `${aliasOf(l)} (${l})` : l);
+  return <AvatarStack logins={owners.map((o) => o.login)} me={me} size={size} max={4} compact={compact} title={owners.map((o) => `${label(o.login)}: ${how(o)}`).join("\n")} />;
 }
 
 /** Whether ``login`` holds ``role`` among a PR's owners and reviewers. */
@@ -47,18 +61,27 @@ export function holds(people: { login: string; role: string }[], login: string, 
   return people.some((p) => p.role === role && p.login.toLowerCase() === me);
 }
 
-export function AvatarStack({ logins, max = 3, size = 20, me, title }: { logins: string[]; max?: number; size?: number; me?: string; title?: string }) {
+/** Overlapping avatars; one alone carries its name too, unless ``compact``. */
+export function AvatarStack({ logins, max = 3, size = 20, me, title, compact }: { logins: string[]; max?: number; size?: number; me?: string; title?: string; compact?: boolean }) {
+  const aliasOf = useAliasOf();
   if (!logins.length) return null;
   const shown = logins.slice(0, max);
+  const label = title ?? logins.map((l) => (aliasOf(l) ? `${aliasOf(l)} (${l})` : l)).join(", ");
   return (
-    <span className="avatar-stack" title={title ?? logins.join(", ")}>
-      {shown.map((l) => (
-        <span key={l} className={l === me ? "avatar-me" : undefined}>
-          <Avatar login={l} size={size} />
+    <span className="avatar-stack-wrap" title={label}>
+      <span className="avatar-stack">
+        {shown.map((l) => (
+          <span key={l} className={l === me ? "avatar-me" : undefined}>
+            <Avatar login={l} size={size} />
+          </span>
+        ))}
+        {logins.length > max && <span className="avatar-more">+{logins.length - max}</span>}
+      </span>
+      {logins.length === 1 && !compact && (
+        <span className="small">
+          <Named login={logins[0]} alias={aliasOf(logins[0])} />
         </span>
-      ))}
-      {logins.length > max && <span className="avatar-more">+{logins.length - max}</span>}
-      {logins.length === 1 && <span className="small">{logins[0]}</span>}
+      )}
     </span>
   );
 }

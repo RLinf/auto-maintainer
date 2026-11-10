@@ -10,7 +10,8 @@
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { api, type Assignable, type Assignee, type AssignResult } from "./api";
-import { Avatar } from "./avatar";
+import { useAliasOf } from "./aliases";
+import { Avatar, Named } from "./avatar";
 import { ErrorBox, Section, useAct, When } from "./components";
 import { useT } from "./i18n";
 import { Icon } from "./icons";
@@ -106,6 +107,7 @@ function RoleCard({
   const suggestions = (who.data?.people ?? []).filter((p) => !on.has(p.login.toLowerCase()) && p.login.toLowerCase() !== author.toLowerCase());
   const logins = loginsIn(text);
   const owner = role === "owner";
+  const aliasOf = useAliasOf();
 
   const submit = () =>
     assign.mutate(
@@ -142,11 +144,11 @@ function RoleCard({
             <Avatar login={a.login} size={28} />
             <span className="main">
               <a href={links.user(a.login)} target="_blank" rel="noreferrer">
-                {a.login}
+                <Named login={a.login} alias={aliasOf(a.login)} />
               </a>
               {a.login.toLowerCase() === me.toLowerCase() && <span className="muted"> ({t("you")})</span>}
               <span className="small muted" style={{ display: "block" }}>
-                {a.kind === "assigned" ? `${t("assigned by")} ${a.by}` : t("claimed")} · <When at={a.at} />
+                {a.kind === "assigned" ? `${t("assigned by")} ${aliasOf(a.by) ?? a.by}` : t("claimed")} · <When at={a.at} />
               </span>
             </span>
             {(canAssign || a.login.toLowerCase() === me.toLowerCase()) && (
@@ -188,7 +190,7 @@ function RoleCard({
             <datalist id={`assignable-${repo}-${role}`}>
               {suggestions.map((p) => (
                 <option key={p.login} value={p.login}>
-                  {[p.role, p.areas.join(", ")].filter(Boolean).join(" · ")}
+                  {[aliasOf(p.login), p.role, p.areas.join(", ")].filter(Boolean).join(" · ")}
                 </option>
               ))}
             </datalist>
@@ -197,7 +199,7 @@ function RoleCard({
                 {suggestions.slice(0, 8).map((p) => (
                   <button key={p.login} type="button" className="chip-person" title={[p.role, p.areas.join(", ")].filter(Boolean).join(" · ") || undefined} onClick={() => setText(p.login)}>
                     <Avatar login={p.login} size={16} />
-                    {p.login}
+                    <Named login={p.login} alias={aliasOf(p.login)} />
                   </button>
                 ))}
               </div>

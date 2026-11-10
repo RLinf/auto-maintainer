@@ -411,6 +411,7 @@ class GitLabReader:
                     sha=str(c["id"]),
                     message=str(c.get("message") or ""),
                     author_email=c.get("author_email"),
+                    committed_at=_time(c.get("committed_date")),
                 )
                 for c in commits
             ],

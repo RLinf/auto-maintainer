@@ -189,6 +189,8 @@ export interface PrRow {
    * assigned it, oldest first; "Owned by me" and "I review" filter by them. Reviews
    * GitHub requested (its code owners' automatic ones among them) give nobody a role. */
   assignees: Assignee[];
+  /** How its review goes (``GET .../progress`` has the details). */
+  progress: ProgressSummary;
   tier: string | null;
   total: number | null;
   summary: string;
@@ -381,6 +383,59 @@ export interface GateItem {
   ok: boolean;
   detail: string;
   pending: boolean;
+}
+
+export interface ProgressSummary {
+  threads: number;
+  resolved: number;
+  /** Share of review threads resolved; ``null`` without threads. */
+  addressed: number | null;
+  approved: number;
+  approved_at_head: number;
+  changes_requested: number;
+  reviewed: number;
+  reviewers: number;
+}
+
+export interface ReviewerProgress {
+  login: string;
+  verdict: "APPROVED" | "CHANGES_REQUESTED" | "COMMENTED" | "DISMISSED" | null;
+  at_head: boolean;
+  reviews: number;
+  threads: number;
+  resolved: number;
+  /** Open threads whose lines changed since. */
+  outdated: number;
+  addressed: number | null;
+  last_at: string | null;
+  assigned: boolean;
+  requested: boolean;
+}
+
+export interface ProgressEvent {
+  at: string | null;
+  kind: "opened" | "role" | "review" | "commits";
+  login: string;
+  state: string | null;
+  threads: number;
+  resolved: number;
+  commits: number;
+  detail: string;
+}
+
+/** ``GET /api/prs/{repo}/{n}/progress``: how the PR's review goes, for its owners. */
+export interface PrProgress {
+  threads: number;
+  resolved: number;
+  outdated: number;
+  addressed: number | null;
+  approved_by: string[];
+  approved_at_head: string[];
+  changes_requested_by: string[];
+  required_approvals: number | null;
+  reviewers: ReviewerProgress[];
+  timeline: ProgressEvent[];
+  head: string;
 }
 
 /** A code owner of a PR's changed files and where they stand on it. */

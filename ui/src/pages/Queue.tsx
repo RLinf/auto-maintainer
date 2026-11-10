@@ -16,6 +16,8 @@ import { ScoringProgress } from "../jobs";
 import { BulkBar, DataTable, ListToolbar, useList, type Column } from "../list";
 import { MenuItem, Popover, Skeleton, Tabs, useTab, useToast } from "../ui";
 import { holds, OwnerAvatars, Person } from "../avatar";
+import { useAliasOf } from "../aliases";
+import { ProgressCell } from "../progress";
 
 const NEEDS_REVIEW = new Set(["NEW_REVIEW", "FOLLOWUP_REVIEW", "APPROVED_NEW_COMMITS"]);
 
@@ -25,6 +27,7 @@ export default function QueuePage({ me }: { me: Me }) {
   const toast = useToast();
   const agent = useAgent();
   const all = usePrs();
+  const aliasOf = useAliasOf();
   // One repository at a time: each ranks its PRs by its own rubric.
   const repos = useRepos();
   const names = (repos.data ?? []).map((r) => r.repo).sort((a, b) => a.localeCompare(b));
@@ -63,7 +66,7 @@ export default function QueuePage({ me }: { me: Me }) {
   const list = useList<PrRow>({
     rows: source,
     key: prKey,
-    search: (p) => `${p.title} ${p.repo}#${p.number} #${p.number} ${p.author} ${p.labels.join(" ")} ${p.summary} ${p.assignees.map((a) => a.login).join(" ")}`,
+    search: (p) => `${p.title} ${p.repo}#${p.number} #${p.number} ${p.labels.join(" ")} ${p.summary} ${[p.author, ...p.assignees.map((a) => a.login)].map((l) => `${l} ${aliasOf(l) ?? ""}`).join(" ")}`,
     facets: [
       { id: "tier", label: t("Priority"), values: (p) => p.tier ?? t("Not evaluated") },
       { id: "state", label: t("Review state"), values: (p) => t(REVIEW_STATES[p.review_state] ?? p.review_state) },
@@ -79,6 +82,7 @@ export default function QueuePage({ me }: { me: Me }) {
       { id: "tier", label: t("Priority"), value: (p) => (p.tier ? TIER_ORDER.indexOf(p.tier) : null) },
       { id: "quality", label: t("Quality"), value: (p) => shownQuality(p.quality, p.quick_quality, p.head)?.score, descFirst: true },
       { id: "opened", label: t("Opened"), value: (p) => timeOf(p.created_at), descFirst: true },
+      { id: "addressed", label: t("Feedback addressed"), value: (p) => p.progress?.addressed ?? null, descFirst: true },
       { id: "updated", label: t("Last updated"), value: (p) => timeOf(p.updated_at), descFirst: true },
       { id: "number", label: t("Number"), value: (p) => p.number, descFirst: true },
       { id: "title", label: t("Title"), value: (p) => p.title.toLowerCase() },
@@ -151,6 +155,14 @@ export default function QueuePage({ me }: { me: Me }) {
           <div className="small muted">
             {p.repo}#{p.number} · <Person login={p.author} /> · <When at={p.updated_at} />
             {p.draft ? ` · ${t("draft")}` : ""}
+            {p.assignees.some((a) => a.role === "owner") && (
+              <>
+                {" · "}
+                <span style={{ whiteSpace: "nowrap" }}>
+                  {t("owner")} <RoleAvatars p={p} role="owner" me={me.login} />
+                </span>
+              </>
+            )}
           </div>
           {p.summary && (
             <div className="small muted truncate hide-narrow" style={{ maxWidth: 560 }} title={p.summary}>
@@ -159,6 +171,13 @@ export default function QueuePage({ me }: { me: Me }) {
           )}
         </div>
       ),
+    },
+    {
+      id: "progress",
+      header: t("Progress"),
+      sort: "addressed",
+      label: t("Review progress"),
+      cell: (p) => <ProgressCell p={p.progress} />,
     },
     {
       id: "state",
@@ -178,13 +197,13 @@ export default function QueuePage({ me }: { me: Me }) {
       id: "owners",
       header: t("Owners"),
       label: t("Owners"),
-      cell: (p) => <RoleAvatars p={p} role="owner" me={me.login} />,
+      cell: (p) => <RoleAvatars p={p} role="owner" me={me.login} compact />,
     },
     {
       id: "claimed",
       header: t("Reviewers"),
       label: t("Reviewers"),
-      cell: (p) => <RoleAvatars p={p} role="reviewer" me={me.login} />,
+      cell: (p) => <RoleAvatars p={p} role="reviewer" me={me.login} compact />,
     },
     {
       id: "actions",
@@ -427,8 +446,8 @@ function namesOf(p: PrRow, role: "owner" | "reviewer"): string[] | null {
   return names.length ? names : null;
 }
 
-function RoleAvatars({ p, role, me }: { p: PrRow; role: "owner" | "reviewer"; me: string }) {
+function RoleAvatars({ p, role, me, compact }: { p: PrRow; role: "owner" | "reviewer"; me: string; compact?: boolean }) {
   const t = useT();
   const people = p.assignees.filter((a) => a.role === role);
-  return people.length ? <OwnerAvatars owners={people} me={me} t={t} /> : <span className="muted">—</span>;
+  return people.length ? <OwnerAvatars owners={people} me={me} size={compact ? 20 : 16} compact={compact} t={t} /> : <span className="muted">—</span>;
 }

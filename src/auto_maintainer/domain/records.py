@@ -130,6 +130,42 @@ class AgentRunRecord(BaseModel):
     created_at: datetime = Field(default_factory=utc_now)
 
 
+ALIAS_MAX = 40
+
+
+def clean_alias(text: str) -> str:
+    """``text`` as a display name: spaces collapsed, 1 to ``ALIAS_MAX`` characters,
+    no control characters and no leading ``@``.
+
+    Raises:
+        ValueError: It is empty, too long, or not plain text.
+    """
+    alias = " ".join(text.split())
+    if not alias:
+        raise ValueError("a name needs at least one character")
+    if len(alias) > ALIAS_MAX:
+        raise ValueError(f"a name has at most {ALIAS_MAX} characters")
+    if alias.startswith("@") or any(ord(c) < 32 or ord(c) == 127 for c in alias):
+        raise ValueError("a name is plain text and does not start with @")
+    return alias
+
+
+class PersonAlias(BaseModel):
+    """The name a forge login goes by on the dashboard, such as a person's real
+    name: their own (``set_by`` is the login), or one the service's owner gave a
+    login whose person has set none, which their own replaces. The dashboard always
+    shows the login beside it, so a name cannot pass for someone else."""
+
+    login: str
+    alias: str
+    set_by: str
+    updated_at: datetime = Field(default_factory=utc_now)
+
+    @property
+    def own(self) -> bool:
+        return self.set_by.lower() == self.login.lower()
+
+
 PrRole = Literal["owner", "reviewer"]
 """What a person takes on for a PR here: its ``owner`` answers for the whole PR's
 progress and may assign its reviewers; a ``reviewer`` reviews it. Neither is a review

@@ -22,6 +22,7 @@ import { MyAgentsSection, MyApisSection, ServiceSignIn } from "../agentAccounts"
 import { ApiForm, ApiSummary, modelsFor, PROTOCOLS } from "../providerForm";
 import { ForgesCard } from "../forgeSetup";
 import { OwnerCard } from "../ownerCard";
+import { NamesCard } from "../aliases";
 import { Popover, Skeleton, Tabs, useTab, useToast } from "../ui";
 
 const CONTEXT: AgentContext = { page: "settings", repo: null, number: null, label: "Settings" };
@@ -158,6 +159,7 @@ export default function SettingsPage() {
       {tab === "system" && (
         <div className="stack" style={{ gap: 16 }}>
           <SystemTab v={v} ask={ask} />
+          <NamesCard />
           <OwnerCard />
           <ForgesCard canChange={v.access.allowed} />
         </div>

@@ -32,6 +32,7 @@ import SetupPage from "./pages/Setup";
 import SignIn from "./pages/SignIn";
 import { MenuItem, Popover, Skeleton, ToastProvider, useHotkey, useTheme, useToast } from "./ui";
 import { useForgesLoader } from "./forges";
+import { OwnAliasForm, useAliasOf } from "./aliases";
 
 export { useMe } from "./data";
 
@@ -78,6 +79,8 @@ function Shell({ me }: { me: Me }) {
   const memory = useMemoryChanges();
   const [palette, setPalette] = useState(false);
   const [help, setHelp] = useState(false);
+  const [naming, setNaming] = useState(false);
+  const aliasOf = useAliasOf();
 
   const counts = {
     questions: me.pending_questions,
@@ -218,12 +221,19 @@ function Shell({ me }: { me: Me }) {
             {(close) => (
               <>
                 <div style={{ padding: "8px 10px 6px" }}>
-                  <div style={{ fontWeight: 600 }}>{me.name || me.login}</div>
+                  <div style={{ fontWeight: 600 }}>{aliasOf(me.login) || me.name || me.login}</div>
                   <div className="small muted">
                     @{me.login}
                     {me.operator ? ` · ${t("operator")}` : ""}
                   </div>
                 </div>
+                {naming ? (
+                  <OwnAliasForm login={me.login} onDone={() => setNaming(false)} />
+                ) : (
+                  <MenuItem icon="settings" onClick={() => setNaming(true)}>
+                    {aliasOf(me.login) ? t("Change your name") : t("Set your name")}
+                  </MenuItem>
+                )}
                 <div className="menu-sep" />
                 <div className="menu-label">{t("Theme")}</div>
                 <MenuItem icon="monitor" checked={theme === "system"} onClick={() => setTheme("system")}>

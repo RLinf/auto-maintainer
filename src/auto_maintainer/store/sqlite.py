@@ -55,6 +55,7 @@ from ..domain.records import (
     CiObservation,
     Job,
     JobStatus,
+    PersonAlias,
     PrAssignee,
     ProfileState,
     RepoRecord,
@@ -809,6 +810,41 @@ class SqliteStore:
             stmt = stmt.where(m.pr_assignees.c.number == number)
         rows = await self._fetch(stmt.order_by(m.pr_assignees.c.at))
         return [_assignee(r) for r in rows]
+
+    async def list_aliases(self) -> list[PersonAlias]:
+        rows = await self._fetch(
+            select(m.person_aliases).order_by(m.person_aliases.c.login)
+        )
+        return [
+            PersonAlias(
+                login=r.display_login,
+                alias=r.alias,
+                set_by=r.set_by,
+                updated_at=datetime.fromisoformat(r.updated_at),
+            )
+            for r in rows
+        ]
+
+    async def set_alias(self, alias: PersonAlias) -> None:
+        key = alias.login.lower()
+        async with self._write, self._engine.begin() as conn:
+            await conn.execute(
+                delete(m.person_aliases).where(m.person_aliases.c.login == key)
+            )
+            await conn.execute(
+                insert(m.person_aliases).values(
+                    login=key,
+                    display_login=alias.login,
+                    alias=alias.alias,
+                    set_by=alias.set_by,
+                    updated_at=ts(alias.updated_at),
+                )
+            )
+
+    async def delete_alias(self, login: str) -> None:
+        await self._exec(
+            delete(m.person_aliases).where(m.person_aliases.c.login == login.lower())
+        )
 
     async def acquire_lease(
         self, lab: str, resource: str, holder: str, ttl_seconds: int, now: datetime

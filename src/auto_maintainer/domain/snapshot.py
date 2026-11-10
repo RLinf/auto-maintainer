@@ -64,6 +64,8 @@ class Commit(_Model):
     message: str = ""
     author_login: str | None = None
     author_email: str | None = None
+    committed_at: datetime | None = None
+    """When it was committed, as the forge reports it (a rebase sets it anew)."""
 
     @property
     def subject(self) -> str:

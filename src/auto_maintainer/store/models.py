@@ -203,6 +203,17 @@ pr_assignees = Table(
     Column("at", String, nullable=False),
 )
 
+person_aliases = Table(
+    "person_aliases",
+    metadata,
+    # The login in lower case, so each login has one name whatever its case.
+    Column("login", String, primary_key=True),
+    Column("display_login", String, nullable=False),
+    Column("alias", String, nullable=False),
+    Column("set_by", String, nullable=False),
+    Column("updated_at", String, nullable=False),
+)
+
 memory_changes = Table(
     "memory_changes",
     metadata,

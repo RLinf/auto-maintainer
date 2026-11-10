@@ -811,10 +811,15 @@ details.pv-section[open] > summary { margin-bottom: 6px; }
 .ladder-step:hover { filter: brightness(0.97); }
 .avatar-img { border-radius: 50%; flex-shrink: 0; background: var(--surface-2); }
 .avatar-letter { display: inline-grid; place-items: center; color: var(--muted); font-weight: 600; line-height: 1; }
-.person-inline { display: inline-flex; align-items: center; gap: 4px; vertical-align: middle; }
-.avatar-stack { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
-.avatar-stack > span:not(.small):not(.avatar-more) { display: inline-flex; margin-left: -6px; border-radius: 50%; box-shadow: 0 0 0 2px var(--surface); }
-.avatar-stack > span:first-child { margin-left: 0; }
+/* Names stay plain text on the line's baseline; only the picture is centered on it. */
+.person-inline { display: inline; white-space: nowrap; }
+.person-inline > .avatar-img, .person-inline > .avatar-letter, .avatar-stack-wrap > .avatar-stack { vertical-align: middle; margin-top: -2px; }
+.person-inline > .avatar-img, .person-inline > .avatar-letter { margin-right: 4px; }
+.avatar-stack-wrap { white-space: nowrap; }
+.avatar-stack-wrap > .small { margin-left: 6px; }
+.avatar-stack { display: inline-flex; align-items: center; gap: 6px; min-width: 0; vertical-align: middle; }
+.avatar-stack > span:not(.small):not(.avatar-more) { display: inline-flex; border-radius: 50%; box-shadow: 0 0 0 2px var(--surface); }
+.avatar-stack > span:not(.avatar-more) + span:not(.avatar-more) { margin-left: -6px; }
 .avatar-stack .avatar-me { box-shadow: 0 0 0 2px var(--accent); }
 .avatar-more { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .skill-options { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 8px; }
@@ -863,3 +868,13 @@ details.pv-section[open] > summary { margin-bottom: 6px; }
 .model-line > code { overflow-wrap: anywhere; }
 .found-models { display: grid; gap: 4px; max-height: 240px; overflow: auto; }
 .found-models code { overflow-wrap: anywhere; }
+.login-beside { font-size: 0.86em; }
+.addressed-bar { display: inline-block; height: 6px; border-radius: 999px; background: var(--surface-3); overflow: hidden; flex: none; }
+.addressed-bar > span { display: block; height: 100%; border-radius: inherit; background: var(--ok); }
+.progress-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; }
+.progress-reviewer { flex-wrap: wrap; gap: 8px 12px; }
+.progress-timeline { list-style: none; margin: 0; padding: 0 0 0 4px; display: grid; gap: 10px; border-left: 2px solid var(--border); }
+.progress-timeline li { display: flex; align-items: flex-start; gap: 8px; margin-left: -11px; }
+.progress-timeline .dot { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; border-radius: 50%; background: var(--surface); border: 1px solid var(--border); color: var(--muted); }
+.progress-timeline .step-review .dot { color: var(--info); }
+.progress-timeline .step-commits .dot { color: var(--ok); }

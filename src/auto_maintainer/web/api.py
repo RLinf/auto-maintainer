@@ -97,6 +97,7 @@ from ..domain.review import (
     review_chain,
     review_quality,
 )
+from ..domain.review_progress import review_progress
 from ..domain.run_ci import plan_run_ci
 from ..domain.scoring import Evaluation, recompute
 from ..domain.secrets import redact_secrets
@@ -1311,6 +1312,7 @@ def build_router() -> APIRouter:
                         "review_state": cls.state,
                         "reviewed_sha": (cls.reviewed_sha or "")[:7],
                         "assignees": [assignee_row(a) for a in assignees],
+                        "progress": review_progress(pr, assignees).summary(),
                         "tier": ev.tier if ev else None,
                         "total": ev.total if ev else None,
                         "summary": ev.summary if ev else "",
@@ -1554,6 +1556,40 @@ def build_router() -> APIRouter:
             "run_ci": plan_run_ci(
                 pr, profile.label_for("ci_gate") if profile else None
             ).model_dump(mode="json"),
+        }
+
+    @r.get("/prs/{repo:path}/{number:int}/progress")
+    async def pr_progress(
+        request: Request,
+        repo: str,
+        number: int,
+        user: User = Depends(current_user),
+    ) -> dict[str, Any]:
+        """How the PR's review goes, for its owners: each reviewer (who reviewed,
+        opened a thread, reviews it here, or is asked by GitHub) with their verdict
+        and how many of their review threads are resolved, the share of all threads
+        resolved, the approvals and the approvals the branch needs, and a timeline of
+        the PR's opening, the roles people took here, each review with its threads
+        and how many are resolved now, and the pushes between reviews."""
+        service = service_of(request)
+        repo = _repo(repo)
+        await require_view(service, user, repo)
+        pr = await service.store.get_snapshot(repo, number)
+        if pr is None:
+            raise HTTPException(404, f"{repo}#{number} is not known yet")
+        progress = review_progress(pr, await service.store.list_assignees(repo, number))
+        info = await service.a.forge.get_repo(repo)
+        return {
+            **progress.model_dump(mode="json", exclude={"reviewers"}),
+            "addressed": progress.addressed,
+            "reviewers": [
+                {**r.model_dump(mode="json"), "addressed": r.addressed}
+                for r in progress.reviewers
+            ],
+            "required_approvals": info.required_approvals
+            if info.default_branch == pr.base_ref
+            else None,
+            "head": pr.head_sha,
         }
 
     @r.get("/prs/{repo:path}/{number:int}/code-owners")

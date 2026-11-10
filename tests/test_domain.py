@@ -41,7 +41,7 @@ from auto_maintainer.domain.merge_gate import (
 )
 from auto_maintainer.domain.permissions import Permission
 from auto_maintainer.domain.profile import RepoProfile, Timing
-from auto_maintainer.domain.records import ActionRecord
+from auto_maintainer.domain.records import ActionRecord, PrAssignee
 from auto_maintainer.domain.review import (
     QualityAssessment,
     ReviewResult,
@@ -51,6 +51,7 @@ from auto_maintainer.domain.review import (
     render_review,
     review_quality,
 )
+from auto_maintainer.domain.review_progress import review_progress
 from auto_maintainer.domain.scoring import (
     DEFAULT_RUBRIC,
     Evaluation,
@@ -70,6 +71,7 @@ from auto_maintainer.domain.snapshot import (
     Review,
     ReviewEventState,
     ReviewThread,
+    ThreadComment,
 )
 from auto_maintainer.testing.fakes import make_pr
 
@@ -717,3 +719,99 @@ def test_commit_trailers() -> None:
     )
     assert c.trailers == [("Signed-off-by", "A <a@x>"), ("Co-authored-by", "B <b@x>")]
     assert Commit(sha="1" * 40, message="feat: x").trailers == []
+
+
+def test_review_progress_counts_each_reviewers_resolved_threads_over_time() -> None:
+    """A reviewer's feedback is the threads they opened; resolved ones are
+    addressed, outdated ones count apart. The author's own threads are notes. The
+    timeline puts the pushes between the reviews, and each review carries the
+    threads it opened."""
+    head = "c" * 40
+
+    def thread(i: int, who: str, minutes: int, resolved=False, outdated=False):
+        return ReviewThread(
+            id=f"t{i}",
+            is_resolved=resolved,
+            is_outdated=outdated,
+            comments=[
+                ThreadComment(
+                    id=i, author=who, created_at=T0 + timedelta(minutes=minutes)
+                )
+            ],
+        )
+
+    pr = make_pr(
+        sha=head,
+        author="alice",
+        created_at=T0,
+        commits=[
+            Commit(sha="a" * 40, committed_at=T0 - timedelta(hours=1)),
+            Commit(sha="b" * 40, committed_at=T0 + timedelta(minutes=90)),
+            Commit(sha=head, committed_at=T0 + timedelta(minutes=95), message="fix: x"),
+        ],
+        reviews=[
+            Review(
+                id=1,
+                author="bob",
+                state=ReviewEventState.CHANGES_REQUESTED,
+                submitted_at=T0 + timedelta(minutes=60),
+                commit_sha="a" * 40,
+            ),
+            Review(
+                id=2,
+                author="carol",
+                state=ReviewEventState.APPROVED,
+                submitted_at=T0 + timedelta(minutes=120),
+                commit_sha=head,
+            ),
+            Review(
+                id=3,
+                author="bob",
+                state=ReviewEventState.COMMENTED,
+                submitted_at=T0 + timedelta(minutes=130),
+                commit_sha=head,
+            ),
+        ],
+        threads=[
+            thread(1, "bob", 59, resolved=True),
+            thread(2, "bob", 59, outdated=True),
+            thread(3, "bob", 59),
+            thread(4, "bob", 129, resolved=True),
+            thread(5, "alice", 70),
+        ],
+        requested_reviewers=["dave"],
+    )
+    roles = [
+        PrAssignee(
+            repo=pr.repo,
+            number=pr.number,
+            login="erin",
+            role="reviewer",
+            kind="assigned",
+            by="maria",
+            at=T0 + timedelta(minutes=5),
+        )
+    ]
+    progress = review_progress(pr, roles)
+    people = {r.login: r for r in progress.reviewers}
+    assert set(people) == {"bob", "carol", "dave", "erin"}
+    bob = people["bob"]
+    assert (bob.verdict, bob.at_head, bob.reviews) == ("CHANGES_REQUESTED", False, 2)
+    assert (bob.threads, bob.resolved, bob.outdated, bob.addressed) == (4, 2, 1, 0.5)
+    assert people["carol"].at_head and people["carol"].addressed is None
+    assert people["dave"].requested and people["dave"].verdict is None
+    assert people["erin"].assigned
+    assert (progress.threads, progress.resolved, progress.addressed) == (4, 2, 0.5)
+    assert progress.approved_at_head == ["carol"]
+    assert progress.changes_requested_by == ["bob"]
+    steps = [
+        (e.kind, e.login, e.threads, e.resolved, e.commits) for e in progress.timeline
+    ]
+    assert steps == [
+        ("opened", "alice", 0, 0, 1),
+        ("role", "erin", 0, 0, 0),
+        ("review", "bob", 3, 1, 0),
+        ("commits", "alice", 0, 0, 2),
+        ("review", "carol", 0, 0, 0),
+        ("review", "bob", 1, 1, 0),
+    ]

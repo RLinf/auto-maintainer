@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 
 import httpx
 from gh_testutil import load_fixture
@@ -46,6 +47,8 @@ def test_snapshot_mapping():
     assert pr.labels == ["bug", "needs review"]
     assert pr.paths == ["widget/scheduler/ports.py", "tests/test_ports.py"]
     assert pr.commits[0].trailers == [("Signed-off-by", "Alice <alice@example.com>")]
+    assert pr.commits[0].committed_at == datetime(2026, 10, 1, 10, tzinfo=UTC)
+    assert pr.commits[1].committed_at is None
     assert (
         pr.commits[1].author_login is None
         and pr.commits[1].author_email == "bob@example.com"

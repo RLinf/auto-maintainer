@@ -40,6 +40,7 @@ import { ReproduceButton } from "../reproduce";
 import { failedChecks, FixCiButton } from "../fixCi";
 import { PrPeopleCards } from "../assignees";
 import { CodeOwnersCard } from "../codeOwners";
+import { ReviewProgressPanel } from "../progress";
 import { ACTIVE, PrWork, usePrWork } from "../jobs";
 import { openJob } from "../openJob";
 import { Skeleton, Tabs, useTab, useToast } from "../ui";
@@ -72,6 +73,7 @@ export default function PrPage({ me }: { me: Me }) {
 
   const tabs = [
     { id: "overview", label: t("Overview") },
+    { id: "progress", label: t("Review progress") },
     { id: "files", label: t("Files"), count: d?.pr.files.length },
     { id: "timeline", label: t("Timeline"), count: d?.actions.length },
     { id: "reviews", label: t("Reviews"), count: d?.reviews.length },
@@ -210,6 +212,7 @@ export default function PrPage({ me }: { me: Me }) {
           <PrWork repo={full} number={pr.number} me={me.login} />
           <Tabs tabs={tabs} active={tab} onChange={setTab} />
           {tab === "overview" && <Overview d={d} />}
+          {tab === "progress" && <ReviewProgressPanel repo={full} number={pr.number} />}
           {tab === "files" && <Files d={d} />}
           {tab === "timeline" && <Timeline d={d} />}
           {tab === "reviews" && <ReviewsTab d={d} repo={full} number={pr.number} />}

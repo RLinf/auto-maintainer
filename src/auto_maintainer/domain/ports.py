@@ -56,6 +56,7 @@ from .records import (
     CiObservation,
     Job,
     JobStatus,
+    PersonAlias,
     PrAssignee,
     ProfileState,
     RepoRecord,
@@ -753,6 +754,16 @@ class Store(Protocol):
     ) -> list[PrAssignee]:
         """The owners and reviewers of PRs, oldest first."""
         ...
+
+    async def list_aliases(self) -> list[PersonAlias]:
+        """Every login's display name."""
+        ...
+
+    async def set_alias(self, alias: PersonAlias) -> None:
+        """Give ``alias.login`` its display name, replacing the one it has."""
+        ...
+
+    async def delete_alias(self, login: str) -> None: ...
 
     async def acquire_lease(
         self, lab: str, resource: str, holder: str, ttl_seconds: int, now: datetime

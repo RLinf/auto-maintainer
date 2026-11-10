@@ -409,3 +409,51 @@ async def test_a_prs_owner_assigns_its_reviewers_but_not_its_owners(demo) -> Non
     await h.settle()
     [request] = [w for w in h.forge.writes if w[0] == "request_reviewers"]
     assert set(request[1]["logins"]) == {"newbie", "walt"}
+
+
+async def test_people_choose_their_own_display_names_and_everyone_sees_them(
+    demo,
+) -> None:
+    """The owner names someone who has no name yet; that person's own choice
+    replaces it, and the owner cannot change it back. Nobody else names others, and
+    two people never share a name."""
+    h, app = demo
+    h.forge.set_permission(REPO, "bob", Permission.WRITE)
+    async with _as(app, "maria") as maria:
+        named = await maria.put("/api/aliases/walt", json={"alias": "  Walter   W "})
+        assert named.status_code == 200
+        assert {"login": "walt", "alias": "Walter W", "own": False} in named.json()[
+            "aliases"
+        ]
+        assert named.json()["can_name_others"]
+    async with _as(app, "bob") as bob:
+        assert (
+            await bob.put("/api/aliases/walt", json={"alias": "Mallory"})
+        ).status_code == 403
+        assert (
+            await bob.put("/api/me/alias", json={"alias": "Walter W"})
+        ).status_code == 409, "walt goes by that name"
+        assert (
+            await bob.put("/api/me/alias", json={"alias": "walt"})
+        ).status_code == 409, "a name may not be someone else's login"
+        assert (await bob.put("/api/me/alias", json={"alias": "@x"})).status_code == 422
+        mine = await bob.put("/api/me/alias", json={"alias": "鲍勃"})
+        assert {"login": "bob", "alias": "鲍勃", "own": True} in mine.json()["aliases"]
+        assert not mine.json()["can_name_others"]
+    async with _as(app, "walt") as walt:
+        own = await walt.put("/api/me/alias", json={"alias": "Walt White"})
+        assert {"login": "walt", "alias": "Walt White", "own": True} in own.json()[
+            "aliases"
+        ]
+    async with _as(app, "maria") as maria:
+        assert (
+            await maria.put("/api/aliases/walt", json={"alias": "Walter"})
+        ).status_code == 409, "walt chose his own"
+        seen = (await maria.get("/api/aliases")).json()["aliases"]
+        assert {a["login"]: a["alias"] for a in seen} == {
+            "bob": "鲍勃",
+            "walt": "Walt White",
+        }
+    async with _as(app, "bob") as bob:
+        cleared = await bob.put("/api/me/alias", json={"alias": None})
+        assert [a["login"] for a in cleared.json()["aliases"]] == ["walt"]

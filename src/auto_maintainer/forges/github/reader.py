@@ -83,7 +83,7 @@ fragment PrFields on PullRequest {
   mergeable mergeStateStatus additions deletions
   labels(first: 50) { nodes { name } }
   files(first: 100) { nodes { path additions deletions changeType } }
-  commits(last: 100) { nodes { commit { oid message author { email user { login } } } } }
+  commits(last: 100) { nodes { commit { oid message committedDate author { email user { login } } } } }
   reviews(last: 50) { nodes { databaseId author { login } state body submittedAt commit { oid } } }
   comments(last: 100) { nodes { databaseId author { login } body createdAt updatedAt } }
   reviewThreads(last: 50) {
@@ -271,6 +271,7 @@ def snapshot_from_graphql(repo: str, node: dict[str, Any]) -> PrSnapshot:
                 message=commit.get("message") or "",
                 author_login=(author.get("user") or {}).get("login"),
                 author_email=author.get("email"),
+                committed_at=_dt(commit.get("committedDate")),
             )
         )
     return PrSnapshot(
