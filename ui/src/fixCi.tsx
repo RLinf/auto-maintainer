@@ -63,7 +63,7 @@ export function FixCiButton({ repo, number, failed, canPush }: { repo: string; n
       )}
     >
       {(close) => (
-        <div className="stack" style={{ gap: 10, padding: 6, width: 380, maxWidth: "calc(100vw - 48px)" }}>
+        <div className="stack" style={{ gap: 8, padding: 6, width: 380, maxWidth: "100%" }}>
           <span className="small muted">
             {t("An agent reads why these jobs fail and fixes the PR's code:")} <strong>{failed.join(", ")}</strong>.{" "}
             {t("On a test machine it copies its change there and runs the failing steps until they pass. You get the fix as a draft and push it as yourself.")}
@@ -101,11 +101,19 @@ export function FixCiButton({ repo, number, failed, canPush }: { repo: string; n
               {t("The tests need a GPU")}
             </label>
           )}
-          <textarea className="prose" rows={2} placeholder={t("Anything the agent should know? (optional)")} value={note} onChange={(e) => setNote(e.target.value)} />
-          <div className="row">
+          <textarea
+            className="prose"
+            rows={2}
+            style={{ minHeight: 0, padding: "6px 10px" }}
+            placeholder={t("Anything the agent should know? (optional)")}
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+          />
+          <div className="row" style={{ flexWrap: "nowrap" }}>
             <AgentPicker value={agent} onChange={setAgent} task="fix" />
             <button
               className="primary right"
+              style={{ flexShrink: 0 }}
               disabled={start.isPending}
               onClick={() =>
                 start.mutate(undefined, {
