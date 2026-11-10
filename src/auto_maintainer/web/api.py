@@ -93,7 +93,7 @@ from ..domain.review import (
 from ..domain.run_ci import plan_run_ci
 from ..domain.scoring import Evaluation, recompute
 from ..domain.secrets import redact_secrets
-from ..domain.snapshot import Mergeable, PrState, ReviewEventState
+from ..domain.snapshot import Mergeable, PrSnapshot, PrState, ReviewEventState
 from ..playbooks.evaluate import haystack, rubric_of
 from ..playbooks.hygiene import hygiene_key
 from ..playbooks.prompts import DEFAULT_QUALITY_GUIDE, DEFAULT_WRITING_GUIDE
@@ -334,6 +334,21 @@ def _add_usage(row: dict[str, Any], run: AgentRunRecord) -> None:
 
 def assignee_row(a: PrAssignee) -> dict[str, Any]:
     return {"login": a.login, "kind": a.kind, "by": a.by, "at": a.at.isoformat()}
+
+
+def owner_rows(pr: PrSnapshot, assignees: list[PrAssignee]) -> list[dict[str, Any]]:
+    """The reviewers responsible for ``pr``, each once: who claimed it or was
+    assigned on the dashboard, then the forge's assignees and the people asked to
+    review it there (``kind`` says which: ``claimed``, ``assigned``, ``assignee``,
+    ``requested``)."""
+    out: dict[str, dict[str, Any]] = {}
+    for a in assignees:
+        out.setdefault(a.login.lower(), {"login": a.login, "kind": a.kind, "by": a.by})
+    for login in pr.assignees:
+        out.setdefault(login.lower(), {"login": login, "kind": "assignee", "by": ""})
+    for login in pr.requested_reviewers:
+        out.setdefault(login.lower(), {"login": login, "kind": "requested", "by": ""})
+    return list(out.values())
 
 
 async def _assignees(service: Service, repo: str, number: int) -> list[dict[str, Any]]:
@@ -1245,15 +1260,12 @@ def build_router() -> APIRouter:
                 )
                 ev = await service.store.get_evaluation(name, pr.number)
                 assignees = on_pr.get((name, pr.number), [])
+                owners = owner_rows(pr, assignees)
                 if tier and (ev is None or ev.tier != tier):
                     continue
                 if state and cls.state != state:
                     continue
-                if (
-                    mine
-                    and all(a.login.lower() != me for a in assignees)
-                    and me not in {r.lower() for r in pr.requested_reviewers}
-                ):
+                if mine and all(o["login"].lower() != me for o in owners):
                     continue
                 rows.append(
                     {
@@ -1269,6 +1281,7 @@ def build_router() -> APIRouter:
                         "review_state": cls.state,
                         "reviewed_sha": (cls.reviewed_sha or "")[:7],
                         "assignees": [assignee_row(a) for a in assignees],
+                        "owners": owners,
                         "tier": ev.tier if ev else None,
                         "total": ev.total if ev else None,
                         "summary": ev.summary if ev else "",

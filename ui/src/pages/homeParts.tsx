@@ -14,7 +14,7 @@ import { Icon } from "../icons";
 import { ACTIVE, needsMe, ScoringRow, useWork, WorkRow } from "../jobs";
 import { openJob } from "../openJob";
 import { Popover, Skeleton, useToast } from "../ui";
-import { AvatarStack, Person } from "../avatar";
+import { OwnerAvatars, ownedBy, Person } from "../avatar";
 
 // ---- getting started ---------------------------------------------------------------------------
 
@@ -160,7 +160,7 @@ function activity(p: PrRow, me: Me, t: (s: string) => string): ReactNode {
 /** Whether a PR matches every word of a search: its title, repository and number,
  *  author, labels, summary, and the reviewers on it. */
 function matches(p: PrRow, words: string[]): boolean {
-  const hay = `${p.title} ${p.repo}#${p.number} #${p.number} ${p.author} ${p.labels.join(" ")} ${p.summary} ${p.assignees.map((a) => a.login).join(" ")}`.toLowerCase();
+  const hay = `${p.title} ${p.repo}#${p.number} #${p.number} ${p.author} ${p.labels.join(" ")} ${p.summary} ${p.owners.map((a) => a.login).join(" ")}`.toLowerCase();
   return words.every((w) => hay.includes(w));
 }
 
@@ -175,9 +175,12 @@ export function ReviewCard({ rows, all, loading, me, automations }: { rows: PrRo
   const [who, setWho] = useAgentChoice("review");
   const [showAll, setShowAll] = useState(false);
   const [query, setQuery] = useState("");
+  const [mineOnly, setMineOnly] = useState(false);
   const words = query.toLowerCase().split(/\s+/).filter(Boolean);
   const searching = words.length > 0;
-  const pool = searching ? all.filter((p) => matches(p, words)) : rows;
+  const mine = (p: PrRow) => ownedBy(p.owners, me.login);
+  const ownedCount = rows.filter(mine).length;
+  const pool = (searching ? all.filter((p) => matches(p, words)) : rows).filter((p) => !mineOnly || mine(p));
   const sorted = [...pool].sort((a, b) => (b.total ?? -1) - (a.total ?? -1));
   const shown = showAll || searching ? sorted : sorted.slice(0, 8);
   const waiting = new Set(rows.map(prKey));
@@ -214,7 +217,8 @@ export function ReviewCard({ rows, all, loading, me, automations }: { rows: PrRo
           {review.isPending ? t("Starting…") : chosen.length ? `${t("Review")} ${chosen.length}` : t("Review selected")}
         </button>
       </div>
-      <label className="search" style={{ minWidth: 0, width: "100%", flex: "none", marginBottom: 8 }}>
+      <div className="row" style={{ gap: 8, marginBottom: 8, flexWrap: "nowrap" }}>
+      <label className="search" style={{ minWidth: 0, flex: 1 }}>
         <Icon name="search" />
         <input
           value={query}
@@ -229,12 +233,23 @@ export function ReviewCard({ rows, all, loading, me, automations }: { rows: PrRo
           </button>
         )}
       </label>
+        <button
+          type="button"
+          className={`chip-btn ${mineOnly ? "on" : ""}`}
+          aria-pressed={mineOnly}
+          title={t("PRs you claimed, were assigned on the dashboard or the forge, or were asked to review")}
+          onClick={() => setMineOnly(!mineOnly)}
+          style={{ flex: "none", borderStyle: "solid", height: 34 }}
+        >
+          {t("Owned by me")} {ownedCount > 0 && <span className="n">{ownedCount}</span>}
+        </button>
+      </div>
       {loading ? (
         <Skeleton rows={4} />
       ) : searching && !sorted.length ? (
         <span className="small muted">{t("No open PR matches the search.")}</span>
       ) : !pool.length ? (
-        <span className="small muted">{t("No PR needs a review.")}</span>
+        <span className="small muted">{mineOnly ? t("None of the PRs waiting for a review is yours.") : t("No PR needs a review.")}</span>
       ) : (
         <div className="list">
           {shown.map((p) => (
@@ -258,16 +273,13 @@ export function ReviewCard({ rows, all, loading, me, automations }: { rows: PrRo
                 </Link>
                 <span className="meta">
                   {p.repo}#{p.number} · <Person login={p.author} /> · <When at={p.updated_at} />
-                  {p.assignees.length > 0 && (
+                  {p.owners.length > 0 && (
                     <>
                       {" · "}
-                      {t("reviewing:")}{" "}
-                      <AvatarStack
-                        logins={p.assignees.map((a) => a.login)}
-                        me={me.login}
-                        size={16}
-                        title={p.assignees.map((a) => `${a.login} (${a.kind === "assigned" ? `${t("assigned by")} ${a.by}` : t("claimed")})`).join("\n")}
-                      />
+                      {t("reviewers:")}
+                      <span style={{ marginLeft: 6 }}>
+                        <OwnerAvatars owners={p.owners} me={me.login} size={16} t={t} />
+                      </span>
                     </>
                   )}
                 </span>

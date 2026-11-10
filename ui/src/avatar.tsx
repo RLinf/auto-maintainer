@@ -34,6 +34,19 @@ export function Person({ login, size = 16 }: { login: string; size?: number }) {
 }
 
 /** Overlapping avatars for a tight cell, with a count for the rest. */
+/** The reviewers responsible for a PR, as avatars; each one's tooltip says how. */
+export function OwnerAvatars({ owners, me, size = 20, t }: { owners: { login: string; kind: string; by: string }[]; me?: string; size?: number; t: (s: string) => string }) {
+  const how = (o: { kind: string; by: string }) =>
+    o.kind === "assigned" ? `${t("assigned by")} ${o.by}` : o.kind === "claimed" ? t("claimed") : o.kind === "assignee" ? t("assignee on the forge") : t("review requested on the forge");
+  return <AvatarStack logins={owners.map((o) => o.login)} me={me} size={size} max={4} title={owners.map((o) => `${o.login} (${how(o)})`).join("\n")} />;
+}
+
+/** Whether ``login`` is responsible for the PR. */
+export function ownedBy(owners: { login: string }[], login: string): boolean {
+  const me = login.toLowerCase();
+  return owners.some((o) => o.login.toLowerCase() === me);
+}
+
 export function AvatarStack({ logins, max = 3, size = 20, me, title }: { logins: string[]; max?: number; size?: number; me?: string; title?: string }) {
   if (!logins.length) return null;
   const shown = logins.slice(0, max);

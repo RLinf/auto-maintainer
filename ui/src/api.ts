@@ -151,6 +151,14 @@ export interface AgentQuestion {
   answer: AgentAnswer | null;
 }
 
+/** A reviewer responsible for a PR, and how: claimed or assigned on the dashboard, the
+ * forge's assignee, or asked to review there. */
+export interface Owner {
+  login: string;
+  kind: "claimed" | "assigned" | "assignee" | "requested";
+  by: string;
+}
+
 export interface Assignee {
   login: string;
   /** "claimed": they took it themselves; "assigned": a maintainer (``by``) gave it to them. */
@@ -183,6 +191,8 @@ export interface PrRow {
   reviewed_sha: string;
   /** Reviewers working on the PR in the service, oldest first. */
   assignees: Assignee[];
+  /** Everyone responsible for the PR (``Owner``): the PR list shows them and "Owned by me" filters by them. */
+  owners: Owner[];
   tier: string | null;
   total: number | null;
   summary: string;

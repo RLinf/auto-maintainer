@@ -423,6 +423,7 @@ class GitLabReader:
             additions=added,
             deletions=removed,
             requested_reviewers=[self._person(r) for r in mr.get("reviewers") or []],
+            assignees=[self._person(a) for a in mr.get("assignees") or []],
         )
 
     async def _checks(self, pid: str, mr: dict[str, Any]) -> list[CheckRun]:

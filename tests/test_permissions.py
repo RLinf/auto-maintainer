@@ -298,3 +298,34 @@ async def test_a_person_approves_a_pr_only_as_themselves(demo) -> None:
     assert proposal is not None
     with pytest.raises(ApprovalError):
         await h.service.pipeline.approve(proposal.id, "maria")
+
+
+async def test_a_prs_owners_include_who_the_forge_assigned_or_asked(demo) -> None:
+    """A PR's owners are who claimed it or was assigned on the dashboard, its
+    assignees on the forge, and the people asked to review it there (not teams);
+    "mine" means a PR the person owns."""
+    h, app = demo
+    pr = make_pr(
+        number=77,
+        requested_reviewers=["walt"],
+        requested_teams=["core-team"],
+        assignees=["bob", "maria"],
+    )
+    h.forge.put_pr(pr)
+    await h.store.save_snapshot(pr)
+    h.forge.set_permission(REPO, "carol", Permission.WRITE)
+    async with _as(app, "maria") as maria:
+        await maria.post(f"/api/prs/{REPO}/77/claim")
+        [row] = [r for r in (await maria.get("/api/prs")).json() if r["number"] == 77]
+        assert [(o["login"], o["kind"]) for o in row["owners"]] == [
+            ("maria", "claimed"),
+            ("bob", "assignee"),
+            ("walt", "requested"),
+        ]
+    async with _as(app, "walt") as walt:
+        mine = (await walt.get("/api/prs?mine=true")).json()
+        assert 77 in [r["number"] for r in mine]
+    async with _as(app, "carol") as carol:
+        assert 77 in [r["number"] for r in (await carol.get("/api/prs")).json()]
+        mine = (await carol.get("/api/prs?mine=true")).json()
+        assert 77 not in [r["number"] for r in mine]

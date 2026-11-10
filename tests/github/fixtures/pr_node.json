@@ -37,6 +37,7 @@
     {"id": "PRRT_kwDO1", "isResolved": false, "isOutdated": true, "path": "widget/scheduler/ports.py", "line": 12,
      "comments": {"nodes": [{"databaseId": 8001, "author": {"login": "maint"}, "body": "Close the socket here.", "createdAt": "2026-10-01T12:00:00Z", "commit": {"oid": "aaaa1111bbbb2222cccc3333dddd4444eeee5555"}}]}}
   ]},
+  "assignees": {"nodes": [{"login": "dave"}]},
   "reviewRequests": {"nodes": [
     {"requestedReviewer": {"login": "carol"}},
     {"requestedReviewer": {"slug": "core-team"}}

@@ -214,6 +214,10 @@ class PrSnapshot(_Model):
     additions: int = 0
     deletions: int = 0
     requested_reviewers: list[str] = Field(default_factory=list)
+    """People asked to review it on the forge; teams are in ``requested_teams``."""
+    requested_teams: list[str] = Field(default_factory=list)
+    assignees: list[str] = Field(default_factory=list)
+    """People the forge lists as the PR's assignees."""
 
     def fingerprint(self) -> str:
         """A hash of the fields whose change produces an event."""

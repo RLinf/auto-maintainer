@@ -58,7 +58,9 @@ def test_snapshot_mapping():
     assert (
         thread.is_outdated and not thread.is_resolved and thread.comments[0].id == 8001
     )
-    assert pr.requested_reviewers == ["carol", "core-team"]
+    # People and teams apart: only people own a PR.
+    assert pr.requested_reviewers == ["carol"] and pr.requested_teams == ["core-team"]
+    assert pr.assignees == ["dave"]
     checks = {c.name: c for c in pr.checks}
     assert set(checks) == {"unit", "lint", "e2e", "codecov/patch"}
     unit = checks["unit"]

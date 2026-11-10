@@ -95,6 +95,7 @@ fragment PrFields on PullRequest {
   reviewRequests(first: 20) {
     nodes { requestedReviewer { ... on User { login } ... on Team { slug } ... on Bot { login } } }
   }
+  assignees(first: 20) { nodes { login } }
   headCommit: commits(last: 1) {
     nodes {
       commit {
@@ -253,12 +254,13 @@ def snapshot_from_graphql(repo: str, node: dict[str, Any]) -> PrSnapshot:
         )
         for t in _nodes(node.get("reviewThreads"))
     ]
-    requested = []
+    requested, teams = [], []
     for r in _nodes(node.get("reviewRequests")):
         reviewer = r.get("requestedReviewer") or {}
-        name = reviewer.get("login") or reviewer.get("slug")
-        if name:
-            requested.append(name)
+        if reviewer.get("login"):
+            requested.append(reviewer["login"])
+        elif reviewer.get("slug"):
+            teams.append(reviewer["slug"])
     commits = []
     for c in _nodes(node.get("commits")):
         commit = c.get("commit") or {}
@@ -326,6 +328,8 @@ def snapshot_from_graphql(repo: str, node: dict[str, Any]) -> PrSnapshot:
         additions=node.get("additions") or 0,
         deletions=node.get("deletions") or 0,
         requested_reviewers=requested,
+        requested_teams=teams,
+        assignees=[a["login"] for a in _nodes(node.get("assignees")) if a.get("login")],
     )
 
 
