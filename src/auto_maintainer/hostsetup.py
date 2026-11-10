@@ -899,6 +899,12 @@ class HostSetup:
         )
         return self._login
 
+    def cancel(self) -> None:
+        """Stop a sign-in still waiting, as when the server stops; what it wrote stays
+        in its staging folder until the next sign-in clears it."""
+        if self._login is not None:
+            self._login.cancel()
+
     async def signin_start(self, role: str) -> dict[str, str]:
         """Start the forge CLI's one-time code: ``owner`` for the admin of the
         service's repository (whose login the service then acts as too), ``service``

@@ -530,7 +530,7 @@ class _Host:
             await self._server.serve()
         finally:
             if self._steps is not None:
-                self._steps.gh_login.cancel()
+                self._steps.cancel()
             if self._watch is not None:
                 self._watch.cancel()
             if self.service is not None:

@@ -976,3 +976,16 @@ def test_a_version_2_file_becomes_the_default_github_forge(tmp_path: Path) -> No
     )
     with pytest.raises(ValueError, match="each id once"):
         HostConfig.model_validate({"forges": [{"id": "a"}, {"id": "a"}]})
+
+
+async def test_stopping_the_server_stops_a_sign_in_in_progress(
+    tmp_path: Path, checkout, world
+) -> None:
+    s = _setup(tmp_path, checkout)
+    s.cancel()  # nothing in progress
+    await s.set_repo(f"https://github.com/{FORK}")
+    await s.signin_start("owner")
+    cancelled: list[bool] = []
+    s._login.cancel = lambda: cancelled.append(True)
+    s.cancel()
+    assert cancelled == [True]
