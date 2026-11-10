@@ -71,9 +71,18 @@ export function AgentPicker({
   // A remembered agent that was disabled since falls back to the default.
   const current = value && !agents.some((a) => a.name === value) && settings.data ? "" : value;
   return (
-    <label className="row" style={{ gap: 6 }} title={t("Which agent does it")}>
-      {!compact && <Icon name="cpu" size={14} />}
-      <select value={current} onChange={(e) => onChange(e.target.value)} aria-label={t("Which agent does it")} style={{ height: compact ? 28 : 34 }}>
+    <label className="row" style={{ gap: 6, flexWrap: "nowrap", minWidth: 0 }} title={t("Which agent does it")}>
+      {!compact && (
+        <span style={{ display: "inline-flex", flexShrink: 0 }}>
+          <Icon name="cpu" size={14} />
+        </span>
+      )}
+      <select
+        value={current}
+        onChange={(e) => onChange(e.target.value)}
+        aria-label={t("Which agent does it")}
+        style={{ height: compact ? 28 : 34, minWidth: 0 }}
+      >
         <option value="">{primary ? `${label(primary)} (${t("default")})` : t("Default agent")}</option>
         {agents
           .filter((a) => a.name !== primary)

@@ -6,6 +6,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type ReactNode,
@@ -13,6 +14,7 @@ import {
 } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Icon, type IconName } from "./icons";
+import { applyPopoverLayout } from "./popover";
 
 // ---- popover / menu ----------------------------------------------------------------------
 
@@ -29,6 +31,7 @@ export function Popover({
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!open) return;
     const onDown = (e: MouseEvent) => {
@@ -42,11 +45,42 @@ export function Popover({
       document.removeEventListener("keydown", onKey);
     };
   }, [open]);
+  useLayoutEffect(() => {
+    if (!open) return;
+    const anchor = ref.current;
+    const panel = panelRef.current;
+    if (!anchor || !panel) return;
+    const reposition = (measureWidth = true) => applyPopoverLayout(anchor, panel, align, measureWidth);
+    reposition(true);
+    const onResize = () => reposition(true);
+    const onScroll = (e: Event) => {
+      if (e.target instanceof Node && panel.contains(e.target)) return;
+      reposition(false);
+    };
+    window.addEventListener("resize", onResize, { passive: true });
+    window.addEventListener("scroll", onScroll, { capture: true, passive: true });
+    const resizes = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(() => reposition(true));
+    resizes?.observe(panel);
+    resizes?.observe(anchor);
+    const bodyClass = typeof MutationObserver === "undefined" ? null : new MutationObserver(() => reposition(true));
+    bodyClass?.observe(document.body, { attributes: true, attributeFilter: ["class"] });
+    return () => {
+      window.removeEventListener("resize", onResize);
+      window.removeEventListener("scroll", onScroll, { capture: true });
+      resizes?.disconnect();
+      bodyClass?.disconnect();
+    };
+  }, [open, align]);
   return (
     <div className="pop" ref={ref}>
       {trigger(open, () => setOpen((o) => !o))}
       {open && (
-        <div className={`pop-panel ${align === "right" ? "align-right" : ""}`} role="menu" aria-label={label}>
+        <div
+          ref={panelRef}
+          className={`pop-panel ${align === "right" ? "align-right" : ""}`}
+          role="menu"
+          aria-label={label}
+        >
           {children(() => setOpen(false))}
         </div>
       )}
