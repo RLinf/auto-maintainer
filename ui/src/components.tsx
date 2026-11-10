@@ -4,7 +4,7 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { forwardRef, useEffect, useLayoutEffect, useRef, useState, type ReactNode, type TextareaHTMLAttributes } from "react";
 import { Link } from "react-router-dom";
-import { ApiError, type QualityBand, type QuickQuality, type ReviewQuality } from "./api";
+import { api, ApiError, type QualityBand, type QuickQuality, type ReviewQuality } from "./api";
 import { REVIEW_STATES } from "./data";
 import { currentLang, useLang, useT, type Lang } from "./i18n";
 import { Icon, type IconName } from "./icons";
@@ -497,3 +497,23 @@ export const GrowingTextarea = forwardRef<HTMLTextAreaElement, TextareaHTMLAttri
   );
 });
 
+
+/** Stops the agent answering in a conversation (``url``: its stop endpoint); the
+ * conversation takes the next message at once, and a message sent meanwhile
+ * interrupts the agent the same way. */
+export function StopButton({ url, onStopped }: { url: string; onStopped?: () => void }) {
+  const t = useT();
+  const stop = useAct(() => api.post<{ stopped: boolean }>(url), []);
+  return (
+    <button
+      type="button"
+      className="icon"
+      disabled={stop.isPending}
+      aria-label={t("Stop")}
+      title={t("Stop the agent; you can send the next message right away")}
+      onClick={() => stop.mutate(undefined, { onSuccess: onStopped })}
+    >
+      <Icon name="stop" size={15} />
+    </button>
+  );
+}

@@ -80,6 +80,7 @@ from .api import (
     visible_repos,
 )
 from .auth import User, current_user
+from .live_turns import LiveTurns, Stopped
 from .records import open_door, reading_line
 
 log = logging.getLogger(__name__)
@@ -105,6 +106,20 @@ async def turn_route(
     return route.model_copy(
         update={"primary": thread.runtime, "fallback": rest, "model": model}
     ), resume
+
+
+async def stopped_message(
+    service: Service, thread: ChatThread, run: str, stopped: Stopped
+) -> ChatMessage:
+    """Record in the conversation that ``stopped.by`` stopped its turn ``run``."""
+    message = ChatMessage(
+        thread_id=thread.id,
+        role="assistant",
+        text=f"Stopped by {stopped.by}.",
+        run_id=run,
+    )
+    await service.store.add_message(message)
+    return message
 
 
 def keep_session(thread: ChatThread, result: AgentResult) -> None:
@@ -352,6 +367,18 @@ def build_router() -> APIRouter:
             "steps": [s.model_dump(mode="json") for s in found],
         }
 
+    @r.post("/threads/{thread_id}/stop")
+    async def stop(
+        request: Request, thread_id: str, user: User = Depends(current_user)
+    ) -> dict[str, Any]:
+        """Stop the agent answering in the user's own conversation."""
+        service = service_of(request)
+        thread = await service.store.get_thread(thread_id)
+        if thread is None or thread.owner != user.login:
+            raise HTTPException(404, "unknown thread")
+        live: LiveTurns = request.app.state.live_turns
+        return {"stopped": await live.stop(thread.live_run, user.login)}
+
     @r.post("/threads/{thread_id}/messages")
     async def post(
         request: Request,
@@ -363,6 +390,12 @@ def build_router() -> APIRouter:
         thread = await service.store.get_thread(thread_id)
         if thread is None or thread.owner != user.login:
             raise HTTPException(404, "unknown thread")
+        live: LiveTurns = request.app.state.live_turns
+        if live.running(thread.live_run):
+            # A new message interrupts the turn still running: its agent stops, and
+            # this one starts from the conversation so far.
+            await live.stop(thread.live_run, user.login)
+            thread = await service.store.get_thread(thread_id) or thread
         repos = await visible_repos(service, user)
         text, removed = redact_secrets(body.text)
         await service.store.add_message(
@@ -432,7 +465,12 @@ def build_router() -> APIRouter:
         thread.live_run = run
         await service.store.save_thread(thread)
         try:
-            result = await service.a.agents.run(task, route, ChatAnswer)
+            outcome = await live.run(run, service.a.agents.run(task, route, ChatAnswer))
+            if isinstance(outcome, Stopped):
+                return (
+                    await stopped_message(service, thread, run, outcome)
+                ).model_dump(mode="json")
+            result = outcome
             if not result.ok or result.structured is None:
                 raise HTTPException(502, f"the chat agent failed: {result.error}")
             answer = ChatAnswer.model_validate(result.structured)

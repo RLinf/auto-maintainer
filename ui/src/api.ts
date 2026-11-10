@@ -783,6 +783,8 @@ export interface ChatThread {
   title: string;
   repo: string | null;
   runtime: string | null;
+  /** The turn whose agent answers now, if one does. */
+  live_run?: string | null;
   created_at: string;
 }
 

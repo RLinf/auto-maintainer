@@ -53,6 +53,7 @@ from . import (
     translate,
 )
 from .dashboard import STATIC, missing_page
+from .live_turns import LiveTurns
 from .records import RecordsDoor
 from .records import build_router as records_router
 
@@ -115,6 +116,7 @@ def create_app(
     app.state.sessions = auth.Sessions(data_dir / ".session_secret")
     app.state.cookie_secure = cookie_secure
     app.state.records = RecordsDoor(app, data_dir / "sandbox" / "records.sock")
+    app.state.live_turns = LiveTurns()
     """The agents' read-only door to this dashboard, started by the first conversation."""
 
     install_csrf(app)

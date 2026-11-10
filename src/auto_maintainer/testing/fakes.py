@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import inspect
 import itertools
 import json
 from collections.abc import Callable
@@ -643,6 +644,8 @@ class ScriptedRunner:
                 await self.progress(task, route.primary, event)
         if kind in self.handlers:
             answer = self.handlers[kind](task)
+            if inspect.isawaitable(answer):
+                answer = await answer
         elif self.answers.get(kind):
             answer = self.answers[kind].pop(0)
         else:

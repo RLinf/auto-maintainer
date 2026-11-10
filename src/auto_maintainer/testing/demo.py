@@ -185,6 +185,11 @@ def _demo_steps() -> dict[str, Any]:
         ),
     ]
     return {
+        "chat": [
+            say("Reading what the dashboard shows for this."),
+            *run("Bash", command="am-read /api/prs", out="[ ... 3 open PRs ... ]"),
+            say("Writing the answer."),
+        ],
         "review": lambda task: talk if TALKING in task.prompt else review,
         "fix": [
             say("Adding the boundary test the review asked for."),

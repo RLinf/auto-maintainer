@@ -17,6 +17,10 @@ export default function ChatPage() {
   const navigate = useNavigate();
   const threads = useQuery({ queryKey: ["chat", "threads"], queryFn: () => api.get<ChatThread[]>("/api/chat/threads") });
   const [filter, setFilter] = useState("");
+  // A conversation started here keeps its view when its thread is created, so its
+  // first answer shows as it comes (and can be stopped); New conversation starts afresh.
+  const [born, setBorn] = useState<string | null>(null);
+  const [fresh, setFresh] = useState(0);
   const rows = [...(threads.data ?? [])]
     .sort((a, b) => b.created_at.localeCompare(a.created_at))
     .filter((th) => `${th.title} ${th.repo ?? ""}`.toLowerCase().includes(filter.toLowerCase()));
@@ -28,7 +32,13 @@ export default function ChatPage() {
   return (
     <div className="chat">
       <aside className="card stack" style={{ padding: 12, gap: 8, alignSelf: "start" }}>
-        <button className="primary" onClick={() => navigate("/chat")}>
+        <button
+          className="primary"
+          onClick={() => {
+            setFresh((n) => n + 1);
+            navigate("/chat");
+          }}
+        >
           <Icon name="plus" />
           {t("New conversation")}
         </button>
@@ -57,10 +67,14 @@ export default function ChatPage() {
       </aside>
       <section className="card flush convo">
         <Conversation
-          key={threadId ?? "new"}
+          key={threadId && threadId !== born ? threadId : `new-${fresh}`}
           threadId={threadId ?? null}
+          liveRun={current?.live_run ?? null}
           context={context}
-          onThread={(id) => navigate(`/chat/${id}`, { replace: true })}
+          onThread={(id) => {
+            setBorn(id);
+            navigate(`/chat/${id}`, { replace: true });
+          }}
         />
       </section>
     </div>

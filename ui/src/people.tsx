@@ -10,7 +10,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Fragment, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { api, type ChatMessage, type JobStep } from "./api";
-import { ErrorBox, Section, GrowingTextarea } from "./components";
+import { ErrorBox, Section, GrowingTextarea, StopButton } from "./components";
 import { useQuestions } from "./data";
 import { useT } from "./i18n";
 import { Icon } from "./icons";
@@ -843,9 +843,11 @@ function PeopleTalk({
   }, [allMessages, messages.length]);
   const showPending = !!pendingText && !(last?.role === "user" && last.text === pendingText);
 
+  // While the agent answers, a new message interrupts it (or goes to it at work,
+  // when it takes messages).
   const submit = (said: string) => {
     const clean = said.trim();
-    if (!clean || busy || !hasProfile) return;
+    if (!clean || !hasProfile) return;
     if (!listening) setPendingText(clean);
     setText("");
     send.mutate(clean);
@@ -964,7 +966,8 @@ function PeopleTalk({
               }
             }}
           />
-          <button className="primary icon" disabled={!text.trim() || busy || !hasProfile} aria-label={t("Send")}>
+          {busy && <StopButton url={`${base}/stop`} />}
+          <button className="primary icon" disabled={!text.trim() || !hasProfile} aria-label={t("Send")} title={busy ? t("Stop the agent and send this instead") : undefined}>
             <Icon name="send" size={15} />
           </button>
         </form>

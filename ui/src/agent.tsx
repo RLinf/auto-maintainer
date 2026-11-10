@@ -17,7 +17,7 @@ import {
 } from "react";
 import { Link, matchPath, useLocation, useNavigate } from "react-router-dom";
 import { api, type ChatMessage, type ChatRequest, type ChatSteps, type ChatThread } from "./api";
-import { ErrorBox, GrowingTextarea } from "./components";
+import { ErrorBox, GrowingTextarea, StopButton } from "./components";
 import { useProposals } from "./data";
 import { useT } from "./i18n";
 import { Markdown } from "./markdown";
@@ -291,12 +291,16 @@ export function Conversation({
   onThread,
   draft,
   autoFocus = true,
+  liveRun = null,
 }: {
   threadId: string | null;
   context: AgentContext;
   onThread: (id: string) => void;
   draft?: Draft | null;
   autoFocus?: boolean;
+  /** The turn the service says runs now in this thread, from its list of threads:
+   * one sent before this page loaded can still be stopped. */
+  liveRun?: string | null;
 }) {
   const t = useT();
   const client = useQueryClient();
@@ -326,9 +330,11 @@ export function Conversation({
       for (const key of ["chat", "proposals", "settings", "memory"]) void client.invalidateQueries({ queryKey: [key] });
     },
   });
+  // A message sent while the agent answers interrupts it: the service stops that
+  // turn and answers this one.
   const submit = (message: string) => {
     const m = message.trim();
-    if (!m || send.isPending) return;
+    if (!m) return;
     setText("");
     send.mutate(m);
   };
@@ -452,7 +458,8 @@ export function Conversation({
               }
             }}
           />
-          <button className="primary icon" disabled={!text.trim() || send.isPending} aria-label={t("Send")}>
+          {(send.isPending || !!liveRun) && threadId && <StopButton url={`/api/chat/threads/${threadId}/stop`} />}
+          <button className="primary icon" disabled={!text.trim()} aria-label={t("Send")} title={send.isPending ? t("Stop the agent and send this instead") : undefined}>
             <Icon name="send" size={15} />
           </button>
         </form>

@@ -71,8 +71,15 @@ from ..playbooks.review_revise import (
 from ..service import Service
 from .api import is_maintainer, service_of
 from .auth import User, current_user
-from .chat import ProposedAction, keep_session, save_lesson, turn_route
+from .chat import (
+    ProposedAction,
+    keep_session,
+    save_lesson,
+    stopped_message,
+    turn_route,
+)
 from .jobs import _job, _payload
+from .live_turns import LiveTurns, Stopped
 from .records import open_door, reading_line
 
 log = logging.getLogger(__name__)
@@ -243,6 +250,26 @@ def build_router() -> APIRouter:
             ],
         }
 
+    @r.post("/{job_id}/talk/stop")
+    async def stop(
+        request: Request, job_id: str, user: User = Depends(current_user)
+    ) -> dict[str, Any]:
+        """Stop the agent answering in a review's conversation: the review's asker
+        or a maintainer, as for a turn. The review's own agent stops from its job."""
+        service = service_of(request)
+        job = await talk_job(service, user, job_id)
+        assert job.repo
+        asker = str(_payload(job).get("by") or "")
+        if asker.lower() != user.login.lower() and not await is_maintainer(
+            service, user, job.repo
+        ):
+            raise HTTPException(403, "only the asker and the maintainers stop it")
+        thread = await service.store.get_thread(thread_id_of(job))
+        live = request.app.state.live_turns
+        return {
+            "stopped": await live.stop(thread.live_run if thread else None, user.login)
+        }
+
     @r.post("/{job_id}/talk")
     async def say(
         request: Request,
@@ -282,7 +309,10 @@ def build_router() -> APIRouter:
             raise HTTPException(409, f"{job.repo}#{job.number} is not available now")
         lock = _turns.setdefault(thread_id_of(job), asyncio.Lock())
         if lock.locked():
-            raise HTTPException(409, "the agent is still answering the last message")
+            # A new message interrupts the turn still running.
+            running = await service.store.get_thread(thread_id_of(job))
+            if running is not None:
+                await request.app.state.live_turns.stop(running.live_run, user.login)
         async with lock:
             return await _turn(
                 service,
@@ -293,6 +323,7 @@ def build_router() -> APIRouter:
                 pr,
                 body.text,
                 getattr(request.app.state, "records", None),
+                getattr(request.app.state, "live_turns", None),
             )
 
     return r
@@ -343,6 +374,7 @@ async def _turn(
     pr: PrSnapshot,
     said: str,
     door: Any = None,
+    live: LiveTurns | None = None,
 ) -> dict[str, Any]:
     assert job.repo and job.number is not None
     thread = await service.store.get_thread(thread_id_of(job)) or ChatThread(
@@ -445,7 +477,14 @@ async def _turn(
     thread.live_run = run
     await service.store.save_thread(thread)
     try:
-        result = await service.a.agents.run(task, route, model)
+        outcome = await (live or LiveTurns()).run(
+            run, service.a.agents.run(task, route, model)
+        )
+        if isinstance(outcome, Stopped):
+            return (await stopped_message(service, thread, run, outcome)).model_dump(
+                mode="json"
+            )
+        result = outcome
     finally:
         if door is not None:
             door.revoke(token)

@@ -49,7 +49,8 @@ from ..playbooks.prompts import no_code_rule, schema_hint, told_block
 from ..service import Service
 from .api import _repo, require_view, service_of
 from .auth import User, current_user
-from .chat import keep_session, turn_route
+from .chat import keep_session, stopped_message, turn_route
+from .live_turns import LiveTurns, Stopped
 from .records import open_door, reading_line
 
 log = logging.getLogger(__name__)
@@ -151,6 +152,18 @@ def build_router() -> APIRouter:
             ],
         }
 
+    @r.post("/{repo:path}/governance/talk/stop")
+    async def stop(
+        request: Request, repo: str, user: User = Depends(current_user)
+    ) -> dict[str, Any]:
+        """Stop the agent answering in the repository's People conversation."""
+        service = service_of(request)
+        repo = _repo(repo)
+        await require_view(service, user, repo)
+        thread = await _thread(service, repo, user)
+        live = request.app.state.live_turns
+        return {"stopped": await live.stop(thread.live_run, user.login)}
+
     @r.post("/{repo:path}/governance/talk")
     async def say(
         request: Request,
@@ -171,8 +184,10 @@ def build_router() -> APIRouter:
         if lock.locked():
             if thread.live_run and service.a.agents.listening(thread.live_run):
                 return await _tell(service, user, thread, body.text)
-            raise HTTPException(409, "the agent is still answering the last message")
+            # A new message interrupts the turn still running.
+            await request.app.state.live_turns.stop(thread.live_run, user.login)
         async with lock:
+            thread = await _thread(service, repo, user)
             return await _turn(
                 service,
                 user,
@@ -180,6 +195,7 @@ def build_router() -> APIRouter:
                 repo,
                 body.text,
                 getattr(request.app.state, "records", None),
+                getattr(request.app.state, "live_turns", None),
             )
 
     return r
@@ -212,6 +228,7 @@ async def _turn(
     repo: str,
     said: str,
     door: Any = None,
+    live: LiveTurns | None = None,
 ) -> dict[str, Any]:
     profile = await service.profiles.active(repo)
     assert profile is not None
@@ -278,7 +295,14 @@ async def _turn(
     thread.live_run = run
     await service.store.save_thread(thread)
     try:
-        result = await service.a.agents.run(task, route, PeopleTurn)
+        outcome = await (live or LiveTurns()).run(
+            run, service.a.agents.run(task, route, PeopleTurn)
+        )
+        if isinstance(outcome, Stopped):
+            return (await stopped_message(service, thread, run, outcome)).model_dump(
+                mode="json"
+            )
+        result = outcome
     finally:
         if door is not None:
             door.revoke(token)

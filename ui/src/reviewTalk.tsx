@@ -10,7 +10,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Fragment, useState } from "react";
 import { api, type AgentJob, type ChatMessage, type JobStep, type ReviewTalkState } from "./api";
-import { ErrorBox, GrowingTextarea } from "./components";
+import { ErrorBox, GrowingTextarea, StopButton } from "./components";
 import { useProposals, useQuestions } from "./data";
 import { useT } from "./i18n";
 import { Icon } from "./icons";
@@ -62,9 +62,11 @@ export function ReviewTalk({ job, me, active }: { job: AgentJob; me: string; act
   const last = messages[messages.length - 1];
   const showPending = !!pendingText && !(last?.role === "user" && last.text === pendingText);
 
+  // While the agent answers, a new message interrupts it (or, while it writes the
+  // review, goes to it at work).
   const submit = (said: string) => {
     const clean = said.trim();
-    if (!clean || busy || !canSend) return;
+    if (!clean || !canSend) return;
     setPendingText(clean);
     setText("");
     send.mutate(clean);
@@ -181,7 +183,8 @@ export function ReviewTalk({ job, me, active }: { job: AgentJob; me: string; act
             }
           }}
         />
-        <button className="primary icon" disabled={!text.trim() || busy || !canSend} aria-label={t("Send")}>
+        {busy && !listening && <StopButton url={`/api/jobs/${job.id}/talk/stop`} />}
+        <button className="primary icon" disabled={!text.trim() || !canSend} aria-label={t("Send")} title={busy && !listening ? t("Stop the agent and send this instead") : undefined}>
           <Icon name="send" size={15} />
         </button>
       </form>
