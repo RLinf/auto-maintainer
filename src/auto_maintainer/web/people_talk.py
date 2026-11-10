@@ -49,7 +49,13 @@ from ..playbooks.prompts import no_code_rule, schema_hint, told_block
 from ..service import Service
 from .api import _repo, require_view, service_of
 from .auth import User, current_user
-from .chat import keep_session, stopped_message, turn_route
+from .chat import (
+    apply_thread_agent,
+    check_agent,
+    keep_session,
+    stopped_message,
+    turn_route,
+)
 from .live_turns import LiveTurns, Stopped
 from .records import open_door, reading_line
 
@@ -63,6 +69,7 @@ _turns: dict[str, asyncio.Lock] = {}
 
 class TalkBody(BaseModel):
     text: str = Field(min_length=1, max_length=20_000)
+    agent: str | None = None
 
 
 def thread_id_of(repo: str) -> str:
@@ -108,6 +115,8 @@ def build_router() -> APIRouter:
         thread = await service.store.get_thread(thread_id_of(repo))
         return {
             "thread": thread.id if thread else None,
+            "agent": thread.agent if thread else None,
+            "runtime": thread.runtime if thread else None,
             "live_run": thread.live_run if thread else None,
             "listening": bool(
                 thread
@@ -176,6 +185,8 @@ def build_router() -> APIRouter:
         service = service_of(request)
         repo = _repo(repo)
         await require_view(service, user, repo)
+        if body.agent:
+            check_agent(service, body.agent)
         profile = await service.profiles.active(repo)
         if profile is None:
             raise HTTPException(409, f"{repo} has no approved profile yet")
@@ -196,6 +207,7 @@ def build_router() -> APIRouter:
                 body.text,
                 getattr(request.app.state, "records", None),
                 getattr(request.app.state, "live_turns", None),
+                agent=body.agent,
             )
 
     return r
@@ -229,9 +241,18 @@ async def _turn(
     said: str,
     door: Any = None,
     live: LiveTurns | None = None,
+    *,
+    agent: str | None = None,
 ) -> dict[str, Any]:
     profile = await service.profiles.active(repo)
     assert profile is not None
+    base_route = profile.route(str(TaskKind.GOVERNANCE), service.info.routing)
+    if base_route is None:
+        raise HTTPException(500, "no agent route for the People record")
+    default_agent = await service.runs_on_for(
+        base_route, user.login, str(TaskKind.GOVERNANCE)
+    )
+    apply_thread_agent(service, thread, agent, default_agent=default_agent)
     text, removed = redact_secrets(said)
     await service.store.save_thread(thread)
     await service.store.add_message(
@@ -273,10 +294,7 @@ async def _turn(
     )
     run = new_id("run")
     token, door_env = await open_door(door, user.login)
-    route = profile.route(str(TaskKind.GOVERNANCE), service.info.routing)
-    if route is None:
-        raise HTTPException(500, "no agent route for the People record")
-    route, resume = await turn_route(service, user.login, thread, route)
+    route, resume = await turn_route(service, user.login, thread, base_route)
     task = AgentTask(
         kind=TaskKind.GOVERNANCE,
         prompt=prompt,
@@ -286,6 +304,7 @@ async def _turn(
         repo=repo,
         job_id=run,
         requested_by=user.login,
+        agent_chosen=bool(thread.agent),
         untrusted_input=False,
         resume_session=resume,
         messages=True,
@@ -315,6 +334,7 @@ async def _turn(
                 role="assistant",
                 text=f"The agent could not answer: {result.error or 'no answer'}",
                 run_id=run,
+                runtime=result.runtime,
             )
         )
         raise HTTPException(502, f"the agent failed: {result.error}")
@@ -340,6 +360,7 @@ async def _turn(
         text="\n\n".join([answer.reply, *notes]),
         changes=changes,
         run_id=run,
+        runtime=result.runtime,
     )
     await service.store.add_message(message)
     return message.model_dump(mode="json")

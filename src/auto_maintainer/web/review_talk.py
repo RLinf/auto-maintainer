@@ -73,6 +73,8 @@ from .api import is_maintainer, service_of
 from .auth import User, current_user
 from .chat import (
     ProposedAction,
+    apply_thread_agent,
+    check_agent,
     keep_session,
     save_lesson,
     stopped_message,
@@ -107,6 +109,7 @@ TALK = """You wrote the {what} of PR #{number} in {repo} given below, and {user}
 
 class TalkBody(BaseModel):
     text: str = Field(min_length=1, max_length=20_000)
+    agent: str | None = None
 
 
 def thread_id_of(job: Job) -> str:
@@ -207,6 +210,12 @@ def build_router() -> APIRouter:
         revision = await _revision(service, record) if record else None
         return {
             "thread": thread.id if thread else None,
+            "agent": thread.agent if thread else None,
+            "runtime": (
+                thread.runtime
+                if thread and thread.runtime
+                else (record.action.payload.get("runtime") if record else None)
+            ),
             "live_run": thread.live_run if thread else None,
             "listening": service.a.agents.listening(job.id),
             "posted": bool(record and _posted(record)),
@@ -294,8 +303,10 @@ def build_router() -> APIRouter:
                 f"{asker or 'the service'} asked for this review; only they and the "
                 f"maintainers of {job.repo} talk to its agent",
             )
+        if body.agent:
+            check_agent(service, body.agent)
         if service.a.agents.listening(job.id):
-            return await _tell(service, user, job, body.text)
+            return await _tell(service, user, job, body.text, body.agent)
         record = await _draft(service, job)
         if record is None:
             raise HTTPException(
@@ -324,12 +335,19 @@ def build_router() -> APIRouter:
                 body.text,
                 getattr(request.app.state, "records", None),
                 getattr(request.app.state, "live_turns", None),
+                agent=body.agent,
             )
 
     return r
 
 
-async def _tell(service: Service, user: User, job: Job, said: str) -> dict[str, Any]:
+async def _tell(
+    service: Service,
+    user: User,
+    job: Job,
+    said: str,
+    agent: str | None = None,
+) -> dict[str, Any]:
     """Bring a reviewer's message to the agent writing the review; the review it
     finishes answers it, and later turns read it in the conversation."""
     assert job.repo and job.number is not None
@@ -344,6 +362,7 @@ async def _tell(service: Service, user: User, job: Job, said: str) -> dict[str, 
         number=job.number,
         job_id=job.id,
     )
+    apply_thread_agent(service, thread, agent)
     await service.store.save_thread(thread)
     message = ChatMessage(
         thread_id=thread.id,
@@ -375,6 +394,8 @@ async def _turn(
     said: str,
     door: Any = None,
     live: LiveTurns | None = None,
+    *,
+    agent: str | None = None,
 ) -> dict[str, Any]:
     assert job.repo and job.number is not None
     thread = await service.store.get_thread(thread_id_of(job)) or ChatThread(
@@ -385,12 +406,6 @@ async def _turn(
         number=job.number,
         job_id=job.id,
     )
-    text, removed = redact_secrets(said)
-    await service.store.save_thread(thread)
-    await service.store.add_message(
-        ChatMessage(thread_id=thread.id, role="user", text=text, author=user.login)
-    )
-    history = await service.store.list_messages(thread.id)
     payload = ReviewPostPayload.model_validate(record.action.payload)
     posted = _posted(record)
     revision = await _revision(service, record) if posted else None
@@ -401,6 +416,15 @@ async def _turn(
             update={"body": pending.body, "result": pending.result or payload.result}
         )
     kind = task_kind_of(payload)
+    base_route = _route(service, profile, kind, payload.runtime)
+    default_agent = await service.runs_on_for(base_route, user.login, str(kind))
+    apply_thread_agent(service, thread, agent, default_agent=default_agent)
+    text, removed = redact_secrets(said)
+    await service.store.save_thread(thread)
+    await service.store.add_message(
+        ChatMessage(thread_id=thread.id, role="user", text=text, author=user.login)
+    )
+    history = await service.store.list_messages(thread.id)
     head = record.action.head_sha or pr.head_sha
     workdir, default_branch = await _checkout(service, thread, record, pr)
     diff = await service.a.workspace.diff(workdir, f"origin/{default_branch}", head)
@@ -454,9 +478,7 @@ async def _turn(
         ]
         if part
     )
-    route, resume = await turn_route(
-        service, user.login, thread, _route(service, profile, kind, payload.runtime)
-    )
+    route, resume = await turn_route(service, user.login, thread, base_route)
     run = new_id("run")
     token, door_env = await open_door(door, user.login)
     task = AgentTask(
@@ -469,6 +491,7 @@ async def _turn(
         pr=job.number,
         job_id=run,
         requested_by=user.login,
+        agent_chosen=bool(thread.agent),
         untrusted_input=not await author_is_team(service.a.forge, profile, pr),
         resume_session=resume,
         records_token=token,
@@ -497,6 +520,7 @@ async def _turn(
                 role="assistant",
                 text=f"The agent could not answer: {result.error or 'no answer'}",
                 run_id=run,
+                runtime=result.runtime,
             )
         )
         raise HTTPException(502, f"the agent failed: {result.error}")
@@ -559,6 +583,7 @@ async def _turn(
         changes=changes,
         jobs=jobs,
         run_id=run,
+        runtime=result.runtime,
     )
     await service.store.add_message(message)
     return message.model_dump(mode="json")

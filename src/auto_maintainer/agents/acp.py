@@ -149,12 +149,12 @@ class AcpRuntime(ExecRuntime):
                 argv = [*(p.format(**fill) for p in self.command_prefix), *argv]
             env = build_env(task, self.env_allow)
             env.update(isolation_env(files.dir))
-            env.update(self.task_env(task))
             for name, value in self.provider_env().items():
                 if value is None:
                     env.pop(name, None)
                 else:
                     env[name] = value
+            env.update(self.task_env(task))
             session = await _open_session(argv, env, root)
         found = choices_from_session(session) if session is not None else None
         # A CLI that did not answer (still starting, not signed in) is asked again

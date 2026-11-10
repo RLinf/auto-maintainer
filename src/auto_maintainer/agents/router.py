@@ -278,6 +278,9 @@ class AgentRouter:
                     "model": (route.model or task.model)
                     if name == route.primary
                     else None,
+                    "resume_session": task.resume_session
+                    if name == route.primary
+                    else None,
                     # An agent's own reasoning level wins over the route's, as its
                     # own permission mode does.
                     "effort": "low"

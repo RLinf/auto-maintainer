@@ -16,6 +16,7 @@ import {
   type ReactNode,
 } from "react";
 import { Link, matchPath, useLocation, useNavigate } from "react-router-dom";
+import { AgentPicker, agentName } from "./agentPicker";
 import { api, type ChatMessage, type ChatRequest, type ChatSteps, type ChatThread } from "./api";
 import { ErrorBox, GrowingTextarea, StopButton } from "./components";
 import { useProposals } from "./data";
@@ -292,6 +293,7 @@ let consumedDraft = 0;
 
 export function Conversation({
   threadId,
+  thread: threadProp = null,
   context,
   onThread,
   draft,
@@ -299,6 +301,7 @@ export function Conversation({
   liveRun = null,
 }: {
   threadId: string | null;
+  thread?: ChatThread | null;
   context: AgentContext;
   onThread: (id: string) => void;
   draft?: Draft | null;
@@ -309,6 +312,12 @@ export function Conversation({
 }) {
   const t = useT();
   const client = useQueryClient();
+  const threads = useQuery({
+    queryKey: ["chat", "threads"],
+    queryFn: () => api.get<ChatThread[]>("/api/chat/threads"),
+    enabled: !!threadId && !threadProp,
+  });
+  const thread = threadProp ?? threads.data?.find((th) => th.id === threadId) ?? null;
   const messages = useQuery({
     queryKey: ["chat", "messages", threadId],
     queryFn: () => api.get<ChatMessage[]>(`/api/chat/threads/${threadId}/messages`),
@@ -317,19 +326,26 @@ export function Conversation({
   const proposals = useProposals();
   const byAction = new Map((proposals.data ?? []).map((p) => [p.action_id, p]));
   const [text, setText] = useState("");
+  const [pickedAgent, setPickedAgent] = useState<string | undefined>(undefined);
+  const agent = pickedAgent ?? thread?.agent ?? thread?.runtime ?? "";
   const body = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLTextAreaElement>(null);
   const ctx = { page: context.page, repo: context.repo, number: context.number };
 
   const send = useMutation({
-    mutationFn: async (message: string) => {
+    mutationFn: async ({ message, chosen }: { message: string; chosen: string | undefined }) => {
+      const agentField = chosen !== undefined ? { agent: chosen } : {};
       let id = threadId;
       if (!id) {
-        const thread = await api.post<ChatThread>("/api/chat/threads", { text: message, context: ctx });
-        id = thread.id;
+        const created = await api.post<ChatThread>("/api/chat/threads", { text: message, context: ctx, ...agentField });
+        id = created.id;
         onThread(id);
       }
-      return api.post<ChatMessage>(`/api/chat/threads/${id}/messages`, { text: message, context: ctx });
+      return api.post<ChatMessage>(`/api/chat/threads/${id}/messages`, { text: message, context: ctx, ...agentField });
+    },
+    onSuccess: async () => {
+      await client.invalidateQueries({ queryKey: ["chat"] });
+      setPickedAgent(undefined);
     },
     onSettled: () => {
       for (const key of ["chat", "proposals", "settings", "memory"]) void client.invalidateQueries({ queryKey: [key] });
@@ -341,7 +357,7 @@ export function Conversation({
     const m = message.trim();
     if (!m) return;
     setText("");
-    send.mutate(m);
+    send.mutate({ message: m, chosen: pickedAgent });
   };
 
   useEffect(() => {
@@ -375,7 +391,7 @@ export function Conversation({
     wasRunning.current = running;
   }, [running, client, threadId]);
   const list = messages.data ?? [];
-  const pendingText = send.isPending ? send.variables : null;
+  const pendingText = send.isPending ? send.variables.message : null;
   const last = list[list.length - 1];
   const showPending = pendingText && !(last && last.role === "user" && last.text === pendingText);
   // Follows the conversation and the agent's live steps; sending a message jumps back down.
@@ -402,6 +418,11 @@ export function Conversation({
         {list.map((m) => (
           <Fragment key={m.id}>
             <div className={`bubble ${m.role === "user" ? "user" : "assistant"}`}>
+              {m.role !== "user" && m.runtime && (
+                <span className="small muted" style={{ display: "block", marginBottom: 2 }}>
+                  {agentName(m.runtime)}
+                </span>
+              )}
               {m.role === "user" ? m.text : <Rich text={m.text} />}
             </div>
             {m.run_id && threadId && <RunSteps threadId={threadId} run={m.run_id} />}
@@ -479,10 +500,13 @@ export function Conversation({
             <Icon name="send" size={15} />
           </button>
         </form>
-        <span className="small muted" style={{ paddingLeft: 4 }}>
-          <span className="kbd">↵</span> {t("send")} · <span className="kbd">⇧</span>
-          <span className="kbd">↵</span> {t("new line")}
-        </span>
+        <div className="row" style={{ justifyContent: "space-between", gap: 8, paddingLeft: 4 }}>
+          <span className="small muted">
+            <span className="kbd">↵</span> {t("send")} · <span className="kbd">⇧</span>
+            <span className="kbd">↵</span> {t("new line")}
+          </span>
+          <AgentPicker compact purpose="answer" task="chat" value={agent} onChange={setPickedAgent} />
+        </div>
       </div>
     </>
   );
