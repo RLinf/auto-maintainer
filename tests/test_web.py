@@ -566,33 +566,3 @@ def test_a_log_lookup_returns_the_latest_lines_about_it(tmp_path: Path) -> None:
     assert len(found) == LOG_MATCHES and found[-1] == f"line {LOG_MATCHES + 4} job_x"
     assert "no recent line" in _log_lines(log, "act_missing")
     assert "cannot be read" in _log_lines(tmp_path / "none.log", "x")
-
-
-async def test_a_conversation_on_a_repo_reads_the_services_code_too(demo) -> None:
-    """Beside the repository's checkout, the agent gets the service's own code,
-    read-only, to see how the service did what it is asked about; a conversation
-    without a repository already works in that code."""
-    h, app = demo
-    tasks: list = []
-
-    def answer(task):
-        tasks.append(task)
-        return {"reply": "ok", "proposals": []}
-
-    h.runner.on("chat", answer)
-    async with _client(app, "maria") as maria:
-        for context in ({"page": "pr", "repo": "acme/widget", "number": 42}, {}):
-            thread = (
-                await maria.post(
-                    "/api/chat/threads", json={"text": "x", "context": context}
-                )
-            ).json()
-            await maria.post(
-                f"/api/chat/threads/{thread['id']}/messages",
-                json={"text": "How does it post?", "context": context},
-            )
-    with_repo, without = tasks
-    [code] = with_repo.reference_dirs
-    assert code.is_dir() and code != with_repo.workdir
-    assert f"read-only at {code}" in with_repo.prompt
-    assert without.reference_dirs == []

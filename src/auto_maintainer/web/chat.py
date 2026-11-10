@@ -364,12 +364,6 @@ def build_router() -> APIRouter:
                 )
         memory_index = await service.knowledge.memory_index(thread.repo)
         workdir, where = await _workdir(service, thread)
-        code_dir = await _service_code(service, thread)
-        if code_dir is not None:
-            where += (
-                f"; and, read-only at {code_dir}, the service's own code at the commit "
-                "it runs: read it to see how the service does something"
-            )
         prompt = "\n\n".join(
             [
                 f"You are the maintainers' assistant for {', '.join(repos) or 'no repositories yet'}. You are talking to {user.login}. "
@@ -415,7 +409,6 @@ def build_router() -> APIRouter:
             resume_session=thread.session,
             job_id=run,
             requested_by=user.login,
-            reference_dirs=[code_dir] if code_dir is not None else [],
         )
         thread.live_run = run
         await service.store.save_thread(thread)
@@ -565,32 +558,6 @@ async def _workdir(service: Any, thread: ChatThread) -> tuple[Path, str]:
     thread.workdir = str(path)
     await service.store.save_thread(thread)
     return path, _where(service, thread)
-
-
-async def _service_code(service: Any, thread: ChatThread) -> Path | None:
-    """For a conversation on a repository, a checkout of the service's own code at
-    the commit it runs, kept for the whole conversation and given to the agent
-    read-only, so it can read how the service does what it is asked about. A fresh
-    worktree from the service's mirror, never the checkout the service runs from,
-    whose git settings may hold credentials. ``None`` without a service repository
-    or when it cannot be checked out."""
-    repo = service.settings.code_repo
-    if not thread.repo or not repo:
-        return None
-    if thread.code_dir and Path(thread.code_dir).is_dir():
-        return Path(thread.code_dir)
-    try:
-        info = await service.a.forge.get_repo(repo)
-        sha = info.default_branch_sha
-        if service.a.updater is not None:
-            sha = (await service.a.updater.status()).running_sha or sha
-        path = await service.a.workspace.prepare(repo, None, sha, info.default_branch)
-    except Exception as e:  # the conversation works without it
-        log.warning("no checkout of %s for chat: %s", repo, e)
-        return None
-    thread.code_dir = str(path)
-    await service.store.save_thread(thread)
-    return Path(path)
 
 
 def _where(service: Any, thread: ChatThread) -> str:

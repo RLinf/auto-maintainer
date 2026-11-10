@@ -14,6 +14,6 @@
 
 """Updating the service's own code (design 5.12): the updater and the supervisor."""
 
-from .updater import RESTART_EXIT_CODE, GitServiceUpdater
+from .updater import RESTART_EXIT_CODE, GitServiceUpdater, export_source
 
-__all__ = ["RESTART_EXIT_CODE", "GitServiceUpdater"]
+__all__ = ["RESTART_EXIT_CODE", "GitServiceUpdater", "export_source"]

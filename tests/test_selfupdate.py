@@ -228,3 +228,22 @@ async def test_updates_come_from_the_service_repo_not_the_checkouts_origin(
     assert status.upstream_sha == target and git(origin, "rev-parse", "main") != target
     assert (await updater.deploy(target)).ok
     assert (checkout / "app.txt").read_text() == "from the fork\n"
+
+
+async def test_agents_read_an_export_of_the_running_code(repos, tmp_path: Path) -> None:
+    """The code agents may read is the running commit's tracked files, read-only,
+    without the checkout's git settings or anything untracked; one per commit."""
+    from auto_maintainer.selfupdate import export_source
+
+    _, checkout, other = repos
+    (checkout / "secret.local").write_text("not tracked")
+    out = await export_source(checkout, tmp_path / "service-code")
+    assert out is not None and (out / "app.txt").is_file()
+    assert not (out / ".git").exists() and not (out / "secret.local").exists()
+    assert not (out / "app.txt").stat().st_mode & 0o222, "read-only"
+    assert await export_source(checkout, tmp_path / "service-code") == out
+    _push_change(other, "v2\n")
+    git(checkout, "pull", "-q", "origin", "main")
+    newer = await export_source(checkout, tmp_path / "service-code")
+    assert newer != out and not out.exists(), "an older export is removed"
+    assert await export_source(tmp_path, tmp_path / "x") is None

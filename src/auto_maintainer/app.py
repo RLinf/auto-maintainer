@@ -43,7 +43,7 @@ from .labs.sessions import LabSessionServer
 from .memory.git_store import GitMemoryStore
 from .notify.webhook import ChannelConfig, WebhookNotifier
 from .resources import data_dir, defaults_dir
-from .selfupdate import GitServiceUpdater
+from .selfupdate import GitServiceUpdater, export_source
 from .service import Adapters, Service, ServiceSettings
 from .store.people import PeopleAgents
 from .store.secrets import FileSecretStore, FileUserTokens
@@ -156,12 +156,18 @@ async def build_service(cfg: HostConfig, dev: bool = False) -> Service:
         await store.add_agent_run(run)
 
     people = PeopleAgents(data / "people")
+    checkout = (
+        Path(cfg.self_update.checkout).expanduser()
+        if cfg.self_update.checkout
+        else Path(__file__).resolve().parents[2]
+    )
     router = AgentRouter(
         runtimes,
         clock=clock,
         budgets=budgets_of(runtimes_cfg),
         usage_today=usage_today,
         record_run=record_run,
+        service_code=await export_source(checkout, data / "service-code"),
     )
     router.people = people
 
@@ -230,11 +236,6 @@ async def build_service(cfg: HostConfig, dev: bool = False) -> Service:
         extra_packs[pack.parent.name] = pack.read_text(encoding="utf-8")
 
     workspace = GitWorkspace(data, token=service_token, remote=remote_of)
-    checkout = (
-        Path(cfg.self_update.checkout).expanduser()
-        if cfg.self_update.checkout
-        else Path(__file__).resolve().parents[2]
-    )
 
     async def code_source() -> tuple[str, str, str | None]:
         """The service's repository, fetched as the service's account there."""

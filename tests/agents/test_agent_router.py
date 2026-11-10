@@ -307,3 +307,17 @@ async def test_a_task_in_a_session_gets_at_least_the_sessions_time() -> None:
     assert [t.timeout_seconds for t in a.tasks] == [5400, 1800], (
         "the route's timeout holds unless the task needs longer"
     )
+
+
+async def test_every_run_may_read_the_services_own_code(tmp_path: Path) -> None:
+    """Whatever the task, the agent gets the service's code read-only and is told
+    where it is; a task that works in that code already gets nothing more."""
+    code = tmp_path / "service-code" / "abc123"
+    code.mkdir(parents=True)
+    a = ScriptedAgentRuntime("a", default={"ok": True})
+    router, _ = _router(a, service_code=code)
+    await router.run(_task(), Route(primary="a"), Verdict)
+    await router.run(_task(workdir=code), Route(primary="a"), Verdict)
+    first, second = a.tasks
+    assert first.reference_dirs == [code] and f"is at {code}, read-only" in first.prompt
+    assert second.reference_dirs == [] and str(code) not in second.prompt

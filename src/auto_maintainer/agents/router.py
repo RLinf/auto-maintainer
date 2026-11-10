@@ -34,6 +34,7 @@ import logging
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel
@@ -138,8 +139,13 @@ class AgentRouter:
         record_run: RecordRun | None = None,
         cooldown_seconds: float = 1800,
         disabled: Iterable[str] = (),
+        service_code: Path | None = None,
     ) -> None:
         self.runtimes = dict(runtimes)
+        self.service_code = service_code
+        """The service's own code at the commit it runs, which every run may read
+        (mounted read-only, and named in the prompt), so an agent can see how the
+        service works."""
         self.people: PersonalAgents | None = None
         """Each person's own agent accounts; a task someone asked for runs on theirs
         when they turned it on for that agent (``_account``)."""
@@ -240,6 +246,7 @@ class AgentRouter:
             runtime = self.runtimes[name]
             attempt = task.model_copy(
                 update={
+                    **self._with_service_code(task),
                     "model": (route.model or task.model) if index == 0 else None,
                     # An agent's own reasoning level wins over the route's, as its
                     # own permission mode does.
@@ -267,6 +274,19 @@ class AgentRouter:
             error="no runtime available: " + "; ".join(skipped),
             error_kind="other",
         )
+
+    def _with_service_code(self, task: AgentTask) -> dict[str, Any]:
+        """``task``'s folders and prompt with the service's own code among what it
+        may read; nothing when there is none or the task works in it already."""
+        code = self.service_code
+        if code is None or code in task.reference_dirs or task.workdir == code:
+            return {}
+        return {
+            "reference_dirs": [*task.reference_dirs, code],
+            "prompt": f"{task.prompt}\n\nThe service's own code (auto-maintainer, at "
+            f"the commit it runs) is at {code}, read-only: read it to see how the "
+            "service does something.",
+        }
 
     def ready(self, name: str) -> bool:
         """Whether ``name`` is configured, enabled, and installed on this host

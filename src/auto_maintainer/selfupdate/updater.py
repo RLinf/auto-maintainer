@@ -276,3 +276,45 @@ class GitServiceUpdater:
         return DeployResult(
             ok=True, sha=target, previous_sha=previous, log="\n".join(log)
         )
+
+
+async def export_source(checkout: Path, root: Path) -> Path | None:
+    """The service's own code at the commit it runs, as files under ``root/<commit>``,
+    for agents to read: what ``git archive`` gives, so no ``.git`` folder (whose
+    settings may hold credentials), nothing untracked, and no build output. Made
+    once per commit and left read-only; older exports are removed. ``None`` when
+    ``checkout`` is not a git checkout."""
+    if not (checkout / ".git").exists():
+        return None
+    head = await run(["git", "rev-parse", "HEAD"], cwd=checkout, timeout=30)
+    if not head.ok:
+        return None
+    sha = head.stdout.strip()[:12]
+    target = root / sha
+    if target.is_dir():
+        return target
+    root.mkdir(parents=True, exist_ok=True)
+    tmp = root / f".{sha}.tmp"
+    shutil.rmtree(tmp, ignore_errors=True)
+    tmp.mkdir()
+    archive = root / f".{sha}.tar"
+    made = await run(
+        ["git", "archive", "--format=tar", "-o", str(archive), "HEAD"],
+        cwd=checkout,
+        timeout=300,
+    )
+    if not made.ok:
+        shutil.rmtree(tmp, ignore_errors=True)
+        return None
+    unpacked = await run(["tar", "-xf", str(archive), "-C", str(tmp)], timeout=300)
+    archive.unlink(missing_ok=True)
+    if not unpacked.ok:
+        shutil.rmtree(tmp, ignore_errors=True)
+        return None
+    await run(["chmod", "-R", "a-w", str(tmp)], timeout=120)
+    os.replace(tmp, target)
+    for old in root.iterdir():
+        if old.name != sha and not old.name.startswith("."):
+            await run(["chmod", "-R", "u+w", str(old)], timeout=120)
+            shutil.rmtree(old, ignore_errors=True)
+    return target
