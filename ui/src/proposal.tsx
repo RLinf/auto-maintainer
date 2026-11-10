@@ -704,7 +704,7 @@ export function MergeBaseForm({
     [["pr"], ["prs"], ["proposals"], ["work"]],
   );
   return (
-    <div className="stack" style={{ gap: 10, padding: 6, width: 340, maxWidth: "100%" }}>
+    <div className="stack" style={{ gap: 10, padding: 6, width: "min(340px, calc(100vw - 24px))", maxWidth: "100%" }}>
       <span className="small muted">
         {conflicting
           ? t("An agent merges the base branch into the PR and resolves the conflicts. You read the resolution, then push the merge onto the PR's branch as yourself, or open it as a PR into this PR when you cannot push there.")
@@ -832,7 +832,7 @@ export function ApproveButton({
       )}
     >
       {(close) => (
-        <div className="stack" style={{ gap: 10, padding: 6, width: 340, maxWidth: "calc(100vw - 48px)" }}>
+        <div className="stack" style={{ gap: 10, padding: 6, width: "min(340px, calc(100vw - 24px))", maxWidth: "100%" }}>
           <span className="small muted">
             {t("Approves the PR on GitHub as you, at")} <code>{head.slice(0, 7)}</code>.
           </span>
@@ -897,7 +897,7 @@ export function FixForm({
     [["pr"], ["prs"], ["proposals"], ["work"]],
   );
   return (
-    <div className="stack" style={{ gap: 10, padding: 6, width: 340, maxWidth: "100%" }}>
+    <div className="stack" style={{ gap: 10, padding: 6, width: "min(340px, calc(100vw - 24px))", maxWidth: "100%" }}>
       <span className="small muted">{t("An agent changes the code for the review's findings; you see the diff before a PR is opened.")}</span>
       <textarea className="prose" rows={3} placeholder={t("Anything the agent should know (optional)")} value={note} onChange={(e) => setNote(e.target.value)} />
       <div className="row">

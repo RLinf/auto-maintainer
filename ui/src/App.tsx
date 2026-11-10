@@ -243,7 +243,7 @@ function Shell({ me }: { me: Me }) {
                 </div>
                 {!me.can_post_as_me &&
                   (connecting ? (
-                    <div style={{ padding: "6px 10px", maxWidth: 340 }}>
+                    <div style={{ padding: "6px 10px", width: "min(340px, calc(100vw - 24px))", maxWidth: "100%" }}>
                       <ConnectGitHub />
                     </div>
                   ) : (
@@ -521,12 +521,12 @@ function TopNav({ waiting, counts }: { waiting: number; counts: { questions: num
             )}
           >
             {(close) => (
-              <div style={{ width: 300 }}>
+              <div style={{ width: "min(300px, calc(100vw - 24px))", maxWidth: "100%" }}>
                 {rest.map((n) => (
                   <button
                     key={n.to}
                     className="menu-item"
-                    style={{ height: "auto", padding: "8px 10px", alignItems: "flex-start" }}
+                    style={{ height: "auto", padding: "8px 10px", alignItems: "flex-start", whiteSpace: "normal" }}
                     onClick={() => {
                       navigate(n.to);
                       close();

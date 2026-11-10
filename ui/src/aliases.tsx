@@ -85,7 +85,7 @@ export function NamesCard() {
       <div className="list">
         {rows.length === 0 && <span className="small muted">{t("Nobody has a name yet.")}</span>}
         {rows.map((a) => (
-          <div key={a.login} className="list-row">
+          <div key={a.login} className="list-row aliases-row">
             <Avatar login={a.login} size={20} />
             <span className="main">
               <strong>{a.alias}</strong> <span className="muted mono">{a.login}</span>
@@ -101,15 +101,15 @@ export function NamesCard() {
       </div>
       {can && (
         <form
-          className="row"
+          className="row form-row"
           style={{ gap: 6, marginTop: 10 }}
           onSubmit={(e) => {
             e.preventDefault();
             save.mutate({ who: login.trim().replace(/^@/, ""), name: alias.trim() }, { onSuccess: () => (setLogin(""), setAlias("")) });
           }}
         >
-          <input value={login} onChange={(e) => setLogin(e.target.value)} placeholder={t("GitHub login")} spellCheck={false} className="mono" style={{ flex: 1, minWidth: 120 }} />
-          <input value={alias} onChange={(e) => setAlias(e.target.value)} placeholder={t("Name")} maxLength={40} style={{ flex: 1, minWidth: 120 }} />
+          <input value={login} onChange={(e) => setLogin(e.target.value)} placeholder={t("GitHub login")} spellCheck={false} className="mono grow-input" />
+          <input value={alias} onChange={(e) => setAlias(e.target.value)} placeholder={t("Name")} maxLength={40} className="grow-input" />
           <button className="primary sm" disabled={!login.trim() || !alias.trim() || save.isPending}>
             {t("Give this name")}
           </button>

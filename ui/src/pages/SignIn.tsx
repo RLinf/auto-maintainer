@@ -41,7 +41,7 @@ function TokenSignIn({ forge, onDone }: { forge: string; onDone: () => void }) {
         else setError(((await r.json().catch(() => ({}))) as { detail?: string }).detail ?? t("Sign-in failed"));
       }}
     >
-      <input type="password" value={token} onChange={(e) => setToken(e.target.value)} placeholder={t("Personal access token (scopes api, read_user)")} autoComplete="off" style={{ flex: 1, minWidth: 220 }} />
+      <input type="password" value={token} onChange={(e) => setToken(e.target.value)} placeholder={t("Personal access token (scopes api, read_user)")} autoComplete="off" className="grow-input" />
       <button className="primary sm" disabled={!token.trim() || busy}>
         {t("Sign in")}
       </button>
@@ -60,7 +60,7 @@ export default function SignIn() {
   const expired = new URLSearchParams(window.location.search).get("signin") === "expired";
 
   return (
-    <div className="signin card" style={{ padding: 28 }}>
+    <div className="signin card">
       <div className="row" style={{ gap: 10 }}>
         <Logo size={40} />
         <h1>auto-maintainer</h1>

@@ -74,7 +74,7 @@ export function SignInFlow({ login, onEnd }: { login: AgentLogin; onEnd: () => v
           )}
           {s.needs_code && (
             <form
-              className="row"
+              className="row form-row"
               style={{ gap: 6 }}
               onSubmit={(e) => {
                 e.preventDefault();
@@ -82,7 +82,7 @@ export function SignInFlow({ login, onEnd }: { login: AgentLogin; onEnd: () => v
               }}
             >
               <span className="small">2. {t("Paste the code the page shows:")}</span>
-              <input value={code} onChange={(e) => setCode(e.target.value)} autoComplete="off" spellCheck={false} style={{ flex: 1, minWidth: 160 }} />
+              <input value={code} onChange={(e) => setCode(e.target.value)} autoComplete="off" spellCheck={false} className="grow-input" />
               <button className="primary sm" disabled={!code.trim() || send.isPending}>
                 {t("Send")}
               </button>
@@ -304,7 +304,7 @@ function MyAgentRow({ agent: a, apis }: { agent: MyAgent; apis: MyProvider[] }) 
           {a.name}
         </span>
         {a.can_sign_in && (a.signed_in ? <Status value="executed" label={t("You are signed in")} /> : <Status value="pending" label={t("You are not signed in")} />)}
-        <span className="right row model-controls" style={{ gap: 4, marginLeft: "auto" }}>
+        <span className="right row model-controls" style={{ gap: 4 }}>
           <select
             value={choice}
             disabled={!a.isolated || save.isPending}

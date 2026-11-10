@@ -75,8 +75,8 @@ export function OwnerCard() {
                 }}
               >
                 <span className="small muted">{t("Hand ownership to another admin of the repository who has signed in here:")}</span>
-                <div className="row" style={{ gap: 8 }}>
-                  <input value={to} onChange={(e) => setTo(e.target.value)} placeholder={t("their login")} spellCheck={false} style={{ flex: 1, minWidth: 180 }} />
+                <div className="row form-row" style={{ gap: 8 }}>
+                  <input value={to} onChange={(e) => setTo(e.target.value)} placeholder={t("their login")} spellCheck={false} className="grow-input" />
                   <button className="sm" disabled={!to.trim() || transfer.isPending}>
                     {t("Hand over")}
                   </button>

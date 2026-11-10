@@ -269,7 +269,7 @@ export function ReviewCard({ rows, all, loading, me, automations }: { rows: PrRo
         </button>
       </div>
       <div className="row" style={{ gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
-      <label className="search" style={{ minWidth: 200, flex: 1 }}>
+      <label className="search" style={{ flex: 1 }}>
         <Icon name="search" />
         <input
           value={query}
@@ -444,7 +444,7 @@ function ScheduleLine({ automations }: { automations: Automation[] }) {
           )}
         >
           {() => (
-            <div style={{ padding: 8, width: 360, maxWidth: "calc(100vw - 48px)" }}>
+            <div style={{ padding: 8, width: "min(360px, calc(100vw - 24px))", maxWidth: "100%" }}>
               <AutomationRow a={a} />
             </div>
           )}

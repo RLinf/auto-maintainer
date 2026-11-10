@@ -217,7 +217,7 @@ function AddForge({ onClose }: { onClose: () => void }) {
         void submit();
       }}
     >
-      <div className="row" style={{ gap: 10, flexWrap: "wrap" }}>
+      <div className="row form-row" style={{ gap: 10, flexWrap: "wrap" }}>
         <label className="stack" style={{ gap: 4 }}>
           <span className="small muted">{t("Kind")}</span>
           <select value={kind} onChange={(e) => setKind(e.target.value)}>
@@ -239,7 +239,7 @@ function AddForge({ onClose }: { onClose: () => void }) {
         {advanced ? t("Fewer options") : t("More options")}
       </button>
       {advanced && (
-        <div className="row" style={{ gap: 10, flexWrap: "wrap" }}>
+        <div className="row form-row" style={{ gap: 10, flexWrap: "wrap" }}>
           <label className="stack" style={{ gap: 4, flex: "1 1 240px" }}>
             <span className="small muted">{t("API address (when not the usual one)")}</span>
             <input value={apiUrl} onChange={(e) => setApiUrl(e.target.value)} placeholder={kind === "gitlab" ? "https://gitlab.example.com/api/v4" : "https://ghe.example.com/api/v3"} spellCheck={false} />
@@ -263,7 +263,7 @@ function AddForge({ onClose }: { onClose: () => void }) {
           <label className="row small" style={{ gap: 6, flexWrap: "wrap" }}>
             <input type="radio" checked={useToken} onChange={() => setHow("token")} />
             {t("With a personal access token (scopes api, read_user)")}
-            {useToken && <input type="password" value={token} onChange={(e) => setToken(e.target.value)} autoComplete="off" style={{ flex: 1, minWidth: 200 }} />}
+            {useToken && <input type="password" value={token} onChange={(e) => setToken(e.target.value)} autoComplete="off" className="grow-input" />}
           </label>
         )}
       </div>
