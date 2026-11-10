@@ -50,7 +50,9 @@ class GeminiRuntime(AcpRuntime):
         model = task.model or self.model
         if model:
             argv += ["-m", model]
-        dirs = [str(d) for d in [*task.skill_dirs, *task.extra_dirs]]
+        dirs = [
+            str(d) for d in [*task.skill_dirs, *task.extra_dirs, *task.reference_dirs]
+        ]
         if dirs:
             argv += ["--include-directories", ",".join(dirs)]
         return argv

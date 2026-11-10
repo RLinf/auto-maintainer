@@ -30,7 +30,7 @@ from ..domain.records import ActionRecord, AuditEntry
 from ..domain.snapshot import PrState
 from ..policy.leak_guard import LeakError
 from .context import ExecContext
-from .handlers import HANDLERS, Noop, Stale
+from .handlers import HANDLERS, Noop, NotWritten, Stale
 from .memory_gate import try_merge_memory
 
 log = logging.getLogger(__name__)
@@ -199,6 +199,11 @@ class Actuator:
             return await self._finish(record, ActionStatus.NOOP, error=str(e))
         except Stale as e:
             return await self._finish(record, ActionStatus.SUPERSEDED, error=str(e))
+        except NotWritten as e:
+            log.warning("action %s not written: %s", action.id, e)
+            return await self._finish(
+                record, ActionStatus.FAILED, error=str(e), unwritten=True
+            )
         except LeakError as e:
             # Handlers build all their public text before they write anything.
             return await self._finish(

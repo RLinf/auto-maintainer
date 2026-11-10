@@ -31,6 +31,7 @@ from ..domain.actions import (
     CodePrPayload,
     CommentUpsertPayload,
     FixPrPayload,
+    InlineComment,
     IssueCommentPayload,
     IssueLabelPayload,
     LabelPayload,
@@ -49,6 +50,7 @@ from ..domain.actions import (
     ServiceDeployPayload,
     ThreadReplyPayload,
 )
+from ..domain.diffs import commentable, fits
 from ..domain.ids import same_commit
 from ..domain.labs import LabProgress
 from ..domain.markers import parse_markers
@@ -69,6 +71,22 @@ class Noop(Exception):
 
 class Stale(Exception):
     """The target moved on; the action is superseded."""
+
+
+class NotWritten(RuntimeError):
+    """The forge refused the action's only write, so nothing was written: the
+    proposal goes back to its reviewers with the reason, to change and approve again."""
+
+
+REFUSED = (400, 404, 409, 422)
+"""Statuses with which a forge refuses a request outright, writing nothing."""
+
+
+def _outside_the_diff(c: InlineComment) -> str:
+    """An inline comment the forge would not take, as a part of the main comment:
+    its place, then its text."""
+    lines = f"{c.start_line}-{c.line}" if c.start_line else str(c.line)
+    return f"\n\n---\n\n`{c.path}:{lines}`\n\n{c.body.strip()}"
 
 
 Handler = Callable[
@@ -147,17 +165,28 @@ async def _review_post(
 ) -> dict[str, Any]:
     assert profile is not None and pr is not None and action.head_sha
     p = ReviewPostPayload.model_validate(action.payload)
+    # The forge refuses a whole review over one comment on a line its diff does not
+    # show; such a comment goes in the main comment instead, under its place.
+    diff = await x.reader.get_pr_diff(action.repo, pr.number)
+    ranges = commentable(diff) if diff else None
+    inline = [
+        c
+        for c in p.comments
+        if ranges is None
+        or fits(ranges, c.path, c.line, c.start_line, c.side) is not False
+    ]
+    outside = [c for c in p.comments if c not in inline]
     body = await x.public(
         action,
         profile,
-        p.body,
+        p.body + "".join(_outside_the_diff(c) for c in outside),
         marker_kind=p.kind,
         pr=pr,
         runtime=p.runtime,
         approver=approver,
     )
     comments = []
-    for c in p.comments[: profile.review.max_inline_comments]:
+    for c in inline[: profile.review.max_inline_comments]:
         text = await x.public(
             action, profile, c.body, marker_kind=p.kind, pr=pr, bare=True
         )
@@ -170,9 +199,14 @@ async def _review_post(
                 side=c.side,
             )
         )
-    ref = await x.writer.create_review(
-        action.repo, pr.number, action.head_sha, body, p.event, comments
-    )
+    try:
+        ref = await x.writer.create_review(
+            action.repo, pr.number, action.head_sha, body, p.event, comments
+        )
+    except Exception as e:
+        if getattr(e, "status", None) in REFUSED:
+            raise NotWritten(f"the forge refused the review: {e}") from e
+        raise
     await x.store.add_review_record(
         ReviewRecord(
             repo=action.repo,
@@ -185,7 +219,12 @@ async def _review_post(
             target="review",
         )
     )
-    return {"review_id": ref.id, "url": ref.url, "inline": len(comments)}
+    return {
+        "review_id": ref.id,
+        "url": ref.url,
+        "inline": len(comments),
+        "moved_to_body": len(outside),
+    }
 
 
 async def _review_update(

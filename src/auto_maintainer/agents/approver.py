@@ -107,7 +107,7 @@ def auto_answer(
     (``RuntimeConfig.approve_commands``)."""
     if question.kind != QuestionKind.PERMISSION:
         return None
-    roots = [task.workdir, *task.skill_dirs, *task.extra_dirs]
+    roots = [task.workdir, *task.skill_dirs, *task.extra_dirs, *task.reference_dirs]
     kind = question.tool
     paths = question.paths
     if kind in ("edit", "delete", "move"):

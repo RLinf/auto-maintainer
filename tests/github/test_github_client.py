@@ -122,3 +122,18 @@ async def test_graphql_errors_raise_and_not_found_can_pass(client, router):
         await client.graphql("query { x }")
     data = await client.graphql("query { x }", allow_not_found=True)
     assert data == {"repository": {"p1": None}}
+
+
+async def test_a_refusal_says_what_github_found_wrong(client, router) -> None:
+    """GitHub's message for a 422 is only "Unprocessable Entity"; its ``errors``
+    list says what was wrong, and the error carries it."""
+    router.post("/repos/acme/widget/pulls/7/reviews").respond(
+        422,
+        json={
+            "message": "Unprocessable Entity",
+            "errors": ["Line could not be resolved"],
+        },
+    )
+    with pytest.raises(GitHubError) as e:
+        await client.post("/repos/acme/widget/pulls/7/reviews", json={})
+    assert e.value.status == 422 and "Line could not be resolved" in str(e.value)

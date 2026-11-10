@@ -809,7 +809,7 @@ class ExecRuntime:
                 invocation.argv,
                 env,
                 rw=task.extra_dirs,
-                ro=task.skill_dirs,
+                ro=[*task.skill_dirs, *task.reference_dirs],
                 home_paths=self.home_paths,
                 home_source=self.account_home,
             )

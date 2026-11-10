@@ -47,6 +47,7 @@ from ..domain.actions import (
     ReviewUpdatePayload,
 )
 from ..domain.agents import AgentTask, TaskKind
+from ..domain.diffs import commentable
 from ..domain.events import Event, EventKind
 from ..domain.ids import new_id
 from ..domain.labs import unusable
@@ -453,7 +454,9 @@ async def _turn(
             "I removed what looked like a credential from your message before reading it."
         )
     revised: list[str] = []
-    new_payload = apply_revision(answer, payload, profile, pr, head, own_format)
+    new_payload = apply_revision(
+        answer, payload, profile, pr, head, own_format, commentable(diff)
+    )
     if new_payload is not None:
         proposal = await service.store.proposal_for_action(record.action.id)
         if proposal is not None and proposal.state == ProposalState.PENDING:

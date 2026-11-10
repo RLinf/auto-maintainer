@@ -364,6 +364,12 @@ def build_router() -> APIRouter:
                 )
         memory_index = await service.knowledge.memory_index(thread.repo)
         workdir, where = await _workdir(service, thread)
+        code_dir = await _service_code(service, thread)
+        if code_dir is not None:
+            where += (
+                f"; and, read-only at {code_dir}, the service's own code at the commit "
+                "it runs: read it to see how the service does something"
+            )
         prompt = "\n\n".join(
             [
                 f"You are the maintainers' assistant for {', '.join(repos) or 'no repositories yet'}. You are talking to {user.login}. "
@@ -409,6 +415,7 @@ def build_router() -> APIRouter:
             resume_session=thread.session,
             job_id=run,
             requested_by=user.login,
+            reference_dirs=[code_dir] if code_dir is not None else [],
         )
         thread.live_run = run
         await service.store.save_thread(thread)
@@ -560,6 +567,32 @@ async def _workdir(service: Any, thread: ChatThread) -> tuple[Path, str]:
     return path, _where(service, thread)
 
 
+async def _service_code(service: Any, thread: ChatThread) -> Path | None:
+    """For a conversation on a repository, a checkout of the service's own code at
+    the commit it runs, kept for the whole conversation and given to the agent
+    read-only, so it can read how the service does what it is asked about. A fresh
+    worktree from the service's mirror, never the checkout the service runs from,
+    whose git settings may hold credentials. ``None`` without a service repository
+    or when it cannot be checked out."""
+    repo = service.settings.code_repo
+    if not thread.repo or not repo:
+        return None
+    if thread.code_dir and Path(thread.code_dir).is_dir():
+        return Path(thread.code_dir)
+    try:
+        info = await service.a.forge.get_repo(repo)
+        sha = info.default_branch_sha
+        if service.a.updater is not None:
+            sha = (await service.a.updater.status()).running_sha or sha
+        path = await service.a.workspace.prepare(repo, None, sha, info.default_branch)
+    except Exception as e:  # the conversation works without it
+        log.warning("no checkout of %s for chat: %s", repo, e)
+        return None
+    thread.code_dir = str(path)
+    await service.store.save_thread(thread)
+    return Path(path)
+
+
 def _where(service: Any, thread: ChatThread) -> str:
     """The conversation's working directory, in words for the agent."""
     if thread.repo:
@@ -579,11 +612,33 @@ RECORD_ACTIONS = 40
 RECORD_JOBS = 12
 
 
+def _draft_summary(payload: dict[str, Any]) -> str:
+    """A review draft in a line: its kind and where each inline comment is, to check
+    against the PR's diff."""
+    comments = payload.get("comments") or []
+    places = [
+        f"{c.get('path')}:"
+        + (
+            f"{c['start_line']}-{c.get('line')}"
+            if c.get("start_line")
+            else str(c.get("line"))
+        )
+        + ("" if c.get("side", "RIGHT") == "RIGHT" else " (old side)")
+        for c in comments
+    ]
+    return f"draft: {payload.get('event', 'COMMENT')} review, " + (
+        f"{len(places)} inline comments at " + ", ".join(places)
+        if places
+        else "no inline comments"
+    )
+
+
 async def _service_record(service: Any, repo: str, number: int) -> str:
     """The service's own record of ``repo#number``, oldest first: each action it
-    proposed or took, how it ended (status, error, the policy's rule), the proposal
-    behind it (who decided, why, its warnings), and its recent jobs (the
-    ``pr_record`` lookup)."""
+    proposed or took, when it last changed, how it ended (status, error, the
+    policy's rule), the proposal behind it (who decided, why, its warnings), for a
+    review draft its kind and where its inline comments are, and its recent jobs
+    (the ``pr_record`` lookup)."""
     actions = await service.store.list_actions(
         repo=repo, number=number, limit=RECORD_ACTIONS
     )
@@ -609,6 +664,10 @@ async def _service_record(service: Any, repo: str, number: int) -> str:
                 parts.append("warnings: " + "; ".join(proposal.warnings))
         if record.post_as:
             parts.append(f"as {record.post_as}")
+        if a.kind in (ActionKind.REVIEW_POST, ActionKind.REVIEW_UPDATE):
+            parts.append(_draft_summary(a.payload))
+        if record.updated_at and record.updated_at > a.created_at:
+            parts.append(f"last changed {record.updated_at:%Y-%m-%d %H:%M} UTC")
         if record.error:
             parts.append(f"error: {record.error}")
         lines.append(" | ".join(parts))

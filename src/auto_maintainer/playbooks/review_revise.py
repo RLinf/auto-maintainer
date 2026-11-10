@@ -40,6 +40,7 @@ from ..domain.actions import (
     make_action,
 )
 from ..domain.agents import TaskKind
+from ..domain.diffs import Ranges
 from ..domain.profile import RepoProfile
 from ..domain.records import ActionRecord
 from ..domain.review import (
@@ -197,9 +198,11 @@ def apply_revision(
     pr: PrSnapshot,
     head_sha: str,
     own_format: bool,
+    ranges: Ranges | None = None,
 ) -> dict[str, Any] | None:
     """The draft's new payload when the answer revises the review, rendered as the
-    playbook renders it; ``None`` when it does not."""
+    playbook renders it (inline only on lines the diff shows, ``ranges``); ``None``
+    when it does not."""
     if isinstance(answer, ReviewRevision):
         review = answer.review
         if review is None:
@@ -213,7 +216,9 @@ def apply_revision(
             )
         review.recommendation = profile.review.recommendations[meaning]
         review.labels = []
-        rendered = render_review(review, profile, set(pr.paths), own_format=own_format)
+        rendered = render_review(
+            review, profile, set(pr.paths), own_format=own_format, ranges=ranges
+        )
         result: dict[str, Any] = review.model_dump(mode="json")
         recommendation = review.recommendation
     else:

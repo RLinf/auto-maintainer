@@ -32,6 +32,7 @@ from ..domain.actions import (
     make_action,
 )
 from ..domain.agents import AgentTask, TaskKind
+from ..domain.diffs import commentable
 from ..domain.events import Event, EventKind
 from ..domain.ids import short_sha
 from ..domain.ports import Store
@@ -244,7 +245,13 @@ class ReviewPlaybook(Playbook):
                 else "ready"
             )
             result.recommendation = profile.review.recommendations[meaning]
-        rendered = render_review(result, profile, set(pr.paths), own_format=own_format)
+        rendered = render_review(
+            result,
+            profile,
+            set(pr.paths),
+            own_format=own_format,
+            ranges=commentable(diff),
+        )
         team = ctx.trusted_input
         hints = ActionHints(
             author_is_team=team, recommendation=meaning, changed_paths=pr.paths

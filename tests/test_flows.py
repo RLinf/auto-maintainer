@@ -65,7 +65,7 @@ def _signed(msg: str) -> str:
 
 def _pr(**kw):
     defaults = {
-        "files": [PrFile(path="src/loader.py", additions=10, deletions=2)],
+        "files": [PrFile(path="src/loader.py", additions=20, deletions=2)],
         "commits": [
             Commit(sha="c" * 40, message=_signed("fix(core): handle empty batches"))
         ],
@@ -878,3 +878,61 @@ async def test_a_post_the_policy_refuses_after_approval_stays_a_draft(
     back = await harness.store.get_proposal(proposals[second.id].id)
     assert back is not None and back.state == ProposalState.PENDING
     assert any("already ran for this head" in w for w in back.warnings), back.warnings
+
+
+async def test_a_comment_on_a_line_the_diff_does_not_show_goes_in_the_review(
+    harness: Harness,
+) -> None:
+    """The forge refuses a whole review over one inline comment on a line outside
+    its diff, so such a comment is posted in the main comment, under its place."""
+    await _auto(harness, review_post="propose")
+    harness.forge.put_pr(_pr())
+    harness.forge.diffs[("acme/widget", 42)] = (
+        "diff --git a/src/loader.py b/src/loader.py\n--- a/src/loader.py\n"
+        "+++ b/src/loader.py\n@@ -30,4 +30,6 @@ def load():\n ctx\n+new\n+new\n ctx\n"
+    )
+    harness.runner.on("triage", lambda t: {"summary": "s", "labels": []})
+    harness.runner.queue("review", REVIEW)
+    harness.runner.queue("verify", {"verdicts": [{"id": "F1", "confirmed": True}]})
+    await harness.poll()
+    [proposal] = [
+        p
+        for p in await harness.store.list_proposals(ProposalState.PENDING)
+        if (await harness.store.get_action(p.action_id)).action.kind == "review.post"
+    ]
+    await harness.service.pipeline.approve(proposal.id, "maria")
+    await harness.settle()
+    [posted] = harness.forge.writes_of("create_review")
+    assert posted["comments"] == []
+    assert "`src/loader.py:12`" in posted["body"] and "Off-by-one" in posted["body"]
+
+
+async def test_a_review_the_forge_refuses_goes_back_to_its_reviewers(
+    harness: Harness,
+) -> None:
+    from auto_maintainer.forges.github.client import GitHubError
+
+    await _auto(harness, review_post="propose")
+    harness.forge.put_pr(_pr())
+    harness.runner.on("triage", lambda t: {"summary": "s", "labels": []})
+    harness.runner.queue("review", REVIEW)
+    harness.runner.queue("verify", {"verdicts": [{"id": "F1", "confirmed": True}]})
+    await harness.poll()
+    [proposal] = [
+        p
+        for p in await harness.store.list_proposals(ProposalState.PENDING)
+        if (await harness.store.get_action(p.action_id)).action.kind == "review.post"
+    ]
+    harness.forge.fail_next["create_review"] = GitHubError(
+        422,
+        "POST /repos/acme/widget/pulls/42/reviews: Unprocessable Entity "
+        "(Line could not be resolved)",
+    )
+    await harness.service.pipeline.approve(proposal.id, "maria")
+    await harness.settle()
+    again = await harness.store.get_proposal(proposal.id)
+    assert again is not None and again.state == ProposalState.PENDING
+    assert any("Line could not be resolved" in w for w in again.warnings)
+    await harness.service.pipeline.approve(proposal.id, "maria")
+    await harness.settle()
+    assert len(harness.forge.writes_of("create_review")) == 1

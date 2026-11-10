@@ -489,10 +489,20 @@ async def test_the_agent_looks_up_why_a_post_failed(demo) -> None:
     from auto_maintainer.domain.records import ActionRecord
 
     h, app = demo
+    from datetime import timedelta
+
+    from auto_maintainer.domain.actions import InlineComment
+
     action = make_action(
         ActionKind.REVIEW_POST,
         "acme/widget",
-        ReviewPostPayload(body="Review."),
+        ReviewPostPayload(
+            body="Review.",
+            comments=[
+                InlineComment(path="src/a.py", line=12, start_line=9, body="x"),
+                InlineComment(path="src/b.py", line=3, body="y"),
+            ],
+        ),
         number=42,
         head_sha="a" * 40,
     )
@@ -501,6 +511,7 @@ async def test_the_agent_looks_up_why_a_post_failed(demo) -> None:
             action=action,
             status=ActionStatus.FAILED,
             error="leak guard: mentions the priority tier 'P2'",
+            updated_at=action.created_at + timedelta(days=1),
         )
     )
     prompts: list[str] = []
@@ -534,6 +545,12 @@ async def test_the_agent_looks_up_why_a_post_failed(demo) -> None:
     assert "tier 'P2'" not in first, "the record is looked up, not put in up front"
     assert "Diagnosing what the service did" in first
     assert "review.post at aaaaaaa: failed" in second and "priority tier" in second
+    # What it needs to check a refused review against the diff, and when it last ran.
+    assert (
+        "draft: COMMENT review, 2 inline comments at src/a.py:9-12, src/b.py:3"
+        in second
+    )
+    assert "last changed" in second
     assert "other/secret#1: not a repository walt can see" in second
     assert "only operators and the owner" in second
 
@@ -549,3 +566,33 @@ def test_a_log_lookup_returns_the_latest_lines_about_it(tmp_path: Path) -> None:
     assert len(found) == LOG_MATCHES and found[-1] == f"line {LOG_MATCHES + 4} job_x"
     assert "no recent line" in _log_lines(log, "act_missing")
     assert "cannot be read" in _log_lines(tmp_path / "none.log", "x")
+
+
+async def test_a_conversation_on_a_repo_reads_the_services_code_too(demo) -> None:
+    """Beside the repository's checkout, the agent gets the service's own code,
+    read-only, to see how the service did what it is asked about; a conversation
+    without a repository already works in that code."""
+    h, app = demo
+    tasks: list = []
+
+    def answer(task):
+        tasks.append(task)
+        return {"reply": "ok", "proposals": []}
+
+    h.runner.on("chat", answer)
+    async with _client(app, "maria") as maria:
+        for context in ({"page": "pr", "repo": "acme/widget", "number": 42}, {}):
+            thread = (
+                await maria.post(
+                    "/api/chat/threads", json={"text": "x", "context": context}
+                )
+            ).json()
+            await maria.post(
+                f"/api/chat/threads/{thread['id']}/messages",
+                json={"text": "How does it post?", "context": context},
+            )
+    with_repo, without = tasks
+    [code] = with_repo.reference_dirs
+    assert code.is_dir() and code != with_repo.workdir
+    assert f"read-only at {code}" in with_repo.prompt
+    assert without.reference_dirs == []

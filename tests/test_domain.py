@@ -218,6 +218,89 @@ def test_render_review_puts_diff_findings_inline() -> None:
     )
 
 
+DIFF = """diff --git a/x.py b/x.py
+index 1..2 100644
+--- a/x.py
++++ b/x.py
+@@ -10,6 +10,8 @@ def f():
+ a
++b
++c
+ d
+@@ -40 +42,2 @@
+-e
++f
++g
+diff --git a/gone.py b/gone.py
+--- a/gone.py
++++ /dev/null
+@@ -1,3 +0,0 @@
+-x
+-y
+-z
+diff --git a/new.py b/new.py
+--- /dev/null
++++ b/new.py
+@@ -0,0 +1,2 @@
++p
++q
+"""
+
+
+def test_the_lines_a_diff_shows_are_where_inline_comments_go() -> None:
+    from auto_maintainer.domain.diffs import commentable, fits, hunk_of
+
+    ranges = commentable(DIFF)
+    assert ranges["x.py"] == {
+        "LEFT": [(10, 15), (40, 40)],
+        "RIGHT": [(10, 17), (42, 43)],
+    }
+    assert ranges["gone.py"] == {"LEFT": [(1, 3)], "RIGHT": []}
+    assert ranges["new.py"]["RIGHT"] == [(1, 2)]
+    assert fits(ranges, "x.py", 12, 10) is True
+    assert fits(ranges, "x.py", 42, 17) is False  # spans two hunks
+    assert fits(ranges, "x.py", 30) is False
+    assert fits(ranges, "x.py", 40, side="LEFT") is True
+    assert fits(ranges, "elsewhere.py", 1) is None  # the diff does not reach it
+    assert hunk_of(ranges, "x.py", 43) == (42, 43)
+
+
+def test_render_review_puts_only_lines_the_diff_shows_inline() -> None:
+    from auto_maintainer.domain.diffs import commentable
+
+    def finding(n: int, line: int, start: int | None = None, **kw: str) -> dict:
+        return {
+            "id": f"F{n}",
+            "severity": "minor",
+            "category": "correctness",
+            "title": f"T{n}",
+            "body": f"body {n}",
+            "path": "x.py",
+            "line": line,
+            "start_line": start,
+            **kw,
+        }
+
+    result = ReviewResult.model_validate(
+        {
+            "summary": "S",
+            "findings": [
+                finding(1, 12),
+                finding(2, 30),  # between the hunks
+                finding(3, 43, 35),  # starts before its hunk: cut to it
+                finding(4, 43, 35, suggestion="h"),  # a suggestion keeps its lines
+            ],
+            "recommendation": "Changes requested",
+        }
+    )
+    out = render_review(
+        result, RepoProfile(repo="acme/widget"), {"x.py"}, ranges=commentable(DIFF)
+    )
+    assert [(c.line, c.start_line) for c in out.comments] == [(12, None), (43, 42)]
+    assert "(`x.py:30`)" in out.body and "  body 2" in out.body
+    assert "(`x.py:43`)" in out.body and "  body 4" in out.body
+
+
 def test_quality_bands_and_lenient_scores() -> None:
     assert [quality_band(n) for n in (100, 90, 89, 75, 60, 59, 40, 39, 0)] == [
         "excellent",

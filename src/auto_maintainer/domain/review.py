@@ -24,6 +24,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
 
 from .actions import ActionKind, ActionStatus, InlineComment
+from .diffs import Ranges, fits, hunk_of
 from .ids import same_commit, short_sha
 from .markers import REVIEW_KINDS, parse_markers
 from .profile import RepoProfile
@@ -331,31 +332,45 @@ def render_review(
     diff_paths: set[str],
     *,
     own_format: bool = False,
+    ranges: Ranges | None = None,
 ) -> RenderedReview:
     """Render a review into a main comment and inline comments.
 
-    A finding goes inline when it names a path in the diff and a line; the rest go
-    in the main comment. Sections come from the profile's template: built-in
+    A finding goes inline when it names a path in the diff and a line that the
+    diff's hunks show (``ranges``, from ``diffs.commentable``), since the forge
+    refuses the whole review over a comment on any other line; a range that starts
+    before its hunk is cut to the hunk. The rest go in the main comment with their
+    location. Sections come from the profile's template: built-in
     section names are filled from the result's fields, and any other section from
     ``result.sections``. With ``own_format`` (the repository's review skill sets
     the format) the main comment is ``result.sections`` as the agent returned them,
     in its order, when it returned any, followed by the findings listed by id, so a
     section that refers to ``F1`` can be looked up.
     """
-    inline_findings = [
-        f for f in result.findings if f.path in diff_paths and f.line is not None
-    ][: profile.review.max_inline_comments]
-    inline_ids = {f.id for f in inline_findings}
+
+    def place(f: Finding) -> tuple[int, int | None] | None:
+        """The lines an inline comment on ``f`` covers, or ``None`` for the body."""
+        if f.path not in diff_paths or f.line is None:
+            return None
+        start = f.start_line if f.start_line and f.start_line < f.line else None
+        if ranges is None or fits(ranges, f.path, f.line, start) is not False:
+            return f.line, start
+        hunk = hunk_of(ranges, f.path, f.line)
+        if hunk is None or f.suggestion:  # a suggestion replaces exactly its lines
+            return None
+        return f.line, (hunk[0] if hunk[0] < f.line else None)
+
+    placed = [(f, where) for f in result.findings if (where := place(f)) is not None]
+    placed = placed[: profile.review.max_inline_comments]
+    inline_ids = {f.id for f, _ in placed}
     comments = [
         InlineComment(
             path=f.path or "",
-            line=f.line or 1,
-            start_line=f.start_line
-            if f.start_line and f.start_line < (f.line or 0)
-            else None,
+            line=line,
+            start_line=start,
             body=_inline_body(f, own_format),
         )
-        for f in inline_findings
+        for f, (line, start) in placed
     ]
 
     def findings_text() -> str:
@@ -363,7 +378,7 @@ def render_review(
             return "- No issues found."
         lines = []
         for f in result.findings:
-            where = f" (`{f.path}:{f.line}`)" if f.id in inline_ids else ""
+            where = f" (`{f.path}:{f.line}`)" if f.path and f.line else ""
             lines.append(f"- {_finding_heading(f)}{where}")
             if f.id not in inline_ids:
                 lines.append(f"  {f.body.strip()}")

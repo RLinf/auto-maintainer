@@ -137,6 +137,9 @@ class AgentTask(BaseModel):
     """JSON schema of the structured result, from the playbook's Pydantic model."""
     skill_dirs: list[Path] = Field(default_factory=list)
     extra_dirs: list[Path] = Field(default_factory=list)
+    reference_dirs: list[Path] = Field(default_factory=list)
+    """Folders the agent may read but never change, such as the service's own code
+    beside a conversation's checkout; a container mounts them read-only."""
     resume_session: str | None = None
     model: str | None = None
     effort: str | None = None

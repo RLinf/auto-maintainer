@@ -226,7 +226,9 @@ class ClaudeCodeRuntime(ExecRuntime):
                 "--json-schema",
                 json.dumps(task.output_schema, separators=(",", ":")),
             ]
-        dirs = [str(d) for d in [*task.skill_dirs, *task.extra_dirs]]
+        dirs = [
+            str(d) for d in [*task.skill_dirs, *task.extra_dirs, *task.reference_dirs]
+        ]
         if dirs:
             argv += ["--add-dir", *dirs]
         if task.resume_session:

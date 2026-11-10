@@ -58,6 +58,7 @@ from ..domain.actions import (
     make_action,
 )
 from ..domain.agents import AgentTask, TaskKind
+from ..domain.diffs import commentable
 from ..domain.events import Event, EventKind
 from ..domain.labs import (
     setup_lines,
@@ -764,6 +765,7 @@ class ReproducePlaybook(Playbook):
             pr,
             head,
             own_format,
+            commentable(diff),
         )
         return new_payload
 

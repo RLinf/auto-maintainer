@@ -223,6 +223,9 @@ class ChatThread(BaseModel):
     """The checkout of ``repo`` (at the PR's head, or its default branch) the agent
     works in for the whole conversation, so its session can resume there."""
     session: str | None = None
+    code_dir: str | None = None
+    """For a conversation on a repository: a read-only checkout of the service's own
+    code at the commit it runs, beside the repository's, for how the service works."""
     runtime: str | None = None
     live_run: str | None = None
     """The run answering the newest message, while it runs; its steps are live."""

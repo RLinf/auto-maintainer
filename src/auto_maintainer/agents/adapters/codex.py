@@ -502,7 +502,7 @@ def _item_events(stage: str, item: dict[str, Any]) -> list[AgentEvent]:
 
 
 def _with_skill_dirs(task: AgentTask) -> str:
-    dirs = [str(d) for d in [*task.skill_dirs, *task.extra_dirs]]
+    dirs = [str(d) for d in [*task.skill_dirs, *task.extra_dirs, *task.reference_dirs]]
     if not dirs:
         return task.prompt
     listing = "\n".join(f"- {d}" for d in dirs)

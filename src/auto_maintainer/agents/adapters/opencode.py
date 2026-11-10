@@ -104,7 +104,9 @@ class OpenCodeRuntime(AcpRuntime):
         return {"AM_PROVIDER_API_KEY": self.provider.api_key}
 
     def prompt_text(self, task: AgentTask) -> str:
-        dirs = [str(d) for d in [*task.skill_dirs, *task.extra_dirs]]
+        dirs = [
+            str(d) for d in [*task.skill_dirs, *task.extra_dirs, *task.reference_dirs]
+        ]
         if not dirs:
             return task.prompt
         listing = "\n".join(f"- {d}" for d in dirs)

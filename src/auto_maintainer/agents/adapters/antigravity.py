@@ -103,7 +103,7 @@ class AntigravityRuntime(AcpRuntime):
             argv.append("--dangerously-skip-permissions")
         elif task.mode == "read_only" and self.sandbox:
             argv.append("--sandbox")
-        for directory in [*task.skill_dirs, *task.extra_dirs]:
+        for directory in [*task.skill_dirs, *task.extra_dirs, *task.reference_dirs]:
             argv += ["--add-dir", str(directory)]
         return argv
 

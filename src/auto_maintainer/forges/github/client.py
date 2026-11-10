@@ -35,6 +35,24 @@ from .auth import API_URL, API_VERSION, USER_AGENT, TokenProvider
 _RETRY_STATUSES = {500, 502, 503, 504}
 
 
+def _error_details(body: Any) -> str:
+    """GitHub's reasons for a refusal (its ``errors`` list), which say what was
+    wrong where its ``message`` says only "Unprocessable Entity"."""
+    errors = body.get("errors") if isinstance(body, dict) else None
+    if not isinstance(errors, list):
+        return ""
+    parts = []
+    for e in errors[:5]:
+        if isinstance(e, str):
+            parts.append(e)
+        elif isinstance(e, dict):
+            parts.append(
+                str(e.get("message") or e.get("code") or "")
+                + (f" ({e['field']})" if e.get("field") else "")
+            )
+    return "; ".join(p for p in parts if p)[:500]
+
+
 class GitHubError(RuntimeError):
     """A GitHub API call failed.
 
@@ -232,6 +250,9 @@ class GitHubClient:
                 if isinstance(body, dict)
                 else resp.reason_phrase
             )
+            details = _error_details(body)
+            if details:
+                message = f"{message} ({details})"
             raise GitHubError(resp.status_code, f"{method} {path}: {message}", body)
 
     # ------------------------------------------------------------------ REST
