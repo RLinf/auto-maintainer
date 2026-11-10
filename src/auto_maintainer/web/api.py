@@ -60,7 +60,9 @@ from ..domain.actions import (
     make_action,
 )
 from ..domain.agents import AgentAnswer, AgentQuestion, QuestionState, SkillInfo
+from ..domain.approvals import approval_status
 from ..domain.codeowners import (
+    CodeOwnerReport,
     OwnerRule,
     code_owner_report,
     codeowners_locations,
@@ -102,7 +104,7 @@ from ..domain.review_progress import checks_key, load_checks, review_progress
 from ..domain.run_ci import plan_run_ci
 from ..domain.scoring import Evaluation, priority_key, recompute
 from ..domain.secrets import redact_secrets
-from ..domain.snapshot import Mergeable, PrState, ReviewEventState
+from ..domain.snapshot import Mergeable, PrSnapshot, PrState, ReviewEventState
 from ..playbooks.evaluate import haystack, rubric_of
 from ..playbooks.hygiene import hygiene_key
 from ..playbooks.prompts import DEFAULT_QUALITY_GUIDE, DEFAULT_WRITING_GUIDE
@@ -412,6 +414,30 @@ async def _can_push(service: Service, user: User, record: ActionRecord) -> bool 
     if pr.head_repo in (None, "", action.repo):
         return True
     return pr.maintainer_can_modify
+
+
+async def approvals_view(
+    service: Service, repo: str, pr: PrSnapshot, owners: CodeOwnerReport
+) -> dict[str, Any]:
+    """Where ``pr``'s reviews stand against its base branch's review rules, as GitHub
+    counts them (``domain/approvals.py``): the rules are known for the default
+    branch, and approvers' write access is read for each of them."""
+    info = await service.view_repo(repo)
+    branch = info if info.default_branch == pr.base_ref else None
+    approvers = {
+        r.author
+        for r in pr.reviews
+        if r.state == ReviewEventState.APPROVED
+        and r.author.lower() != pr.author.lower()
+    }
+    writers = {
+        login.lower()
+        for login in approvers
+        if (await permission(service, User(login=login), repo)).at_least(
+            Permission.WRITE
+        )
+    }
+    return approval_status(pr, branch, owners, writers).model_dump(mode="json")
 
 
 async def permission(service: Service, user: User, repo: str) -> Permission:
@@ -1648,6 +1674,7 @@ def build_router() -> APIRouter:
                 "people": [o.model_dump(mode="json") for o in owners.people],
                 "waiting": owners.waiting,
             },
+            "approvals": await approvals_view(service, repo, pr, owners),
             "head": pr.head_sha,
         }
 
@@ -1777,6 +1804,7 @@ def build_router() -> APIRouter:
             "base": pr.base_ref,
             "required": required,
             **report.model_dump(mode="json"),
+            "approvals": await approvals_view(service, repo, pr, report),
             "requested": [
                 r_ for r_ in pr.requested_reviewers if r_.lower() not in owners
             ],

@@ -92,7 +92,7 @@ fragment PrFields on PullRequest {
   author { login }
   baseRefName headRefName headRefOid
   headRepository { nameWithOwner }
-  maintainerCanModify
+  maintainerCanModify reviewDecision
   mergeable mergeStateStatus additions deletions
   labels(first: 50) { nodes { name } }
   files(first: 100) { FORWARD nodes { FILE } }
@@ -313,6 +313,7 @@ def snapshot_from_graphql(repo: str, node: dict[str, Any]) -> PrSnapshot:
         head_sha=node["headRefOid"],
         head_repo=(node.get("headRepository") or {}).get("nameWithOwner"),
         maintainer_can_modify=node.get("maintainerCanModify"),
+        review_decision=node.get("reviewDecision"),
         url=node.get("url") or "",
         created_at=_dt(node.get("createdAt")),
         updated_at=_dt(node.get("updatedAt")),
@@ -433,6 +434,8 @@ class GitHubReader:
         strict: bool | None = None
         approvals: int | None = None
         owners_review: bool | None = None
+        last_push: bool | None = None
+        stale: bool | None = None
         protection_summary = (branch_data.get("protection") or {}).get(
             "required_status_checks"
         ) or {}
@@ -445,6 +448,7 @@ class GitHubReader:
             }
             if not branch_data.get("protected"):
                 strict, approvals, owners_review = False, 0, False
+                last_push, stale = False, False
         protection = None
         if branch_data.get("protected"):
             protection = await self._client.get(
@@ -459,6 +463,8 @@ class GitHubReader:
             reviews = protection.get("required_pull_request_reviews") or {}
             approvals = int(reviews.get("required_approving_review_count") or 0)
             owners_review = bool(reviews.get("require_code_owner_reviews"))
+            last_push = bool(reviews.get("require_last_push_approval"))
+            stale = bool(reviews.get("dismiss_stale_reviews"))
         rules = await self._client.get(
             f"/repos/{repo}/rules/branches/{quote(branch, safe='')}",
             repo=repo,
@@ -482,6 +488,8 @@ class GitHubReader:
                 owners_review = bool(
                     owners_review or params.get("require_code_owner_review")
                 )
+                last_push = bool(last_push or params.get("require_last_push_approval"))
+                stale = bool(stale or params.get("dismiss_stale_reviews_on_push"))
         return RepoInfo(
             # GitHub's own spelling: names are not case-sensitive there, and the
             # service keys a repository's records and memory folder by this one.
@@ -494,6 +502,8 @@ class GitHubReader:
             requires_up_to_date=strict,
             required_approvals=approvals,
             requires_code_owner_reviews=owners_review,
+            requires_last_push_approval=last_push,
+            dismisses_stale_reviews=stale,
         )
 
     async def default_branch_sha(self, repo: str) -> str:

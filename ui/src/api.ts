@@ -477,6 +477,7 @@ export interface PrProgress {
   /** The code owners' approvals: each owner's verdict, and how many parts of the
    * change an owner other than the author approved. */
   code_owners: { file: string | null; required: boolean | null; parts: number; approved_parts: number; people: CodeOwnerStanding[]; waiting: string[][] };
+  approvals: ApprovalStatus;
   head: string;
   /** The user resolves any comment (a maintainer or the PR's owner); a reviewer resolves their own. */
   can_resolve: boolean;
@@ -507,6 +508,23 @@ export interface CodeOwnerStanding {
 
 /** ``GET /api/prs/{repo}/{n}/code-owners``: whom to ask for the approvals a merge
  * waits on. Code owners are not the PR's owners here. */
+/** A PR's approvals against its branch's rules, as GitHub counts them. */
+export interface ApprovalStatus {
+  /** GitHub's own verdict on the branch's review rules for this PR. */
+  decision: "APPROVED" | "CHANGES_REQUESTED" | "REVIEW_REQUIRED" | null;
+  /** Approving reviews the branch requires; null when it could not be read. */
+  required: number | null;
+  /** Approvals that count toward ``required``. */
+  approved_by: string[];
+  not_counted: { login: string; reason: string }[];
+  /** Approvals still needed, from anyone with write access. */
+  missing: number | null;
+  changes_requested_by: string[];
+  code_owners_required: boolean | null;
+  code_owners_waiting: string[][];
+  last_push_approval: boolean | null;
+}
+
 export interface CodeOwners {
   file: string | null;
   base: string;
@@ -517,6 +535,7 @@ export interface CodeOwners {
   unowned: string[];
   /** The approvals still missing: for each, the owners any one of whom may give it. */
   waiting: string[][];
+  approvals: ApprovalStatus;
   /** Others GitHub asks to review, who own none of the files. */
   requested: string[];
 }

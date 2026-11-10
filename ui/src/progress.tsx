@@ -8,7 +8,7 @@ import { useState } from "react";
 import { api, type CommentItem, type PrProgress, type ProgressEvent, type ProgressSummary, type ReviewerProgress } from "./api";
 import { useAliasOf } from "./aliases";
 import { Avatar, Named } from "./avatar";
-import { OwnerGroups, useCodeOwnerSummary } from "./codeOwners";
+import { ApprovalsBlock, OwnerGroups, useApprovalSummary, useCodeOwnerSummary } from "./codeOwners";
 import { ConnectGitHub } from "./connectGitHub";
 import { Empty, ErrorBox, Section, useAct, When } from "./components";
 import { useT } from "./i18n";
@@ -130,7 +130,9 @@ export function ReviewProgressPanel({ repo, number, me }: { repo: string; number
   if (q.isLoading) return <Skeleton rows={5} />;
   if (!q.data) return <ErrorBox error={q.error} />;
   const d = q.data;
-  const need = d.required_approvals;
+  // The approvals that count under the branch's rules, as GitHub counts them.
+  const counted = d.approvals?.approved_by ?? d.approved_by;
+  const need = d.approvals ? d.approvals.required : d.required_approvals;
   const name = (l: string) => aliasOf(l) ?? l;
   return (
     <>
@@ -166,12 +168,12 @@ export function ReviewProgressPanel({ repo, number, me }: { repo: string; number
           <div className="stack" style={{ gap: 4 }}>
             <span className="small muted">{t("Approvals")}</span>
             <strong style={{ fontSize: 20 }}>
-              {d.approved_by.length}
+              {counted.length}
               {need ? <span className="muted" style={{ fontSize: 14 }}> / {need} {t("required")}</span> : null}
             </strong>
             <span className="small muted">
-              {d.approved_by.length ? d.approved_by.map(name).join(", ") : t("none yet")}
-              {d.approved_by.length > d.approved_at_head.length && ` · ${d.approved_by.length - d.approved_at_head.length} ${t("on an earlier commit")}`}
+              {counted.length ? counted.map(name).join(", ") : t("none yet")}
+              {d.approvals?.missing ? ` · ${t("needs")} ${d.approvals.missing} ${t("more from anyone with write access")}` : ""}
             </span>
           </div>
           <div className="stack" style={{ gap: 4 }}>
@@ -237,19 +239,26 @@ export function ReviewProgressPanel({ repo, number, me }: { repo: string; number
 function CodeOwnerApprovals({ d, repo }: { d: PrProgress; repo: string }) {
   const t = useT();
   const c = d.code_owners;
-  const summary = useCodeOwnerSummary()(c.people, c.waiting ?? [], c.required);
-  if (!c.file) return null;
+  const approvalSummary = useApprovalSummary();
+  const ownerSummary = useCodeOwnerSummary();
+  const summary = approvalSummary(d.approvals) ?? ownerSummary(c.people, c.waiting ?? [], c.required);
   return (
-    <Section
-      title={t("Code owners")}
-      hint={c.required ? t("GitHub merges only with their approval") : undefined}
-      aside={summary ? <span className={`pill ${summary.tone}`}>{summary.text}</span> : undefined}
-    >
-      {c.people.length === 0 ? (
-        <span className="small muted">{t("No code owner owns the files this PR changes.")}</span>
-      ) : (
-        <OwnerGroups repo={repo} people={c.people} waiting={c.waiting ?? []} />
-      )}
+    <Section title={t("Approvals")} aside={summary ? <span className={`pill ${summary.tone}`}>{summary.text}</span> : undefined}>
+      <div className="stack" style={{ gap: 10 }}>
+        {d.approvals && <ApprovalsBlock a={d.approvals} repo={repo} />}
+        {c.file && (
+          <>
+            <span className="small muted" style={{ fontWeight: 600, marginTop: 4 }} title={c.required ? t("GitHub merges only with their approval") : undefined}>
+              {t("Code owners")}
+            </span>
+            {c.people.length === 0 ? (
+              <span className="small muted">{t("No code owner owns the files this PR changes.")}</span>
+            ) : (
+              <OwnerGroups repo={repo} people={c.people} waiting={c.waiting ?? []} />
+            )}
+          </>
+        )}
+      </div>
     </Section>
   );
 }

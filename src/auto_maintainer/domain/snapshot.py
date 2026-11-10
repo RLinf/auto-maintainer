@@ -48,6 +48,11 @@ class RepoInfo(_Model):
     requires_up_to_date: bool | None = None
     required_approvals: int | None = None
     requires_code_owner_reviews: bool | None = None
+    requires_last_push_approval: bool | None = None
+    """The newest push must be approved by someone other than who pushed it, so an
+    approval of an earlier commit does not satisfy the branch."""
+    dismisses_stale_reviews: bool | None = None
+    """GitHub dismisses approvals when new commits change the diff."""
     """Whether the default branch waits for a code owner's approval of the files
     they own; ``None`` when unreadable."""
 
@@ -204,6 +209,10 @@ class PrSnapshot(_Model):
     head_ref: str = ""
     head_sha: str
     head_repo: str | None = None
+    review_decision: str | None = None
+    """GitHub's own verdict on the branch's review rules for this PR: ``APPROVED``,
+    ``CHANGES_REQUESTED``, or ``REVIEW_REQUIRED``; ``None`` where the branch requires
+    no review, or the forge does not say."""
     maintainer_can_modify: bool | None = None
     """Whether people who may write to the PR's repository may push to its branch:
     for a fork, whether its author allowed it; ``None`` when the forge did not say."""

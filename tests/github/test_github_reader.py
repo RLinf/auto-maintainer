@@ -34,6 +34,13 @@ from auto_maintainer.forges.github import GitHubReader, snapshot_from_graphql
 from auto_maintainer.forges.github.reader import map_check_conclusion, map_check_status
 
 
+def test_review_decision_is_githubs_own_verdict():
+    node = {**load_fixture("pr_node.json"), "reviewDecision": "REVIEW_REQUIRED"}
+    assert snapshot_from_graphql("acme/widget", node).review_decision == (
+        "REVIEW_REQUIRED"
+    )
+
+
 def test_snapshot_mapping():
     pr = snapshot_from_graphql("acme/widget", load_fixture("pr_node.json"))
     assert (pr.number, pr.author, pr.state, pr.is_draft) == (
@@ -219,6 +226,8 @@ async def test_get_repo_with_unreadable_protection(client, router):
                 "parameters": {
                     "required_approving_review_count": 2,
                     "require_code_owner_review": True,
+                    "require_last_push_approval": True,
+                    "dismiss_stale_reviews_on_push": False,
                 },
             },
             {
@@ -236,6 +245,8 @@ async def test_get_repo_with_unreadable_protection(client, router):
     assert info.required_checks == ["e2e", "lint", "unit"]
     assert info.requires_up_to_date is True and info.required_approvals == 2
     assert info.requires_code_owner_reviews is True, "from the branch's ruleset"
+    assert info.requires_last_push_approval is True
+    assert info.dismisses_stale_reviews is False
     assert info.labels == ["bug"]
 
 

@@ -9,7 +9,7 @@
 
 import { useQuery } from "@tanstack/react-query";
 import type { ReactNode } from "react";
-import { api, type CodeOwnerStanding, type CodeOwners } from "./api";
+import { api, type ApprovalStatus, type CodeOwnerStanding, type CodeOwners } from "./api";
 import { useAliasOf } from "./aliases";
 import { Avatar, Named } from "./avatar";
 import { ErrorBox, Section } from "./components";
@@ -57,6 +57,96 @@ export function useCodeOwnerSummary() {
     const groups = waiting.map((g) => (g.length === 0 ? t("another approver for the author's files") : g.length === 1 ? name(g[0]) : `${t("one of")} ${g.map(name).join(" / ")}`));
     return { text: `${t("Waiting on")} ${groups.join(", ")}`, tone: required ? "status-warn" : "status-muted" };
   };
+}
+
+/** One line on a PR's approvals, as GitHub counts them: changes requested, the
+ * approvals still missing toward the branch's number and from code owners, or who
+ * approved. GitHub's own verdict wins where it disagrees with the count. */
+export function useApprovalSummary() {
+  const t = useT();
+  const aliasOf = useAliasOf();
+  const name = (login: string) => (login.includes("/") ? login : (aliasOf(login) ?? login));
+  return (a: ApprovalStatus | undefined): { text: string; tone: string } | null => {
+    if (!a) return null;
+    if (a.changes_requested_by.length) return { text: `${t("Changes requested by")} ${a.changes_requested_by.map(name).join(", ")}`, tone: "status-bad" };
+    const missing: string[] = [];
+    if (a.missing) missing.push(`${t("Needs")} ${a.missing} ${a.missing === 1 ? t("more approval") : t("more approvals")}`);
+    if (a.code_owners_waiting.length && a.code_owners_required !== false)
+      missing.push(
+        `${t("code owners")}: ${a.code_owners_waiting.map((g) => (g.length === 0 ? "?" : g.length === 1 ? name(g[0]) : `${t("one of")} ${g.map(name).join(" / ")}`)).join(", ")}`,
+      );
+    if (a.decision === "APPROVED" || (!missing.length && a.decision !== "REVIEW_REQUIRED"))
+      return a.approved_by.length || a.decision === "APPROVED"
+        ? { text: a.approved_by.length ? `${t("Approved by")} ${a.approved_by.map(name).join(", ")}` : t("Approved"), tone: "status-ok" }
+        : null;
+    if (!missing.length) return { text: t("GitHub still requires a review"), tone: "status-warn" };
+    return { text: missing.join(" · "), tone: "status-warn" };
+  };
+}
+
+const DECISIONS: Record<string, [string, string]> = {
+  APPROVED: ["approved", "status-ok"],
+  CHANGES_REQUESTED: ["changes requested", "status-bad"],
+  REVIEW_REQUIRED: ["review required", "status-warn"],
+};
+
+/** The branch's approval rule against the PR's approvals: who counts, who does not
+ * and why, how many more are needed, and what GitHub itself says. */
+export function ApprovalsBlock({ a, repo }: { a: ApprovalStatus; repo: string }) {
+  const t = useT();
+  const aliasOf = useAliasOf();
+  const prefix = repo.includes(":") ? repo.slice(0, repo.indexOf(":") + 1) : "";
+  const person = (login: string, note?: string) => (
+    <span key={login} className="owner-chip">
+      <Avatar login={prefix + login} size={18} />
+      <Named login={login} alias={aliasOf(login)} />
+      {note && <span className="pill status-muted">{note}</span>}
+    </span>
+  );
+  const decision = a.decision ? DECISIONS[a.decision] : undefined;
+  return (
+    <div className="stack" style={{ gap: 8 }}>
+      <div className="owner-group">
+        <span className="small muted" title={t("Approving reviews from people with write access, which the branch requires apart from the code owners")}>
+          {t("Approvals")}
+          {a.required != null && ` ${a.approved_by.length}/${a.required}`}
+        </span>
+        <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+          {a.approved_by.map((l) => person(l))}
+          {a.missing ? (
+            <span className="pill status-warn" title={t("Any approval from someone with write access counts, code owner or not")}>
+              {t("needs")} {a.missing} {t("more from anyone with write access")}
+            </span>
+          ) : null}
+          {!a.approved_by.length && !a.missing && <span className="small muted">{t("none yet")}</span>}
+          {decision && (
+            <span className={`pill ${decision[1]}`} title={t("GitHub's own verdict on this branch's review rules")}>
+              GitHub: {t(decision[0])}
+            </span>
+          )}
+        </div>
+      </div>
+      {a.not_counted.length > 0 && (
+        <div className="owner-group">
+          <span className="small muted">{t("Not counted")}</span>
+          <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+            {a.not_counted.map((n) => person(n.login, t(n.reason)))}
+          </div>
+        </div>
+      )}
+      {a.changes_requested_by.length > 0 && (
+        <div className="owner-group">
+          <span className="small muted">{t("Changes requested")}</span>
+          <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+            {a.changes_requested_by.map((l) => person(l))}
+            <span className="small muted">{t("They approve, or their review is dismissed, before GitHub merges.")}</span>
+          </div>
+        </div>
+      )}
+      {a.required == null && <span className="small muted">{t("The approvals this base branch requires could not be read; GitHub's verdict above still applies.")}</span>}
+      {a.last_push_approval && <span className="small muted">{t("This branch counts only approvals of the latest push.")}</span>}
+    </div>
+  );
 }
 
 /** Who approved, who the merge still waits on, and who is not needed. */
@@ -137,11 +227,12 @@ export function CodeOwnersCard({ repo, number, head }: { repo: string; number: n
   const d = q.data;
   const prefix = repo.includes(":") ? repo.slice(0, repo.indexOf(":") + 1) : "";
   const aliasOf = useAliasOf();
-  const summary = useCodeOwnerSummary()(d?.people ?? [], d?.waiting ?? [], d?.required ?? null);
+  const approvalSummary = useApprovalSummary();
+  const ownerSummary = useCodeOwnerSummary();
+  const summary = approvalSummary(d?.approvals) ?? ownerSummary(d?.people ?? [], d?.waiting ?? [], d?.required ?? null);
   return (
     <Section
-      title={t("Code owners")}
-      hint={d?.file ? <code title={`${d.file} @ ${d.base}`}>{d.file.split("/").pop()}</code> : undefined}
+      title={t("Approvals")}
       aside={summary ? <span className={`pill ${summary.tone}`}>{summary.text}</span> : undefined}
     >
       {q.isLoading ? (
@@ -150,6 +241,15 @@ export function CodeOwnersCard({ repo, number, head }: { repo: string; number: n
         <ErrorBox error={q.error} />
       ) : (
         <div className="stack" style={{ gap: 10 }}>
+          {d.approvals && <ApprovalsBlock a={d.approvals} repo={repo} />}
+          <span className="small muted" style={{ fontWeight: 600, marginTop: 4 }}>
+            {t("Code owners")}
+            {d.file && (
+              <code title={`${d.file} @ ${d.base}`} style={{ marginLeft: 6, fontWeight: 400 }}>
+                {d.file.split("/").pop()}
+              </code>
+            )}
+          </span>
           {!d.file && (
             <span className="small muted">
               {t("This repository has no CODEOWNERS file on")} <code>{d.base}</code>.
