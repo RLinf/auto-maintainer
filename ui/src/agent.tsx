@@ -88,27 +88,28 @@ const SUGGESTIONS: Record<string, string[]> = {
   chat: ["What can you do?"],
 };
 
-// ---- per-context threads, kept for the browser session ------------------------------------
+// ---- the panel's conversation, kept across pages for the browser session -------------------
 
-const STORE = "am.agent.threads";
+const STORE = "am.agent.thread";
 
 function ctxKey(c: AgentContext) {
   return `${c.page}:${c.repo ?? ""}:${c.number ?? ""}`;
 }
 
-function readThreads(): Record<string, string> {
+function readThread(): string | null {
   try {
-    return JSON.parse(sessionStorage.getItem(STORE) ?? "{}") as Record<string, string>;
+    return sessionStorage.getItem(STORE);
   } catch {
-    return {};
+    return null;
   }
 }
 
-function writeThreads(map: Record<string, string>) {
+function writeThread(id: string | null) {
   try {
-    sessionStorage.setItem(STORE, JSON.stringify(map));
+    if (id) sessionStorage.setItem(STORE, id);
+    else sessionStorage.removeItem(STORE);
   } catch {
-    // storage can be unavailable; conversations then last until the page reloads
+    // storage can be unavailable; the conversation then lasts until the page reloads
   }
 }
 
@@ -152,7 +153,10 @@ export function AgentProvider({ children }: { children: ReactNode }) {
   const [override, setOverride] = useState<AgentContext | null>(null);
   const [isOpen, setOpen] = useState(false);
   const [draft, setDraft] = useState<Draft | null>(null);
-  const [threads, setThreads] = useState<Record<string, string>>(readThreads);
+  // One conversation follows the person from page to page; each message carries the
+  // page it was sent from. New conversation starts another.
+  const [threadId, setThreadId] = useState<string | null>(readThread);
+  const [fresh, setFresh] = useState(0);
   useEffect(() => setOverride(null), [location.pathname]);
   const context = override ?? fromRoute;
 
@@ -170,15 +174,11 @@ export function AgentProvider({ children }: { children: ReactNode }) {
     document.body.classList.toggle("agent-open", isOpen);
   }, [isOpen]);
 
-  const key = ctxKey(context);
-  const setThread = (id: string | null) =>
-    setThreads((prev) => {
-      const next = { ...prev };
-      if (id) next[key] = id;
-      else delete next[key];
-      writeThreads(next);
-      return next;
-    });
+  const setThread = (id: string | null) => {
+    if (!id) setFresh((n) => n + 1);
+    writeThread(id);
+    setThreadId(id);
+  };
 
   return (
     <AgentCtx.Provider value={api_}>
@@ -187,7 +187,8 @@ export function AgentProvider({ children }: { children: ReactNode }) {
         isOpen={isOpen}
         context={context}
         pageContext={fromRoute}
-        threadId={threads[key] ?? null}
+        threadId={threadId}
+        conversationKey={`panel-${fresh}`}
         onThread={setThread}
         draft={draft}
         onClose={() => setOpen(false)}
@@ -202,6 +203,7 @@ function AgentPanel({
   context,
   pageContext,
   threadId,
+  conversationKey,
   onThread,
   draft,
   onClose,
@@ -211,6 +213,9 @@ function AgentPanel({
   context: AgentContext;
   pageContext: AgentContext;
   threadId: string | null;
+  /** Changes only for a new conversation: moving between pages keeps the view, so a
+   * reply in progress stays on screen. */
+  conversationKey: string;
   onThread: (id: string | null) => void;
   draft: Draft | null;
   onClose: () => void;
@@ -274,7 +279,7 @@ function AgentPanel({
         </button>
       </div>
       {mounted && (
-        <Conversation key={ctxKey(context)} threadId={threadId} context={context} onThread={onThread} draft={draft} autoFocus={isOpen} />
+        <Conversation key={conversationKey} threadId={threadId} context={context} onThread={onThread} draft={draft} autoFocus={isOpen} />
       )}
     </aside>
   );
@@ -352,12 +357,23 @@ export function Conversation({
 
   // What the agent is doing for the message being answered; the event stream refreshes
   // it for operators, and a short poll covers everyone else.
+  // Asked once when the conversation is shown, then while a reply runs: a reply sent
+  // from another page, or before this view was opened, shows here as it goes.
   const live = useQuery({
     queryKey: ["chat", "steps", threadId, "live"],
     queryFn: () => api.get<ChatSteps>(`/api/chat/threads/${threadId}/steps`),
-    enabled: !!threadId && send.isPending,
-    refetchInterval: send.isPending ? 1500 : false,
+    enabled: !!threadId,
+    refetchInterval: (query) => (send.isPending || query.state.data?.live ? 1500 : false),
   });
+  // The thread list's live_run only until this conversation's own status has loaded:
+  // the list is read once, the status follows the reply.
+  const running = send.isPending || (live.data ? live.data.live : !!liveRun);
+  const wasRunning = useRef(running);
+  useEffect(() => {
+    // The reply came while this view was not the one waiting for it.
+    if (wasRunning.current && !running) void client.invalidateQueries({ queryKey: ["chat", "messages", threadId] });
+    wasRunning.current = running;
+  }, [running, client, threadId]);
   const list = messages.data ?? [];
   const pendingText = send.isPending ? send.variables : null;
   const last = list[list.length - 1];
@@ -365,8 +381,8 @@ export function Conversation({
   // Follows the conversation and the agent's live steps; sending a message jumps back down.
   const stick = useFollowBottom(body);
   useEffect(() => {
-    if (send.isPending) stick();
-  }, [send.isPending, stick]);
+    if (running) stick();
+  }, [running, stick]);
   useEffect(() => {
     if (autoFocus) input.current?.focus();
   }, [autoFocus]);
@@ -412,7 +428,7 @@ export function Conversation({
           </Fragment>
         ))}
         {showPending && <div className="bubble user">{pendingText}</div>}
-        {send.isPending &&
+        {running &&
           (live.data?.steps.length ? (
             <div className="agent-live" aria-live="polite">
               <Steps steps={live.data.steps} active />
@@ -429,7 +445,7 @@ export function Conversation({
         <ErrorBox error={send.error || messages.error} />
       </div>
       <div className="agent-foot">
-        {!list.length && !send.isPending && (
+        {!list.length && !running && (
           <div className="suggestions">
             {suggestions.map((s) => (
               <button key={s} className="suggestion" onClick={() => submit(t(s))}>
@@ -458,8 +474,8 @@ export function Conversation({
               }
             }}
           />
-          {(send.isPending || !!liveRun) && threadId && <StopButton url={`/api/chat/threads/${threadId}/stop`} />}
-          <button className="primary icon" disabled={!text.trim()} aria-label={t("Send")} title={send.isPending ? t("Stop the agent and send this instead") : undefined}>
+          {running && threadId && <StopButton url={`/api/chat/threads/${threadId}/stop`} />}
+          <button className="primary icon" disabled={!text.trim()} aria-label={t("Send")} title={running ? t("Stop the agent and send this instead") : undefined}>
             <Icon name="send" size={15} />
           </button>
         </form>
