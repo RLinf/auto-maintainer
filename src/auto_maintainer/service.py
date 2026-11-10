@@ -524,11 +524,19 @@ class Service:
         self.scheduler.start()
 
     async def stop(self) -> None:
+        """Stop everything the service runs, waiting until each piece has unwound:
+        background work may hold a store connection, which must be given back
+        before the store closes."""
         self.closing.set()
-        if self._confirming is not None:
-            self._confirming.cancel()
-        for task in self._polls.values():
+        loose = [
+            t
+            for t in [self._confirming, *self._polls.values(), *self._install_tasks]
+            if t is not None
+        ]
+        for task in loose:
             task.cancel()
+        if loose:
+            await asyncio.gather(*loose, return_exceptions=True)
         await self.scheduler.stop()
         await self.engine.stop()
         await self.actuator.stop()

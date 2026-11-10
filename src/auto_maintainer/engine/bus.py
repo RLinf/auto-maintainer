@@ -104,8 +104,14 @@ class EventBus:
         await self._idle.wait()
 
     async def stop(self) -> None:
-        for task in list(self._later):
+        """Stop dispatching and end the work running beside it (``later``), waiting
+        until that work has unwound: it may hold a store connection, which must be
+        given back before the store closes, or closing it later never finishes."""
+        later = list(self._later)
+        for task in later:
             task.cancel()
+        if later:
+            await asyncio.gather(*later, return_exceptions=True)
         if self._task:
             self._task.cancel()
             with contextlib.suppress(asyncio.CancelledError):

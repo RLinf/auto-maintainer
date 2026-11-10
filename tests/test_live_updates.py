@@ -94,3 +94,24 @@ async def test_a_poll_tells_dashboards_of_changes_that_start_no_playbook(
         assert told.count(("pr.refreshed", pr.repo)) == 1
     finally:
         await h.close()
+
+
+async def test_stopping_the_bus_waits_for_the_work_beside_it() -> None:
+    """Work beside the bus may hold a store connection: stop returns only once it has
+    unwound, so the store can close after it (a shutdown, a test's teardown)."""
+    bus = EventBus()
+    unwound: list[str] = []
+    started = asyncio.Event()
+
+    async def slow() -> None:
+        started.set()
+        try:
+            await asyncio.sleep(60)
+        finally:
+            await asyncio.sleep(0.01)  # giving a connection back takes a step
+            unwound.append("done")
+
+    bus.later(slow(), "read the forge again")
+    await asyncio.wait_for(started.wait(), 1)
+    await asyncio.wait_for(bus.stop(), 1)
+    assert unwound == ["done"]

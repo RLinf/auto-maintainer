@@ -238,6 +238,6 @@ class Harness:
         return events
 
     async def close(self) -> None:
-        await self.service.actuator.stop()
-        await self.service.bus.stop()
+        # As the service shuts down: everything stopped and unwound, then the store.
+        await self.service.stop()
         await self.store.close()  # type: ignore[attr-defined]
