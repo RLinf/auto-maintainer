@@ -610,6 +610,13 @@ textarea.mono-input { width: 100%; }
 .md .md-h1 { font-size: 20px; } .md .md-h2 { font-size: 17px; } .md .md-h3 { font-size: 15px; } .md .md-h4, .md .md-h5, .md .md-h6 { font-size: 14px; }
 .md sub { font-size: 12px; color: var(--muted); vertical-align: baseline; }
 .md details { margin: 0 0 10px; }
+.md img { max-width: 100%; height: auto; vertical-align: middle; }
+.md img[style*="float: left"] { margin: 0 12px 6px 0; }
+.md img[style*="float: right"] { margin: 0 0 6px 12px; }
+.md kbd { font-family: var(--mono); font-size: 12px; padding: 1px 5px; border: 1px solid var(--border-strong); border-bottom-width: 2px; border-radius: 5px; background: var(--surface-2); }
+.md sup { font-size: 11px; }
+.md center { display: block; text-align: center; }
+.md mark { background: var(--warn-bg, #fff3bf); color: inherit; }
 .md summary { cursor: pointer; color: var(--text-2); }
 .md-table { overflow-x: auto; margin: 0 0 10px; }
 .md table { border-collapse: collapse; font-size: 13px; }
