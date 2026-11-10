@@ -125,11 +125,12 @@ def _opened_at(thread: ReviewThread) -> datetime | None:
 def review_progress(
     pr: PrSnapshot, assignees: list[PrAssignee] | None = None
 ) -> ReviewProgress:
-    """How ``pr``'s review goes: each reviewer (whoever reviewed it, opened a thread
-    on it, reviews it on the dashboard, or is asked by GitHub), their verdict and
-    how many of their threads are resolved, and a timeline of the PR's opening, the
-    roles people took on the dashboard, each review with the threads it opened and
-    how many are resolved now, and the pushes between reviews."""
+    """How ``pr``'s review goes: each reviewer, their verdict and how many of their
+    threads are resolved, and a timeline of the PR's opening, the roles people took
+    on the dashboard, each review with the threads it opened and how many are
+    resolved now, and the pushes between reviews. Its reviewers are the ones assigned
+    on the dashboard, first, then anyone else who reviewed it or opened a thread on
+    it; someone GitHub only asks, who has not reviewed, is not one."""
     assignees = assignees or []
     author = pr.author.lower()
     people: dict[str, ReviewerProgress] = {}
@@ -178,9 +179,9 @@ def review_progress(
     for a in assignees:
         if a.role == "reviewer" and a.login.lower() != author:
             person(a.login).assigned = True
-    for login in pr.requested_reviewers:
-        if login.lower() != author:
-            person(login).requested = True
+    asked = {login.lower() for login in pr.requested_reviewers}
+    for p in people.values():
+        p.requested = p.login.lower() in asked
 
     out = ReviewProgress(
         threads=sum(p.threads for p in people.values()),
@@ -201,7 +202,7 @@ def review_progress(
         ],
         reviewers=sorted(
             people.values(),
-            key=lambda p: (p.verdict is None, p.last_at is None, p.login.lower()),
+            key=lambda p: (not p.assigned, p.verdict is None, p.login.lower()),
         ),
     )
     out.timeline = _timeline(pr, assignees, reviews, threads)

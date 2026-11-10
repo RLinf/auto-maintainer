@@ -868,7 +868,6 @@ details.pv-section[open] > summary { margin-bottom: 6px; }
 .model-line > code { overflow-wrap: anywhere; }
 .found-models { display: grid; gap: 4px; max-height: 240px; overflow: auto; }
 .found-models code { overflow-wrap: anywhere; }
-.login-beside { font-size: 0.86em; }
 .addressed-bar { display: inline-block; height: 6px; border-radius: 999px; background: var(--surface-3); overflow: hidden; flex: none; }
 .addressed-bar > span { display: block; height: 100%; border-radius: inherit; background: var(--ok); }
 .progress-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; }
@@ -878,3 +877,7 @@ details.pv-section[open] > summary { margin-bottom: 6px; }
 .progress-timeline .dot { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; border-radius: 50%; background: var(--surface); border: 1px solid var(--border); color: var(--muted); }
 .progress-timeline .step-review .dot { color: var(--info); }
 .progress-timeline .step-commits .dot { color: var(--ok); }
+.people-line { display: inline-flex; flex-wrap: wrap; align-items: baseline; gap: 2px 14px; }
+.people-group { display: inline-flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; }
+.people-line .is-me { font-weight: 600; }
+.progress-reviewer.first-other { border-top: 2px solid var(--border); }

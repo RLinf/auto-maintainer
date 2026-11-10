@@ -408,8 +408,11 @@ export interface ReviewerProgress {
   outdated: number;
   addressed: number | null;
   last_at: string | null;
+  /** A reviewer of the PR here (listed first). */
   assigned: boolean;
   requested: boolean;
+  /** CODEOWNERS names them for some of the changed files. */
+  code_owner?: boolean;
 }
 
 export interface ProgressEvent {
@@ -435,6 +438,9 @@ export interface PrProgress {
   required_approvals: number | null;
   reviewers: ReviewerProgress[];
   timeline: ProgressEvent[];
+  /** The code owners' approvals: each owner's verdict, and how many parts of the
+   * change an owner other than the author approved. */
+  code_owners: { file: string | null; required: boolean | null; parts: number; approved_parts: number; people: CodeOwnerStanding[] };
   head: string;
 }
 

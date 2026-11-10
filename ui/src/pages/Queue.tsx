@@ -15,7 +15,7 @@ import { openJob } from "../openJob";
 import { ScoringProgress } from "../jobs";
 import { BulkBar, DataTable, ListToolbar, useList, type Column } from "../list";
 import { MenuItem, Popover, Skeleton, Tabs, useTab, useToast } from "../ui";
-import { holds, OwnerAvatars, Person } from "../avatar";
+import { holds, Person, PrPeopleLine } from "../avatar";
 import { useAliasOf } from "../aliases";
 import { ProgressCell } from "../progress";
 
@@ -155,15 +155,12 @@ export default function QueuePage({ me }: { me: Me }) {
           <div className="small muted">
             {p.repo}#{p.number} · <Person login={p.author} /> · <When at={p.updated_at} />
             {p.draft ? ` · ${t("draft")}` : ""}
-            {p.assignees.some((a) => a.role === "owner") && (
-              <>
-                {" · "}
-                <span style={{ whiteSpace: "nowrap" }}>
-                  {t("owner")} <RoleAvatars p={p} role="owner" me={me.login} />
-                </span>
-              </>
-            )}
           </div>
+          {p.assignees.length > 0 && (
+            <div className="small">
+              <PrPeopleLine people={p.assignees} me={me.login} t={t} />
+            </div>
+          )}
           {p.summary && (
             <div className="small muted truncate hide-narrow" style={{ maxWidth: 560 }} title={p.summary}>
               {p.summary}
@@ -193,18 +190,6 @@ export default function QueuePage({ me }: { me: Me }) {
     { id: "labels", header: t("Labels"), cell: (p) => <Labels labels={p.labels} max={3} />, className: "hide-narrow" },
     { id: "opened", header: t("Opened"), sort: "opened", cell: (p) => <span style={{ whiteSpace: "nowrap" }}><When at={p.created_at} /></span>, className: "small hide-narrow" },
     { id: "updated", header: t("Updated"), sort: "updated", cell: (p) => <span style={{ whiteSpace: "nowrap" }}><When at={p.updated_at} /></span>, className: "small hide-narrow" },
-    {
-      id: "owners",
-      header: t("Owners"),
-      label: t("Owners"),
-      cell: (p) => <RoleAvatars p={p} role="owner" me={me.login} compact />,
-    },
-    {
-      id: "claimed",
-      header: t("Reviewers"),
-      label: t("Reviewers"),
-      cell: (p) => <RoleAvatars p={p} role="reviewer" me={me.login} compact />,
-    },
     {
       id: "actions",
       header: "",
@@ -444,10 +429,4 @@ function Activity({ a, me }: { a: ReviewActivity; me: string }) {
 function namesOf(p: PrRow, role: "owner" | "reviewer"): string[] | null {
   const names = p.assignees.filter((a) => a.role === role).map((a) => a.login);
   return names.length ? names : null;
-}
-
-function RoleAvatars({ p, role, me, compact }: { p: PrRow; role: "owner" | "reviewer"; me: string; compact?: boolean }) {
-  const t = useT();
-  const people = p.assignees.filter((a) => a.role === role);
-  return people.length ? <OwnerAvatars owners={people} me={me} size={compact ? 20 : 16} compact={compact} t={t} /> : <span className="muted">—</span>;
 }

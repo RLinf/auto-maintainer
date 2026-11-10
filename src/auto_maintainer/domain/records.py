@@ -153,8 +153,8 @@ def clean_alias(text: str) -> str:
 class PersonAlias(BaseModel):
     """The name a forge login goes by on the dashboard, such as a person's real
     name: their own (``set_by`` is the login), or one the service's owner gave a
-    login whose person has set none, which their own replaces. The dashboard always
-    shows the login beside it, so a name cannot pass for someone else."""
+    login whose person has set none, which their own replaces. The dashboard shows it
+    in place of the login, with the login on hover."""
 
     login: str
     alias: str

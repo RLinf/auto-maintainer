@@ -187,6 +187,10 @@ class Poller:
             if old is None or old.fingerprint() != pr.fingerprint():
                 events += diff_snapshots(old, pr, self.service_login, prefix)
                 await self.store.save_snapshot(pr)
+            elif old != pr:
+                # Nothing that makes an event changed (a commit's time, a file's
+                # counts): keep the fresher record without announcing a change.
+                await self.store.save_snapshot(pr)
             if reconcile:
                 events.append(
                     Event(
@@ -228,6 +232,8 @@ class Poller:
             return []
         old = await self.store.get_snapshot(repo, number)
         if old is not None and old.fingerprint() == fresh.fingerprint():
+            if old != fresh:
+                await self.store.save_snapshot(fresh)
             return []
         events = diff_snapshots(old, fresh, self.service_login, prefix)
         await self.store.save_snapshot(fresh)

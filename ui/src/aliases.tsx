@@ -1,7 +1,7 @@
 // Display names (design 5.13): the name each login goes by, such as a person's real
-// name. A person sets their own from the account menu; the service's owner may name
-// someone who has set none, from Settings. Everyone sees them, always beside the login,
-// so a name cannot pass for someone else.
+// name, shown in place of the login, which shows on hover. A person sets their own from
+// the account menu; the service's owner may name someone who has set none, from
+// Settings. Two people never share a name.
 
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
@@ -58,7 +58,7 @@ export function OwnAliasForm({ login, onDone }: { login: string; onDone?: () => 
         save.mutate(text.trim() || null, { onSuccess: () => onDone?.() });
       }}
     >
-      <span className="small muted">{t("The name people see beside your login")}</span>
+      <span className="small muted">{t("The name people see instead of your login")}</span>
       <span className="row" style={{ gap: 6, flexWrap: "nowrap" }}>
         <input value={text} onChange={(e) => setText(e.target.value)} maxLength={40} placeholder={t("Your name")} aria-label={t("Your name")} style={{ flex: 1, minWidth: 0 }} />
         <button className="primary sm" disabled={save.isPending}>
@@ -81,7 +81,7 @@ export function NamesCard() {
   const rows = q.data?.aliases ?? [];
   const can = !!q.data?.can_name_others;
   return (
-    <Section title={t("Display names")} hint={t("The names people go by here, shown beside their logins")}>
+    <Section title={t("Display names")} hint={t("The names people go by here, shown in place of their logins")}>
       <div className="list">
         {rows.length === 0 && <span className="small muted">{t("Nobody has a name yet.")}</span>}
         {rows.map((a) => (

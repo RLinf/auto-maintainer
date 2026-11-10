@@ -17,9 +17,10 @@ as a person's real name, so people recognize each other behind their logins.
 
 Everyone signed in reads them all. A person sets or clears their own; the service's
 owner may name a login whose person has set none (people who never sign in, from a
-team's list), and a person's own name always replaces it. Two people never share a
-name, and the dashboard shows the login beside every name, so nobody passes for
-someone else. Names are internal: nothing the service posts uses them.
+team's list), and a person's own name always replaces it. The dashboard shows the
+name in place of the login, with the login on hover; two people never share a name,
+and no name is another person's login. Names are internal: nothing the service posts
+uses them.
 """
 
 from __future__ import annotations

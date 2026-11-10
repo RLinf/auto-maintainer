@@ -48,7 +48,7 @@ export function ProgressCell({ p }: { p: ProgressSummary | undefined }) {
   );
 }
 
-function Verdict({ r }: { r: ReviewerProgress }) {
+function Verdict({ r }: { r: Pick<ReviewerProgress, "verdict" | "at_head"> }) {
   const t = useT();
   if (!r.verdict) return <span className="pill status-muted">{t("not reviewed yet")}</span>;
   const [label, tone] =
@@ -121,18 +121,19 @@ export function ReviewProgressPanel({ repo, number }: { repo: string; number: nu
           </div>
         </div>
       </Section>
-      <Section title={t("Reviewers")}>
+      <Section title={t("Reviewers")} hint={t("assigned here first, then anyone else who reviewed")}>
         {d.reviewers.length === 0 ? (
           <Empty icon="pr">{t("Nobody reviews this PR yet.")}</Empty>
         ) : (
           <div className="list">
-            {d.reviewers.map((r) => (
-              <div key={r.login} className="list-row progress-reviewer">
+            {d.reviewers.map((r, i) => (
+              <div key={r.login} className={`list-row progress-reviewer${!r.assigned && i > 0 && d.reviewers[i - 1].assigned ? " first-other" : ""}`}>
                 <Avatar login={r.login} size={24} />
                 <span className="main">
                   <Named login={r.login} alias={aliasOf(r.login)} />
+                  {r.code_owner && <span className="pill status-info" style={{ marginLeft: 6 }}>{t("code owner")}</span>}
                   <span className="small muted" style={{ display: "block" }}>
-                    {[r.assigned ? t("reviewer here") : null, r.requested ? t("asked on GitHub") : null, r.reviews ? `${r.reviews} ${t("reviews")}` : null].filter(Boolean).join(" · ")}
+                    {[r.assigned ? t("assigned reviewer") : t("not assigned here"), r.requested ? t("asked on GitHub") : null, r.reviews ? `${r.reviews} ${r.reviews === 1 ? t("review") : t("reviews")}` : null].filter(Boolean).join(" · ")}
                     {r.last_at && (
                       <>
                         {" · "}
@@ -151,6 +152,7 @@ export function ReviewProgressPanel({ repo, number }: { repo: string; number: nu
           </div>
         )}
       </Section>
+      <CodeOwnerApprovals d={d} />
       <Section title={t("Timeline")}>
         {d.timeline.length === 0 ? (
           <Empty icon="clock">{t("Nothing happened yet.")}</Empty>
@@ -171,5 +173,55 @@ export function ReviewProgressPanel({ repo, number }: { repo: string; number: nu
         )}
       </Section>
     </>
+  );
+}
+
+/** Whether the code owners approved: each owner's verdict, and how many parts of the
+ * change have an approval from one of their owners. */
+function CodeOwnerApprovals({ d }: { d: PrProgress }) {
+  const t = useT();
+  const aliasOf = useAliasOf();
+  const c = d.code_owners;
+  if (!c.file) return null;
+  const people = c.people;
+  return (
+    <Section
+      title={t("Code owners")}
+      hint={c.required ? t("GitHub merges only with their approval") : undefined}
+      aside={
+        c.parts > 0 ? (
+          <span className={`pill ${c.approved_parts === c.parts ? "status-ok" : c.required ? "status-warn" : "status-muted"}`}>
+            {c.approved_parts}/{c.parts} {t("parts approved")}
+          </span>
+        ) : undefined
+      }
+    >
+      {people.length === 0 ? (
+        <span className="small muted">{t("No code owner owns the files this PR changes.")}</span>
+      ) : (
+        <div className="list">
+          {people.map((o) => (
+            <div key={o.login} className="list-row progress-reviewer">
+              {o.team ? <Icon name="list" size={18} /> : <Avatar login={o.login} size={24} />}
+              <span className="main">
+                <Named login={o.login} alias={o.team ? undefined : aliasOf(o.login)} />
+                <span className="small muted" style={{ display: "block" }}>
+                  {[o.team ? t("a team") : null, `${o.files} ${o.files === 1 ? t("file") : t("files")}`, o.requested ? t("asked on GitHub") : null].filter(Boolean).join(" · ")}
+                </span>
+              </span>
+              {o.author ? (
+                <span className="pill status-muted" title={t("GitHub does not count an author's approval of their own PR")}>
+                  {t("author")}
+                </span>
+              ) : o.team ? (
+                <span className="pill status-muted">{o.requested ? t("review requested") : t("not asked")}</span>
+              ) : (
+                <Verdict r={{ verdict: o.verdict as ReviewerProgress["verdict"], at_head: o.at_head }} />
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </Section>
   );
 }

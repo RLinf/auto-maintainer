@@ -35,14 +35,31 @@ export function Person({ login, size = 16 }: { login: string; size?: number }) {
   );
 }
 
-/** A name with its login beside it, or the login alone. */
+/** The name a login goes by, with the login on hover; the login when it has none. */
 export function Named({ login, alias }: { login: string; alias?: string }) {
-  return alias ? (
-    <>
-      {alias} <span className="muted login-beside">{login}</span>
-    </>
-  ) : (
-    <>{login}</>
+  return alias ? <span title={login}>{alias}</span> : <>{login}</>;
+}
+
+/** A PR's owners and reviewers on a line of their own, each with avatar and name. */
+export function PrPeopleLine({ people, me, t }: { people: { login: string; role: string; kind: string; by: string }[]; me?: string; t: (s: string) => string }) {
+  const aliasOf = useAliasOf();
+  const groups = (["owner", "reviewer"] as const).map((role) => [role, people.filter((p) => p.role === role)] as const).filter(([, list]) => list.length > 0);
+  if (!groups.length) return null;
+  const how = (p: { kind: string; by: string }) => (p.kind === "assigned" ? `${t("assigned by")} ${aliasOf(p.by) ?? p.by}` : t("claimed"));
+  return (
+    <span className="people-line">
+      {groups.map(([role, list]) => (
+        <span key={role} className="people-group">
+          <span className="muted">{role === "owner" ? t("Owners") : t("Reviewers")}</span>
+          {list.map((p) => (
+            <span key={p.login} className={`person-inline${me && p.login.toLowerCase() === me.toLowerCase() ? " is-me" : ""}`} title={`${aliasOf(p.login) ? `${aliasOf(p.login)} (${p.login})` : p.login}: ${how(p)}`}>
+              <Avatar login={p.login} size={16} />
+              {aliasOf(p.login) ?? p.login}
+            </span>
+          ))}
+        </span>
+      ))}
+    </span>
   );
 }
 

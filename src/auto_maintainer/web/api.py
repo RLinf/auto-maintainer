@@ -1565,12 +1565,14 @@ def build_router() -> APIRouter:
         number: int,
         user: User = Depends(current_user),
     ) -> dict[str, Any]:
-        """How the PR's review goes, for its owners: each reviewer (who reviewed,
-        opened a thread, reviews it here, or is asked by GitHub) with their verdict
-        and how many of their review threads are resolved, the share of all threads
-        resolved, the approvals and the approvals the branch needs, and a timeline of
-        the PR's opening, the roles people took here, each review with its threads
-        and how many are resolved now, and the pushes between reviews."""
+        """How the PR's review goes, for its owners: its reviewers (those assigned
+        here first, then anyone else who reviewed or opened a thread) with their
+        verdict, whether they are code owners, and how many of their review threads
+        are resolved; the share of all threads resolved; the approvals and the
+        approvals the branch needs; the code owners' approvals (each owner's verdict
+        and how many parts of the change an owner approved); and a timeline of the
+        PR's opening, the roles people took here, each review with its threads and
+        how many are resolved now, and the pushes between reviews."""
         service = service_of(request)
         repo = _repo(repo)
         await require_view(service, user, repo)
@@ -1579,16 +1581,32 @@ def build_router() -> APIRouter:
             raise HTTPException(404, f"{repo}#{number} is not known yet")
         progress = review_progress(pr, await service.store.list_assignees(repo, number))
         info = await service.a.forge.get_repo(repo)
+        on_default = info.default_branch == pr.base_ref
+        profile = await service.profiles.active(repo)
+        location, rules = await read_codeowners(
+            service, repo, profile.people.codeowners if profile else None, pr.base_ref
+        )
+        owners = code_owner_report(rules, pr)
+        owner_logins = {o.login.lower() for o in owners.people if not o.team}
         return {
             **progress.model_dump(mode="json", exclude={"reviewers"}),
             "addressed": progress.addressed,
             "reviewers": [
-                {**r.model_dump(mode="json"), "addressed": r.addressed}
+                {
+                    **r.model_dump(mode="json"),
+                    "addressed": r.addressed,
+                    "code_owner": r.login.lower() in owner_logins,
+                }
                 for r in progress.reviewers
             ],
-            "required_approvals": info.required_approvals
-            if info.default_branch == pr.base_ref
-            else None,
+            "required_approvals": info.required_approvals if on_default else None,
+            "code_owners": {
+                "file": location,
+                "required": info.requires_code_owner_reviews if on_default else None,
+                "parts": len(owners.parts),
+                "approved_parts": sum(1 for p in owners.parts if p.approved_by),
+                "people": [o.model_dump(mode="json") for o in owners.people],
+            },
             "head": pr.head_sha,
         }
 

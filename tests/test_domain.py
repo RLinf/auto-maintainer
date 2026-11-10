@@ -794,12 +794,13 @@ def test_review_progress_counts_each_reviewers_resolved_threads_over_time() -> N
     ]
     progress = review_progress(pr, roles)
     people = {r.login: r for r in progress.reviewers}
-    assert set(people) == {"bob", "carol", "dave", "erin"}
+    assert [r.login for r in progress.reviewers] == ["erin", "bob", "carol"], (
+        "assigned reviewers first; dave, whom GitHub only asks, has not reviewed"
+    )
     bob = people["bob"]
     assert (bob.verdict, bob.at_head, bob.reviews) == ("CHANGES_REQUESTED", False, 2)
     assert (bob.threads, bob.resolved, bob.outdated, bob.addressed) == (4, 2, 1, 0.5)
     assert people["carol"].at_head and people["carol"].addressed is None
-    assert people["dave"].requested and people["dave"].verdict is None
     assert people["erin"].assigned
     assert (progress.threads, progress.resolved, progress.addressed) == (4, 2, 0.5)
     assert progress.approved_at_head == ["carol"]

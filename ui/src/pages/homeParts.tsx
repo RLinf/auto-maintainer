@@ -14,7 +14,7 @@ import { Icon } from "../icons";
 import { ACTIVE, needsMe, ScoringRow, useWork, WorkRow } from "../jobs";
 import { openJob } from "../openJob";
 import { Popover, Skeleton, useToast } from "../ui";
-import { holds, OwnerAvatars, Person } from "../avatar";
+import { holds, Person, PrPeopleLine } from "../avatar";
 import { useAliasOf } from "../aliases";
 
 // ---- getting started ---------------------------------------------------------------------------
@@ -346,19 +346,12 @@ export function ReviewCard({ rows, all, loading, me, automations }: { rows: PrRo
                       <span className="check-ok">✓{p.progress.approved}</span>
                     </span>
                   )}
-                  {(["owner", "reviewer"] as const).map((role) => {
-                    const people = p.assignees.filter((a) => a.role === role);
-                    return people.length > 0 ? (
-                      <span key={role}>
-                        {" · "}
-                        {role === "owner" ? t("owners:") : t("reviewers:")}
-                        <span style={{ marginLeft: 6 }}>
-                          <OwnerAvatars owners={people} me={me.login} size={16} t={t} />
-                        </span>
-                      </span>
-                    ) : null;
-                  })}
                 </span>
+                {p.assignees.length > 0 && (
+                  <span className="meta">
+                    <PrPeopleLine people={p.assignees} me={me.login} t={t} />
+                  </span>
+                )}
               </span>
               {(p.quality || p.quick_quality) && <Quality quality={p.quality} quick={p.quick_quality} head={p.head} compact />}
               {(p.review_state === "FOLLOWUP_REVIEW" || p.review_state === "APPROVED_NEW_COMMITS") && (

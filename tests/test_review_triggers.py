@@ -230,3 +230,28 @@ def test_scan_due() -> None:
     assert scan_due("0 */6 * * *", None, last)
     assert not scan_due("0 */6 * * *", last, datetime(2026, 1, 5, 11, 59, tzinfo=UTC))
     assert scan_due("0 */6 * * *", last, datetime(2026, 1, 5, 12, 0, tzinfo=UTC))
+
+
+async def test_a_poll_keeps_fresher_details_without_announcing_a_change(
+    tmp_path: Path,
+) -> None:
+    """Commit times reach stored snapshots (for review progress) even when nothing
+    that makes an event changed, and the poll announces nothing for them."""
+    from datetime import UTC, datetime
+
+    from auto_maintainer.domain.snapshot import Commit
+
+    h = await Harness.create(tmp_path, layer={"extends": ["dco"]})
+    try:
+        pr = _pr(42, "a" * 40).model_copy(update={"commits": [Commit(sha="a" * 40)]})
+        h.forge.put_pr(pr)
+        await h.poll()
+        when = datetime(2026, 11, 1, tzinfo=UTC)
+        h.forge.put_pr(
+            pr.model_copy(update={"commits": [Commit(sha="a" * 40, committed_at=when)]})
+        )
+        assert await h.poll() == []
+        stored = await h.store.get_snapshot(REPO, 42)
+        assert stored.commits[0].committed_at == when
+    finally:
+        await h.close()
