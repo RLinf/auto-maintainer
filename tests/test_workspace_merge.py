@@ -168,3 +168,29 @@ async def test_a_merge_git_refuses_is_not_read_as_a_clean_one(tmp_path: Path) ->
     with pytest.raises(RuntimeError, match="could not merge"):
         await ws.merge(path, "other")
     await ws.release(path)
+
+
+async def test_an_agents_changes_leave_out_the_instructions_the_checkout_swapped_in(
+    tmp_path: Path,
+) -> None:
+    """A fix's patch holds what the agent changed, not main's instruction files the
+    checkout carries for it (nor the removal of the PR's own)."""
+    forge, work, _ = _repo_with_pr(tmp_path)
+    (work / "AGENTS.md").write_text("the PR's rules\n")
+    (work / "CLAUDE.md").write_text("added by the PR\n")
+    head = _commit(work, "one, from the PR\n", "pr change")
+    git(work, "push", "-q", "origin", "feature:refs/pull/7/head")
+    git(work, "checkout", "-q", "main")
+    (work / "AGENTS.md").write_text("main's rules\n")
+    _commit(work, "one\n", "main change")
+    git(work, "push", "-q", "origin", "main")
+
+    ws = GitWorkspace(tmp_path / "data", forge_url=f"file://{forge}")
+    path = await ws.prepare("acme/widget", 7, head, "main")
+    assert (path / "AGENTS.md").read_text() == "main's rules\n"
+    assert not (path / "CLAUDE.md").exists()
+    (path / "loader.py").write_text("fixed\n")
+    changes = await ws.changes(path)
+    assert changes.files == ["loader.py"]
+    assert "AGENTS.md" not in changes.patch and "CLAUDE.md" not in changes.patch
+    await ws.release(path)

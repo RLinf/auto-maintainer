@@ -440,11 +440,12 @@ def build_router() -> APIRouter:
             view = await job_view(service, job, me=user.login)
             if (
                 job.status not in ACTIVE
-                and (job.result or {}).get("skipped")
+                and (job.result or {}).get("handed_to")
                 and view["last_step"] is None
             ):
-                # Nothing ran: another playbook took the same request (a follow-up
-                # for a PR that has no review yet), so there is no work to show.
+                # Another playbook took the same request (a follow-up for a PR that
+                # has no review yet): that one shows. Any other skip shows its
+                # reason, so a button pressed never seems to do nothing.
                 continue
             out.append(view)
         out.sort(key=lambda j: (j["status"] in ACTIVE, j["updated_at"]), reverse=True)

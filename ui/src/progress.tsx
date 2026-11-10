@@ -245,7 +245,10 @@ function CodeOwnerApprovals({ d }: { d: PrProgress }) {
       hint={c.required ? t("GitHub merges only with their approval") : undefined}
       aside={
         c.parts > 0 ? (
-          <span className={`pill ${c.approved_parts === c.parts ? "status-ok" : c.required ? "status-warn" : "status-muted"}`}>
+          <span
+            className={`pill ${c.approved_parts === c.parts ? "status-ok" : c.required ? "status-warn" : "status-muted"}`}
+            title={t("Parts of the change with an approval from one of their code owners; one person's approval covers every part they own.")}
+          >
             {c.approved_parts}/{c.parts} {t("parts approved")}
           </span>
         ) : undefined

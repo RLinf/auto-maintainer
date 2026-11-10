@@ -117,7 +117,7 @@ async def test_list_open_prs_fetches_only_changed(client, router):
 
     def graphql(request: httpx.Request) -> httpx.Response:
         query = json.loads(request.content)["query"]
-        if "pageInfo" in query:
+        if "pullRequests(states: OPEN" in query:
             nodes = [_light(42, "2026-10-02T09:30:00Z", state["suites"])]
             return httpx.Response(
                 200,
@@ -154,7 +154,7 @@ async def test_list_open_prs_refetches_after_cache_age(client, router):
 
     def graphql(request: httpx.Request) -> httpx.Response:
         query = json.loads(request.content)["query"]
-        if "pageInfo" in query:
+        if "pullRequests(states: OPEN" in query:
             return httpx.Response(
                 200,
                 json={
@@ -450,3 +450,64 @@ def test_a_workflow_github_holds_for_approval_is_a_check_that_has_not_run():
     assert (held.name, held.workflow, held.run_id) == ("CI", "CI", 991)
     assert held.status != "completed" and not held.failed
     assert held.details_url == "https://github.com/acme/widget/actions/runs/991"
+
+
+async def test_lists_one_query_cuts_short_are_read_to_the_end(client, router):
+    """A PR with more review threads, or a matrix workflow with more jobs, than one
+    query returns is judged on all of them: a failed job on the second page still
+    fails its CI, and the oldest threads still count."""
+    node = load_fixture("pr_node.json")
+    node["id"] = "PR_1"
+    node["reviewThreads"]["pageInfo"] = {"hasPreviousPage": True, "startCursor": "t1"}
+    suite = node["headCommit"]["nodes"][0]["commit"]["checkSuites"]["nodes"][0]
+    suite["id"] = "CS_1"
+    suite["checkRuns"]["pageInfo"] = {"hasNextPage": True, "endCursor": "r1"}
+    older = {
+        "id": "PRRT_old",
+        "isResolved": True,
+        "isOutdated": False,
+        "path": "a.py",
+        "line": 1,
+        "comments": {"nodes": []},
+    }
+    late = {
+        "databaseId": 99,
+        "name": "matrix (py3.12)",
+        "status": "COMPLETED",
+        "conclusion": "FAILURE",
+        "detailsUrl": None,
+        "startedAt": None,
+        "completedAt": None,
+        "summary": None,
+    }
+    asked: list[dict] = []
+
+    def graphql(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        query, variables = body["query"], body.get("variables") or {}
+        if "node(id: $id)" not in query:
+            return httpx.Response(200, json={"data": {"repository": {"p42": node}}})
+        asked.append(variables)
+        if variables["id"] == "PR_1" and "reviewThreads" in query:
+            page = {"pageInfo": {"hasPreviousPage": False, "startCursor": None}}
+            return httpx.Response(
+                200,
+                json={"data": {"node": {"reviewThreads": {**page, "nodes": [older]}}}},
+            )
+        if variables["id"] == "CS_1":
+            page = {"pageInfo": {"hasNextPage": False, "endCursor": None}}
+            return httpx.Response(
+                200, json={"data": {"node": {"checkRuns": {**page, "nodes": [late]}}}}
+            )
+        return httpx.Response(400, json={"message": f"unexpected {query}"})
+
+    router.post("/graphql").mock(side_effect=graphql)
+    pr = await GitHubReader(client).get_pr("acme/widget", 42)
+    assert pr is not None
+    assert pr.threads[0].id == "PRRT_old", "older threads come first"
+    assert (
+        len(pr.threads)
+        == len(load_fixture("pr_node.json")["reviewThreads"]["nodes"]) + 1
+    )
+    assert any(c.id == 99 and c.conclusion == "failure" for c in pr.checks)
+    assert {(a["id"], a["cursor"]) for a in asked} == {("PR_1", "t1"), ("CS_1", "r1")}

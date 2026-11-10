@@ -114,7 +114,9 @@ class Followup(Playbook):
             own_actions=ctx.own_reviews,
         )
         if cls.state not in FOLLOWUP_STATES:
-            return PlaybookResult(result={"skipped": f"state is {cls.state}"})
+            return PlaybookResult(
+                result={"skipped": f"state is {cls.state}", "handed_to": "review"}
+            )
         previous_sha = cls.reviewed_sha
         prior = await self._prior_findings(ctx, pr)
 

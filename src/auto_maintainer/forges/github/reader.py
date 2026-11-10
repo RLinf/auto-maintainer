@@ -74,25 +74,32 @@ from .client import GitHubClient, GitHubError, GraphQLError
 PR_BATCH = 10
 LIGHT_PAGE = 50
 
-_PR_FIELDS = """
+_FILE = "path additions deletions changeType"
+_REVIEW = "databaseId author { login } state body submittedAt commit { oid }"
+_COMMENT = "databaseId author { login } body createdAt updatedAt"
+_THREAD = (
+    "id isResolved isOutdated path line "
+    "comments(first: 20) { nodes { databaseId author { login } body createdAt commit { oid } } }"
+)
+_RUN = "databaseId name status conclusion detailsUrl startedAt completedAt summary"
+_FORWARD = "pageInfo { hasNextPage endCursor }"
+_BACKWARD = "pageInfo { hasPreviousPage startCursor }"
+
+_PR_FIELDS = (
+    """
 fragment PrFields on PullRequest {
-  number title body url createdAt updatedAt isDraft state authorAssociation
+  id number title body url createdAt updatedAt isDraft state authorAssociation
   author { login }
   baseRefName headRefName headRefOid
   headRepository { nameWithOwner }
   maintainerCanModify
   mergeable mergeStateStatus additions deletions
   labels(first: 50) { nodes { name } }
-  files(first: 100) { nodes { path additions deletions changeType } }
+  files(first: 100) { FORWARD nodes { FILE } }
   commits(last: 100) { nodes { commit { oid message committedDate author { email user { login } } } } }
-  reviews(last: 50) { nodes { databaseId author { login } state body submittedAt commit { oid } } }
-  comments(last: 100) { nodes { databaseId author { login } body createdAt updatedAt } }
-  reviewThreads(last: 50) {
-    nodes {
-      id isResolved isOutdated path line
-      comments(first: 20) { nodes { databaseId author { login } body createdAt commit { oid } } }
-    }
-  }
+  reviews(last: 50) { BACKWARD nodes { REVIEW } }
+  comments(last: 100) { BACKWARD nodes { COMMENT } }
+  reviewThreads(last: 50) { BACKWARD nodes { THREAD } }
   reviewRequests(first: 20) {
     nodes { requestedReviewer { ... on User { login } ... on Team { slug } ... on Bot { login } } }
   }
@@ -100,20 +107,37 @@ fragment PrFields on PullRequest {
   headCommit: commits(last: 1) {
     nodes {
       commit {
-        checkSuites(first: 20) {
+        checkSuites(first: 50) {
           nodes {
-            status conclusion
+            id status conclusion
             workflowRun { databaseId runAttempt url workflow { name } }
-            checkRuns(first: 50, filterBy: {checkType: LATEST}) {
-              nodes { databaseId name status conclusion detailsUrl startedAt completedAt summary }
-            }
+            checkRuns(first: 50, filterBy: {checkType: LATEST}) { FORWARD nodes { RUN } }
           }
         }
       }
     }
   }
 }
-"""
+""".replace("FORWARD", _FORWARD)
+    .replace("BACKWARD", _BACKWARD)
+    .replace("FILE", _FILE)
+    .replace("REVIEW", _REVIEW)
+    .replace("COMMENT", _COMMENT)
+    .replace("THREAD", _THREAD)
+    .replace("RUN", _RUN)
+)
+
+_MORE_PAGES = 20
+"""At most this many further pages of one list of a PR (100 items each)."""
+
+_MORE: dict[str, tuple[str, str, bool]] = {
+    "files": ("files(first: 100, after: $cursor)", _FILE, True),
+    "reviews": ("reviews(last: 100, before: $cursor)", _REVIEW, False),
+    "comments": ("comments(last: 100, before: $cursor)", _COMMENT, False),
+    "reviewThreads": ("reviewThreads(last: 100, before: $cursor)", _THREAD, False),
+}
+"""The PR's lists one query may cut short: how to read more of each, and whether
+it reads forward (from the first) or backward (from the latest)."""
 
 _LIGHT_QUERY = """
 query($owner: String!, $name: String!, $cursor: String) {
@@ -549,8 +573,72 @@ class GitHubReader:
             for n in batch:
                 node = repository.get(f"p{n}")
                 if node:
+                    await self._complete(repo, node)
                     found[n] = snapshot_from_graphql(repo, node)
         return found
+
+    async def _complete(self, repo: str, node: dict[str, Any]) -> None:
+        """Read, in place, the rest of every list of the PR ``node`` that one query
+        cut short: its files, reviews, comments, and review threads, and each check
+        suite's runs (a matrix workflow has more than one page). A PR is judged on
+        all of them: a failed job past the first page still fails its CI."""
+        pr_id = node.get("id")
+        for field, (call, fields, forward) in _MORE.items():
+            conn = node.get(field)
+            if not pr_id or not isinstance(conn, dict):
+                continue
+            await self._more(
+                repo,
+                conn,
+                pr_id,
+                f"... on PullRequest {{ {field}: {call} {{ PAGE nodes {{ {fields} }} }} }}",
+                field,
+                forward,
+            )
+        for head in _nodes(node.get("headCommit")):
+            for suite in _nodes((head.get("commit") or {}).get("checkSuites")):
+                conn = suite.get("checkRuns")
+                if not suite.get("id") or not isinstance(conn, dict):
+                    continue
+                await self._more(
+                    repo,
+                    conn,
+                    suite["id"],
+                    "... on CheckSuite { checkRuns(first: 100, after: $cursor, "
+                    f"filterBy: {{checkType: LATEST}}) {{ PAGE nodes {{ {_RUN} }} }} }}",
+                    "checkRuns",
+                    True,
+                )
+
+    async def _more(
+        self,
+        repo: str,
+        conn: dict[str, Any],
+        node_id: str,
+        selection: str,
+        field: str,
+        forward: bool,
+    ) -> None:
+        """Add the further pages of the connection ``conn`` to its nodes."""
+        info = conn.get("pageInfo") or {}
+        for _ in range(_MORE_PAGES):
+            more = info.get("hasNextPage" if forward else "hasPreviousPage")
+            cursor = info.get("endCursor" if forward else "startCursor")
+            if not more or not cursor:
+                return
+            query = (
+                "query($id: ID!, $cursor: String) { node(id: $id) { "
+                + selection.replace("PAGE", _FORWARD if forward else _BACKWARD)
+                + " } }"
+            )
+            data = await self._client.graphql(
+                query, {"id": node_id, "cursor": cursor}, repo=repo
+            )
+            page = (data.get("node") or {}).get(field) or {}
+            got = [n for n in page.get("nodes") or [] if n]
+            have = [n for n in conn.get("nodes") or [] if n]
+            conn["nodes"] = have + got if forward else got + have
+            info = page.get("pageInfo") or {}
 
     async def list_open_issues(self, repo: str) -> list[IssueSnapshot]:
         items = await self._client.paginate(

@@ -120,6 +120,10 @@ class EvaluatePlaybook(Playbook):
         if event.kind == EventKind.MEMORY_CHANGED:
             return await self._rescore_all(ctx, profile, rubric, event)
         assert event.number
+        if event.kind == EventKind.DASHBOARD_COMMAND and event.payload.get("by"):
+            # Someone pressed Score again: theirs, on their own agent when they run
+            # one, and its questions go to them.
+            ctx.requested_by = str(event.payload["by"])
         pr = await ctx.forge.get_pr(event.repo, event.number)
         if pr is None or not in_scope(pr, profile):
             return PlaybookResult(result={"skipped": "out of scope"})

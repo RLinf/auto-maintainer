@@ -44,6 +44,8 @@ export function CodeOwnersCard({ repo, number, head }: { repo: string; number: n
   const people = new Map((d?.people ?? []).map((p) => [p.login.toLowerCase(), p]));
   const approved = (d?.parts ?? []).filter((p) => p.approved_by.length > 0).length;
   const total = d?.parts.length ?? 0;
+  // Parts, not approvals: one code owner's approval covers every part they own.
+  const approvers = [...new Set((d?.parts ?? []).flatMap((p) => p.approved_by))];
   const prefix = repo.includes(":") ? repo.slice(0, repo.indexOf(":") + 1) : "";
   const aliasOf = useAliasOf();
   return (
@@ -54,9 +56,9 @@ export function CodeOwnersCard({ repo, number, head }: { repo: string; number: n
         total > 0 ? (
           <span
             className={`pill ${approved === total ? "status-ok" : d?.required ? "status-warn" : "status-muted"}`}
-            title={t("Parts of the change with an approval from one of their code owners")}
+            title={`${t("Parts of the change with an approval from one of their code owners; one person's approval covers every part they own.")}${approvers.length ? ` ${t("Approved by")} ${approvers.map((l) => aliasOf(l) ?? l).join(", ")}.` : ""}`}
           >
-            {approved}/{total} {t("approved")}
+            {approved}/{total} {t("parts approved")}
           </span>
         ) : undefined
       }

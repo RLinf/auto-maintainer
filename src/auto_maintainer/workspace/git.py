@@ -269,8 +269,27 @@ class GitWorkspace:
         shutil.rmtree(p, ignore_errors=True)
 
     async def changes(self, path: Any) -> WorkChanges:
+        """What changed in the checkout since its commit: the agent's work. The
+        instruction files the checkout took from the default branch (``prepare``)
+        are left out, so a fix never carries them onto a PR, nor drops the PR's own;
+        in a checkout of the default branch itself they are the agent's to change."""
         p = Path(path)
         await run(["git", "add", "-A"], cwd=p, timeout=300, check=True)
+        steering = self._steering.get(p)
+        if steering is not None:
+            differ = await run(
+                ["git", "diff", "--name-only", "-z", "HEAD", steering, "--"],
+                cwd=p,
+                timeout=300,
+                check=True,
+            )
+            swapped = [f for f in differ.stdout.split("\0") if is_instruction_path(f)]
+            for i in range(0, len(swapped), 200):
+                await run(
+                    ["git", "reset", "-q", "HEAD", "--", *swapped[i : i + 200]],
+                    cwd=p,
+                    timeout=300,
+                )
         base = (
             await run(["git", "rev-parse", "HEAD"], cwd=p, check=True)
         ).stdout.strip()

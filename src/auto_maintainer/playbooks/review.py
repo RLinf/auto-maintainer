@@ -140,7 +140,8 @@ class ReviewPlaybook(Playbook):
         if state in FOLLOWUP_STATES:
             return PlaybookResult(
                 result={
-                    "skipped": "already reviewed; the follow-up handles new commits"
+                    "skipped": "already reviewed; the follow-up handles new commits",
+                    "handed_to": "followup",
                 }
             )
         if state == ReviewState.UP_TO_DATE:
