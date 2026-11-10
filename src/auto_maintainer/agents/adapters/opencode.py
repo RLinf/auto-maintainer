@@ -30,8 +30,18 @@ import json
 from typing import Any
 
 from ...domain.agents import AgentTask
+from ...domain.settings import ModelSpec
 from ..acp import AcpRuntime
 from ..exec import RunFiles
+
+
+def _model_entry(model: str, spec: ModelSpec | None) -> dict[str, Any]:
+    """A model under the provider's ``models``: its name, and its ``limit`` when both
+    how much it reads and how much it writes are known."""
+    entry: dict[str, Any] = {"name": model}
+    if spec is not None and spec.context_window and spec.max_output:
+        entry["limit"] = {"context": spec.context_window, "output": spec.max_output}
+    return entry
 
 
 class OpenCodeRuntime(AcpRuntime):
@@ -95,7 +105,7 @@ class OpenCodeRuntime(AcpRuntime):
             "npm": npm,
             "name": p.name or p.id,
             "options": options,
-            "models": {m: {"name": m} for m in models},
+            "models": {m: _model_entry(m, p.spec(m)) for m in models},
         }
 
     def provider_env(self) -> dict[str, str | None]:

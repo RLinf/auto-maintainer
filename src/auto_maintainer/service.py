@@ -658,8 +658,9 @@ class Service:
                 name=p.name or pid,
                 protocol=p.protocol,
                 base_url=p.base_url,
-                models=tuple(p.models),
+                models=tuple(p.model_ids),
                 api_key=key,
+                specs=tuple(p.models),
             )
         return out
 
@@ -822,12 +823,20 @@ class Service:
         runtime = self.runtime(name)
         return getattr(runtime, "container_sandbox", None) is not None
 
-    def start_login(self, name: str, account: str | None, by: str) -> AgentLogin:
+    def start_login(
+        self, name: str, account: str | None, by: str, option: str | None = None
+    ) -> AgentLogin:
         """Start agent ``name``'s own sign-in for ``account`` (``None``: the service's,
-        which ``by`` may change only past ``service_gate``; else ``by``'s own),
-        replacing one still waiting for the same account."""
+        which ``by`` may change only past ``service_gate``; else ``by``'s own), to the
+        account kind ``option`` where the CLI offers several, replacing one still
+        waiting for the same account.
+
+        Raises:
+            ValueError: The agent cannot sign in here, or offers no ``option``.
+        """
         runtime = self.runtime(name)
-        if runtime is None or not getattr(runtime, "login_args", ()):
+        can = getattr(runtime, "can_sign_in", None)
+        if runtime is None or can is None or not can():
             raise ValueError(f"{name} has no sign-in of its own")
         for key, process in list(self.logins.items()):
             st = process.state
@@ -839,7 +848,12 @@ class Service:
         state = AgentLogin(
             agent=name, account=account, by=by, started_at=self.clock.now()
         )
-        self.logins[state.id] = runtime.start_login(self.account_home(account), state)
+        try:
+            self.logins[state.id] = runtime.start_login(  # type: ignore[attr-defined]
+                self.account_home(account), state, option
+            )
+        except RuntimeError as e:
+            raise ValueError(str(e)) from e
         self._signed_in.pop((name, account), None)
         return state
 

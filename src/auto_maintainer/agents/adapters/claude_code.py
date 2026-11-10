@@ -175,6 +175,8 @@ class ClaudeCodeRuntime(ExecRuntime):
         The key goes in ``ANTHROPIC_AUTH_TOKEN`` (sent as a bearer token); an inherited
         ``ANTHROPIC_API_KEY`` would take precedence over it, so it is removed. The
         background model is the same one, since the endpoint may not serve Claude's.
+        A known output limit of the model caps ``CLAUDE_CODE_MAX_OUTPUT_TOKENS``, so
+        Claude Code never asks it for more than it writes.
         """
         p = self.provider
         if p is None:
@@ -188,6 +190,9 @@ class ClaudeCodeRuntime(ExecRuntime):
             env["ANTHROPIC_MODEL"] = self.model
             env["ANTHROPIC_SMALL_FAST_MODEL"] = self.model
             env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = self.model
+        spec = p.spec(self.model or (p.models[0] if p.models else None))
+        if spec is not None and spec.max_output:
+            env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(spec.max_output)
         return env
 
     def build_invocation(

@@ -21,9 +21,17 @@ may write use it; read-only tasks use ``default``, which asks before every tool 
 needs approval; bypass mode is ``yolo``. On this host the ACP server did not answer
 because the account needs ``GOOGLE_CLOUD_PROJECT``, so the flow follows the ACP
 specification and was not run end to end.
+
+A model provider that speaks Google's Gemini API reaches it through
+``GOOGLE_GEMINI_BASE_URL`` (the address without its ``/v1beta``; Gemini CLI wants
+HTTPS there unless it is the local host) with the key in ``GEMINI_API_KEY``, which
+``docs/reference/configuration.md`` documents for API-key sign-in; an inherited
+``GOOGLE_API_KEY``, which would win over it, is removed. Not run end to end.
 """
 
 from __future__ import annotations
+
+import re
 
 from ...domain.agents import AgentTask, Capabilities
 from ..acp import AcpRuntime
@@ -40,6 +48,16 @@ class GeminiRuntime(AcpRuntime):
 
     def capabilities(self) -> Capabilities:
         return super().capabilities().model_copy(update={"skill_dirs": True})
+
+    def provider_env(self) -> dict[str, str | None]:
+        p = self.provider
+        if p is None or p.protocol != "google":
+            return {}
+        return {
+            "GOOGLE_GEMINI_BASE_URL": re.sub(r"/v1(beta)?/?$", "", p.base_url),
+            "GEMINI_API_KEY": p.api_key or None,
+            "GOOGLE_API_KEY": None,
+        }
 
     def acp_argv(self, task: AgentTask, files: RunFiles, binary: str) -> list[str]:
         if task.permissions == "bypass":

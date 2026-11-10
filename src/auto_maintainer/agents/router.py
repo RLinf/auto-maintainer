@@ -57,7 +57,7 @@ from ..domain.ports import (
 )
 from ..domain.profile import Route
 from ..domain.records import AgentRunRecord
-from ..domain.settings import Budget, ProviderBinding
+from ..domain.settings import Budget, ProviderBinding, protocol_for
 from .exec import Inbox, Told
 from .sandbox import scrub
 from .structured import extract_json, repair_prompt, schema_instructions, validate
@@ -455,11 +455,16 @@ class AgentRouter:
             }
         ), None
 
-    async def _account(self, runtime: AgentRuntime, task: AgentTask) -> AgentRuntime:
-        """``runtime``, or a copy of it on the account of the person who asked for
-        ``task``, when they turned their own account on for this agent. Only where
-        each run gets a container of its own, which mounts only that person's
-        sign-in: on the host, every run could read every person's."""
+    async def _account(
+        self, runtime: AgentRuntime, task: AgentTask
+    ) -> tuple[AgentRuntime, AgentTask]:
+        """``runtime`` and ``task``, or a copy of the runtime on the account of the
+        person who asked for ``task``, when they turned their own account on for this
+        agent: their CLI sign-in, or one of their own model APIs with the model and
+        reasoning level they chose for it, which then win over the route's. Nobody
+        else's task ever runs on them. Only where each run gets a container of its
+        own, which mounts only that person's sign-in: on the host, every run could
+        read every person's."""
         login = task.requested_by
         if (
             self.people is None
@@ -467,36 +472,51 @@ class AgentRouter:
             or getattr(runtime, "container_sandbox", None) is None
             or not hasattr(runtime, "account_home")
         ):
-            return runtime
+            return runtime, task
         try:
             setup = (await self.people.get(login)).get(runtime.name)
+            apis = await self.people.providers(login) if setup else {}
         except ValueError:
-            return runtime
+            return runtime, task
         if setup is None or not setup.use_own:
-            return runtime
+            return runtime, task
         mine = copy.copy(runtime)
         mine.account = login.lower()  # type: ignore[attr-defined]
         mine.account_home = self.people.home(login)  # type: ignore[attr-defined]
-        if setup.provider is not None:
-            p = setup.provider
+        api = apis.get(setup.provider) if setup.provider else None
+        model = setup.model or (api.model_ids[0] if api and api.models else None)
+        protocol = (
+            protocol_for(
+                str(getattr(type(runtime), "default_name", runtime.name)),
+                api.protocol,
+                api.model(model),
+            )
+            if api is not None
+            else None
+        )
+        if api is not None and setup.provider and protocol is not None:
             mine.provider = ProviderBinding(  # type: ignore[attr-defined]
                 id=f"own-{login.lower()}",
-                name=f"{login}'s own",
-                protocol=p.protocol,
-                base_url=p.base_url,
-                models=tuple(p.models),
-                api_key=await self.people.key(login, runtime.name),
+                name=f"{login}'s {api.name or setup.provider}",
+                protocol=protocol,
+                base_url=api.base_url,
+                models=tuple(api.model_ids),
+                api_key=await self.people.provider_key(login, setup.provider),
+                specs=tuple(api.models),
             )
-            mine.model = p.models[0] if p.models else None  # type: ignore[attr-defined]
+            mine.model = model  # type: ignore[attr-defined]
+            task = task.model_copy(
+                update={"model": model, "effort": setup.effort or task.effort}
+            )
         else:
             if getattr(runtime, "provider", None) is not None:
                 # The service's model belongs to its provider, not to this sign-in.
                 mine.model = None  # type: ignore[attr-defined]
             mine.provider = None  # type: ignore[attr-defined]
-        return mine
+        return mine, task
 
     async def _attempt(self, runtime: AgentRuntime, task: AgentTask) -> AgentResult:
-        runtime = await self._account(runtime, task)
+        runtime, task = await self._account(runtime, task)
         result: AgentResult | None = None
         await self._report(task, runtime.name, AgentEvent(type=AgentEventType.STARTED))
         try:

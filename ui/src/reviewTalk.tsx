@@ -10,7 +10,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Fragment, useState } from "react";
 import { api, type AgentJob, type ChatMessage, type JobStep, type ReviewTalkState } from "./api";
-import { ErrorBox } from "./components";
+import { ErrorBox, GrowingTextarea } from "./components";
 import { useProposals, useQuestions } from "./data";
 import { useT } from "./i18n";
 import { Icon } from "./icons";
@@ -167,9 +167,9 @@ export function ReviewTalk({ job, me, active }: { job: AgentJob; me: string; act
           submit(text);
         }}
       >
-        <textarea
+        <GrowingTextarea
           value={text}
-          rows={Math.min(6, Math.max(2, text.split("\n").length))}
+          minRows={2}
           placeholder={listening ? t("Tell the agent what to check while it reviews…") : t("Ask about the review, or ask for a change…")}
           aria-label={t("Message")}
           disabled={!canSend}

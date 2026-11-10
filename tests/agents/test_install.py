@@ -55,6 +55,9 @@ async def test_an_npm_package_is_installed_and_linked_from_the_data_bin(
     data = tmp_path / "data"
     installer = AgentInstaller(data, npm=str(npm))
     assert installer.sources()["codex"] == "npm @openai/codex"
+    # Every CLI the service runs comes from its publisher's own npm package or release.
+    assert installer.sources()["opencode"] == "npm opencode-ai"
+    assert installer.sources()["gemini"] == "npm @google/gemini-cli"
     lines: list[str] = []
 
     async def on_line(line: str) -> None:

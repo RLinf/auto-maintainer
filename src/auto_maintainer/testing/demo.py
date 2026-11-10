@@ -21,6 +21,7 @@ from typing import Any
 
 from ..domain.agents import AgentEvent, AgentEventType, AgentTask
 from ..domain.permissions import Permission
+from ..domain.settings import ModelSpec, Provider
 from ..domain.snapshot import (
     CheckConclusion,
     CheckRun,
@@ -30,6 +31,7 @@ from ..domain.snapshot import (
     Review,
     ReviewEventState,
 )
+from ..store.people import PeopleAgents
 from .fakes import make_pr
 from .harness import Harness
 
@@ -865,6 +867,28 @@ def _governance(task: AgentTask) -> dict[str, Any]:
     }
 
 
+DEMO_OWN_API = Provider(
+    name="My gateway",
+    protocol="openai",
+    base_url="https://gateway.example/v1",
+    models=[
+        ModelSpec(
+            id="qwen3-coder",
+            context_window=262_144,
+            max_output=65_536,
+            reasoning=["low", "medium", "high"],
+            interfaces=["openai", "anthropic"],
+            tools=True,
+            images=False,
+            streaming=True,
+            tested_at="2026-11-10T08:00:00+00:00",
+        ),
+        ModelSpec(id="qwen3-small"),
+    ],
+)
+"""The demo maintainer's own model API, used only by their own agents."""
+
+
 async def build_demo(root: Path) -> Harness:
     h = await Harness.create(
         root,
@@ -875,6 +899,8 @@ async def build_demo(root: Path) -> Harness:
     )
     h.memory.files["config/service.yaml"] = DEMO_SETTINGS
     h.forge.set_permission(DEMO_REPO, "bob", Permission.WRITE)
+    h.service.a.people = PeopleAgents(root / "people")
+    await h.service.a.people.put_provider(DEMO_USER, "my-gateway", DEMO_OWN_API)
     for kind in (
         "triage",
         "evaluate",

@@ -10,7 +10,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Fragment, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { api, type ChatMessage, type JobStep } from "./api";
-import { ErrorBox, Section } from "./components";
+import { ErrorBox, Section, GrowingTextarea } from "./components";
 import { useQuestions } from "./data";
 import { useT } from "./i18n";
 import { Icon } from "./icons";
@@ -945,10 +945,10 @@ function PeopleTalk({
             submit(text);
           }}
         >
-          <textarea
+          <GrowingTextarea
             ref={box}
             value={text}
-            rows={Math.min(8, Math.max(2, text.split("\n").length))}
+            minRows={2}
             placeholder={
               listening
                 ? t("Tell the agent something while it works…")

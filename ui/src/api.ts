@@ -771,17 +771,67 @@ export interface SettingsAgent {
   binary: string | null;
   from_settings: boolean;
   providers_supported: string[];
+  /** The account kinds its sign-in offers, when it must be told which (pi). */
+  sign_in_options: SignInOption[];
 }
 
-export interface SettingsProvider {
+export interface SignInOption {
   id: string;
-  name: string;
-  protocol: "anthropic" | "openai" | "openai-responses";
+  label: string;
+}
+
+export type Protocol = "anthropic" | "openai" | "openai-responses" | "google";
+
+/** One model a provider serves and what is known of it; ``tested_at`` says it was
+ * learned by talking to it (``examine``), else the endpoint's list said it. */
+export interface ModelSpec {
+  id: string;
+  context_window: number | null;
+  max_output: number | null;
+  /** Reasoning levels it accepts; empty, none known. */
+  reasoning: string[];
+  /** APIs it answered a conversation on, when tested. */
+  interfaces: Protocol[];
+  tools: boolean | null;
+  images: boolean | null;
+  streaming: boolean | null;
+  tested_at: string | null;
+}
+
+/** A model API as the forms show it: the service's or a person's own. */
+export interface ApiRow {
+  id: string;
+  name: string | null;
+  protocol: Protocol;
   base_url: string;
   api_key: string | null;
-  models: string[];
+  models: ModelSpec[];
+  /** The adapters each model can run (by model id). */
+  works_with: Record<string, string[]>;
+}
+
+export interface SettingsProvider extends ApiRow {
   key: SecretInfo | null;
   used_by: string[];
+}
+
+export interface MyProvider extends ApiRow {
+  has_key: boolean;
+  used_by: string[];
+}
+
+export interface ModelList {
+  ok: boolean;
+  models: { id: string; context_window: number | null; max_output: number | null; reasoning: string[] }[];
+  error?: string;
+}
+
+export interface Examination {
+  ok: boolean;
+  spec: Partial<ModelSpec> & { id: string };
+  checks: { name: string; ok: boolean | null; detail: string }[];
+  /** The adapters that can run on the model. */
+  agents: string[];
 }
 
 export interface SettingsRoute {
@@ -814,20 +864,16 @@ export interface AgentLogin {
   started_at: string;
 }
 
-export interface PersonalProvider {
-  protocol: string;
-  base_url: string;
-  models: string[];
-}
-
 export interface MyAgent {
   name: string;
   can_sign_in: boolean;
+  sign_in_options: SignInOption[];
   signed_in: boolean | null;
   protocols: string[];
   /** Whether each run gets a container of its own here, which a personal account needs. */
   isolated: boolean;
-  setup: { agent: string; use_own: boolean; provider: PersonalProvider | null; has_key: boolean };
+  adapter: string;
+  setup: { agent: string; use_own: boolean; provider: string | null; model: string | null; effort: string | null };
   login: AgentLogin | null;
 }
 

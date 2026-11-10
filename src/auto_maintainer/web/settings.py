@@ -26,7 +26,6 @@ from __future__ import annotations
 import json
 from typing import Any, Literal
 
-import httpx
 import yaml
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -36,11 +35,14 @@ from ..domain.ids import new_id
 from ..domain.memory import MemoryChangeState
 from ..domain.records import AuditEntry
 from ..domain.settings import (
+    PROVIDER_ID,
     PROVIDER_PROTOCOLS,
     SECRET_NAME,
     LabMachine,
+    ModelSpec,
     Provider,
     SettingsError,
+    agents_for,
     can_bypass,
     effective_agents,
     effective_routing,
@@ -53,6 +55,7 @@ from ..playbooks.prompts import schema_hint
 from ..service import Service
 from .api import service_of, visible_repos
 from .auth import User, current_user
+from .model_apis import ApiForm, ProbeBody, examine, list_models
 
 
 class DocumentBody(BaseModel):
@@ -126,13 +129,16 @@ async def settings_view(service: Service, user: User) -> dict[str, Any]:
                 "confined": bool(cfg.command_prefix),
                 "from_settings": name in config.agents or name in legacy,
                 "providers_supported": sorted(PROVIDER_PROTOCOLS.get(cfg.adapter, ())),
+                "sign_in_options": [
+                    {"id": o, "label": label}
+                    for o, label in getattr(service.runtime(name), "login_options", ())
+                ],
             }
             for name, cfg in agents.items()
         ],
         "providers": [
             {
-                "id": pid,
-                **p.model_dump(mode="json"),
+                **provider_row(pid, p),
                 "key": secrets[p.api_key].model_dump(mode="json")
                 if p.api_key in secrets
                 else None,
@@ -251,6 +257,9 @@ def _with_agent_fields(text: str, name: str, fields: dict[str, Any]) -> str:
 class AgentModelBody(BaseModel):
     model: str | None = None
     effort: str | None = None
+    provider: str | None = None
+    """The model provider the agent runs on; sent as ``null``, its CLI's own
+    sign-in. Left out, the agent keeps the one it has."""
 
 
 class DefaultAgentBody(BaseModel):
@@ -343,56 +352,43 @@ def _with_machine(text: str, name: str, machine: LabMachine | None) -> str:
     return yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
 
 
-def _describe_probe_error(status: int | None, error: Exception | None) -> str:
-    if error is not None:
-        return "could not reach the endpoint; check the base URL and the host's network"
-    if status in (401, 403):
-        return "the endpoint rejected the key"
-    if status == 404:
-        return (
-            "there is no model list at this URL; check the base URL (many end in /v1)"
-        )
-    if status == 429:
-        return "the endpoint is rate limiting this key"
-    if status is not None and status >= 500:
-        return f"the endpoint failed ({status})"
-    return f"unexpected answer ({status})"
+def provider_document(provider: Provider) -> dict[str, Any]:
+    """``provider`` as the settings file writes it: each model by its id alone when
+    nothing else is known of it."""
+    out = provider.model_dump(mode="json", exclude_none=True, exclude={"models"})
+    out["models"] = [
+        m.id
+        if not (fields := m.model_dump(mode="json", exclude_defaults=True)).keys()
+        - {"id"}
+        else fields
+        for m in provider.models
+    ]
+    return out
 
 
-async def probe_models(provider: Provider, key: str | None) -> dict[str, Any]:
-    """List the provider's models with its key; spends no tokens. Returns model ids only."""
-    base = provider.base_url
-    headers = {"Accept": "application/json"}
-    if provider.protocol == "anthropic":
-        url = f"{base}/models" if base.endswith("/v1") else f"{base}/v1/models"
-        headers["anthropic-version"] = "2023-06-01"
-        if key:
-            headers["x-api-key"] = key
-            headers["Authorization"] = f"Bearer {key}"
+def _with_provider(text: str, provider_id: str, provider: Provider | None) -> str:
+    """The settings document with provider ``provider_id`` set, or removed when
+    ``None``; everything else is kept."""
+    data = _settings_data(text)
+    providers = dict(data.get("providers") or {})
+    if provider is None:
+        providers.pop(provider_id, None)
     else:
-        url = f"{base}/models"
-        if key:
-            headers["Authorization"] = f"Bearer {key}"
-    try:
-        async with httpx.AsyncClient(timeout=12, follow_redirects=False) as client:
-            res = await client.get(url, headers=headers)
-    except httpx.HTTPError as e:
-        return {"ok": False, "error": _describe_probe_error(None, e), "models": []}
-    if res.status_code != 200:
-        return {
-            "ok": False,
-            "error": _describe_probe_error(res.status_code, None),
-            "status": res.status_code,
-            "models": [],
-        }
-    try:
-        data = res.json().get("data", [])
-        models = sorted(
-            {str(m["id"]) for m in data if isinstance(m, dict) and "id" in m}
-        )[:200]
-    except (ValueError, AttributeError):
-        return {"ok": False, "error": "the answer was not a model list", "models": []}
-    return {"ok": True, "models": models, "status": 200}
+        providers[provider_id] = provider_document(provider)
+    if providers:
+        data["providers"] = providers
+    else:
+        data.pop("providers", None)
+    return yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
+
+
+def provider_row(provider_id: str, provider: Provider) -> dict[str, Any]:
+    """A provider as the forms show it, with the agents each model works with."""
+    return {
+        "id": provider_id,
+        **provider.model_dump(mode="json"),
+        "works_with": {m.id: agents_for(m, provider.protocol) for m in provider.models},
+    }
 
 
 def build_router() -> APIRouter:
@@ -584,17 +580,25 @@ def build_router() -> APIRouter:
         text, legacy = await service.settings_text()
         if name not in effective_agents(service.service_config, legacy):
             raise HTTPException(404, f"there is no agent named {name!r}")
+        fields: dict[str, Any] = {
+            "model": body.model or None,
+            "effort": body.effort or None,
+        }
+        if "provider" in body.model_fields_set:
+            fields["provider"] = body.provider or None
         what = ", ".join(
-            f"{k} {v}" for k, v in (("model", body.model), ("effort", body.effort)) if v
+            f"{k} {v}"
+            for k, v in (
+                ("provider", fields.get("provider", "")),
+                ("model", body.model),
+                ("effort", body.effort),
+            )
+            if v
         )
         return await save(
             request,
             DocumentBody(
-                yaml=_with_agent_fields(
-                    text,
-                    name,
-                    {"model": body.model or None, "effort": body.effort or None},
-                ),
+                yaml=_with_agent_fields(text, name, fields),
                 title=f"settings: {name} uses {what or 'its own defaults'}",
             ),
             user,
@@ -755,22 +759,144 @@ def build_router() -> APIRouter:
     async def test_provider(
         request: Request, provider_id: str, user: User = Depends(current_user)
     ) -> dict[str, Any]:
+        """List a saved provider's models with its stored key; spends no tokens."""
         service = service_of(request)
         await _require_maintainer(service, user)
         provider = service.service_config.providers.get(provider_id)
         if provider is None:
             raise HTTPException(404, f"no provider named {provider_id!r} is in force")
-        key = (
-            await service.a.secrets.get(provider.api_key)
-            if provider.api_key and service.a.secrets is not None
-            else None
-        )
+        key = await _stored_key(service, provider_id)
         if provider.api_key and not key:
             return {
                 "ok": False,
                 "error": f"the key {provider.api_key} is not set yet",
                 "models": [],
             }
-        return await probe_models(provider, key)
+        return await list_models(provider.protocol, provider.base_url, key)
+
+    @r.put("/providers/{provider_id}")
+    async def put_provider(
+        request: Request,
+        provider_id: str,
+        body: ApiForm,
+        user: User = Depends(current_user),
+    ) -> dict[str, Any]:
+        """Add or change a model provider from its form: a settings change like any
+        other, which the owner's applies at once and anyone else's proposes. A key
+        typed into the form goes into the secret store under ``api_key``
+        (``<ID>_API_KEY`` unless named), which only the owner may do; it is never
+        written to the settings or sent back."""
+        service = service_of(request)
+        if not PROVIDER_ID.match(provider_id):
+            raise HTTPException(
+                422, "ids are lowercase words joined by hyphens, such as my-gateway"
+            )
+        text, _ = await service.settings_text()
+        current = _settings_data(text).get("providers") or {}
+        secret = (
+            body.api_key
+            or (current.get(provider_id) or {}).get("api_key")
+            or (
+                f"{provider_id.upper().replace('-', '_')}_API_KEY" if body.key else None
+            )
+        )
+        try:
+            provider = body.model_copy(update={"api_key": secret}).provider()
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from e
+        draft = _with_provider(text, provider_id, provider)
+        try:
+            await service.check_settings_text(draft)
+        except SettingsError as e:
+            raise HTTPException(
+                422, {"message": "the settings do not check", "problems": e.problems}
+            ) from e
+        if body.key:
+            await _require_maintainer(service, user)
+            if service.a.secrets is None:
+                raise HTTPException(409, "this service has no secret store")
+            await service.a.secrets.set(str(secret), body.key.strip(), user.login)
+            await service.store.add_audit(
+                AuditEntry(
+                    kind="config", actor=user.login, summary=f"set secret {secret}"
+                )
+            )
+        if yaml.safe_load(draft) == yaml.safe_load(text or "{}"):
+            await service.reload_settings()
+            return {
+                "change": None,
+                "approved": True,
+                "diff": "",
+                "status": service.settings_status.model_dump(mode="json"),
+            }
+        return await save(
+            request,
+            DocumentBody(
+                yaml=draft,
+                title=f"settings: {'change' if provider_id in current else 'add'} "
+                f"provider {provider_id}",
+            ),
+            user,
+        )
+
+    @r.delete("/providers/{provider_id}")
+    async def delete_provider(
+        request: Request, provider_id: str, user: User = Depends(current_user)
+    ) -> dict[str, Any]:
+        """Remove a provider: a settings change, refused while an agent uses it. Its
+        key stays in the secret store."""
+        service = service_of(request)
+        text, _ = await service.settings_text()
+        if provider_id not in (_settings_data(text).get("providers") or {}):
+            raise HTTPException(404, f"the settings name no provider {provider_id!r}")
+        return await save(
+            request,
+            DocumentBody(
+                yaml=_with_provider(text, provider_id, None),
+                title=f"settings: remove provider {provider_id}",
+            ),
+            user,
+        )
+
+    @r.post("/providers/query")
+    async def query_provider(
+        request: Request, body: ProbeBody, user: User = Depends(current_user)
+    ) -> dict[str, Any]:
+        """The models an endpoint lists, with what it says of each, before or after
+        its provider is saved; spends no tokens. The owner's alone, since it may use
+        the service's stored keys."""
+        service = service_of(request)
+        await _require_maintainer(service, user)
+        key = body.key or await _stored_key(service, body.provider)
+        return await list_models(body.protocol, body.base_url, key)
+
+    @r.post("/providers/examine")
+    async def examine_provider(
+        request: Request, body: ProbeBody, user: User = Depends(current_user)
+    ) -> dict[str, Any]:
+        """Talk to one model to learn what it can do (``model_apis.examine``), and
+        which agents can run on it; spends a few thousand tokens. The owner's alone."""
+        service = service_of(request)
+        await _require_maintainer(service, user)
+        if not body.model:
+            raise HTTPException(422, "name the model to examine")
+        key = body.key or await _stored_key(service, body.provider)
+        return await examined(body, key)
 
     return r
+
+
+async def _stored_key(service: Service, provider_id: str | None) -> str | None:
+    """The stored key of the service's provider ``provider_id``, if any."""
+    provider = service.service_config.providers.get(provider_id or "")
+    if provider is None or not provider.api_key or service.a.secrets is None:
+        return None
+    return await service.a.secrets.get(provider.api_key)
+
+
+async def examined(body: ProbeBody, key: str | None) -> dict[str, Any]:
+    """``examine`` of ``body.model``, with the agents that can run on it."""
+    out = await examine(body.base_url, key, str(body.model), body.protocol)
+    spec = ModelSpec.model_validate(out["spec"])
+    out["agents"] = agents_for(spec, body.protocol) if out["ok"] else []
+    return out

@@ -20,8 +20,10 @@
   sign-in (``.claude``, ``.codex``, ``.gemini``, ...). Only their own tasks' containers
   mount it, and only what the CLI needs of it.
 - ``agents.json``: how they run each agent (``PersonalAgent``), without keys.
-- ``keys.json`` (mode 0600): the keys of their own model APIs. Nothing reads them back
-  but the runs of their own tasks; the dashboard sees only whether one is set.
+- ``providers.json``: their own model APIs (``Provider``, by id), without keys.
+- ``keys.json`` (mode 0600): each of those APIs' key, as ``provider:<id>``. Nothing
+  reads them back but the runs of their own tasks; the dashboard sees only whether
+  one is set.
 
 Nobody else reaches these through the dashboard: every route works on the signed-in
 person's own login.
@@ -35,10 +37,18 @@ import os
 import re
 import shutil
 from pathlib import Path
+from typing import Any
+
+from pydantic import ValidationError
 
 from ..domain.agents import PersonalAgent
+from ..domain.settings import PROVIDER_ID, Provider
 
 _LOGIN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
+
+
+def _key_name(provider_id: str) -> str:
+    return f"provider:{provider_id}"
 
 
 class PeopleAgents:
@@ -68,36 +78,103 @@ class PeopleAgents:
         return home
 
     async def get(self, login: str) -> dict[str, PersonalAgent]:
-        data = self._read(self.folder(login) / "agents.json")
-        keys = self._read(self.folder(login) / "keys.json")
+        folder = self.folder(login)
+        await self._migrate(folder)
         out = {}
-        for name, value in data.items():
-            setup = PersonalAgent.model_validate({**value, "agent": name})
-            out[name] = setup.model_copy(update={"has_key": bool(keys.get(name))})
+        for name, value in self._read(folder / "agents.json").items():
+            try:
+                out[name] = PersonalAgent.model_validate({**value, "agent": name})
+            except (ValidationError, TypeError):
+                continue
         return out
 
     async def put(self, login: str, setup: PersonalAgent) -> None:
+        folder = self.folder(login)
+        await self._migrate(folder)
         async with self._lock:
-            path = self.folder(login) / "agents.json"
+            path = folder / "agents.json"
             data = self._read(path)
             data[setup.agent] = setup.model_dump(
-                mode="json", exclude={"agent", "has_key"}
+                mode="json", exclude={"agent"}, exclude_none=True
             )
             _write(path, data)
 
-    async def key(self, login: str, agent: str) -> str | None:
-        value = self._read(self.folder(login) / "keys.json").get(agent)
+    async def providers(self, login: str) -> dict[str, Provider]:
+        folder = self.folder(login)
+        await self._migrate(folder)
+        out = {}
+        for pid, value in self._read(folder / "providers.json").items():
+            try:
+                out[pid] = Provider.model_validate(value)
+            except (ValidationError, TypeError):
+                continue
+        return out
+
+    async def put_provider(
+        self, login: str, provider_id: str, provider: Provider | None
+    ) -> None:
+        """Save the person's model API ``provider_id``, or remove it (``None``) with
+        its key, and point their agents that used it back at their CLI's sign-in.
+
+        Raises:
+            ValueError: ``provider_id`` is not lowercase words joined by hyphens.
+        """
+        if not PROVIDER_ID.match(provider_id):
+            raise ValueError(
+                "ids are lowercase words joined by hyphens, such as my-gateway"
+            )
+        folder = self.folder(login)
+        await self._migrate(folder)
+        async with self._lock:
+            path = folder / "providers.json"
+            data = self._read(path)
+            if provider is not None:
+                data[provider_id] = provider.model_dump(
+                    mode="json", exclude={"api_key"}, exclude_none=True
+                )
+                _write(path, data)
+                return
+            data.pop(provider_id, None)
+            _write(path, data)
+            keys = self._read(folder / "keys.json")
+            if keys.pop(_key_name(provider_id), None) is not None:
+                _write(folder / "keys.json", keys)
+            agents = self._read(folder / "agents.json")
+            for value in agents.values():
+                if isinstance(value, dict) and value.get("provider") == provider_id:
+                    for field in ("provider", "model", "effort"):
+                        value.pop(field, None)
+            _write(folder / "agents.json", agents)
+
+    async def provider_key(self, login: str, provider_id: str) -> str | None:
+        folder = self.folder(login)
+        await self._migrate(folder)
+        value = self._read(folder / "keys.json").get(_key_name(provider_id))
         return str(value) if value else None
 
-    async def set_key(self, login: str, agent: str, value: str | None) -> None:
+    async def set_provider_key(
+        self, login: str, provider_id: str, value: str | None
+    ) -> None:
+        folder = self.folder(login)
+        await self._migrate(folder)
         async with self._lock:
-            path = self.folder(login) / "keys.json"
+            path = folder / "keys.json"
             keys = self._read(path)
             if value:
-                keys[agent] = value
+                keys[_key_name(provider_id)] = value
             else:
-                keys.pop(agent, None)
+                keys.pop(_key_name(provider_id), None)
             _write(path, keys)
+
+    async def keyed(self, login: str) -> set[str]:
+        """The ids of the person's model APIs whose key is stored."""
+        folder = self.folder(login)
+        await self._migrate(folder)
+        return {
+            name.removeprefix("provider:")
+            for name, value in self._read(folder / "keys.json").items()
+            if name.startswith("provider:") and value
+        }
 
     async def sign_out(self, login: str, paths: tuple[str, ...]) -> None:
         """Remove one CLI's sign-in (its ``home_paths``) from the person's home."""
@@ -111,8 +188,42 @@ class PeopleAgents:
             else:
                 target.unlink(missing_ok=True)
 
+    async def _migrate(self, folder: Path) -> None:
+        """Move model APIs kept the earlier way, inline in one agent's setup with the
+        key under the agent's name, to model APIs of their own (``<agent>-api``)."""
+        if not any(
+            isinstance(v, dict) and isinstance(v.get("provider"), dict)
+            for v in self._read(folder / "agents.json").values()
+        ):
+            return
+        async with self._lock:
+            agents = self._read(folder / "agents.json")
+            providers = self._read(folder / "providers.json")
+            keys = self._read(folder / "keys.json")
+            for name, value in agents.items():
+                inline = value.get("provider") if isinstance(value, dict) else None
+                if not isinstance(inline, dict):
+                    continue
+                pid = _free_id(name, providers)
+                models = [m for m in inline.get("models") or [] if isinstance(m, str)]
+                providers[pid] = {
+                    "name": f"{name} API",
+                    "protocol": inline.get("protocol"),
+                    "base_url": inline.get("base_url"),
+                    "models": models,
+                }
+                value["provider"] = pid
+                value.pop("has_key", None)
+                if models and not value.get("model"):
+                    value["model"] = models[0]
+                if keys.get(name):
+                    keys[_key_name(pid)] = keys.pop(name)
+            _write(folder / "providers.json", providers)
+            _write(folder / "keys.json", keys)
+            _write(folder / "agents.json", agents)
+
     @staticmethod
-    def _read(path: Path) -> dict:
+    def _read(path: Path) -> dict[str, Any]:
         if not path.is_file():
             return {}
         try:
@@ -120,6 +231,16 @@ class PeopleAgents:
         except ValueError:
             return {}
         return data if isinstance(data, dict) else {}
+
+
+def _free_id(agent: str, taken: dict[str, Any]) -> str:
+    base = re.sub(r"[^a-z0-9]+", "-", agent.lower()).strip("-") or "agent"
+    if not base[0].isalpha():
+        base = f"api-{base}"
+    pid, n = f"{base}-api", 2
+    while pid in taken:
+        pid, n = f"{base}-api-{n}", n + 1
+    return pid
 
 
 def _write(path: Path, data: dict) -> None:

@@ -22,6 +22,7 @@ import contextlib
 import json
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -29,6 +30,7 @@ import pytest
 from auto_maintainer.agents.adapters.claude_code import ClaudeCodeRuntime
 from auto_maintainer.agents.adapters.codex import CodexRuntime
 from auto_maintainer.agents.adapters.opencode import OpenCodeRuntime
+from auto_maintainer.agents.exec import RunFiles
 from auto_maintainer.agents.registry import build_runtime
 from auto_maintainer.agents.sandbox import scrub
 from auto_maintainer.domain.agents import AgentTask, TaskKind
@@ -36,6 +38,7 @@ from auto_maintainer.domain.permissions import Permission
 from auto_maintainer.domain.profile import Route
 from auto_maintainer.domain.settings import (
     SETTINGS_PATH,
+    ModelSpec,
     ProviderBinding,
     RuntimeConfig,
     ServiceConfig,
@@ -105,7 +108,7 @@ def test_a_document_that_fits_has_no_problems() -> None:
         ),
         (
             "providers: {gw: {protocol: anthropic, base_url: 'https://gw.example', models: [m]}}\n"
-            "agents: {gemini: {provider: gw}}",
+            "agents: {antigravity: {provider: gw}}",
             "supports no custom provider",
         ),
         ("routing: {review: {primary: robot}}", "there is no agent named 'robot'"),
@@ -339,6 +342,72 @@ async def test_keys_go_in_and_never_come_out(demo) -> None:
     assert bindings["deepseek"].api_key == KEY
 
 
+async def test_a_provider_is_added_by_its_form_and_its_key_kept_apart(
+    demo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The owner adds a provider from its form, key included: the key goes to the
+    secret store and the settings name it; models with nothing known are written by
+    id. Anyone else's form waits as a proposal, without a key, and may not ask the
+    endpoint, which could spend the service's keys."""
+    from auto_maintainer.web import settings as settings_web
+
+    h, app = demo
+    asked: list[str | None] = []
+
+    async def fake_list(protocol: str, base_url: str, key: str | None, **_: Any):
+        asked.append(key)
+        return {"ok": True, "models": [{"id": "m1"}], "status": 200}
+
+    monkeypatch.setattr(settings_web, "list_models", fake_list)
+    form = {
+        "name": "Gateway",
+        "protocol": "openai",
+        "base_url": "https://gw.example/v1/",
+        "models": [{"id": "m1", "context_window": 128000, "tools": True}, {"id": "m2"}],
+        "key": KEY,
+    }
+    async with _client(app, "walt") as walt:
+        assert (
+            await walt.put("/api/settings/providers/gw", json=form)
+        ).status_code == 403
+        proposed = await walt.put(
+            "/api/settings/providers/gw", json={**form, "key": None}
+        )
+        assert proposed.json()["approved"] is False
+        assert (
+            await walt.post(
+                "/api/settings/providers/query",
+                json={"protocol": "openai", "base_url": "https://gw.example/v1"},
+            )
+        ).status_code == 403
+    async with _client(app, "maria") as maria:
+        bad = await maria.put("/api/settings/providers/Gw", json=form)
+        assert bad.status_code == 422
+        saved = await maria.put("/api/settings/providers/gw", json=form)
+        assert saved.status_code == 200 and saved.json()["approved"] is True
+        assert KEY not in saved.text
+        listed = await maria.post(
+            "/api/settings/providers/query",
+            json={
+                "protocol": "openai",
+                "base_url": "https://gw.example/v1",
+                "provider": "gw",
+            },
+        )
+        assert listed.json()["models"] == [{"id": "m1"}] and asked == [KEY], (
+            "the stored key, when the form types none"
+        )
+        view = (await maria.get("/api/settings")).json()
+    written = parse_settings(h.memory.files[SETTINGS_PATH])
+    gw = written.providers["gw"]
+    assert (gw.api_key, gw.base_url) == ("GW_API_KEY", "https://gw.example/v1")
+    assert "- m2\n" in h.memory.files[SETTINGS_PATH], "a bare model by its id"
+    assert await h.service.a.secrets.get("GW_API_KEY") == KEY
+    [row] = [p for p in view["providers"] if p["id"] == "gw"]
+    assert row["works_with"]["m1"] == ["dsh", "opencode", "pi"]
+    assert KEY not in json.dumps(view)
+
+
 # -- configuring through the agent ----------------------------------------------------------
 
 
@@ -371,15 +440,27 @@ async def test_the_agent_drafts_a_change_the_maintainer_applies(demo) -> None:
 # -- providers in each CLI ------------------------------------------------------------------
 
 
-def _binding(protocol: str) -> ProviderBinding:
+def _binding(protocol: str, *specs: ModelSpec) -> ProviderBinding:
     return ProviderBinding(
         id="gw",
         name="Gateway",
         protocol=protocol,
         base_url="https://gw.example/v1",
-        models=("m-large",),
+        models=tuple(m.id for m in specs) or ("m-large",),
         api_key=KEY,
+        specs=specs,
     )
+
+
+LARGE = ModelSpec(
+    id="m-large",
+    context_window=200_000,
+    max_output=32_000,
+    reasoning=["low", "high"],
+    images=True,
+    interfaces=["openai", "openai-responses", "anthropic"],
+    tested_at="2026-11-10T00:00:00+00:00",
+)
 
 
 def _task(tmp_path: Path) -> AgentTask:
@@ -402,16 +483,85 @@ def test_claude_code_gets_the_endpoint_in_its_environment(tmp_path: Path) -> Non
 
 def test_codex_selects_the_provider_by_flags_without_the_key(tmp_path: Path) -> None:
     rt = build_runtime(
-        "codex", RuntimeConfig(adapter="codex"), tmp_path, _binding("openai")
+        "codex",
+        RuntimeConfig(adapter="codex"),
+        tmp_path,
+        _binding("openai-responses", LARGE),
     )
     assert isinstance(rt, CodexRuntime)
     args = rt.provider_args()
     assert 'model_provider="am-gw"' in args
     assert 'model_providers.am-gw.base_url="https://gw.example/v1"' in args
     assert 'model_providers.am-gw.env_key="AM_PROVIDER_API_KEY"' in args
-    assert 'model_providers.am-gw.wire_api="chat"' in args
+    assert 'model_providers.am-gw.wire_api="responses"' in args
+    assert "model_context_window=200000" in args
     assert KEY not in " ".join(args)
     assert rt.provider_env() == {"AM_PROVIDER_API_KEY": KEY}
+
+
+def test_an_agent_reaches_a_provider_over_an_api_its_model_answered_on(
+    tmp_path: Path,
+) -> None:
+    """Codex no longer talks Chat Completions: on a chat provider it runs on its own
+    sign-in, unless the model answered on the Responses API too when it was tested."""
+    untested = build_runtime(
+        "codex", RuntimeConfig(adapter="codex"), tmp_path, _binding("openai")
+    )
+    assert untested.provider is None
+    both = build_runtime(
+        "codex", RuntimeConfig(adapter="codex"), tmp_path, _binding("openai", LARGE)
+    )
+    assert both.provider is not None and both.provider.protocol == "openai-responses"
+    claude = build_runtime(
+        "claude-code",
+        RuntimeConfig(adapter="claude-code"),
+        tmp_path,
+        _binding("openai", LARGE),
+    )
+    assert claude.provider.protocol == "anthropic"
+    assert claude.provider_env()["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "32000"
+
+
+def test_pi_reads_its_key_by_name_and_knows_the_model(tmp_path: Path) -> None:
+    rt = build_runtime(
+        "pi", RuntimeConfig(adapter="pi"), tmp_path, _binding("openai", LARGE)
+    )
+    files = RunFiles.create(tmp_path / "runs", "run_pi")
+    rt.build_invocation(_task(tmp_path), files, "pi")
+    models = json.loads((files.dir / "pi-agent" / "models.json").read_text())
+    provider = models["providers"]["am"]
+    assert provider["apiKey"] == "AM_PROVIDER_API_KEY", (
+        "pi reads a value that names a set variable from it, and sends any other as is"
+    )
+    assert provider["api"] == "openai-completions"
+    assert provider["models"] == [
+        {
+            "id": "m-large",
+            "contextWindow": 200_000,
+            "maxTokens": 32_000,
+            "input": ["text", "image"],
+            "reasoning": True,
+            "thinkingLevelMap": {"minimal": None, "medium": None, "xhigh": None},
+        }
+    ]
+    assert KEY not in json.dumps(models)
+
+
+def test_gemini_cli_reaches_a_gemini_api_at_another_address(tmp_path: Path) -> None:
+    binding = ProviderBinding(
+        id="g",
+        name="Gemini gateway",
+        protocol="google",
+        base_url="https://gemini.example/v1beta",
+        models=("gemini-pro",),
+        api_key=KEY,
+    )
+    rt = build_runtime("gemini", RuntimeConfig(adapter="gemini"), tmp_path, binding)
+    assert rt.provider_env() == {
+        "GOOGLE_GEMINI_BASE_URL": "https://gemini.example",
+        "GEMINI_API_KEY": KEY,
+        "GOOGLE_API_KEY": None,
+    }
 
 
 def test_opencode_gets_an_inline_provider_that_reads_the_key_from_env(
@@ -424,6 +574,7 @@ def test_opencode_gets_an_inline_provider_that_reads_the_key_from_env(
     config = json.loads(rt.task_env(_task(tmp_path))["OPENCODE_CONFIG_CONTENT"])
     provider = config["provider"]["am-gw"]
     assert provider["npm"] == "@ai-sdk/openai-compatible"
+    assert "limit" not in provider["models"]["m-large"], "nothing is known of it"
     assert provider["options"]["apiKey"] == "{env:AM_PROVIDER_API_KEY}"
     assert KEY not in json.dumps(config)
     [(_, params)] = rt.session_setup(_task(tmp_path), {})
@@ -547,13 +698,13 @@ async def test_people_run_agents_on_their_own_accounts_and_nobody_elses(
     runtime = ClaudeCodeRuntime(binary=str(cli))
     h.runner.runtimes = {"claude-code": runtime}
     h.service.a.people = PeopleAgents(tmp_path / "people")
-    own = {
-        "use_own": True,
-        "provider": {
-            "protocol": "anthropic",
-            "base_url": "https://gw.example",
-            "models": ["m1"],
-        },
+    own = {"use_own": True, "provider": "gw", "model": "m1"}
+    api = {
+        "name": "Gateway",
+        "protocol": "anthropic",
+        "base_url": "https://gw.example",
+        "models": [{"id": "m1", "reasoning": ["high"]}],
+        "key": "sk-w",
     }
     async with _client(app, "walt") as walt:
         [row] = (await walt.get("/api/me/agents")).json()["agents"]
@@ -565,15 +716,40 @@ async def test_people_run_agents_on_their_own_accounts_and_nobody_elses(
         refused = await walt.put("/api/me/agents/claude-code", json=own)
         assert refused.status_code == 409 and "on the host" in refused.json()["detail"]
         runtime.container_sandbox = object()
-        wrong = {**own, "provider": {**own["provider"], "protocol": "openai"}}
+        local = {"protocol": "openai", "base_url": "http://127.0.0.1:8080/v1"}
+        probe = await walt.post("/api/me/providers/query", json=local)
+        assert probe.status_code == 422 and "this host" in probe.json()["detail"], (
+            "a person's probe may not point the host at itself"
+        )
+        saved = await walt.put("/api/me/providers/gw", json=api)
+        assert saved.status_code == 200 and "sk-w" not in saved.text
+        [row] = saved.json()["providers"]
+        assert row["has_key"] and row["works_with"]["m1"] == [
+            "claude-code",
+            "opencode",
+            "pi",
+        ]
+        wrong = await walt.put(
+            "/api/me/providers/oa", json={**api, "protocol": "openai"}
+        )
+        assert wrong.status_code == 200
         assert (
-            await walt.put("/api/me/agents/claude-code", json=wrong)
-        ).status_code == 422
+            await walt.put("/api/me/agents/claude-code", json={**own, "provider": "oa"})
+        ).status_code == 422, "Claude Code does not talk the OpenAI API"
         assert (
-            await walt.put("/api/me/agents/claude-code", json=own)
-        ).status_code == 200
-        keyed = await walt.put("/api/me/agents/claude-code/key", json={"value": "sk-w"})
-        assert keyed.json()["setup"]["has_key"] and "sk-w" not in keyed.text
+            await walt.put("/api/me/agents/claude-code", json={**own, "effort": "low"})
+        ).status_code == 422, "m1 reasons only at high"
+        mine = await walt.put(
+            "/api/me/agents/claude-code", json={**own, "effort": "high"}
+        )
+        assert mine.status_code == 200
+        assert mine.json()["setup"] == {
+            "agent": "claude-code",
+            "use_own": True,
+            "provider": "gw",
+            "model": "m1",
+            "effort": "high",
+        }
         assert (
             await walt.post("/api/settings/agents/claude-code/sign-in")
         ).status_code == 403
@@ -584,8 +760,13 @@ async def test_people_run_agents_on_their_own_accounts_and_nobody_elses(
         assert (
             await maria.post(f"/api/agent-logins/{mine['id']}/code", json={"code": "x"})
         ).status_code == 404
-        [row] = (await maria.get("/api/me/agents")).json()["agents"]
-        assert row["setup"]["use_own"] is False, "walt's setup is walt's alone"
+        theirs = (await maria.get("/api/me/agents")).json()
+        assert theirs["agents"][0]["setup"]["use_own"] is False, (
+            "walt's setup is walt's alone"
+        )
+        assert "gw" not in [a["id"] for a in theirs["providers"]], (
+            "and so are his model APIs"
+        )
         service_login = await maria.post("/api/settings/agents/claude-code/sign-in")
         assert service_login.status_code == 200
         assert service_login.json()["account"] is None
@@ -602,7 +783,7 @@ async def test_people_run_agents_on_their_own_accounts_and_nobody_elses(
         assert (await walt.get(f"/api/agent-logins/{mine['id']}")).json()[
             "state"
         ] == "done"
-    assert await h.service.a.people.key("walt", "claude-code") == "sk-w"
+    assert await h.service.a.people.provider_key("walt", "gw") == "sk-w"
 
 
 async def test_one_owner_acts_while_an_admin_of_the_service_repo(demo) -> None:

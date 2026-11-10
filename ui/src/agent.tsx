@@ -17,7 +17,7 @@ import {
 } from "react";
 import { Link, matchPath, useLocation, useNavigate } from "react-router-dom";
 import { api, type ChatMessage, type ChatRequest, type ChatSteps, type ChatThread } from "./api";
-import { ErrorBox } from "./components";
+import { ErrorBox, GrowingTextarea } from "./components";
 import { useProposals } from "./data";
 import { useT } from "./i18n";
 import { Markdown } from "./markdown";
@@ -439,10 +439,9 @@ export function Conversation({
             submit(text);
           }}
         >
-          <textarea
+          <GrowingTextarea
             ref={input}
             value={text}
-            rows={Math.min(6, Math.max(1, text.split("\n").length))}
             placeholder={t("Ask the agent…")}
             aria-label={t("Message")}
             onChange={(e) => setText(e.target.value)}

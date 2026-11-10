@@ -30,9 +30,9 @@ from auto_maintainer.domain.agents import (
     AgentLogin,
     AgentTask,
     PersonalAgent,
-    PersonalProvider,
     TaskKind,
 )
+from auto_maintainer.domain.settings import ModelSpec, Provider
 from auto_maintainer.store.people import PeopleAgents
 
 PASTE_CLI = """#!/bin/sh
@@ -102,29 +102,43 @@ async def test_a_device_login_shows_its_page_and_one_time_code(tmp_path: Path) -
     )
 
 
+GATEWAY = Provider(
+    name="Gateway",
+    protocol="openai",
+    base_url="https://gw.example/v1",
+    models=[
+        ModelSpec(id="m1", interfaces=["openai", "anthropic"], reasoning=["high"]),
+        ModelSpec(id="m2"),
+    ],
+)
+
+
 async def test_each_persons_folder_is_private_and_their_key_write_only(
     tmp_path: Path,
 ) -> None:
     people = PeopleAgents(tmp_path / "people")
     home = people.home("Maria")
     assert stat.S_IMODE(os.stat(home.parent).st_mode) == 0o700
+    await people.put_provider("maria", "gw", GATEWAY)
+    await people.set_provider_key("maria", "gw", "sk-own")
     await people.put(
-        "maria",
-        PersonalAgent(
-            agent="claude-code",
-            use_own=True,
-            provider=PersonalProvider(
-                protocol="anthropic", base_url="https://gw.example", models=["m1"]
-            ),
-        ),
+        "maria", PersonalAgent(agent="claude-code", use_own=True, provider="gw")
     )
-    await people.set_key("maria", "claude-code", "sk-own")
     [setup] = (await people.get("MARIA")).values()
-    assert setup.use_own and setup.has_key
-    assert "sk-own" not in setup.model_dump_json()
+    assert setup.use_own and setup.provider == "gw"
+    assert await people.keyed("maria") == {"gw"}
+    assert "sk-own" not in (home.parent / "providers.json").read_text()
     keys = home.parent / "keys.json"
     assert stat.S_IMODE(os.stat(keys).st_mode) == 0o600
-    assert await people.key("maria", "claude-code") == "sk-own"
+    assert await people.provider_key("maria", "gw") == "sk-own"
+    assert (await people.providers("maria"))["gw"].model_ids == ["m1", "m2"]
+
+    await people.put_provider("maria", "gw", None)
+    assert (
+        await people.providers("maria") == {} and await people.keyed("maria") == set()
+    )
+    [setup] = (await people.get("maria")).values()
+    assert setup.use_own and setup.provider is None, "back on the CLI's sign-in"
 
     (home / ".claude").mkdir()
     (home / ".claude.json").write_text("{}")
@@ -134,21 +148,47 @@ async def test_each_persons_folder_is_private_and_their_key_write_only(
     assert (home / ".codex").exists() and (tmp_path / "people").exists()
 
 
+async def test_an_api_kept_inside_an_agents_setup_moves_to_a_named_one(
+    tmp_path: Path,
+) -> None:
+    """Before named model APIs, each agent held its own inline, with the key under
+    the agent's name; reading moves it to ``<agent>-api`` with its key."""
+    people = PeopleAgents(tmp_path / "people")
+    folder = people.folder("maria")
+    (folder / "agents.json").write_text(
+        '{"claude-code": {"use_own": true, "has_key": true, "provider": '
+        '{"protocol": "anthropic", "base_url": "https://gw.example", "models": ["m1"]}}}'
+    )
+    (folder / "keys.json").write_text('{"claude-code": "sk-old"}')
+    [setup] = (await people.get("maria")).values()
+    assert (setup.provider, setup.model) == ("claude-code-api", "m1")
+    api = (await people.providers("maria"))["claude-code-api"]
+    assert (api.protocol, api.base_url, api.model_ids) == (
+        "anthropic",
+        "https://gw.example",
+        ["m1"],
+    )
+    assert await people.provider_key("maria", "claude-code-api") == "sk-old"
+    assert "claude-code" not in (folder / "keys.json").read_text().replace(
+        "provider:claude-code-api", ""
+    )
+
+
 async def test_a_task_runs_on_its_requesters_own_account_only_in_a_container(
     tmp_path: Path,
 ) -> None:
+    """A person's own API runs only their tasks, in a container, with the model and
+    level they chose (over the route's), over an API the CLI talks: Claude Code
+    reaches an OpenAI gateway's model that also answered on the Anthropic API."""
     people = PeopleAgents(tmp_path / "people")
+    await people.put_provider("maria", "gw", GATEWAY)
+    await people.set_provider_key("maria", "gw", "sk-own")
     await people.put(
         "maria",
         PersonalAgent(
-            agent="claude-code",
-            use_own=True,
-            provider=PersonalProvider(
-                protocol="anthropic", base_url="https://gw.example", models=["m1"]
-            ),
+            agent="claude-code", use_own=True, provider="gw", model="m1", effort="high"
         ),
     )
-    await people.set_key("maria", "claude-code", "sk-own")
     await people.put("walt", PersonalAgent(agent="claude-code", use_own=False))
     runtime = ClaudeCodeRuntime(model="opus")
     router = AgentRouter({"claude-code": runtime})
@@ -156,20 +196,35 @@ async def test_a_task_runs_on_its_requesters_own_account_only_in_a_container(
 
     def task(by: str | None) -> AgentTask:
         return AgentTask(
-            kind=TaskKind.REVIEW, prompt="p", workdir=tmp_path, requested_by=by
+            kind=TaskKind.REVIEW,
+            prompt="p",
+            workdir=tmp_path,
+            requested_by=by,
+            model="route-model",
+            effort="low",
         )
 
-    assert await router._account(runtime, task("maria")) is runtime, (
+    assert (await router._account(runtime, task("maria")))[0] is runtime, (
         "on the host, every run could read every person's sign-in"
     )
     runtime.container_sandbox = object()
-    mine = await router._account(runtime, task("maria"))
+    mine, theirs = await router._account(runtime, task("maria"))
     assert mine is not runtime
     assert (mine.account, mine.account_home) == ("maria", people.home("maria"))
-    assert mine.provider.api_key == "sk-own" and mine.model == "m1"
+    assert (mine.provider.api_key, mine.provider.protocol) == ("sk-own", "anthropic")
+    assert (mine.model, theirs.model, theirs.effort) == ("m1", "m1", "high")
     assert runtime.provider is None and runtime.model == "opus", "the original stays"
     for other in ("walt", "oscar", None):
-        assert await router._account(runtime, task(other)) is runtime
+        assert (await router._account(runtime, task(other)))[0] is runtime
+
+    await people.put(
+        "maria",
+        PersonalAgent(agent="claude-code", use_own=True, provider="gw", model="m2"),
+    )
+    mine, _ = await router._account(runtime, task("maria"))
+    assert mine.provider is None, (
+        "m2 answers only on the OpenAI API, which Claude Code does not talk"
+    )
 
 
 def test_a_persons_run_mounts_their_sign_in_and_not_the_services(

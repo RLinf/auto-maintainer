@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,7 @@ from ..domain.settings import (
     ProviderBinding,
     RuntimeConfig,
     merge_configs,
+    protocol_for,
 )
 from .adapters.antigravity import AntigravityRuntime
 from .adapters.claude_code import ClaudeCodeRuntime
@@ -74,10 +76,13 @@ def build_runtime(
 ) -> AgentRuntime:
     """Build one runtime from its configuration.
 
-    ``provider`` points the CLI at a model endpoint instead of its own sign-in; its key
-    is registered for scrubbing, so transcripts and errors never carry it.
+    ``provider`` points the CLI at a model endpoint instead of its own sign-in, over
+    the API this adapter talks for the agent's model (``protocol_for``); its key is
+    registered for scrubbing, so transcripts and errors never carry it.
     """
     cls = ADAPTERS[config.adapter]
+    if provider is not None:
+        provider = bind(provider, config.adapter, config.model)
     if provider is not None and provider.api_key:
         register_secret(provider.api_key)
     kwargs: dict[str, Any] = {
@@ -109,6 +114,18 @@ def build_runtime(
             **kwargs,
         )
     return cls(name, **kwargs)
+
+
+def bind(
+    provider: ProviderBinding, adapter: str, model: str | None
+) -> ProviderBinding | None:
+    """``provider`` as ``adapter`` talks to it for ``model`` (its first model when
+    unset): with the API they share (``protocol_for``), or ``None`` when none."""
+    model = model or (provider.models[0] if provider.models else None)
+    protocol = protocol_for(adapter, provider.protocol, provider.spec(model))
+    if protocol is None:
+        return None
+    return dataclasses.replace(provider, protocol=protocol)
 
 
 def build_runtimes(

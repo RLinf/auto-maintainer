@@ -54,22 +54,28 @@ option: a destination that starts with ``-`` would be read by ssh as one."""
 AdapterName = Literal[
     "claude-code", "codex", "antigravity", "opencode", "gemini", "dsh", "pi", "generic"
 ]
-ProviderProtocol = Literal["anthropic", "openai", "openai-responses"]
-"""The wire API a provider speaks: Anthropic Messages, OpenAI Chat Completions, or
-OpenAI Responses."""
+ProviderProtocol = Literal["anthropic", "openai", "openai-responses", "google"]
+"""The wire API a provider speaks: Anthropic Messages, OpenAI Chat Completions,
+OpenAI Responses, or Google's Gemini API (``generateContent``)."""
+PROTOCOLS: tuple[str, ...] = ("anthropic", "openai", "openai-responses", "google")
+REASONING_LEVELS: tuple[str, ...] = ("minimal", "low", "medium", "high", "xhigh", "max")
+"""The reasoning levels a model may accept, lowest first; an agent maps them to its
+CLI's own names."""
 
 PROVIDER_PROTOCOLS: dict[str, frozenset[str]] = {
     "claude-code": frozenset({"anthropic"}),
-    "codex": frozenset({"openai", "openai-responses"}),
+    "codex": frozenset({"openai-responses"}),
     "opencode": frozenset({"anthropic", "openai", "openai-responses"}),
     "dsh": frozenset({"openai"}),
-    "pi": frozenset({"anthropic", "openai", "openai-responses"}),
+    "pi": frozenset({"anthropic", "openai", "openai-responses", "google"}),
     "generic": frozenset({"anthropic", "openai", "openai-responses"}),
-    "gemini": frozenset(),
+    "gemini": frozenset({"google"}),
     "antigravity": frozenset(),
 }
-"""Which provider protocols each adapter can point its CLI at. Gemini CLI and
-Antigravity only talk to their own services."""
+"""Which provider protocols each adapter can point its CLI at. Codex has dropped
+Chat Completions (``wire_api = "chat"`` no longer loads); Gemini CLI reaches a Gemini
+API at another address through ``GOOGLE_GEMINI_BASE_URL``; Antigravity only talks to
+its own service."""
 
 
 class SettingsError(ValueError):
@@ -170,6 +176,70 @@ def merge_configs(
 # -- providers ---------------------------------------------------------------------
 
 
+class ModelSpec(BaseModel):
+    """One model a provider serves, and what is known of it: how much it reads and
+    writes, and which reasoning levels it accepts (none known: empty)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1, max_length=200)
+    context_window: int | None = Field(default=None, gt=0)
+    """Tokens of input it takes at most."""
+    max_output: int | None = Field(default=None, gt=0)
+    """Tokens it writes at most in one answer."""
+    reasoning: list[Literal["minimal", "low", "medium", "high", "xhigh", "max"]] = (
+        Field(default_factory=list)
+    )
+    interfaces: list[ProviderProtocol] = Field(default_factory=list)
+    """The APIs it answered a conversation on at the provider's address, when it was
+    tested; empty, untested (the provider's own protocol is assumed)."""
+    tools: bool | None = None
+    """Whether it calls tools and reads their results; ``None``, untested."""
+    images: bool | None = None
+    """Whether it reads images."""
+    streaming: bool | None = None
+    """Whether it streams its answers, as the agents' CLIs read them."""
+    tested_at: str | None = None
+    """When it was tested (ISO 8601), by ``web/model_apis.examine``."""
+
+    @classmethod
+    def of(cls, value: Any) -> Any:
+        """A bare model name is a model with nothing else known."""
+        return {"id": value} if isinstance(value, str) else value
+
+
+def model_ids(models: list[ModelSpec]) -> list[str]:
+    return [m.id for m in models]
+
+
+def protocol_for(adapter: str, protocol: str, spec: ModelSpec | None) -> str | None:
+    """The API ``adapter`` talks to a provider that speaks ``protocol`` when it runs
+    model ``spec``: the provider's own protocol when the adapter talks it, else one
+    the model answered a conversation on when it was tested (``interfaces``), so a
+    gateway that serves both OpenAI and Anthropic APIs at one address works for
+    either kind of CLI. ``None`` when they share no API."""
+    allowed = PROVIDER_PROTOCOLS.get(adapter, frozenset())
+    if protocol in allowed and (
+        not spec or not spec.interfaces or protocol in spec.interfaces
+    ):
+        return protocol
+    return next((p for p in (spec.interfaces if spec else []) if p in allowed), None)
+
+
+def agents_for(spec: ModelSpec, protocol: str) -> list[str]:
+    """The adapters that can run on ``spec`` at a provider speaking ``protocol``
+    (``protocol_for``), leaving out the generic adapter, whose command says, and any
+    when the model is known not to call tools, since every coding agent reads and
+    edits through them."""
+    if spec.tools is False:
+        return []
+    return sorted(
+        name
+        for name in PROVIDER_PROTOCOLS
+        if name != "generic" and protocol_for(name, protocol, spec)
+    )
+
+
 class Provider(BaseModel):
     """A model endpoint the agents' CLIs can use instead of their own sign-in."""
 
@@ -181,7 +251,20 @@ class Provider(BaseModel):
     api_key: str | None = None
     """The name of the secret that holds the key, such as ``DEEPSEEK_API_KEY``; never
     the key itself."""
-    models: list[str] = Field(default_factory=list)
+    models: list[ModelSpec] = Field(default_factory=list)
+    """Its models; a settings file may name each by its id alone."""
+
+    @field_validator("models", mode="before")
+    @classmethod
+    def _models(cls, v: Any) -> Any:
+        return [ModelSpec.of(m) for m in v] if isinstance(v, list) else v
+
+    @property
+    def model_ids(self) -> list[str]:
+        return model_ids(self.models)
+
+    def model(self, model_id: str | None) -> ModelSpec | None:
+        return next((m for m in self.models if m.id == model_id), None)
 
     @field_validator("base_url")
     @classmethod
@@ -212,6 +295,11 @@ class ProviderBinding:
     base_url: str
     models: tuple[str, ...] = ()
     api_key: str | None = field(default=None, repr=False)
+    specs: tuple[ModelSpec, ...] = ()
+    """What is known of each model, as the provider's settings say."""
+
+    def spec(self, model_id: str | None) -> ModelSpec | None:
+        return next((m for m in self.specs if m.id == model_id), None)
 
 
 # -- system ------------------------------------------------------------------------
@@ -476,7 +564,11 @@ def check_settings(
             )
             continue
         allowed = PROVIDER_PROTOCOLS.get(agent.adapter, frozenset())
-        if provider.protocol not in allowed:
+        model = agent.model or (provider.model_ids[0] if provider.models else None)
+        if (
+            protocol_for(agent.adapter, provider.protocol, provider.model(model))
+            is None
+        ):
             can = ", ".join(sorted(allowed)) or "no custom provider"
             problems.append(
                 f"agents.{name}: {agent.adapter} cannot use a {provider.protocol} "

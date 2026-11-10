@@ -14,11 +14,16 @@
 
 """Agent accounts on the dashboard: each person's own, and the service's sign-ins.
 
-A signed-in person may sign each agent CLI in to their own account, or give it their
-own model API, and turn that on for the work they ask for (``/api/me/agents``).
-Every route here works on the signed-in person's own login and nobody else's; their
-keys go in and never come back. Their own account runs only where each agent run
-gets a container of its own (``Service.agents_isolated``).
+A signed-in person may sign each agent CLI in to their own account, or keep model
+APIs of their own (``/api/me/providers``) and run an agent on one of them, with the
+model and reasoning level they choose, for the work they ask for
+(``/api/me/agents``). Their APIs serve only their own agents and tasks: nobody
+else's run ever gets them. Every route here works on the signed-in person's own
+login and nobody else's; their keys go in and never come back. Their own account
+runs only where each agent run gets a container of its own
+(``Service.agents_isolated``). Asking an endpoint about its models goes out from
+the host, so a person's requests may not reach the host itself or a link-local
+address (``model_apis.refused_address``).
 
 Signing an agent CLI in for the service itself changes the service, so it needs
 ``service_gate``, as every service setting does (``/api/settings/agents``).
@@ -26,37 +31,76 @@ Signing an agent CLI in for the service itself changes the service, so it needs
 
 from __future__ import annotations
 
-import re
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from ..domain.agents import AgentLogin, PersonalAgent, PersonalProvider
-from ..domain.settings import PROVIDER_PROTOCOLS
+from ..domain.agents import AgentLogin, PersonalAgent
+from ..domain.ports import PersonalAgents
+from ..domain.settings import PROVIDER_PROTOCOLS, REASONING_LEVELS, protocol_for
 from ..service import Service
-from .api import service_of
+from .api import service_of, visible_repos
 from .auth import User, current_user
-
-_BASE_URL = re.compile(r"^https?://[^\s/]+(/[^\s]*)?$")
+from .model_apis import ApiForm, ProbeBody, list_models, refused_address
+from .settings import examined, provider_row
 
 
 class SetupBody(BaseModel):
     use_own: bool = False
-    provider: PersonalProvider | None = None
-
-
-class KeyBody(BaseModel):
-    value: str = Field(min_length=1, max_length=4000)
+    provider: str | None = Field(default=None, max_length=64)
+    """One of the user's own model APIs; none, the CLI's own sign-in."""
+    model: str | None = Field(default=None, max_length=200)
+    effort: str | None = None
 
 
 class CodeBody(BaseModel):
     code: str = Field(min_length=1, max_length=4000)
 
 
+class SignInBody(BaseModel):
+    option: str | None = Field(default=None, max_length=64)
+    """What to sign in to, where the CLI offers several (``sign_in_options``)."""
+
+
+def sign_in_options(runtime: Any) -> list[dict[str, str]]:
+    """The account kinds a CLI's sign-in offers, for the dashboard to pick from."""
+    return [
+        {"id": o, "label": label} for o, label in getattr(runtime, "login_options", ())
+    ]
+
+
+def can_sign_in(runtime: Any) -> bool:
+    can = getattr(runtime, "can_sign_in", None)
+    return bool(can and can())
+
+
 def _adapter(runtime: Any, name: str) -> str:
     """The adapter a runtime comes from, for its provider protocols."""
     return str(getattr(type(runtime), "default_name", name))
+
+
+def _people(service: Service) -> PersonalAgents:
+    if service.a.people is None:
+        raise HTTPException(409, "this host keeps no personal agent accounts")
+    return service.a.people
+
+
+async def _providers(service: Service, user: User) -> list[dict[str, Any]]:
+    """The user's own model APIs, as the forms show them."""
+    people = service.a.people
+    if people is None:
+        return []
+    keyed = await people.keyed(user.login)
+    setups = await people.get(user.login)
+    return [
+        {
+            **provider_row(pid, p),
+            "has_key": pid in keyed,
+            "used_by": sorted(n for n, s in setups.items() if s.provider == pid),
+        }
+        for pid, p in sorted((await people.providers(user.login)).items())
+    ]
 
 
 async def _agent_row(service: Service, user: User, name: str) -> dict[str, Any]:
@@ -75,10 +119,12 @@ async def _agent_row(service: Service, user: User, name: str) -> dict[str, Any]:
     )
     return {
         "name": name,
-        "can_sign_in": bool(getattr(runtime, "login_args", ())),
+        "can_sign_in": can_sign_in(runtime),
+        "sign_in_options": sign_in_options(runtime),
         "signed_in": await service.signed_in(name, user.login.lower())
-        if getattr(runtime, "login_args", ())
+        if can_sign_in(runtime)
         else None,
+        "adapter": _adapter(runtime, name),
         "protocols": sorted(PROVIDER_PROTOCOLS.get(_adapter(runtime, name), ())),
         "isolated": service.agents_isolated(name),
         "setup": (setup or PersonalAgent(agent=name)).model_dump(mode="json"),
@@ -116,72 +162,151 @@ def build_router() -> APIRouter:
         return {
             "personal": service.a.people is not None,
             "agents": [await _agent_row(service, user, n) for n in names],
+            "providers": await _providers(service, user),
         }
 
     @r.put("/me/agents/{name}")
     async def set_my_agent(
         request: Request, name: str, body: SetupBody, user: User = Depends(current_user)
     ) -> dict[str, Any]:
-        """Turn the user's own account for agent ``name`` on or off, or set their own
-        model API for it (its key separately, write-only)."""
+        """Turn the user's own account for agent ``name`` on or off, and choose
+        whether it runs on their CLI sign-in or on one of their own model APIs, with
+        which model and reasoning level."""
         service = service_of(request)
         _ready(service, name)
-        if service.a.people is None:
-            raise HTTPException(409, "this host keeps no personal agent accounts")
+        people = _people(service)
         if body.use_own and not service.agents_isolated(name):
             raise HTTPException(
                 409,
                 "agents run on the host here, where every run could read every "
                 "person's sign-in, so personal accounts are off",
             )
-        if body.provider is not None:
-            allowed = PROVIDER_PROTOCOLS.get(_adapter(service.runtime(name), name), ())
-            if body.provider.protocol not in allowed:
+        if body.effort and body.effort not in REASONING_LEVELS:
+            raise HTTPException(
+                422, f"the reasoning level is one of {', '.join(REASONING_LEVELS)}"
+            )
+        model = body.model or None
+        if body.provider:
+            api = (await people.providers(user.login)).get(body.provider)
+            if api is None:
+                raise HTTPException(422, f"you have no model API {body.provider!r}")
+            model = model or (api.model_ids[0] if api.models else None)
+            if api.models and model not in api.model_ids:
+                raise HTTPException(422, f"{body.provider} lists no model {model!r}")
+            spec = api.model(model)
+            adapter = _adapter(service.runtime(name), name)
+            if protocol_for(adapter, api.protocol, spec) is None:
                 raise HTTPException(
-                    422, f"{name} cannot use a {body.provider.protocol} API"
+                    422, f"{name} cannot use {model or body.provider} over its APIs"
                 )
-            if not _BASE_URL.match(body.provider.base_url.strip()):
-                raise HTTPException(422, "the base URL must look like https://host/v1")
-        current = (await service.a.people.get(user.login)).get(name)
+            if (
+                body.effort
+                and spec
+                and spec.reasoning
+                and body.effort not in spec.reasoning
+            ):
+                raise HTTPException(
+                    422,
+                    f"{model} takes the reasoning levels {', '.join(spec.reasoning)}",
+                )
         setup = PersonalAgent(
             agent=name,
             use_own=body.use_own,
-            provider=body.provider,
-            has_key=bool(current and current.has_key),
+            provider=body.provider or None,
+            model=model if body.provider else None,
+            effort=body.effort or None,
         )
-        await service.a.people.put(user.login, setup)
+        await people.put(user.login, setup)
         return await _agent_row(service, user, name)
 
-    @r.put("/me/agents/{name}/key")
-    async def set_my_key(
-        request: Request, name: str, body: KeyBody, user: User = Depends(current_user)
+    @r.put("/me/providers/{provider_id}")
+    async def put_my_provider(
+        request: Request,
+        provider_id: str,
+        body: ApiForm,
+        user: User = Depends(current_user),
     ) -> dict[str, Any]:
-        """Store the key of the user's own model API for agent ``name``."""
+        """Add or change one of the user's own model APIs. A key typed into the form
+        is stored apart, for the runs of the user's own tasks only, and never sent
+        back."""
         service = service_of(request)
-        _ready(service, name)
-        if service.a.people is None:
-            raise HTTPException(409, "this host keeps no personal agent accounts")
-        await service.a.people.set_key(user.login, name, body.value.strip())
-        return await _agent_row(service, user, name)
+        people = _people(service)
+        try:
+            provider = body.model_copy(update={"api_key": None}).provider()
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from e
+        try:
+            await people.put_provider(user.login, provider_id, provider)
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from e
+        if body.key:
+            await people.set_provider_key(user.login, provider_id, body.key.strip())
+        return {"providers": await _providers(service, user)}
 
-    @r.delete("/me/agents/{name}/key")
-    async def delete_my_key(
-        request: Request, name: str, user: User = Depends(current_user)
+    @r.delete("/me/providers/{provider_id}")
+    async def delete_my_provider(
+        request: Request, provider_id: str, user: User = Depends(current_user)
     ) -> dict[str, Any]:
+        """Remove one of the user's model APIs with its key; their agents that ran
+        on it go back to their CLI's sign-in."""
         service = service_of(request)
-        if service.a.people is not None:
-            await service.a.people.set_key(user.login, name, None)
-        return await _agent_row(service, user, name)
+        people = _people(service)
+        if provider_id not in await people.providers(user.login):
+            raise HTTPException(404, f"you have no model API {provider_id!r}")
+        await people.put_provider(user.login, provider_id, None)
+        return {"providers": await _providers(service, user)}
+
+    async def _probe_key(service: Service, user: User, body: ProbeBody) -> str | None:
+        """The key a personal probe uses, after checking the user may make one: a
+        person with a repository here, to an address the host may reach for them."""
+        if not await visible_repos(service, user):
+            raise HTTPException(403, "only people with a repository here ask endpoints")
+        refused = await refused_address(body.base_url)
+        if refused:
+            raise HTTPException(422, refused)
+        if body.key:
+            return body.key.strip()
+        if body.provider:
+            return await _people(service).provider_key(user.login, body.provider)
+        return None
+
+    @r.post("/me/providers/query")
+    async def query_my_provider(
+        request: Request, body: ProbeBody, user: User = Depends(current_user)
+    ) -> dict[str, Any]:
+        """The models one of the user's endpoints lists, with what it says of each,
+        before or after it is saved; spends no tokens."""
+        service = service_of(request)
+        key = await _probe_key(service, user, body)
+        return await list_models(body.protocol, body.base_url, key)
+
+    @r.post("/me/providers/examine")
+    async def examine_my_provider(
+        request: Request, body: ProbeBody, user: User = Depends(current_user)
+    ) -> dict[str, Any]:
+        """Talk to one of the user's models to learn what it can do, on their key;
+        spends a few thousand of their tokens."""
+        service = service_of(request)
+        if not body.model:
+            raise HTTPException(422, "name the model to examine")
+        key = await _probe_key(service, user, body)
+        return await examined(body, key)
 
     @r.post("/me/agents/{name}/sign-in")
     async def sign_me_in(
-        request: Request, name: str, user: User = Depends(current_user)
+        request: Request,
+        name: str,
+        body: SignInBody | None = None,
+        user: User = Depends(current_user),
     ) -> dict[str, Any]:
-        """Start agent ``name``'s own sign-in for the user's own account."""
+        """Start agent ``name``'s own sign-in for the user's own account, to the
+        account kind ``option`` where the CLI offers several."""
         service = service_of(request)
         _ready(service, name)
         try:
-            state = service.start_login(name, user.login.lower(), user.login)
+            state = service.start_login(
+                name, user.login.lower(), user.login, body.option if body else None
+            )
         except ValueError as e:
             raise HTTPException(409, str(e)) from e
         return state.model_dump(mode="json")
@@ -203,17 +328,22 @@ def build_router() -> APIRouter:
 
     @r.post("/settings/agents/{name}/sign-in")
     async def sign_service_in(
-        request: Request, name: str, user: User = Depends(current_user)
+        request: Request,
+        name: str,
+        body: SignInBody | None = None,
+        user: User = Depends(current_user),
     ) -> dict[str, Any]:
-        """Start agent ``name``'s own sign-in for the service's account: maintainers
-        of the service's repository only, as for every service setting."""
+        """Start agent ``name``'s own sign-in for the service's account: its owner
+        only, as for every service setting."""
         service = service_of(request)
         decision = await service.service_gate(user.login)
         if not decision.allowed:
             raise HTTPException(403, decision.reason)
         _ready(service, name)
         try:
-            state = service.start_login(name, None, user.login)
+            state = service.start_login(
+                name, None, user.login, body.option if body else None
+            )
         except ValueError as e:
             raise HTTPException(409, str(e)) from e
         return state.model_dump(mode="json")

@@ -1,22 +1,25 @@
 // Settings: how the service runs. Agents, model providers, default routes, and system
-// values in one place, each row showing its current value. Changes are made by asking
-// the agent (it drafts the edit, you apply it) or by editing the settings file; API keys
-// go only into their key fields. Only the owner of the service's repository applies
-// changes; anyone else's wait for one.
+// values in one place, each row showing its current value. Changes are made in place
+// (an agent's model, a provider's form), by asking the agent (it drafts the edit, you
+// apply it), or by editing the settings file; API keys go only into their key fields.
+// Only the owner of the service applies changes; anyone else's wait for the owner. The
+// Agents and Model providers tabs also hold the signed-in person's own agents and
+// model APIs, which are theirs alone.
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { api, type AgentChoices, type AgentInstall, type LabMachine, type MachineCheck, type MachineDraft, type SettingsAgent, type SettingsCheck, type SandboxView, type SettingsProvider, type SettingsView } from "../api";
 import { useAgent, type AgentContext } from "../agent";
-import { Diff, Empty, ErrorBox, PageHead, Section, Status, useAct, When } from "../components";
+import { Diff, Empty, ErrorBox, PageHead, Section, Status, useAct, When, GrowingTextarea } from "../components";
 import { useRepos, useSettings } from "../data";
 import { useT } from "../i18n";
 import { Icon, type IconName } from "../icons";
 import { agentName } from "../agentPicker";
 import { useAgentsData } from "./Agents";
 import { SettingsChangeCard } from "../settingsChange";
-import { MyAgentsTab, ServiceSignIn } from "../agentAccounts";
+import { MyAgentsSection, MyApisSection, ServiceSignIn } from "../agentAccounts";
+import { ApiForm, ApiSummary, modelsFor, PROTOCOLS } from "../providerForm";
 import { ForgesCard } from "../forgeSetup";
 import { OwnerCard } from "../ownerCard";
 import { Popover, Skeleton, Tabs, useTab, useToast } from "../ui";
@@ -49,19 +52,12 @@ const TASKS: Record<string, string> = {
   translate: "Translates reviews for reading on the dashboard",
 };
 
-const PROTOCOL: Record<string, string> = {
-  anthropic: "Anthropic Messages",
-  openai: "OpenAI Chat Completions",
-  "openai-responses": "OpenAI Responses",
-};
-
 export default function SettingsPage() {
   const t = useT();
   const agent = useAgent();
   const view = useSettings();
   const tabs = [
     { id: "agents", label: t("Agents"), count: view.data?.agents.filter((a) => a.enabled).length },
-    { id: "mine", label: t("My agents") },
     { id: "providers", label: t("Model providers"), count: view.data?.providers.length },
     { id: "routing", label: t("Task routing") },
     { id: "labs", label: t("Test machines"), count: view.data?.labs.length },
@@ -147,11 +143,16 @@ export default function SettingsPage() {
       {tab === "agents" && (
         <div className="stack" style={{ gap: 16 }}>
           <AgentsTab v={v} ask={ask} />
+          <MyAgentsSection />
           <SandboxCard />
         </div>
       )}
-      {tab === "mine" && <MyAgentsTab />}
-      {tab === "providers" && <ProvidersTab v={v} ask={ask} />}
+      {tab === "providers" && (
+        <div className="stack" style={{ gap: 16 }}>
+          <ProvidersTab v={v} ask={ask} />
+          <MyApisSection />
+        </div>
+      )}
       {tab === "routing" && <RoutingTab v={v} ask={ask} />}
       {tab === "labs" && <LabsTab v={v} ask={ask} />}
       {tab === "system" && (
@@ -190,9 +191,8 @@ function AskCard({ onAsk }: { onAsk: (prompt: string, send?: boolean) => void })
           }
         }}
       >
-        <textarea
+        <GrowingTextarea
           value={text}
-          rows={Math.min(5, Math.max(1, text.split("\n").length))}
           placeholder={t("For example: use DeepSeek for Claude Code, and let Codex verify reviews")}
           aria-label={t("What should change?")}
           onChange={(e) => setText(e.target.value)}
@@ -256,26 +256,73 @@ const SKIP_FLAG: Record<string, string> = {
 
 /** Turn an agent's own skip-permissions mode on or off: a settings change, applied at
  * once for the owner of the service's repository and proposed otherwise. */
-/** The model and reasoning level an agent uses when a route names none, chosen among
- * what its CLI offers (asked of the CLI itself where it can say). */
-function ModelControls({ agent, choices, canChange }: { agent: SettingsAgent; choices: AgentChoices | null | undefined; canChange: boolean }) {
+/** What an agent runs on when a route names nothing else: its CLI's own sign-in or a
+ * model provider that serves a model it can run, which model, and a reasoning level
+ * that model takes (the provider's tested levels, else what the CLI offers). */
+function ModelControls({
+  agent,
+  choices,
+  providers,
+  canChange,
+}: {
+  agent: SettingsAgent;
+  choices: AgentChoices | null | undefined;
+  providers: SettingsProvider[];
+  canChange: boolean;
+}) {
   const t = useT();
   const toast = useToast();
   const set = useAct(
-    (body: { model: string | null; effort: string | null }) => api.put<{ approved: boolean }>(`/api/settings/agents/${agent.name}/model`, body),
+    (body: { model: string | null; effort: string | null; provider?: string | null }) => api.put<{ approved: boolean }>(`/api/settings/agents/${agent.name}/model`, body),
     [["settings"], ["memory"]],
   );
   const done = (r: { approved: boolean }) => toast({ title: r.approved ? t("Saved") : t("Change proposed"), icon: r.approved ? "check" : "inbox" });
-  const models = choices?.models ?? [];
-  const efforts = choices?.efforts ?? [];
-  const nameOf = (id: string | null | undefined) => (id ? models.find((m) => m.id === id)?.name || id : null);
+  const usable = providers.filter((p) => modelsFor(p, agent.adapter).length > 0 || p.id === agent.provider);
+  const provider = providers.find((p) => p.id === agent.provider);
+  const providerModels = provider ? modelsFor(provider, agent.adapter) : [];
+  const cliModels = choices?.models ?? [];
+  const nameOf = (id: string | null | undefined) => (id ? cliModels.find((m) => m.id === id)?.name || id : null);
   const cliModel = nameOf(choices?.default_model);
-  const cliEffort = choices?.default_effort;
+  const spec = provider?.models.find((m) => m.id === (agent.model ?? providerModels[0]?.id));
+  const efforts = provider ? (spec?.reasoning.length ? spec.reasoning : []) : (choices?.efforts ?? []);
+  const cliEffort = provider ? null : choices?.default_effort;
   const disabled = !canChange || set.isPending;
   const title = canChange ? undefined : t("Only the owner of this service changes agents.");
   return (
     <span className="row model-controls" style={{ gap: 6 }}>
-      {models.length > 0 ? (
+      {(usable.length > 0 || agent.provider) && (
+        <select
+          value={agent.provider ?? ""}
+          disabled={disabled}
+          title={title ?? t("What the agent runs on")}
+          aria-label={`${agent.name}: ${t("Runs on")}`}
+          onChange={(e) => set.mutate({ provider: e.target.value || null, model: null, effort: null }, { onSuccess: done })}
+        >
+          <option value="">{t("its own sign-in")}</option>
+          {usable.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.name || p.id}
+            </option>
+          ))}
+        </select>
+      )}
+      {provider ? (
+        <select
+          value={agent.model ?? ""}
+          disabled={disabled}
+          title={title}
+          aria-label={`${agent.name}: ${t("Model")}`}
+          onChange={(e) => set.mutate({ model: e.target.value || null, effort: null }, { onSuccess: done })}
+        >
+          <option value="">{providerModels[0] ? `${providerModels[0].id} (${t("the provider's first")})` : t("the provider's first")}</option>
+          {providerModels.map((m) => (
+            <option key={m.id} value={m.id}>
+              {m.id}
+            </option>
+          ))}
+          {agent.model && !providerModels.some((m) => m.id === agent.model) && <option value={agent.model}>{agent.model}</option>}
+        </select>
+      ) : cliModels.length > 0 ? (
         <select
           value={agent.model ?? ""}
           disabled={disabled}
@@ -284,12 +331,12 @@ function ModelControls({ agent, choices, canChange }: { agent: SettingsAgent; ch
           onChange={(e) => set.mutate({ model: e.target.value || null, effort: agent.effort }, { onSuccess: done })}
         >
           <option value="">{cliModel ? `${cliModel} (${t("the CLI's default")})` : t("the CLI's default")}</option>
-          {models.map((m) => (
+          {cliModels.map((m) => (
             <option key={m.id} value={m.id}>
               {m.name || m.id}
             </option>
           ))}
-          {agent.model && !models.some((m) => m.id === agent.model) && <option value={agent.model}>{agent.model}</option>}
+          {agent.model && !cliModels.some((m) => m.id === agent.model) && <option value={agent.model}>{agent.model}</option>}
         </select>
       ) : null}
       {efforts.length > 0 ? (
@@ -570,7 +617,7 @@ function AgentsTab({ v, ask }: { v: SettingsView; ask: (p: string, send?: boolea
                   <strong>
                     {a.model
                       ? modelName(a.model)
-                      : (provider?.models[0] ?? (choices?.default_model ? `${modelName(choices.default_model)} (${t("the CLI's default")})` : t("the CLI's default")))}
+                      : (provider?.models[0]?.id ?? (choices?.default_model ? `${modelName(choices.default_model)} (${t("the CLI's default")})` : t("the CLI's default")))}
                   </strong>
                   {(a.effort || choices?.default_effort) && (
                     <>
@@ -596,11 +643,11 @@ function AgentsTab({ v, ask }: { v: SettingsView; ask: (p: string, send?: boolea
               }
               actions={
                 <span className="row" style={{ gap: 4 }}>
-                  {a.enabled && a.installed !== false && !a.provider && (
-                    <ModelControls agent={a} choices={choices} canChange={v.access.allowed} />
+                  {a.enabled && a.installed !== false && (
+                    <ModelControls agent={a} choices={choices} providers={v.providers} canChange={v.access.allowed} />
                   )}
                   {a.can_bypass && <AgentModeSwitch agent={a} canChange={v.access.allowed} />}
-                  {a.enabled && a.installed !== false && <ServiceSignIn name={a.name} canChange={v.access.allowed} />}
+                  {a.enabled && a.installed !== false && <ServiceSignIn name={a.name} options={a.sign_in_options} canChange={v.access.allowed} />}
                   {v.installable[a.name] && (a.installed === false || v.installs[a.name]?.state === "running") && (
                     <InstallButton name={a.name} source={v.installable[a.name]} state={v.installs[a.name]} canInstall={v.access.allowed} />
                   )}
@@ -628,28 +675,35 @@ function AgentsTab({ v, ask }: { v: SettingsView; ask: (p: string, send?: boolea
 
 function ProvidersTab({ v, ask }: { v: SettingsView; ask: (p: string, send?: boolean) => void }) {
   const t = useT();
+  const toast = useToast();
+  const [adding, setAdding] = useState(false);
+  const saved = (approved: boolean) => {
+    setAdding(false);
+    toast({ title: approved ? t("Saved") : t("Change proposed"), icon: approved ? "check" : "inbox" });
+  };
   return (
     <Section
-      title={t("Model providers")}
-      hint={t("Endpoints agents use instead of their CLI's own sign-in")}
+      title={t("Service providers")}
+      hint={t("Model APIs the service's agents can use instead of their CLI's own sign-in")}
       aside={
-        <button className="primary sm" onClick={() => ask(t("Add a model provider. Name: , protocol (OpenAI-compatible or Anthropic): , base URL: , models: , and use it for: "))}>
-          <Icon name="plus" size={14} />
-          {t("Add provider")}
-        </button>
+        <span className="row" style={{ gap: 6 }}>
+          <ChangeButton onClick={() => ask(t("Add a model provider. Name: , API (OpenAI, Anthropic, or Gemini): , base URL: , models: , and use it for: "))} />
+          {!adding && (
+            <button className="primary sm" onClick={() => setAdding(true)}>
+              <Icon name="plus" size={14} />
+              {t("Add provider")}
+            </button>
+          )}
+        </span>
       }
     >
-      {v.providers.length === 0 ? (
-        <Empty icon="globe">
-          {t("No custom providers. Every agent uses its CLI's own sign-in.")}
-          <div className="small" style={{ marginTop: 6 }}>
-            {t("Ask the agent to add one, then paste its key here.")}
-          </div>
-        </Empty>
+      {adding && <ApiForm base="/api/settings/providers" hasKey={false} service onDone={(ok) => (ok ? saved(true) : saved(false))} />}
+      {v.providers.length === 0 && !adding ? (
+        <Empty icon="globe">{t("No providers. Every agent uses its CLI's own sign-in.")}</Empty>
       ) : (
         <div className="list">
           {v.providers.map((p) => (
-            <ProviderRow key={p.id} p={p} canEdit={v.access.allowed} ask={ask} />
+            <ProviderRow key={p.id} p={p} canEdit={v.access.allowed} />
           ))}
         </div>
       )}
@@ -660,114 +714,87 @@ function ProvidersTab({ v, ask }: { v: SettingsView; ask: (p: string, send?: boo
   );
 }
 
-function ProviderRow({ p, canEdit, ask }: { p: SettingsProvider; canEdit: boolean; ask: (p: string, send?: boolean) => void }) {
+function ProviderRow({ p, canEdit }: { p: SettingsProvider; canEdit: boolean }) {
   const t = useT();
   const toast = useToast();
-  const [editing, setEditing] = useState(!!p.api_key && !p.key?.configured && canEdit);
-  const [value, setValue] = useState("");
-  const [show, setShow] = useState(false);
-  const save = useAct((v: string) => api.put(`/api/settings/secrets/${p.api_key}`, { value: v }), [["settings"]]);
-  const test = useAct(() => api.post<{ ok: boolean; models: string[]; error?: string }>(`/api/settings/providers/${p.id}/test`), []);
+  const [editing, setEditing] = useState(false);
+  const [confirm, setConfirm] = useState(false);
+  const test = useAct(() => api.post<{ ok: boolean; models: { id: string }[]; error?: string }>(`/api/settings/providers/${p.id}/test`), []);
+  const remove = useAct(() => api.del<{ approved: boolean }>(`/api/settings/providers/${p.id}`), [["settings"], ["memory"]]);
   const key = p.key;
+  if (editing) {
+    return (
+      <div className="list-row" style={{ display: "block", padding: "12px 0" }}>
+        <ApiForm
+          base="/api/settings/providers"
+          initial={p}
+          hasKey={!!key?.configured}
+          service
+          onDone={(approved) => {
+            setEditing(false);
+            toast({ title: approved ? t("Saved") : t("Change proposed"), icon: approved ? "check" : "inbox" });
+          }}
+        />
+      </div>
+    );
+  }
   return (
     <div className="list-row" style={{ flexDirection: "column", alignItems: "stretch", gap: 8, padding: "14px 4px" }}>
-      <div className="row">
+      <div className="row" style={{ flexWrap: "wrap" }}>
         <Icon name="globe" />
         <strong>{p.name || p.id}</strong>
         <span className="mono muted">{p.id}</span>
-        <span className="pill status-muted">{PROTOCOL[p.protocol] ?? p.protocol}</span>
+        <span className="pill status-muted">{PROTOCOLS[p.protocol] ?? p.protocol}</span>
         <span className="spacer" />
         {canEdit && (
-          <button
-            className="sm"
-            disabled={test.isPending}
-            onClick={() => test.mutate(undefined)}
-            title={t("List the endpoint's models with the stored key; spends no tokens")}
-          >
+          <button className="sm" disabled={test.isPending} onClick={() => test.mutate(undefined)} title={t("List the endpoint's models with the stored key; spends no tokens")}>
             <Icon name="activity" size={13} />
             {test.isPending ? t("Testing…") : t("Test connection")}
           </button>
         )}
-        <ChangeButton onClick={() => ask(`${t("For the provider")} ${p.id}, `)} />
+        <button className="sm" onClick={() => setEditing(true)} title={canEdit ? undefined : t("Your change waits for the owner")}>
+          {t("Edit")}
+        </button>
+        {confirm ? (
+          <button className="danger sm" disabled={remove.isPending} onClick={() => remove.mutate(undefined, { onSuccess: (r) => toast({ title: r.approved ? t("Removed") : t("Change proposed"), icon: "check" }) })}>
+            {t("Remove it")}
+          </button>
+        ) : (
+          <button className="ghost sm" onClick={() => setConfirm(true)} disabled={p.used_by.length > 0} title={p.used_by.length ? t("Agents use it; point them elsewhere first") : undefined}>
+            {t("Remove")}
+          </button>
+        )}
       </div>
-      <dl className="props" style={{ paddingLeft: 26 }}>
-        <dt>{t("Base URL")}</dt>
-        <dd>
-          <code>{p.base_url}</code>
-        </dd>
-        <dt>{t("Models")}</dt>
-        <dd className="labels">{p.models.length ? p.models.map((m) => <span key={m} className="label">{m}</span>) : <span className="muted">—</span>}</dd>
-        <dt>{t("Used by")}</dt>
-        <dd>{p.used_by.length ? p.used_by.join(", ") : <span className="muted">{t("no agent yet")}</span>}</dd>
-        <dt>{t("API key")}</dt>
-        <dd>
-          {!p.api_key ? (
-            <span className="muted">{t("none needed")}</span>
-          ) : (
-            <span className="row" style={{ gap: 8 }}>
-              <code>{p.api_key}</code>
-              {key?.configured ? (
-                <Status value="executed" label={key.source === "host" ? t("set on the host") : t("set")} />
+      <ApiSummary
+        row={p}
+        extra={
+          <>
+            <dt>{t("Used by")}</dt>
+            <dd>{p.used_by.length ? p.used_by.join(", ") : <span className="muted">{t("no agent yet")}</span>}</dd>
+            <dt>{t("API key")}</dt>
+            <dd>
+              {!p.api_key ? (
+                <span className="muted">{t("none needed")}</span>
               ) : (
-                <Status value="pending" label={t("missing")} />
-              )}
-              {key?.updated_by && (
-                <span className="small muted">
-                  {key.updated_by} · <When at={key.updated_at} />
+                <span className="row" style={{ gap: 8 }}>
+                  <code>{p.api_key}</code>
+                  {key?.configured ? <Status value="executed" label={key.source === "host" ? t("set on the host") : t("set")} /> : <Status value="pending" label={t("missing")} />}
+                  {key?.updated_by && (
+                    <span className="small muted">
+                      {key.updated_by} · <When at={key.updated_at} />
+                    </span>
+                  )}
                 </span>
               )}
-              {canEdit && !editing && (
-                <button className="ghost sm" onClick={() => setEditing(true)}>
-                  <Icon name="key" size={13} />
-                  {key?.configured ? t("Replace") : t("Set key")}
-                </button>
-              )}
-            </span>
-          )}
-        </dd>
-      </dl>
-      {editing && p.api_key && (
-        <form
-          className="row"
-          style={{ paddingLeft: 26 }}
-          onSubmit={(e) => {
-            e.preventDefault();
-            save.mutate(value.trim(), {
-              onSuccess: () => {
-                setValue("");
-                setEditing(false);
-                toast({ title: `${p.api_key} ${t("saved")}`, body: t("The agents that use it restart with the new key."), icon: "key" });
-              },
-            });
-          }}
-        >
-          <input
-            type={show ? "text" : "password"}
-            autoComplete="off"
-            spellCheck={false}
-            value={value}
-            onChange={(e) => setValue(e.target.value)}
-            placeholder={key?.configured ? t("•••••••• (leave empty to keep the stored key)") : t("Paste the API key")}
-            aria-label={`${p.api_key} ${t("value")}`}
-            style={{ flex: 1, minWidth: 220, fontFamily: "var(--mono)" }}
-          />
-          <button type="button" className="ghost sm" onClick={() => setShow(!show)} aria-label={show ? t("Hide") : t("Show")}>
-            <Icon name="eye" size={14} />
-          </button>
-          <button className="primary sm" disabled={!value.trim() || save.isPending}>
-            {t("Save key")}
-          </button>
-          <button type="button" className="ghost sm" onClick={() => (setEditing(false), setValue(""))}>
-            {t("Cancel")}
-          </button>
-        </form>
-      )}
+            </dd>
+          </>
+        }
+      />
       {test.data && (
         <div className={test.data.ok ? "notice small" : "error"} style={{ marginLeft: 26 }}>
           {test.data.ok ? (
             <>
               <Icon name="check" size={13} /> {t("Connected")}: {test.data.models.length} {t("models")}
-              {test.data.models.length > 0 && <span className="muted"> ({test.data.models.slice(0, 8).join(", ")}{test.data.models.length > 8 ? ", …" : ""})</span>}
             </>
           ) : (
             test.data.error
@@ -775,7 +802,7 @@ function ProviderRow({ p, canEdit, ask }: { p: SettingsProvider; canEdit: boolea
         </div>
       )}
       <div style={{ paddingLeft: 26 }}>
-        <ErrorBox error={save.error || test.error} />
+        <ErrorBox error={test.error || remove.error} />
       </div>
     </div>
   );

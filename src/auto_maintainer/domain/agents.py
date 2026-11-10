@@ -367,24 +367,21 @@ class AgentLogin(BaseModel):
     started_at: datetime
 
 
-class PersonalProvider(BaseModel):
-    """A person's own model API for one agent; its key is kept apart, write-only."""
-
-    protocol: str
-    base_url: str
-    models: list[str] = Field(default_factory=list)
-
-
 class PersonalAgent(BaseModel):
     """How one person runs one agent for the work they ask for."""
 
     agent: str
     use_own: bool = False
-    """Run what this person asks on their own account: their CLI sign-in, or their
-    model API when ``provider`` is set. Only on hosts that run agents in containers."""
-    provider: PersonalProvider | None = None
-    has_key: bool = False
-    """Whether a key for ``provider`` is stored (the key itself never leaves)."""
+    """Run what this person asks on their own account: their CLI sign-in, or one of
+    their own model APIs when ``provider`` names it. Only on hosts that run agents in
+    containers."""
+    provider: str | None = None
+    """The id of the person's own model API (a ``Provider`` of theirs) to run on
+    instead of the CLI's sign-in."""
+    model: str | None = None
+    """A model of that API; its first model when unset."""
+    effort: str | None = None
+    """A reasoning level the model accepts; the task's own when unset."""
 
 
 class AgentInstall(BaseModel):

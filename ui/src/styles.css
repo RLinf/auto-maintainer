@@ -456,7 +456,7 @@ label.field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; 
 .agent-foot { border-top: 1px solid var(--border); padding: 10px; display: flex; flex-direction: column; gap: 8px; }
 .composer { display: flex; align-items: flex-end; gap: 8px; border: 1px solid var(--border-strong); border-radius: 14px; padding: 6px 6px 6px 12px; background: var(--surface); }
 .composer:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--ring); }
-.composer textarea { border: none; box-shadow: none; padding: 6px 0; min-height: 22px; max-height: 160px; font-family: var(--sans); font-size: 14px; resize: none; background: transparent; }
+.composer textarea { border: none; box-shadow: none; padding: 6px 0; min-height: 22px; max-height: min(40vh, 320px); font-family: var(--sans); font-size: 14px; resize: none; background: transparent; }
 .composer textarea:focus { box-shadow: none; }
 .suggestions { display: flex; gap: 6px; flex-wrap: wrap; }
 .suggestion { height: 28px; font-size: 12.5px; border-radius: 999px; border: 1px solid var(--border-strong); background: var(--surface); color: var(--text-2); padding: 0 11px; box-shadow: none; }
@@ -855,3 +855,11 @@ details.pv-section[open] > summary { margin-bottom: 6px; }
 .people .role-row > summary > .role-badge { flex-shrink: 0; }
 .lab-output { max-height: 320px; overflow: auto; font-size: 11.5px; }
 .plan-steps { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 3px; }
+.api-form { gap: 12px; padding: 14px; background: var(--surface-2); width: 100%; }
+.api-form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px 12px; }
+.api-form-grid input, .api-form-grid select { width: 100%; min-width: 0; }
+.model-list { display: grid; gap: 6px; }
+.model-line { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; padding: 6px 8px; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--surface); min-width: 0; }
+.model-line > code { overflow-wrap: anywhere; }
+.found-models { display: grid; gap: 4px; max-height: 240px; overflow: auto; }
+.found-models code { overflow-wrap: anywhere; }

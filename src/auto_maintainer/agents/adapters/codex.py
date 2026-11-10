@@ -147,20 +147,25 @@ class CodexRuntime(ExecRuntime):
 
     def provider_args(self) -> list[str]:
         """``-c`` overrides that define and select ``self.provider``; the key itself is
-        read from ``AM_PROVIDER_API_KEY`` (``env_key``), never put on the command line."""
+        read from ``AM_PROVIDER_API_KEY`` (``env_key``), never put on the command line.
+        The provider speaks the Responses API, the only ``wire_api`` Codex still loads
+        (0.167.0 refuses ``chat``); a known context window of the model goes in
+        ``model_context_window``."""
         p = self.provider
         if p is None:
             return []
         key = f"model_providers.am-{p.id}"
-        wire = "responses" if p.protocol == "openai-responses" else "chat"
-        pairs = [
+        pairs: list[tuple[str, Any]] = [
             ("model_provider", f"am-{p.id}"),
             (f"{key}.name", p.name or p.id),
             (f"{key}.base_url", p.base_url),
-            (f"{key}.wire_api", wire),
+            (f"{key}.wire_api", "responses"),
         ]
         if p.api_key:
             pairs.append((f"{key}.env_key", "AM_PROVIDER_API_KEY"))
+        spec = p.spec(self.model or (p.models[0] if p.models else None))
+        if spec is not None and spec.context_window:
+            pairs.append(("model_context_window", spec.context_window))
         args: list[str] = []
         for name, value in pairs:
             args += ["-c", f"{name}={json.dumps(value)}"]

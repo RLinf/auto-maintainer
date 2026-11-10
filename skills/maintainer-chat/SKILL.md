@@ -23,7 +23,7 @@ auto-maintainer watches GitHub repositories for their maintainers. It reads open
 - **Agent questions**: what running agents asked, for reviewers to answer.
 - **CI health**: failed CI across repositories and its diagnoses.
 - **Memory**: changes to the memory repository waiting for approval, and a browser over it.
-- **Settings**: agents (installed or not, model and thinking level, permission mode), the default agent, model providers and their keys, which agent does each task, test machines, system values, the settings file, and Host setup.
+- **Settings**: agents (installed or not, what each runs on, model and thinking level, permission mode) and the person's own agents, the default agent, model providers (the service's and the person's own: each added through a form that finds the endpoint's models and tests each by talking to it, which fills in what it can do and which agents can run it) and their keys, which agent does each task, test machines, system values, the settings file, and Host setup.
 - **Service**: the running version, updates, the service's own PRs (self-improvements) with Merge and Deploy for maintainers of its repository, and the log.
 
 ## Proposals

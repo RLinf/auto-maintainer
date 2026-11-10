@@ -23,22 +23,34 @@ holds the text, the usage, and ``stopReason`` (``error`` or ``aborted`` fails th
 run, and pi exits 1). ``--no-session`` keeps nothing; ``--offline`` and
 ``PI_TELEMETRY=0`` stop its update checks and install pings.
 
-pi cannot ask: its ``bash`` tool runs anything. Outside bypass mode a task therefore
+pi cannot ask: its ``bash`` tool runs anything. Its interactive UI, where it signs in
+(``/login``), also runs any shell command typed after ``!``, so the service never
+shows it to anyone: the dashboard signs pi in to a subscription (``login_options``)
+through ``agents/pi_login.mjs``, which calls the sign-in that UI calls
+(``AuthStorage.login`` of pi's own package) and relays only the page to open and the
+code to paste, the way every CLI's sign-in is relayed (``agents/login.py``). Outside bypass mode a task therefore
 gets only the tools that cannot run code (``--tools``): read, grep, find, and ls, with
 edit and write for a task that may change its checkout. In a container the service
 runs it in bypass mode with every tool. It signs in with ``/login`` (kept in
 ``~/.pi/agent``, mounted into containers) or a provider's API key in its usual
 environment variable; a model provider from the service settings goes into a
 ``models.json`` of the run's own (``PI_CODING_AGENT_DIR``), whose ``apiKey`` names
-``AM_PROVIDER_API_KEY`` instead of holding the key.
+the environment variable ``AM_PROVIDER_API_KEY`` instead of holding the key (pi reads
+a value that names a set variable from it, ``core/resolve-config-value``), with what
+is known of the model: ``contextWindow``, ``maxTokens``, ``reasoning``, ``input``,
+and a ``thinkingLevelMap`` that hides the levels it does not accept
+(``docs/models.md``).
 """
 
 from __future__ import annotations
 
 import json
+import shutil
+from pathlib import Path
 from typing import Any
 
 from ...domain.agents import AgentEvent, AgentEventType, AgentTask, Capabilities
+from ...domain.settings import ModelSpec
 from ..exec import ExecRuntime, Invocation, RunFiles
 from . import partial, short
 
@@ -57,9 +69,50 @@ _API = {
     "openai": "openai-completions",
     "openai-responses": "openai-responses",
     "anthropic": "anthropic-messages",
+    "google": "google-generative-ai",
 }
+_LEVELS = ("minimal", "low", "medium", "high", "xhigh")
+"""pi's thinking levels above ``off``; the service's ``max`` is pi's ``xhigh``."""
 PROVIDER = "am"
 """The name of the service's model provider in a run's ``models.json``."""
+LOGIN_SCRIPT = Path(__file__).resolve().parent.parent / "pi_login.mjs"
+PACKAGE = "@mariozechner/pi-coding-agent"
+
+
+def package_of(binary: str) -> Path | None:
+    """pi's package folder, found from its command (a link to its ``dist/cli.js``)."""
+    for folder in Path(binary).resolve().parents:
+        manifest = folder / "package.json"
+        if manifest.is_file():
+            try:
+                name = json.loads(manifest.read_text(encoding="utf-8")).get("name")
+            except (OSError, ValueError, AttributeError):
+                return None
+            return folder if name == PACKAGE else None
+    return None
+
+
+def model_entry(model: str, spec: ModelSpec | None) -> dict[str, Any]:
+    """The ``models.json`` entry of ``model``, with what its provider's settings know
+    of it; pi's defaults stand for the rest."""
+    entry: dict[str, Any] = {"id": model}
+    if spec is None:
+        return entry
+    if spec.context_window:
+        entry["contextWindow"] = spec.context_window
+    if spec.max_output:
+        entry["maxTokens"] = spec.max_output
+    if spec.images is not None:
+        entry["input"] = ["text", "image"] if spec.images else ["text"]
+    if spec.reasoning:
+        accepted = {"xhigh" if level == "max" else level for level in spec.reasoning}
+        entry["reasoning"] = True
+        hidden = {level: None for level in _LEVELS if level not in accepted}
+        if hidden:
+            entry["thinkingLevelMap"] = hidden
+    elif spec.tested_at:
+        entry["reasoning"] = False
+    return entry
 
 
 class PiRuntime(ExecRuntime):
@@ -68,6 +121,12 @@ class PiRuntime(ExecRuntime):
     default_name = "pi"
     default_binary = "pi"
     home_paths = (".pi",)
+    login_marker = ".pi/agent/auth.json"
+    login_options = (
+        ("anthropic", "Claude Pro/Max"),
+        ("openai-codex", "ChatGPT Plus/Pro (Codex)"),
+        ("github-copilot", "GitHub Copilot"),
+    )
     default_env_allow = (
         "PI_*",
         "ANTHROPIC_API_KEY",
@@ -84,6 +143,29 @@ class PiRuntime(ExecRuntime):
 
     def capabilities(self) -> Capabilities:
         return Capabilities(streaming=True, bypass=True, read_only_mode=True)
+
+    def login_command(self, binary: str, option: str | None) -> list[str]:
+        package = package_of(binary)
+        node = shutil.which("node")
+        if package is None or node is None:
+            raise RuntimeError("pi's package or Node.js is not where the service looks")
+        return [node, str(LOGIN_SCRIPT), str(package), str(option)]
+
+    def login_env(self, env: dict[str, str]) -> dict[str, str]:
+        # The sign-in belongs in the account's home, not a folder the host names.
+        return {k: v for k, v in env.items() if k != "PI_CODING_AGENT_DIR"}
+
+    async def signed_in(self, home: Path | None = None) -> bool | None:
+        """Whether pi holds a sign-in or a key for any provider in the account's
+        ``.pi/agent/auth.json``."""
+        path = (home or Path.home()) / self.login_marker
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return False
+        except (OSError, ValueError):
+            return None
+        return isinstance(data, dict) and bool(data)
 
     def provider_env(self) -> dict[str, str | None]:
         p = self.provider
@@ -115,8 +197,8 @@ class PiRuntime(ExecRuntime):
                             PROVIDER: {
                                 "baseUrl": p.base_url,
                                 "api": _API[p.protocol],
-                                "apiKey": "$AM_PROVIDER_API_KEY",
-                                "models": [{"id": model}],
+                                "apiKey": "AM_PROVIDER_API_KEY",
+                                "models": [model_entry(model, p.spec(model))],
                             }
                         }
                     }

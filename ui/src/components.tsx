@@ -2,7 +2,7 @@
 // color alone), times, diffs, empty and error states, and mutation helpers.
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState, type ReactNode } from "react";
+import { forwardRef, useEffect, useLayoutEffect, useRef, useState, type ReactNode, type TextareaHTMLAttributes } from "react";
 import { Link } from "react-router-dom";
 import { ApiError, type QualityBand, type QuickQuality, type ReviewQuality } from "./api";
 import { REVIEW_STATES } from "./data";
@@ -467,3 +467,33 @@ export function RejectButton({
     </form>
   );
 }
+
+/** A message box that grows with what is typed in it, wrapped lines included, from
+ *  ``minRows`` up to its stylesheet's ``max-height``, and scrolls beyond that. Counting
+ *  line breaks alone left a long one-line message in a single visible row. */
+export const GrowingTextarea = forwardRef<HTMLTextAreaElement, TextareaHTMLAttributes<HTMLTextAreaElement> & { minRows?: number }>(function GrowingTextarea({ minRows = 1, ...props }, ref) {
+  const own = useRef<HTMLTextAreaElement | null>(null);
+  useLayoutEffect(() => {
+    const el = own.current;
+    if (!el) return;
+    const css = getComputedStyle(el);
+    const borders = css.boxSizing === "border-box" ? parseFloat(css.borderTopWidth) + parseFloat(css.borderBottomWidth) : 0;
+    el.style.height = "auto";
+    const wanted = el.scrollHeight + borders;
+    const cap = parseFloat(css.maxHeight);
+    el.style.height = `${wanted}px`;
+    el.style.overflowY = Number.isFinite(cap) && wanted > cap ? "auto" : "hidden";
+  }, [props.value]);
+  return (
+    <textarea
+      {...props}
+      rows={minRows}
+      ref={(el) => {
+        own.current = el;
+        if (typeof ref === "function") ref(el);
+        else if (ref) ref.current = el;
+      }}
+    />
+  );
+});
+

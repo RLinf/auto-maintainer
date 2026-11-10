@@ -500,6 +500,9 @@ class ExecRuntime:
     (``agents/login.py``); empty for a CLI that has none and runs on a model API."""
     login_marker: ClassVar[str] = ""
     """The file, relative to the home folder, the CLI writes when it signed in."""
+    login_options: ClassVar[tuple[tuple[str, str], ...]] = ()
+    """The accounts the CLI's sign-in can be to, as (id, label), when it must be told
+    which; the person picks one, and only these ids reach ``login_command``."""
 
     account: str | None = None
     """The person whose own agent account this runtime runs on; ``None`` for the
@@ -508,22 +511,42 @@ class ExecRuntime:
     """That person's home folder for the CLI: what the container mounts as
     ``home_paths`` instead of the service's own."""
 
-    def start_login(self, home: Path, state: AgentLogin) -> LoginProcess:
-        """Start the CLI's sign-in for the account whose home folder is ``home``.
+    def can_sign_in(self) -> bool:
+        """Whether the dashboard can run this CLI's own sign-in."""
+        return bool(self.login_args or self.login_options)
+
+    def login_command(self, binary: str, option: str | None) -> list[str]:
+        """The command that runs the sign-in (``option``: one of ``login_options``)."""
+        return [binary, *self.login_args]
+
+    def login_env(self, env: dict[str, str]) -> dict[str, str]:
+        """The sign-in's environment, from the run's allowlist with ``HOME`` set."""
+        return env
+
+    def start_login(
+        self, home: Path, state: AgentLogin, option: str | None = None
+    ) -> LoginProcess:
+        """Start the CLI's sign-in for the account whose home folder is ``home``,
+        to the account kind ``option`` when the CLI offers several.
 
         Raises:
-            RuntimeError: The CLI is missing or has no sign-in.
+            RuntimeError: The CLI is missing, has no sign-in, or offers no ``option``.
         """
         binary = resolve_binary(self.binary, self.search_dirs)
-        if binary is None or not self.login_args:
+        if binary is None or not self.can_sign_in():
             raise RuntimeError(f"{self.name} cannot sign in here")
+        if self.login_options and option not in {o for o, _ in self.login_options}:
+            choices = ", ".join(o for o, _ in self.login_options)
+            raise RuntimeError(f"choose what {self.name} signs in to: {choices}")
         home.mkdir(parents=True, exist_ok=True)
         env = build_env(
             AgentTask(kind="probe", prompt="", workdir=home), self.env_allow
         )
         env["HOME"] = str(home)
         marker = home / self.login_marker if self.login_marker else None
-        process = LoginProcess([binary, *self.login_args], env, state, marker)
+        process = LoginProcess(
+            self.login_command(binary, option), self.login_env(env), state, marker
+        )
         process.start(home)
         return process
 
