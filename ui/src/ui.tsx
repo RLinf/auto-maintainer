@@ -95,6 +95,8 @@ export function MenuItem({
   hint,
   checked,
   href,
+  disabled,
+  title,
 }: {
   icon?: IconName;
   children: ReactNode;
@@ -102,6 +104,8 @@ export function MenuItem({
   hint?: ReactNode;
   checked?: boolean;
   href?: string;
+  disabled?: boolean;
+  title?: string;
 }) {
   const inner = (
     <>
@@ -113,13 +117,13 @@ export function MenuItem({
   );
   if (href) {
     return (
-      <a className="menu-item" role="menuitem" href={href} onClick={onClick} target="_blank" rel="noreferrer">
+      <a className="menu-item" role="menuitem" href={href} title={title} onClick={onClick} target="_blank" rel="noreferrer">
         {inner}
       </a>
     );
   }
   return (
-    <button className="menu-item" role="menuitem" onClick={onClick}>
+    <button type="button" className="menu-item" role="menuitem" disabled={disabled} title={title} onClick={onClick}>
       {inner}
     </button>
   );

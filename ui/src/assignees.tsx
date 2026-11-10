@@ -66,18 +66,21 @@ export function ClaimButton({ repo, number, role, assignees, me }: { repo: strin
  * progress, reviewers review it; anyone claims either, maintainers assign both, and
  * the PR's owners assign its reviewers. */
 export function PrPeopleCards({ repo, number, author, assignees, me }: { repo: string; number: number; author: string; assignees: Assignee[]; me: string }) {
+  const t = useT();
   const who = useAssignable(repo);
   const iOwn = assignees.some((a) => a.role === "owner" && a.login.toLowerCase() === me.toLowerCase());
   const maintainer = !!who.data?.can_assign;
   return (
-    <>
-      <RoleCard role="owner" repo={repo} number={number} author={author} assignees={assignees} me={me} canAssign={maintainer} />
-      <RoleCard role="reviewer" repo={repo} number={number} author={author} assignees={assignees} me={me} canAssign={maintainer || iOwn} />
-    </>
+    <Section title={t("People")}>
+      <div className="stack" style={{ gap: 10 }}>
+        <RoleGroup role="owner" repo={repo} number={number} author={author} assignees={assignees} me={me} canAssign={maintainer} />
+        <RoleGroup role="reviewer" repo={repo} number={number} author={author} assignees={assignees} me={me} canAssign={maintainer || iOwn} />
+      </div>
+    </Section>
   );
 }
 
-function RoleCard({
+function RoleGroup({
   role,
   repo,
   number,
@@ -100,6 +103,7 @@ function RoleCard({
   const base = `/api/prs/${repo}/${number}`;
   const remove = useAct((login: string) => api.del(`${base}/assignees/${encodeURIComponent(login)}?role=${role}`), KEYS);
   const assign = useAct((body: { logins: string[]; role: Role; request_review: boolean }) => api.post<AssignResult>(`${base}/assignees`, body), KEYS);
+  const [assigning, setAssigning] = useState(false);
   const [text, setText] = useState("");
   const [ask, setAsk] = useState(true);
   const holders = assignees.filter((a) => a.role === role);
@@ -115,6 +119,7 @@ function RoleCard({
       {
         onSuccess: (r) => {
           setText("");
+          setAssigning(false);
           const q = r.requested;
           toast(
             !q
@@ -132,88 +137,113 @@ function RoleCard({
     );
 
   return (
-    <Section
-      title={owner ? t("Owners") : t("Reviewers")}
-      hint={owner ? t("answer for the PR's progress") : t("review it")}
-      aside={<ClaimButton repo={repo} number={number} role={role} assignees={assignees} me={me} />}
-    >
-      <div className="stack" style={{ gap: 8 }}>
-        {holders.length === 0 && <span className="small muted">{owner ? t("Nobody owns this PR yet.") : t("Nobody reviews this PR yet.")}</span>}
-        {holders.map((a) => (
-          <div key={a.login} className="assignee">
-            <Avatar login={a.login} size={28} />
-            <span className="main">
-              <a href={links.user(a.login)} target="_blank" rel="noreferrer">
-                <Named login={a.login} alias={aliasOf(a.login)} />
-              </a>
-              {a.login.toLowerCase() === me.toLowerCase() && <span className="muted"> ({t("you")})</span>}
-              <span className="small muted" style={{ display: "block" }}>
-                {a.kind === "assigned" ? `${t("assigned by")} ${aliasOf(a.by) ?? a.by}` : t("claimed")} · <When at={a.at} />
-              </span>
-            </span>
-            {(canAssign || a.login.toLowerCase() === me.toLowerCase()) && (
-              <button
-                className="ghost sm icon"
-                aria-label={`${t("Take off")} ${a.login}`}
-                title={owner ? t("Take them off as an owner") : t("Take them off this PR here; a review requested on GitHub stays requested")}
-                disabled={remove.isPending}
-                onClick={() => remove.mutate(a.login)}
-              >
-                <Icon name="x" size={13} />
-              </button>
-            )}
-          </div>
-        ))}
-        {canAssign && (
-          <form
-            className="stack"
-            style={{ gap: 6 }}
-            onSubmit={(e) => {
-              e.preventDefault();
-              if (logins.length) submit();
-            }}
-          >
-            <div className="row" style={{ gap: 6 }}>
-              <input
-                list={`assignable-${repo}-${role}`}
-                value={text}
-                onChange={(e) => setText(e.target.value)}
-                placeholder={t("GitHub login, or several")}
-                aria-label={owner ? t("GitHub logins to make owners") : t("GitHub logins to assign")}
-                style={{ flex: 1, minWidth: 0 }}
-              />
-              <button className="sm" type="submit" disabled={!logins.length || assign.isPending}>
-                <Icon name="plus" size={13} />
-                {assign.isPending ? t("Assigning…") : t("Assign")}
-              </button>
-            </div>
-            <datalist id={`assignable-${repo}-${role}`}>
-              {suggestions.map((p) => (
-                <option key={p.login} value={p.login}>
-                  {[aliasOf(p.login), p.role, p.areas.join(", ")].filter(Boolean).join(" · ")}
-                </option>
-              ))}
-            </datalist>
-            {suggestions.length > 0 && !text && (
-              <div className="row" style={{ gap: 4, flexWrap: "wrap" }}>
-                {suggestions.slice(0, 8).map((p) => (
-                  <button key={p.login} type="button" className="chip-person" title={[p.role, p.areas.join(", ")].filter(Boolean).join(" · ") || undefined} onClick={() => setText(p.login)}>
-                    <Avatar login={p.login} size={16} />
-                    <Named login={p.login} alias={aliasOf(p.login)} />
-                  </button>
-                ))}
-              </div>
-            )}
-            {!owner && (
-              <label className="small row" style={{ gap: 6 }}>
-                <input type="checkbox" checked={ask} onChange={(e) => setAsk(e.target.checked)} />
-                {t("Also request their review on GitHub")}
-              </label>
-            )}
-          </form>
-        )}
-        <ErrorBox error={assign.error || remove.error} />
+    <div className="pr-role-group">
+      <div className="pr-role-head">
+        <span className="pr-role-title" title={owner ? t("answer for the PR's progress") : t("review it")}>
+          {owner ? t("Owners") : t("Reviewers")}
+        </span>
+        <span className="row right" style={{ gap: 4 }}>
+          {canAssign && !assigning && (
+            <button
+              type="button"
+              className="ghost sm"
+              aria-expanded={false}
+              title={owner ? t("GitHub logins to make owners") : t("GitHub logins to assign")}
+              onClick={() => setAssigning(true)}
+            >
+              <Icon name="plus" size={13} />
+              {t("Assign")}
+            </button>
+          )}
+          <ClaimButton repo={repo} number={number} role={role} assignees={assignees} me={me} />
+        </span>
       </div>
-    </Section>
+      {holders.length === 0 && <span className="small muted">{owner ? t("Nobody owns this PR yet.") : t("Nobody reviews this PR yet.")}</span>}
+      {holders.map((a) => (
+        <div key={a.login} className="assignee">
+          <Avatar login={a.login} size={24} />
+          <span className="main">
+            <a href={links.user(a.login)} target="_blank" rel="noreferrer">
+              <Named login={a.login} alias={aliasOf(a.login)} />
+            </a>
+            {a.login.toLowerCase() === me.toLowerCase() && <span className="muted"> ({t("you")})</span>}
+            <span className="small muted" style={{ display: "block" }}>
+              {a.kind === "assigned" ? `${t("assigned by")} ${aliasOf(a.by) ?? a.by}` : t("claimed")} · <When at={a.at} />
+            </span>
+          </span>
+          {(canAssign || a.login.toLowerCase() === me.toLowerCase()) && (
+            <button
+              className="ghost sm icon"
+              aria-label={`${t("Take off")} ${a.login}`}
+              title={owner ? t("Take them off as an owner") : t("Take them off this PR here; a review requested on GitHub stays requested")}
+              disabled={remove.isPending}
+              onClick={() => remove.mutate(a.login)}
+            >
+              <Icon name="x" size={13} />
+            </button>
+          )}
+        </div>
+      ))}
+      {canAssign && assigning && (
+        <form
+          className="stack"
+          style={{ gap: 6 }}
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (logins.length) submit();
+          }}
+        >
+          <input
+            autoFocus
+            list={`assignable-${repo}-${role}`}
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            placeholder={t("GitHub login, or several")}
+            aria-label={owner ? t("GitHub logins to make owners") : t("GitHub logins to assign")}
+            style={{ width: "100%", minWidth: 0 }}
+          />
+          <datalist id={`assignable-${repo}-${role}`}>
+            {suggestions.map((p) => (
+              <option key={p.login} value={p.login}>
+                {[aliasOf(p.login), p.role, p.areas.join(", ")].filter(Boolean).join(" · ")}
+              </option>
+            ))}
+          </datalist>
+          {suggestions.length > 0 && !text && (
+            <div className="row" style={{ gap: 4, flexWrap: "wrap" }}>
+              {suggestions.slice(0, 8).map((p) => (
+                <button key={p.login} type="button" className="chip-person" title={[p.role, p.areas.join(", ")].filter(Boolean).join(" · ") || undefined} onClick={() => setText(p.login)}>
+                  <Avatar login={p.login} size={16} />
+                  <Named login={p.login} alias={aliasOf(p.login)} />
+                </button>
+              ))}
+            </div>
+          )}
+          {!owner && (
+            <label className="small row" style={{ gap: 6 }}>
+              <input type="checkbox" checked={ask} onChange={(e) => setAsk(e.target.checked)} />
+              {t("Also request their review on GitHub")}
+            </label>
+          )}
+          <div className="row" style={{ gap: 6 }}>
+            <button className="primary sm" type="submit" disabled={!logins.length || assign.isPending}>
+              <Icon name="plus" size={13} />
+              {assign.isPending ? t("Assigning…") : t("Assign")}
+            </button>
+            <button
+              type="button"
+              className="ghost sm"
+              onClick={() => {
+                setAssigning(false);
+                setText("");
+              }}
+            >
+              {t("Cancel")}
+            </button>
+          </div>
+        </form>
+      )}
+      <ErrorBox error={assign.error || remove.error} />
+    </div>
   );
 }

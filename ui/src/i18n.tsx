@@ -2016,6 +2016,8 @@ const zh: Record<string, string> = {
   "Memory per task": "每个任务的内存",
   "Image": "镜像",
   "The next agent task runs this way.": "下一个智能体任务将按此运行。",
+  Back: "返回",
+  "Open on GitLab": "在 GitLab 打开",
 };
 
 const LangContext = createContext<{ lang: Lang; setLang: (l: Lang) => void }>({ lang: "zh", setLang: () => {} });
