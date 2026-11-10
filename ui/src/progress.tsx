@@ -25,6 +25,31 @@ export function AddressedBar({ value, width = 72 }: { value: number | null; widt
   );
 }
 
+/** Review progress in one short line: feedback addressed, approvals, changes
+ * requested, and how many reviewers reviewed; nothing before any review. */
+export function ProgressInline({ p }: { p: ProgressSummary | undefined }) {
+  const t = useT();
+  if (!p || (!p.reviewed && !p.threads)) return null;
+  return (
+    <span
+      className="progress-inline small"
+      title={`${p.resolved}/${p.threads} ${t("review threads resolved")} · ${p.approved} ${t("approved")} · ${p.changes_requested} ${t("changes requested")} · ${p.reviewed}/${p.reviewers} ${t("reviewed")}`}
+    >
+      {p.threads > 0 && (
+        <>
+          <AddressedBar value={p.addressed} width={40} />
+          <span>{percent(p.addressed)}</span>
+        </>
+      )}
+      {p.approved > 0 && <span className="check-ok">✓{p.approved}</span>}
+      {p.changes_requested > 0 && <span style={{ color: "var(--bad)" }}>✗{p.changes_requested}</span>}
+      <span className="muted">
+        {p.reviewed}/{p.reviewers}
+      </span>
+    </span>
+  );
+}
+
 /** The PR list's cell: feedback addressed, approvals, and changes requested. */
 export function ProgressCell({ p }: { p: ProgressSummary | undefined }) {
   const t = useT();

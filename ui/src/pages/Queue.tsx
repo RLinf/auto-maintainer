@@ -17,7 +17,7 @@ import { BulkBar, DataTable, ListToolbar, useList, type Column } from "../list";
 import { MenuItem, Popover, Skeleton, Tabs, useTab, useToast } from "../ui";
 import { holds, Person, PrPeopleLine } from "../avatar";
 import { useAliasOf } from "../aliases";
-import { ProgressCell } from "../progress";
+import { ProgressInline } from "../progress";
 
 const NEEDS_REVIEW = new Set(["NEW_REVIEW", "FOLLOWUP_REVIEW", "APPROVED_NEW_COMMITS"]);
 
@@ -128,14 +128,17 @@ export default function QueuePage({ me }: { me: Me }) {
   const askAbout = (p: PrRow) => agent.open({ context: { page: "pr", repo: p.repo, number: p.number, label: `${p.repo}#${p.number}` } });
 
   const columns: Column<PrRow>[] = [
-    { id: "tier", header: t("Priority"), cell: (p) => <Tier tier={p.tier} />, sort: "tier", width: 64 },
     {
-      id: "score",
-      header: t("Score"),
-      cell: (p) => (p.total == null ? <span className="muted">—</span> : p.total.toFixed(1)),
+      id: "tier",
+      header: t("Priority"),
       sort: "priority",
-      className: "num hide-phone",
-      width: 72,
+      width: 70,
+      cell: (p) => (
+        <span className="stack" style={{ gap: 2, alignItems: "flex-start" }}>
+          <Tier tier={p.tier} />
+          {p.total != null && <span className="small muted num">{p.total.toFixed(1)}</span>}
+        </span>
+      ),
     },
     {
       id: "quality",
@@ -151,11 +154,14 @@ export default function QueuePage({ me }: { me: Me }) {
       sort: "title",
       cell: (p) => (
         <div className="title-cell">
-          <Link to={prPath(p.repo, p.number)} style={{ color: "var(--text)", fontWeight: 550 }}>
-            {p.title}
-          </Link>
+          <span className="title-line">
+            <Link to={prPath(p.repo, p.number)} style={{ color: "var(--text)", fontWeight: 550 }}>
+              {p.title}
+            </Link>
+            {p.labels.length > 0 && <Labels labels={p.labels} max={2} />}
+          </span>
           <div className="small muted">
-            {p.repo}#{p.number} · <Person login={p.author} /> · <When at={p.updated_at} />
+            #{p.number} · <Person login={p.author} />
             {p.draft ? ` · ${t("draft")}` : ""}
           </div>
           {p.assignees.length > 0 && (
@@ -172,26 +178,33 @@ export default function QueuePage({ me }: { me: Me }) {
       ),
     },
     {
-      id: "progress",
-      header: t("Progress"),
-      sort: "addressed",
-      label: t("Review progress"),
-      cell: (p) => <ProgressCell p={p.progress} />,
-    },
-    {
       id: "state",
       header: t("Review"),
       sort: "state",
       cell: (p) => (
         <div className="stack" style={{ gap: 4, alignItems: "flex-start" }}>
           <ReviewState state={p.review_state} />
+          <ProgressInline p={p.progress} />
           <Activity a={p.review_activity} me={me.login} />
         </div>
       ),
     },
-    { id: "labels", header: t("Labels"), cell: (p) => <Labels labels={p.labels} max={3} />, className: "hide-narrow" },
-    { id: "opened", header: t("Opened"), sort: "opened", cell: (p) => <span style={{ whiteSpace: "nowrap" }}><When at={p.created_at} /></span>, className: "small hide-narrow" },
-    { id: "updated", header: t("Updated"), sort: "updated", cell: (p) => <span style={{ whiteSpace: "nowrap" }}><When at={p.updated_at} /></span>, className: "small hide-narrow" },
+    {
+      id: "updated",
+      header: t("Activity"),
+      sort: "updated",
+      className: "small hide-narrow",
+      cell: (p) => (
+        <span className="stack" style={{ gap: 2, whiteSpace: "nowrap" }}>
+          <span>
+            {t("updated")} <When at={p.updated_at} />
+          </span>
+          <span className="muted">
+            {t("opened")} <When at={p.created_at} />
+          </span>
+        </span>
+      ),
+    },
     {
       id: "actions",
       header: "",

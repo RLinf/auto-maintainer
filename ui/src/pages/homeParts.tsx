@@ -16,6 +16,7 @@ import { openJob } from "../openJob";
 import { Popover, Skeleton, useToast } from "../ui";
 import { holds, Person, PrPeopleLine } from "../avatar";
 import { useAliasOf } from "../aliases";
+import { ProgressInline } from "../progress";
 
 // ---- getting started ---------------------------------------------------------------------------
 
@@ -354,19 +355,7 @@ export function ReviewCard({ rows, all, loading, me, automations }: { rows: PrRo
                   {p.title}
                 </Link>
                 <span className="meta">
-                  {p.repo}#{p.number} · <Person login={p.author} /> · <When at={p.updated_at} />
-                  {p.progress && p.progress.threads > 0 && (
-                    <span title={`${p.progress.resolved}/${p.progress.threads} ${t("review threads resolved")}`}>
-                      {" · "}
-                      {Math.round((p.progress.addressed ?? 0) * 100)}% {t("addressed")}
-                    </span>
-                  )}
-                  {p.progress && p.progress.approved > 0 && (
-                    <span>
-                      {" · "}
-                      <span className="check-ok">✓{p.progress.approved}</span>
-                    </span>
-                  )}
+                  #{p.number} · <Person login={p.author} /> · <When at={p.updated_at} />
                 </span>
                 {p.assignees.length > 0 && (
                   <span className="meta">
@@ -374,6 +363,7 @@ export function ReviewCard({ rows, all, loading, me, automations }: { rows: PrRo
                   </span>
                 )}
               </span>
+              <ProgressInline p={p.progress} />
               {(p.quality || p.quick_quality) && <Quality quality={p.quality} quick={p.quick_quality} head={p.head} compact />}
               {(p.review_state === "FOLLOWUP_REVIEW" || p.review_state === "APPROVED_NEW_COMMITS") && (
                 <span className="pill status-warn" title={t("New commits since the last review")}>

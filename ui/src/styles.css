@@ -881,3 +881,5 @@ details.pv-section[open] > summary { margin-bottom: 6px; }
 .people-group { display: inline-flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; }
 .people-line .is-me { font-weight: 600; }
 .progress-reviewer.first-other { border-top: 2px solid var(--border); }
+.progress-inline { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; flex: none; }
+.title-line { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
