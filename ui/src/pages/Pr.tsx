@@ -38,7 +38,8 @@ import { DataTable, ListToolbar, useList, type Column } from "../list";
 import { ApproveButton, FixButton, MergeBaseButton, type InlineComment } from "../proposal";
 import { ReproduceButton } from "../reproduce";
 import { failedChecks, FixCiButton } from "../fixCi";
-import { ReviewersCard } from "../assignees";
+import { PrPeopleCards } from "../assignees";
+import { CodeOwnersCard } from "../codeOwners";
 import { ACTIVE, PrWork, usePrWork } from "../jobs";
 import { openJob } from "../openJob";
 import { Skeleton, Tabs, useTab, useToast } from "../ui";
@@ -240,7 +241,8 @@ export default function PrPage({ me }: { me: Me }) {
         </div>
 
         <aside className="side">
-          <ReviewersCard repo={full} number={pr.number} author={pr.author} assignees={d.assignees ?? []} requested={pr.requested_reviewers ?? []} me={me.login} />
+          <PrPeopleCards repo={full} number={pr.number} author={pr.author} assignees={d.assignees ?? []} me={me.login} />
+          <CodeOwnersCard repo={full} number={pr.number} head={pr.head_sha} />
           <QualityCard
             repo={full}
             number={pr.number}

@@ -151,17 +151,11 @@ export interface AgentQuestion {
   answer: AgentAnswer | null;
 }
 
-/** A reviewer responsible for a PR, and how: claimed or assigned on the dashboard, the
- * forge's assignee, or asked to review there. */
-export interface Owner {
-  login: string;
-  kind: "claimed" | "assigned" | "assignee" | "requested";
-  by: string;
-}
-
 export interface Assignee {
   login: string;
-  /** "claimed": they took it themselves; "assigned": a maintainer (``by``) gave it to them. */
+  /** "owner": answers for the whole PR's progress; "reviewer": reviews it. */
+  role: "owner" | "reviewer";
+  /** "claimed": they took it themselves; "assigned": someone (``by``) gave it to them. */
   kind: "claimed" | "assigned";
   by: string;
   at: string;
@@ -186,13 +180,15 @@ export interface PrRow {
   head: string;
   labels: string[];
   draft: boolean;
+  /** When the PR was opened. */
+  created_at: string | null;
   updated_at: string | null;
   review_state: string;
   reviewed_sha: string;
-  /** Reviewers working on the PR in the service, oldest first. */
+  /** The PR's owners and reviewers here (``role``), who claimed the role or were
+   * assigned it, oldest first; "Owned by me" and "I review" filter by them. Reviews
+   * GitHub requested (its code owners' automatic ones among them) give nobody a role. */
   assignees: Assignee[];
-  /** Everyone responsible for the PR (``Owner``): the PR list shows them and "Owned by me" filters by them. */
-  owners: Owner[];
   tier: string | null;
   total: number | null;
   summary: string;
@@ -385,6 +381,35 @@ export interface GateItem {
   ok: boolean;
   detail: string;
   pending: boolean;
+}
+
+/** A code owner of a PR's changed files and where they stand on it. */
+export interface CodeOwnerStanding {
+  /** A login, an ``org/team``, or an email address, as CODEOWNERS names it. */
+  login: string;
+  team: boolean;
+  /** The PR's author, whose own approval GitHub does not count. */
+  author: boolean;
+  /** Their latest review that is not a comment. */
+  verdict: "APPROVED" | "CHANGES_REQUESTED" | "DISMISSED" | null;
+  at_head: boolean;
+  /** GitHub asks them (or the team) for a review now. */
+  requested: boolean;
+  files: number;
+}
+
+/** ``GET /api/prs/{repo}/{n}/code-owners``: whom to ask for the approvals a merge
+ * waits on. Code owners are not the PR's owners here. */
+export interface CodeOwners {
+  file: string | null;
+  base: string;
+  /** Whether the branch makes a merge wait for a code owner's approval of each part. */
+  required: boolean | null;
+  parts: { owners: string[]; patterns: string[]; files: string[]; approved_by: string[] }[];
+  people: CodeOwnerStanding[];
+  unowned: string[];
+  /** Others GitHub asks to review, who own none of the files. */
+  requested: string[];
 }
 
 export interface PrDetail {

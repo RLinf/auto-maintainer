@@ -7,14 +7,14 @@ import { Link, useNavigate } from "react-router-dom";
 import { api, type AgentJob, type Automation, type ChatThread, type Me, type PrRow, type RepoRow, type ReviewStart } from "../api";
 import { useAgent } from "../agent";
 import { agentName, AgentPicker, reviewToast, useAgentChoice } from "../agentPicker";
-import { ErrorBox, prPath, Quality, Tier, useAct, When } from "../components";
+import { ErrorBox, prPath, Quality, Tier, timeOf, useAct, When } from "../components";
 import { prKey, REVIEW_STATES, useSettings } from "../data";
 import { useT } from "../i18n";
 import { Icon } from "../icons";
 import { ACTIVE, needsMe, ScoringRow, useWork, WorkRow } from "../jobs";
 import { openJob } from "../openJob";
 import { Popover, Skeleton, useToast } from "../ui";
-import { OwnerAvatars, ownedBy, Person } from "../avatar";
+import { holds, OwnerAvatars, Person } from "../avatar";
 
 // ---- getting started ---------------------------------------------------------------------------
 
@@ -160,8 +160,40 @@ function activity(p: PrRow, me: Me, t: (s: string) => string): ReactNode {
 /** Whether a PR matches every word of a search: its title, repository and number,
  *  author, labels, summary, and the reviewers on it. */
 function matches(p: PrRow, words: string[]): boolean {
-  const hay = `${p.title} ${p.repo}#${p.number} #${p.number} ${p.author} ${p.labels.join(" ")} ${p.summary} ${p.owners.map((a) => a.login).join(" ")}`.toLowerCase();
+  const hay = `${p.title} ${p.repo}#${p.number} #${p.number} ${p.author} ${p.labels.join(" ")} ${p.summary} ${p.assignees.map((a) => a.login).join(" ")}`.toLowerCase();
   return words.every((w) => hay.includes(w));
+}
+
+type ReviewOrder = "priority" | "newest" | "oldest" | "updated";
+
+/** The orders Home's PRs to review offers: the repository's priorities (the default),
+ *  or time, by when a PR was opened or last updated; PRs without the time go last. */
+const REVIEW_ORDERS: Record<ReviewOrder, { label: string; compare: (a: PrRow, b: PrRow) => number }> = {
+  priority: { label: "Priority", compare: (a, b) => (b.total ?? -1) - (a.total ?? -1) },
+  newest: { label: "Newest first", compare: (a, b) => (timeOf(b.created_at) ?? -Infinity) - (timeOf(a.created_at) ?? -Infinity) },
+  oldest: { label: "Oldest first", compare: (a, b) => (timeOf(a.created_at) ?? Infinity) - (timeOf(b.created_at) ?? Infinity) },
+  updated: { label: "Recently updated", compare: (a, b) => (timeOf(b.updated_at) ?? -Infinity) - (timeOf(a.updated_at) ?? -Infinity) },
+};
+
+/** The order chosen for Home's PRs to review, remembered in this browser. */
+function useReviewOrder(): [ReviewOrder, (o: ReviewOrder) => void] {
+  const [order, setOrder] = useState<ReviewOrder>(() => {
+    try {
+      const saved = localStorage.getItem("am.home.order") as ReviewOrder | null;
+      return saved && saved in REVIEW_ORDERS ? saved : "priority";
+    } catch {
+      return "priority";
+    }
+  });
+  const choose = (o: ReviewOrder) => {
+    setOrder(o);
+    try {
+      localStorage.setItem("am.home.order", o);
+    } catch {
+      /* the choice lasts for this page only */
+    }
+  };
+  return [order, choose];
 }
 
 /** PRs that need a review in one repository, ranked by its priorities. A search looks
@@ -175,13 +207,14 @@ export function ReviewCard({ rows, all, loading, me, automations }: { rows: PrRo
   const [who, setWho] = useAgentChoice("review");
   const [showAll, setShowAll] = useState(false);
   const [query, setQuery] = useState("");
-  const [mineOnly, setMineOnly] = useState(false);
+  const [only, setOnly] = useState<"owner" | "reviewer" | null>(null);
+  const [order, setOrder] = useReviewOrder();
   const words = query.toLowerCase().split(/\s+/).filter(Boolean);
   const searching = words.length > 0;
-  const mine = (p: PrRow) => ownedBy(p.owners, me.login);
-  const ownedCount = rows.filter(mine).length;
-  const pool = (searching ? all.filter((p) => matches(p, words)) : rows).filter((p) => !mineOnly || mine(p));
-  const sorted = [...pool].sort((a, b) => (b.total ?? -1) - (a.total ?? -1));
+  const ownedCount = rows.filter((p) => holds(p.assignees, me.login, "owner")).length;
+  const reviewingCount = rows.filter((p) => holds(p.assignees, me.login, "reviewer")).length;
+  const pool = (searching ? all.filter((p) => matches(p, words)) : rows).filter((p) => !only || holds(p.assignees, me.login, only));
+  const sorted = [...pool].sort(REVIEW_ORDERS[order].compare);
   const shown = showAll || searching ? sorted : sorted.slice(0, 8);
   const waiting = new Set(rows.map(prKey));
   const review = useAct(
@@ -235,21 +268,46 @@ export function ReviewCard({ rows, all, loading, me, automations }: { rows: PrRo
       </label>
         <button
           type="button"
-          className={`chip-btn ${mineOnly ? "on" : ""}`}
-          aria-pressed={mineOnly}
-          title={t("PRs you claimed, were assigned on the dashboard or the forge, or were asked to review")}
-          onClick={() => setMineOnly(!mineOnly)}
+          className={`chip-btn ${only === "owner" ? "on" : ""}`}
+          aria-pressed={only === "owner"}
+          title={t("PRs you own here: you answer for their progress")}
+          onClick={() => setOnly(only === "owner" ? null : "owner")}
           style={{ flex: "none", borderStyle: "solid", height: 34 }}
         >
           {t("Owned by me")} {ownedCount > 0 && <span className="n">{ownedCount}</span>}
         </button>
+        <button
+          type="button"
+          className={`chip-btn ${only === "reviewer" ? "on" : ""}`}
+          aria-pressed={only === "reviewer"}
+          title={t("PRs you review here; a review GitHub requested of you does not count")}
+          onClick={() => setOnly(only === "reviewer" ? null : "reviewer")}
+          style={{ flex: "none", borderStyle: "solid", height: 34 }}
+        >
+          {t("I review")} {reviewingCount > 0 && <span className="n">{reviewingCount}</span>}
+        </button>
+        <select
+          value={order}
+          onChange={(e) => setOrder(e.target.value as ReviewOrder)}
+          aria-label={t("Sort by")}
+          title={t("Sort by")}
+          style={{ flex: "none", height: 34, width: "auto" }}
+        >
+          {(Object.keys(REVIEW_ORDERS) as ReviewOrder[]).map((k) => (
+            <option key={k} value={k}>
+              {t(REVIEW_ORDERS[k].label)}
+            </option>
+          ))}
+        </select>
       </div>
       {loading ? (
         <Skeleton rows={4} />
       ) : searching && !sorted.length ? (
         <span className="small muted">{t("No open PR matches the search.")}</span>
       ) : !pool.length ? (
-        <span className="small muted">{mineOnly ? t("None of the PRs waiting for a review is yours.") : t("No PR needs a review.")}</span>
+        <span className="small muted">
+          {only === "owner" ? t("You own none of the PRs waiting for a review.") : only === "reviewer" ? t("You review none of the PRs waiting for a review.") : t("No PR needs a review.")}
+        </span>
       ) : (
         <div className="list">
           {shown.map((p) => (
@@ -273,15 +331,18 @@ export function ReviewCard({ rows, all, loading, me, automations }: { rows: PrRo
                 </Link>
                 <span className="meta">
                   {p.repo}#{p.number} · <Person login={p.author} /> · <When at={p.updated_at} />
-                  {p.owners.length > 0 && (
-                    <>
-                      {" · "}
-                      {t("reviewers:")}
-                      <span style={{ marginLeft: 6 }}>
-                        <OwnerAvatars owners={p.owners} me={me.login} size={16} t={t} />
+                  {(["owner", "reviewer"] as const).map((role) => {
+                    const people = p.assignees.filter((a) => a.role === role);
+                    return people.length > 0 ? (
+                      <span key={role}>
+                        {" · "}
+                        {role === "owner" ? t("owners:") : t("reviewers:")}
+                        <span style={{ marginLeft: 6 }}>
+                          <OwnerAvatars owners={people} me={me.login} size={16} t={t} />
+                        </span>
                       </span>
-                    </>
-                  )}
+                    ) : null;
+                  })}
                 </span>
               </span>
               {(p.quality || p.quick_quality) && <Quality quality={p.quality} quick={p.quick_quality} head={p.head} compact />}

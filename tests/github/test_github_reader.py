@@ -213,7 +213,10 @@ async def test_get_repo_with_unreadable_protection(client, router):
         json=[
             {
                 "type": "pull_request",
-                "parameters": {"required_approving_review_count": 2},
+                "parameters": {
+                    "required_approving_review_count": 2,
+                    "require_code_owner_review": True,
+                },
             },
             {
                 "type": "required_status_checks",
@@ -229,6 +232,7 @@ async def test_get_repo_with_unreadable_protection(client, router):
     assert info.default_branch_sha == "abc123" and info.private
     assert info.required_checks == ["e2e", "lint", "unit"]
     assert info.requires_up_to_date is True and info.required_approvals == 2
+    assert info.requires_code_owner_reviews is True, "from the branch's ruleset"
     assert info.labels == ["bug"]
 
 
@@ -244,7 +248,8 @@ async def test_get_repo_unprotected_branch(client, router):
         info.required_checks,
         info.requires_up_to_date,
         info.required_approvals,
-    ) == ([], False, 0)
+        info.requires_code_owner_reviews,
+    ) == ([], False, 0, False)
 
 
 async def test_permission_mapping(client, router):

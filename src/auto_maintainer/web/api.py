@@ -59,6 +59,12 @@ from ..domain.actions import (
     make_action,
 )
 from ..domain.agents import AgentAnswer, AgentQuestion, QuestionState, SkillInfo
+from ..domain.codeowners import (
+    OwnerRule,
+    code_owner_report,
+    codeowners_locations,
+    parse_codeowners,
+)
 from ..domain.events import Event, EventKind
 from ..domain.forges import all_infos, default_forge
 from ..domain.ids import check_login, check_repo, new_id, same_commit
@@ -83,6 +89,7 @@ from ..domain.records import (
     Job,
     JobStatus,
     PrAssignee,
+    PrRole,
 )
 from ..domain.review import (
     ReviewQuality,
@@ -93,7 +100,7 @@ from ..domain.review import (
 from ..domain.run_ci import plan_run_ci
 from ..domain.scoring import Evaluation, recompute
 from ..domain.secrets import redact_secrets
-from ..domain.snapshot import Mergeable, PrSnapshot, PrState, ReviewEventState
+from ..domain.snapshot import Mergeable, PrState, ReviewEventState
 from ..playbooks.evaluate import haystack, rubric_of
 from ..playbooks.hygiene import hygiene_key
 from ..playbooks.prompts import DEFAULT_QUALITY_GUIDE, DEFAULT_WRITING_GUIDE
@@ -333,22 +340,31 @@ def _add_usage(row: dict[str, Any], run: AgentRunRecord) -> None:
 
 
 def assignee_row(a: PrAssignee) -> dict[str, Any]:
-    return {"login": a.login, "kind": a.kind, "by": a.by, "at": a.at.isoformat()}
+    return {
+        "login": a.login,
+        "role": a.role,
+        "kind": a.kind,
+        "by": a.by,
+        "at": a.at.isoformat(),
+    }
 
 
-def owner_rows(pr: PrSnapshot, assignees: list[PrAssignee]) -> list[dict[str, Any]]:
-    """The reviewers responsible for ``pr``, each once: who claimed it or was
-    assigned on the dashboard, then the forge's assignees and the people asked to
-    review it there (``kind`` says which: ``claimed``, ``assigned``, ``assignee``,
-    ``requested``)."""
-    out: dict[str, dict[str, Any]] = {}
-    for a in assignees:
-        out.setdefault(a.login.lower(), {"login": a.login, "kind": a.kind, "by": a.by})
-    for login in pr.assignees:
-        out.setdefault(login.lower(), {"login": login, "kind": "assignee", "by": ""})
-    for login in pr.requested_reviewers:
-        out.setdefault(login.lower(), {"login": login, "kind": "requested", "by": ""})
-    return list(out.values())
+def holds(assignees: list[PrAssignee], login: str, role: str) -> bool:
+    """Whether ``login`` holds ``role`` among a PR's ``assignees``."""
+    return any(a.role == role and a.login.lower() == login.lower() for a in assignees)
+
+
+async def read_codeowners(
+    service: Service, repo: str, path: str | None, ref: str | None = None
+) -> tuple[str | None, list[OwnerRule]]:
+    """The CODEOWNERS file that governs ``repo`` at ``ref`` (the default branch when
+    ``None``): the profile's ``people.codeowners`` when it names one, else the first
+    of the forge's places that has one; with its rules, or ``(None, [])``."""
+    for location in [path] if path else list(codeowners_locations(repo)):
+        text = await service.a.forge.get_file(repo, location, ref)
+        if text:
+            return location, parse_codeowners(text)
+    return None, []
 
 
 async def _assignees(service: Service, repo: str, number: int) -> list[dict[str, Any]]:
@@ -495,8 +511,14 @@ class ApprovePrBody(BaseModel):
 
 class AssignBody(BaseModel):
     logins: list[str] = Field(min_length=1, max_length=10)
+    role: PrRole = "reviewer"
     request_review: bool = True
-    """Also request their review on GitHub, under the repository's rule."""
+    """For reviewers, also request their review on GitHub, under the repository's
+    rule; owners are never asked to review by it."""
+
+
+class ClaimBody(BaseModel):
+    role: PrRole = "reviewer"
 
 
 class AnswerBody(BaseModel):
@@ -1231,8 +1253,14 @@ def build_router() -> APIRouter:
         tier: str | None = None,
         state: str | None = None,
         mine: bool = False,
+        reviewing: bool = False,
         user: User = Depends(current_user),
     ) -> list[dict[str, Any]]:
+        """The PRs of the person's repositories. A PR's ``assignees`` are its owners
+        and reviewers here, who claimed the role or were assigned it; ``mine`` keeps
+        the PRs the person owns, ``reviewing`` those they review. Reviews GitHub
+        requested, such as its code owners' automatic ones, and the forge's own
+        assignees give nobody a role."""
         service = service_of(request)
         repos_ = [repo] if repo else await visible_repos(service, user)
         if repo:
@@ -1260,12 +1288,13 @@ def build_router() -> APIRouter:
                 )
                 ev = await service.store.get_evaluation(name, pr.number)
                 assignees = on_pr.get((name, pr.number), [])
-                owners = owner_rows(pr, assignees)
                 if tier and (ev is None or ev.tier != tier):
                     continue
                 if state and cls.state != state:
                     continue
-                if mine and all(o["login"].lower() != me for o in owners):
+                if mine and not holds(assignees, me, "owner"):
+                    continue
+                if reviewing and not holds(assignees, me, "reviewer"):
                     continue
                 rows.append(
                     {
@@ -1277,11 +1306,11 @@ def build_router() -> APIRouter:
                         "head": pr.head_sha[:7],
                         "labels": pr.labels,
                         "draft": pr.is_draft,
+                        "created_at": pr.created_at,
                         "updated_at": pr.updated_at,
                         "review_state": cls.state,
                         "reviewed_sha": (cls.reviewed_sha or "")[:7],
                         "assignees": [assignee_row(a) for a in assignees],
-                        "owners": owners,
                         "tier": ev.tier if ev else None,
                         "total": ev.total if ev else None,
                         "summary": ev.summary if ev else "",
@@ -1525,6 +1554,47 @@ def build_router() -> APIRouter:
             "run_ci": plan_run_ci(
                 pr, profile.label_for("ci_gate") if profile else None
             ).model_dump(mode="json"),
+        }
+
+    @r.get("/prs/{repo:path}/{number:int}/code-owners")
+    async def pr_code_owners(
+        request: Request,
+        repo: str,
+        number: int,
+        user: User = Depends(current_user),
+    ) -> dict[str, Any]:
+        """Who owns the files the PR changes under CODEOWNERS (read from its base
+        branch, as GitHub does), part by part, and where each owner stands: their
+        latest verdict, whether GitHub asks them for a review, how many of the files
+        are theirs. ``required`` says whether the branch makes a merge wait for a code
+        owner's approval of each part (``null`` when unreadable); ``requested`` lists
+        the others GitHub asks to review. This is whom to ask for the approvals a
+        merge waits on; code owners are not the PR's owners here (``assignees``)."""
+        service = service_of(request)
+        repo = _repo(repo)
+        await require_view(service, user, repo)
+        pr = await service.store.get_snapshot(repo, number)
+        if pr is None:
+            raise HTTPException(404, f"{repo}#{number} is not known yet")
+        profile = await service.profiles.active(repo)
+        location, rules = await read_codeowners(
+            service, repo, profile.people.codeowners if profile else None, pr.base_ref
+        )
+        report = code_owner_report(rules, pr)
+        required: bool | None = None
+        if location:
+            info = await service.a.forge.get_repo(repo)
+            if info.default_branch == pr.base_ref:
+                required = info.requires_code_owner_reviews
+        owners = {o.login.lower() for o in report.people}
+        return {
+            "file": location,
+            "base": pr.base_ref,
+            "required": required,
+            **report.model_dump(mode="json"),
+            "requested": [
+                r_ for r_ in pr.requested_reviewers if r_.lower() not in owners
+            ],
         }
 
     @r.post("/prs/{repo:path}/{number:int}/approve")
@@ -1881,14 +1951,19 @@ def build_router() -> APIRouter:
         request: Request,
         repo: str,
         number: int,
+        body: ClaimBody | None = None,
         user: User = Depends(current_user),
     ) -> dict[str, Any]:
-        """Join the reviewers working on the PR; others who claimed it stay."""
+        """Take a role on the PR yourself: own it (answer for its progress) or review
+        it; others who hold the role stay."""
         service = service_of(request)
         repo = _repo(repo)
         await require_view(service, user, repo)
+        role = body.role if body else "reviewer"
         await service.store.add_assignee(
-            PrAssignee(repo=repo, number=number, login=user.login, by=user.login)
+            PrAssignee(
+                repo=repo, number=number, login=user.login, role=role, by=user.login
+            )
         )
         return {"assignees": await _assignees(service, repo, number)}
 
@@ -1897,13 +1972,14 @@ def build_router() -> APIRouter:
         request: Request,
         repo: str,
         number: int,
+        role: PrRole = Query(default="reviewer"),
         user: User = Depends(current_user),
     ) -> dict[str, Any]:
-        """Leave the PR's reviewers, whether you claimed it or were assigned."""
+        """Give up your role on the PR, whether you claimed it or were assigned."""
         service = service_of(request)
         repo = _repo(repo)
         await require_view(service, user, repo)
-        await service.store.remove_assignee(repo, number, user.login)
+        await service.store.remove_assignee(repo, number, user.login, role)
         return {"assignees": await _assignees(service, repo, number)}
 
     @r.post("/prs/{repo:path}/{number:int}/assignees")
@@ -1914,19 +1990,29 @@ def build_router() -> APIRouter:
         body: AssignBody,
         user: User = Depends(current_user),
     ) -> dict[str, Any]:
-        """Assign reviewers to the PR, for maintainers of the repository (design
-        2.3). A login need not have signed in here, but it must be a GitHub user who
-        can see the repository. With ``request_review``, their review is also
-        requested on GitHub, as the repository's ``pr.request_reviewers`` rule
-        allows."""
+        """Assign people a role on the PR (design 2.3): owners by maintainers of the
+        repository, reviewers by them or by the PR's owners. A login need not have
+        signed in here, but it must be a GitHub user who can see the repository. For
+        reviewers with ``request_review``, their review is also requested on GitHub,
+        as the repository's ``pr.request_reviewers`` rule allows."""
         service = service_of(request)
         repo = _repo(repo)
         await require_view(service, user, repo)
-        if not await is_maintainer(service, user, repo):
-            raise HTTPException(403, f"only maintainers of {repo} assign reviewers")
         pr = await service.store.get_snapshot(repo, number)
         if pr is None:
             raise HTTPException(404, f"{repo}#{number} is not known yet")
+        if not await is_maintainer(service, user, repo) and not (
+            body.role == "reviewer"
+            and holds(
+                await service.store.list_assignees(repo, number), user.login, "owner"
+            )
+        ):
+            raise HTTPException(
+                403,
+                f"only maintainers of {repo} assign owners"
+                if body.role == "owner"
+                else f"only maintainers of {repo} and the PR's owners assign reviewers",
+            )
         logins: list[str] = []
         for raw in body.logins:
             try:
@@ -1947,6 +2033,7 @@ def build_router() -> APIRouter:
                     repo=repo,
                     number=number,
                     login=login,
+                    role=body.role,
                     kind="assigned",
                     by=user.login,
                 )
@@ -1957,7 +2044,8 @@ def build_router() -> APIRouter:
                 repo=repo,
                 number=number,
                 actor=user.login,
-                summary=f"assigned {', '.join(logins)}",
+                summary=f"assigned {', '.join(logins)} as {body.role}"
+                f"{'s' if len(logins) > 1 else ''}",
             )
         )
         requested: dict[str, Any] | None = None
@@ -1967,7 +2055,12 @@ def build_router() -> APIRouter:
             if lg.lower() != pr.author.lower()
             and lg.lower() not in {r.lower() for r in pr.requested_reviewers}
         ]
-        if body.request_review and ask and pr.state == PrState.OPEN:
+        if (
+            body.role == "reviewer"
+            and body.request_review
+            and ask
+            and pr.state == PrState.OPEN
+        ):
             record = await _run_now(
                 service,
                 user,
@@ -2000,20 +2093,31 @@ def build_router() -> APIRouter:
         repo: str,
         number: int,
         login: str,
+        role: PrRole = Query(default="reviewer"),
         user: User = Depends(current_user),
     ) -> dict[str, Any]:
-        """Take a reviewer off the PR: maintainers take anyone off, and everyone
-        themselves. A review requested on GitHub stays requested there."""
+        """Take someone off the PR in ``role``: maintainers take anyone off, the PR's
+        owners its reviewers, and everyone themselves. A review requested on GitHub
+        stays requested there."""
         service = service_of(request)
         repo = _repo(repo)
         await require_view(service, user, repo)
-        if login.lower() != user.login.lower() and not await is_maintainer(
-            service, user, repo
+        if (
+            login.lower() != user.login.lower()
+            and not await is_maintainer(service, user, repo)
+            and not (
+                role == "reviewer"
+                and holds(
+                    await service.store.list_assignees(repo, number),
+                    user.login,
+                    "owner",
+                )
+            )
         ):
             raise HTTPException(
-                403, f"only maintainers of {repo} take other reviewers off a PR"
+                403, f"only maintainers of {repo} take others off a PR's {role}s"
             )
-        await service.store.remove_assignee(repo, number, login)
+        await service.store.remove_assignee(repo, number, login, role)
         return {"assignees": await _assignees(service, repo, number)}
 
     @r.get("/repos/{repo:path}/usage")

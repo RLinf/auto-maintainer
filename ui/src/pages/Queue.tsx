@@ -1,7 +1,6 @@
 // Pull requests: every open PR the user can see, ranked by internal priority, with saved
 // views, search, filters, sorting, grouping, and review in bulk. The view lives in the URL.
 
-import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api, type Me, type PrRow, type ReviewActivity, type ReviewStart } from "../api";
@@ -16,7 +15,7 @@ import { openJob } from "../openJob";
 import { ScoringProgress } from "../jobs";
 import { BulkBar, DataTable, ListToolbar, useList, type Column } from "../list";
 import { MenuItem, Popover, Skeleton, Tabs, useTab, useToast } from "../ui";
-import { OwnerAvatars, Person } from "../avatar";
+import { holds, OwnerAvatars, Person } from "../avatar";
 
 const NEEDS_REVIEW = new Set(["NEW_REVIEW", "FOLLOWUP_REVIEW", "APPROVED_NEW_COMMITS"]);
 
@@ -26,18 +25,19 @@ export default function QueuePage({ me }: { me: Me }) {
   const toast = useToast();
   const agent = useAgent();
   const all = usePrs();
-  const mine = useQuery({ queryKey: ["prs", "mine"], queryFn: () => api.get<PrRow[]>("/api/prs?mine=true") });
   // One repository at a time: each ranks its PRs by its own rubric.
   const repos = useRepos();
   const names = (repos.data ?? []).map((r) => r.repo).sort((a, b) => a.localeCompare(b));
   const [scope, setScope] = useRepoScope(names);
   const allRows = all.data ?? [];
   const rows = allRows.filter((p) => !scope || p.repo === scope);
-  const myRows = (mine.data ?? []).filter((p) => !scope || p.repo === scope);
+  const myRows = rows.filter((p) => holds(p.assignees, me.login, "owner"));
+  const reviewingRows = rows.filter((p) => holds(p.assignees, me.login, "reviewer"));
   const views = [
     { id: "all", label: t("All open"), count: rows.length },
     { id: "review", label: t("Needs review"), count: rows.filter((p) => NEEDS_REVIEW.has(p.review_state)).length },
     { id: "mine", label: t("Owned by me"), count: myRows.length },
+    { id: "reviewing", label: t("I review"), count: reviewingRows.length },
     { id: "unrated", label: t("Not evaluated"), count: rows.filter((p) => !p.tier).length },
     { id: "reviewed", label: t("Reviewed"), count: rows.filter((p) => p.review_state === "UP_TO_DATE").length },
   ];
@@ -45,7 +45,9 @@ export default function QueuePage({ me }: { me: Me }) {
   const source =
     view === "mine"
       ? myRows
-      : view === "review"
+      : view === "reviewing"
+        ? reviewingRows
+        : view === "review"
         ? rows.filter((p) => NEEDS_REVIEW.has(p.review_state))
         : view === "unrated"
           ? rows.filter((p) => !p.tier)
@@ -61,7 +63,7 @@ export default function QueuePage({ me }: { me: Me }) {
   const list = useList<PrRow>({
     rows: source,
     key: prKey,
-    search: (p) => `${p.title} ${p.repo}#${p.number} #${p.number} ${p.author} ${p.labels.join(" ")} ${p.summary} ${p.owners.map((a) => a.login).join(" ")}`,
+    search: (p) => `${p.title} ${p.repo}#${p.number} #${p.number} ${p.author} ${p.labels.join(" ")} ${p.summary} ${p.assignees.map((a) => a.login).join(" ")}`,
     facets: [
       { id: "tier", label: t("Priority"), values: (p) => p.tier ?? t("Not evaluated") },
       { id: "state", label: t("Review state"), values: (p) => t(REVIEW_STATES[p.review_state] ?? p.review_state) },
@@ -69,12 +71,14 @@ export default function QueuePage({ me }: { me: Me }) {
       { id: "scored", label: t("Quality from"), values: (p) => (showsQuick(p.quality, p.quick_quality, p.head) ? t("Quick score") : p.quality ? t("Review") : t("Not scored yet")) },
       { id: "author", label: t("Author"), values: (p) => p.author },
       { id: "label", label: t("Label"), values: (p) => p.labels },
-      { id: "claimed", label: t("Reviewers"), values: (p) => (p.owners.length ? p.owners.map((a) => a.login) : t("Nobody")) },
+      { id: "owners", label: t("Owners"), values: (p) => namesOf(p, "owner") ?? t("Nobody") },
+      { id: "claimed", label: t("Reviewers"), values: (p) => namesOf(p, "reviewer") ?? t("Nobody") },
     ],
     sorts: [
       { id: "priority", label: t("Priority"), value: (p) => p.total, descFirst: true },
       { id: "tier", label: t("Priority"), value: (p) => (p.tier ? TIER_ORDER.indexOf(p.tier) : null) },
       { id: "quality", label: t("Quality"), value: (p) => shownQuality(p.quality, p.quick_quality, p.head)?.score, descFirst: true },
+      { id: "opened", label: t("Opened"), value: (p) => timeOf(p.created_at), descFirst: true },
       { id: "updated", label: t("Last updated"), value: (p) => timeOf(p.updated_at), descFirst: true },
       { id: "number", label: t("Number"), value: (p) => p.number, descFirst: true },
       { id: "title", label: t("Title"), value: (p) => p.title.toLowerCase() },
@@ -92,7 +96,8 @@ export default function QueuePage({ me }: { me: Me }) {
         order: [...QUALITY_BANDS.map((b) => t(b.label)), t("Not scored yet")],
       },
       { id: "author", label: t("Author"), value: (p) => p.author },
-      { id: "claimed", label: t("Reviewers"), value: (p) => (p.owners.length ? p.owners.map((a) => a.login).join(", ") : t("Nobody")) },
+      { id: "owners", label: t("Owners"), value: (p) => namesOf(p, "owner")?.join(", ") ?? t("Nobody") },
+      { id: "claimed", label: t("Reviewers"), value: (p) => namesOf(p, "reviewer")?.join(", ") ?? t("Nobody") },
     ],
     pageSize: 50,
   });
@@ -167,11 +172,19 @@ export default function QueuePage({ me }: { me: Me }) {
       ),
     },
     { id: "labels", header: t("Labels"), cell: (p) => <Labels labels={p.labels} max={3} />, className: "hide-narrow" },
+    { id: "opened", header: t("Opened"), sort: "opened", cell: (p) => <span style={{ whiteSpace: "nowrap" }}><When at={p.created_at} /></span>, className: "small hide-narrow" },
+    { id: "updated", header: t("Updated"), sort: "updated", cell: (p) => <span style={{ whiteSpace: "nowrap" }}><When at={p.updated_at} /></span>, className: "small hide-narrow" },
+    {
+      id: "owners",
+      header: t("Owners"),
+      label: t("Owners"),
+      cell: (p) => <RoleAvatars p={p} role="owner" me={me.login} />,
+    },
     {
       id: "claimed",
       header: t("Reviewers"),
       label: t("Reviewers"),
-      cell: (p) => (p.owners.length ? <OwnerAvatars owners={p.owners} me={me.login} t={t} /> : <span className="muted">—</span>),
+      cell: (p) => <RoleAvatars p={p} role="reviewer" me={me.login} />,
     },
     {
       id: "actions",
@@ -316,7 +329,7 @@ export default function QueuePage({ me }: { me: Me }) {
       <Tabs tabs={views} active={view} onChange={setView} />
       <ListToolbar list={list} placeholder={t("Search by title, number, author, label…")} />
       <ErrorBox error={all.error || review.error || again.error || quality.error || sync.error} />
-      {all.isLoading || (view === "mine" && mine.isLoading) ? (
+      {all.isLoading ? (
         <div className="card">
           <Skeleton rows={8} />
         </div>
@@ -406,4 +419,16 @@ function Activity({ a, me }: { a: ReviewActivity; me: string }) {
     );
   }
   return null;
+}
+
+/** The logins holding ``role`` on a PR; ``null`` when nobody does. */
+function namesOf(p: PrRow, role: "owner" | "reviewer"): string[] | null {
+  const names = p.assignees.filter((a) => a.role === role).map((a) => a.login);
+  return names.length ? names : null;
+}
+
+function RoleAvatars({ p, role, me }: { p: PrRow; role: "owner" | "reviewer"; me: string }) {
+  const t = useT();
+  const people = p.assignees.filter((a) => a.role === role);
+  return people.length ? <OwnerAvatars owners={people} me={me} t={t} /> : <span className="muted">—</span>;
 }

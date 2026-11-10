@@ -1,8 +1,11 @@
-// The reviewers working on a PR in the service (design 2.3). Anyone who may use the
-// repository's dashboard claims a PR or leaves it, and a PR has any number of them. The
-// repository's maintainers assign others, by any GitHub login that can see the
-// repository, whether or not that person ever signed in here; assigning can also
-// request their review on GitHub, as the repository's rule for that allows.
+// A PR's people in the service (design 2.3): its owners, who answer for the whole PR's
+// progress, and its reviewers, who review it. Anyone who may use the repository's
+// dashboard claims either role or leaves it, and a PR has any number of each. The
+// repository's maintainers assign both, and the PR's owners assign its reviewers, by
+// any GitHub login that can see the repository, whether or not that person ever signed
+// in here; assigning a reviewer can also request their review on GitHub, as the
+// repository's rule for that allows. Whom GitHub asks to review on its own (its code
+// owners) shows apart, in the Code owners card.
 
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
@@ -25,60 +28,88 @@ function loginsIn(text: string): string[] {
   return [...new Set(text.split(/[\s,]+/).map((x) => x.replace(/^@/, "").trim()).filter(Boolean))];
 }
 
-export function ClaimButton({ repo, number, assignees, me }: { repo: string; number: number; assignees: Assignee[]; me: string }) {
+export type Role = "owner" | "reviewer";
+
+/** Claim a role on the PR, or leave it. */
+export function ClaimButton({ repo, number, role, assignees, me }: { repo: string; number: number; role: Role; assignees: Assignee[]; me: string }) {
   const t = useT();
   const base = `/api/prs/${repo}/${number}`;
-  const claim = useAct(() => api.post(`${base}/claim`), KEYS);
-  const leave = useAct(() => api.del(`${base}/claim`), KEYS);
-  const mine = assignees.some((a) => a.login.toLowerCase() === me.toLowerCase());
-  const others = assignees.filter((a) => a.login.toLowerCase() !== me.toLowerCase()).map((a) => a.login);
+  const claim = useAct(() => api.post(`${base}/claim`, { role }), KEYS);
+  const leave = useAct(() => api.del(`${base}/claim?role=${role}`), KEYS);
+  const holders = assignees.filter((a) => a.role === role);
+  const mine = holders.some((a) => a.login.toLowerCase() === me.toLowerCase());
+  const others = holders.filter((a) => a.login.toLowerCase() !== me.toLowerCase()).map((a) => a.login);
   return mine ? (
-    <button disabled={leave.isPending} onClick={() => leave.mutate(undefined)} title={t("Stop working on this PR; the others stay on it")}>
+    <button className="sm" disabled={leave.isPending} onClick={() => leave.mutate(undefined)} title={role === "owner" ? t("Stop owning this PR; the other owners stay") : t("Stop reviewing this PR; the other reviewers stay")}>
       {t("Leave")}
     </button>
   ) : (
     <button
+      className="sm"
       disabled={claim.isPending}
       onClick={() => claim.mutate(undefined)}
-      title={others.length ? `${t("Join the reviewers on it:")} ${others.join(", ")}` : t("Say you are reviewing this PR")}
+      title={
+        others.length
+          ? `${role === "owner" ? t("Own it with:") : t("Review it with:")} ${others.join(", ")}`
+          : role === "owner"
+            ? t("Say you answer for this PR's progress")
+            : t("Say you are reviewing this PR")
+      }
     >
       {t("Claim")}
     </button>
   );
 }
 
-export function ReviewersCard({
+/** A PR's owners and reviewers here (design 2.3): owners answer for the whole PR's
+ * progress, reviewers review it; anyone claims either, maintainers assign both, and
+ * the PR's owners assign its reviewers. */
+export function PrPeopleCards({ repo, number, author, assignees, me }: { repo: string; number: number; author: string; assignees: Assignee[]; me: string }) {
+  const who = useAssignable(repo);
+  const iOwn = assignees.some((a) => a.role === "owner" && a.login.toLowerCase() === me.toLowerCase());
+  const maintainer = !!who.data?.can_assign;
+  return (
+    <>
+      <RoleCard role="owner" repo={repo} number={number} author={author} assignees={assignees} me={me} canAssign={maintainer} />
+      <RoleCard role="reviewer" repo={repo} number={number} author={author} assignees={assignees} me={me} canAssign={maintainer || iOwn} />
+    </>
+  );
+}
+
+function RoleCard({
+  role,
   repo,
   number,
   author,
   assignees,
-  requested,
   me,
+  canAssign,
 }: {
+  role: Role;
   repo: string;
   number: number;
   author: string;
   assignees: Assignee[];
-  requested: string[];
   me: string;
+  canAssign: boolean;
 }) {
   const t = useT();
   const toast = useToast();
   const who = useAssignable(repo);
   const base = `/api/prs/${repo}/${number}`;
-  const remove = useAct((login: string) => api.del(`${base}/assignees/${encodeURIComponent(login)}`), KEYS);
-  const assign = useAct((body: { logins: string[]; request_review: boolean }) => api.post<AssignResult>(`${base}/assignees`, body), KEYS);
+  const remove = useAct((login: string) => api.del(`${base}/assignees/${encodeURIComponent(login)}?role=${role}`), KEYS);
+  const assign = useAct((body: { logins: string[]; role: Role; request_review: boolean }) => api.post<AssignResult>(`${base}/assignees`, body), KEYS);
   const [text, setText] = useState("");
   const [ask, setAsk] = useState(true);
-  const canAssign = !!who.data?.can_assign;
-  const on = new Set(assignees.map((a) => a.login.toLowerCase()));
-  const onGitHub = requested.filter((l) => !on.has(l.toLowerCase()));
+  const holders = assignees.filter((a) => a.role === role);
+  const on = new Set(holders.map((a) => a.login.toLowerCase()));
   const suggestions = (who.data?.people ?? []).filter((p) => !on.has(p.login.toLowerCase()) && p.login.toLowerCase() !== author.toLowerCase());
   const logins = loginsIn(text);
+  const owner = role === "owner";
 
   const submit = () =>
     assign.mutate(
-      { logins, request_review: ask },
+      { logins, role, request_review: !owner && ask },
       {
         onSuccess: (r) => {
           setText("");
@@ -99,10 +130,14 @@ export function ReviewersCard({
     );
 
   return (
-    <Section title={t("Reviewers")} aside={<ClaimButton repo={repo} number={number} assignees={assignees} me={me} />}>
+    <Section
+      title={owner ? t("Owners") : t("Reviewers")}
+      hint={owner ? t("answer for the PR's progress") : t("review it")}
+      aside={<ClaimButton repo={repo} number={number} role={role} assignees={assignees} me={me} />}
+    >
       <div className="stack" style={{ gap: 8 }}>
-        {assignees.length === 0 && <span className="small muted">{t("Nobody has claimed this PR or been assigned to it.")}</span>}
-        {assignees.map((a) => (
+        {holders.length === 0 && <span className="small muted">{owner ? t("Nobody owns this PR yet.") : t("Nobody reviews this PR yet.")}</span>}
+        {holders.map((a) => (
           <div key={a.login} className="assignee">
             <Avatar login={a.login} size={28} />
             <span className="main">
@@ -118,7 +153,7 @@ export function ReviewersCard({
               <button
                 className="ghost sm icon"
                 aria-label={`${t("Take off")} ${a.login}`}
-                title={t("Take them off this PR here; a review requested on GitHub stays requested")}
+                title={owner ? t("Take them off as an owner") : t("Take them off this PR here; a review requested on GitHub stays requested")}
                 disabled={remove.isPending}
                 onClick={() => remove.mutate(a.login)}
               >
@@ -127,17 +162,6 @@ export function ReviewersCard({
             )}
           </div>
         ))}
-        {onGitHub.length > 0 && (
-          <div className="small muted row" style={{ gap: 6, flexWrap: "wrap" }}>
-            {t("Review requested on GitHub:")}
-            {onGitHub.map((l) => (
-              <span key={l} className="row" style={{ gap: 4 }}>
-                <Avatar login={l} size={18} />
-                {l}
-              </span>
-            ))}
-          </div>
-        )}
         {canAssign && (
           <form
             className="stack"
@@ -149,11 +173,11 @@ export function ReviewersCard({
           >
             <div className="row" style={{ gap: 6 }}>
               <input
-                list={`assignable-${repo}`}
+                list={`assignable-${repo}-${role}`}
                 value={text}
                 onChange={(e) => setText(e.target.value)}
                 placeholder={t("GitHub login, or several")}
-                aria-label={t("GitHub logins to assign")}
+                aria-label={owner ? t("GitHub logins to make owners") : t("GitHub logins to assign")}
                 style={{ flex: 1, minWidth: 0 }}
               />
               <button className="sm" type="submit" disabled={!logins.length || assign.isPending}>
@@ -161,7 +185,7 @@ export function ReviewersCard({
                 {assign.isPending ? t("Assigning…") : t("Assign")}
               </button>
             </div>
-            <datalist id={`assignable-${repo}`}>
+            <datalist id={`assignable-${repo}-${role}`}>
               {suggestions.map((p) => (
                 <option key={p.login} value={p.login}>
                   {[p.role, p.areas.join(", ")].filter(Boolean).join(" · ")}
@@ -178,10 +202,12 @@ export function ReviewersCard({
                 ))}
               </div>
             )}
-            <label className="small row" style={{ gap: 6 }}>
-              <input type="checkbox" checked={ask} onChange={(e) => setAsk(e.target.checked)} />
-              {t("Also request their review on GitHub")}
-            </label>
+            {!owner && (
+              <label className="small row" style={{ gap: 6 }}>
+                <input type="checkbox" checked={ask} onChange={(e) => setAsk(e.target.checked)} />
+                {t("Also request their review on GitHub")}
+              </label>
+            )}
           </form>
         )}
         <ErrorBox error={assign.error || remove.error} />

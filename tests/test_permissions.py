@@ -41,6 +41,7 @@ from auto_maintainer.domain.memory import profile_path
 from auto_maintainer.domain.permissions import Permission
 from auto_maintainer.domain.records import AgentRunRecord, Job
 from auto_maintainer.domain.settings import UserToken
+from auto_maintainer.domain.snapshot import PrFile, RepoInfo
 from auto_maintainer.profiles.governance import governance_path
 from auto_maintainer.profiles.layers import dump_yaml, parse_yaml
 from auto_maintainer.testing.demo import DEMO_GOVERNANCE, build_demo
@@ -200,8 +201,8 @@ async def test_reviewers_claim_together_and_maintainers_assign_anyone(demo) -> N
     async with _as(app, "walt") as walt:
         assert (await walt.delete(f"{base}/assignees/maria")).status_code == 403
         assert (await walt.delete(f"{base}/claim")).status_code == 200
-        mine = (await walt.get("/api/prs?mine=true")).json()
-        assert 42 not in [r["number"] for r in mine]
+        reviewing = (await walt.get("/api/prs?reviewing=true")).json()
+        assert 42 not in [r["number"] for r in reviewing]
         assert not (await walt.get(f"/api/repos/{REPO}/assignable")).json()[
             "can_assign"
         ]
@@ -300,32 +301,111 @@ async def test_a_person_approves_a_pr_only_as_themselves(demo) -> None:
         await h.service.pipeline.approve(proposal.id, "maria")
 
 
-async def test_a_prs_owners_include_who_the_forge_assigned_or_asked(demo) -> None:
-    """A PR's owners are who claimed it or was assigned on the dashboard, its
-    assignees on the forge, and the people asked to review it there (not teams);
-    "mine" means a PR the person owns."""
+async def test_the_pr_page_lists_code_owners_apart_from_its_owners(demo) -> None:
+    """The code owners of the changed files come from CODEOWNERS on the PR's base
+    branch, with whether the branch waits for their approval; anyone who may see
+    the repository reads them, and they never become the PR's owners."""
+    h, app = demo
+    h.forge.add_repo(RepoInfo(name=REPO, requires_code_owner_reviews=True))
+    h.forge.put_file(REPO, ".github/CODEOWNERS", "* @lead\n/docs/ @writer\n")
+    pr = make_pr(
+        number=78,
+        files=[PrFile(path="docs/a.md"), PrFile(path="main.py")],
+        requested_reviewers=["writer", "walt"],
+    )
+    h.forge.put_pr(pr)
+    await h.store.save_snapshot(pr)
+    async with _as(app, "walt") as walt:
+        got = (await walt.get(f"/api/prs/{REPO}/78/code-owners")).json()
+        assert got["file"] == ".github/CODEOWNERS" and got["required"] is True
+        assert [(p["owners"], p["files"]) for p in got["parts"]] == [
+            (["writer"], ["docs/a.md"]),
+            (["lead"], ["main.py"]),
+        ]
+        writer = next(p for p in got["people"] if p["login"] == "writer")
+        assert writer["requested"] and got["requested"] == ["walt"]
+        mine = (await walt.get("/api/prs?mine=true")).json()
+        assert 78 not in [r["number"] for r in mine]
+    async with _as(app, "nobody") as nobody:
+        res = await nobody.get(f"/api/prs/{REPO}/78/code-owners")
+        assert res.status_code in (403, 404)
+
+
+async def test_a_prs_owners_are_only_who_claimed_or_was_assigned_here(demo) -> None:
+    """A PR's owners and reviewers are who claimed the role or was assigned it on
+    the dashboard. Reviews GitHub requested (its code owners' automatic ones among
+    them) and the forge's assignees give nobody a role, so neither "mine" (owned)
+    nor "reviewing" lists those PRs."""
     h, app = demo
     pr = make_pr(
         number=77,
         requested_reviewers=["walt"],
         requested_teams=["core-team"],
-        assignees=["bob", "maria"],
+        assignees=["bob"],
     )
     h.forge.put_pr(pr)
     await h.store.save_snapshot(pr)
-    h.forge.set_permission(REPO, "carol", Permission.WRITE)
+    h.forge.set_permission(REPO, "bob", Permission.WRITE)
     async with _as(app, "maria") as maria:
-        await maria.post(f"/api/prs/{REPO}/77/claim")
+        await maria.post(f"/api/prs/{REPO}/77/claim", json={"role": "owner"})
         [row] = [r for r in (await maria.get("/api/prs")).json() if r["number"] == 77]
-        assert [(o["login"], o["kind"]) for o in row["owners"]] == [
-            ("maria", "claimed"),
-            ("bob", "assignee"),
-            ("walt", "requested"),
+        assert [(a["login"], a["role"], a["kind"]) for a in row["assignees"]] == [
+            ("maria", "owner", "claimed")
         ]
-    async with _as(app, "walt") as walt:
-        mine = (await walt.get("/api/prs?mine=true")).json()
+        assert "owners" not in row
+        mine = (await maria.get("/api/prs?mine=true")).json()
         assert 77 in [r["number"] for r in mine]
-    async with _as(app, "carol") as carol:
-        assert 77 in [r["number"] for r in (await carol.get("/api/prs")).json()]
-        mine = (await carol.get("/api/prs?mine=true")).json()
-        assert 77 not in [r["number"] for r in mine]
+        reviewing = (await maria.get("/api/prs?reviewing=true")).json()
+        assert 77 not in [r["number"] for r in reviewing]
+    for login in ("walt", "bob"):
+        async with _as(app, login) as person:
+            assert 77 in [r["number"] for r in (await person.get("/api/prs")).json()]
+            for view in ("mine", "reviewing"):
+                listed = (await person.get(f"/api/prs?{view}=true")).json()
+                assert 77 not in [r["number"] for r in listed]
+
+
+async def test_a_prs_owner_assigns_its_reviewers_but_not_its_owners(demo) -> None:
+    """Owners answer for the whole PR: they assign and take off its reviewers.
+    Only maintainers assign owners; assigning an owner asks GitHub for nothing,
+    and one person may own a PR and review it."""
+    h, app = demo
+    h.forge.set_permission(REPO, "newbie", Permission.READ)
+    base = f"/api/prs/{REPO}/42"
+    async with _as(app, "walt") as walt:
+        refused = await walt.post(
+            f"{base}/assignees", json={"logins": ["newbie"], "role": "reviewer"}
+        )
+        assert refused.status_code == 403, "not yet the PR's owner"
+    async with _as(app, "maria") as maria:
+        owner = await maria.post(
+            f"{base}/assignees", json={"logins": ["walt"], "role": "owner"}
+        )
+        assert owner.json()["requested"] is None, "an owner is not asked to review"
+    async with _as(app, "walt") as walt:
+        assert (
+            await walt.post(
+                f"{base}/assignees", json={"logins": ["newbie"], "role": "owner"}
+            )
+        ).status_code == 403
+        assigned = await walt.post(
+            f"{base}/assignees", json={"logins": ["newbie", "walt"], "role": "reviewer"}
+        )
+        assert assigned.status_code == 200
+        roles = {(a["login"], a["role"]) for a in assigned.json()["assignees"]}
+        assert roles == {
+            ("walt", "owner"),
+            ("walt", "reviewer"),
+            ("newbie", "reviewer"),
+        }
+        left = await walt.delete(f"{base}/assignees/newbie?role=reviewer")
+        assert {a["login"] for a in left.json()["assignees"]} == {"walt"}
+        await walt.delete(f"{base}/claim?role=owner")
+        assert (
+            await walt.post(
+                f"{base}/assignees", json={"logins": ["newbie"], "role": "reviewer"}
+            )
+        ).status_code == 403, "no longer the owner"
+    await h.settle()
+    [request] = [w for w in h.forge.writes if w[0] == "request_reviewers"]
+    assert set(request[1]["logins"]) == {"newbie", "walt"}

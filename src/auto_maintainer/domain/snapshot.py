@@ -47,6 +47,9 @@ class RepoInfo(_Model):
     """Check names that branch protection requires; ``None`` when unreadable."""
     requires_up_to_date: bool | None = None
     required_approvals: int | None = None
+    requires_code_owner_reviews: bool | None = None
+    """Whether the default branch waits for a code owner's approval of the files
+    they own; ``None`` when unreadable."""
 
 
 class PrFile(_Model):

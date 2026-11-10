@@ -27,6 +27,7 @@ from auto_maintainer.domain.actions import (
 )
 from auto_maintainer.domain.calendar import BusinessCalendar
 from auto_maintainer.domain.codeowners import (
+    code_owner_report,
     owners_for,
     owners_of_paths,
     parse_codeowners,
@@ -64,6 +65,7 @@ from auto_maintainer.domain.snapshot import (
     Commit,
     IssueComment,
     Mergeable,
+    PrFile,
     RepoInfo,
     Review,
     ReviewEventState,
@@ -632,6 +634,63 @@ def test_codeowners_last_match_wins() -> None:
     assert owners_for(rules, "tools/x.py") == ("py",)
     assert owners_for(rules, "src/core/a/b.py") == ("core",)
     assert owners_of_paths(rules, ["docs/x.md", "a.py"]) == ["writer", "py"]
+
+
+def test_code_owner_report_groups_files_and_reads_verdicts() -> None:
+    """Files go to the owners of their last matching rule; a part counts as
+    approved by a user owner's standing approval, never the author's; a team is
+    only asked or not; a later comment leaves an approval standing."""
+    rules = parse_codeowners(
+        "* @lead\n/docs/ @writer @acme/docs\n/src/core/ @core @alice\n/vendor/\n"
+    )
+    sha = "b" * 40
+    pr = make_pr(
+        sha=sha,
+        author="alice",
+        files=[
+            PrFile(path="src/core/a.py"),
+            PrFile(path="src/core/b.py"),
+            PrFile(path="docs/x.md"),
+            PrFile(path="vendor/lib.c"),
+            PrFile(path="README.md"),
+        ],
+        requested_reviewers=["lead", "walt"],
+        requested_teams=["docs"],
+        reviews=[
+            Review(
+                id=1,
+                author="core",
+                state=ReviewEventState.APPROVED,
+                commit_sha="a" * 40,
+            ),
+            Review(
+                id=2, author="core", state=ReviewEventState.COMMENTED, commit_sha=sha
+            ),
+            Review(
+                id=3, author="alice", state=ReviewEventState.APPROVED, commit_sha=sha
+            ),
+            Review(
+                id=4,
+                author="writer",
+                state=ReviewEventState.CHANGES_REQUESTED,
+                commit_sha=sha,
+            ),
+        ],
+    )
+    report = code_owner_report(rules, pr)
+    parts = {tuple(p.owners): p for p in report.parts}
+    assert parts[("core", "alice")].files == ["src/core/a.py", "src/core/b.py"]
+    assert parts[("core", "alice")].approved_by == ["core"], "not the author"
+    assert parts[("writer", "acme/docs")].approved_by == []
+    assert parts[("lead",)].files == ["README.md"]
+    assert report.unowned == ["vendor/lib.c"], "a rule without owners owns nothing"
+    people = {p.login: p for p in report.people}
+    assert (people["core"].verdict, people["core"].at_head) == ("APPROVED", False)
+    assert people["alice"].author and people["core"].files == 2
+    assert people["writer"].verdict == "CHANGES_REQUESTED"
+    assert people["acme/docs"].team and people["acme/docs"].requested
+    assert people["lead"].requested and not people["core"].requested
+    assert "walt" not in people
 
 
 def test_business_days() -> None:

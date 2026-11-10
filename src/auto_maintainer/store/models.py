@@ -197,6 +197,7 @@ pr_assignees = Table(
     Column("repo", String, primary_key=True),
     Column("number", Integer, primary_key=True),
     Column("login", String, primary_key=True),
+    Column("role", String, primary_key=True),
     Column("kind", String, nullable=False),
     Column("by", String, nullable=False),
     Column("at", String, nullable=False),

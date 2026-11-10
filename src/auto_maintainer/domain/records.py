@@ -130,14 +130,22 @@ class AgentRunRecord(BaseModel):
     created_at: datetime = Field(default_factory=utc_now)
 
 
+PrRole = Literal["owner", "reviewer"]
+"""What a person takes on for a PR here: its ``owner`` answers for the whole PR's
+progress and may assign its reviewers; a ``reviewer`` reviews it. Neither is a review
+GitHub requested (its code owners), which stays GitHub's."""
+
+
 class PrAssignee(BaseModel):
-    """A reviewer working on a PR in the service (design 2.3): one who claimed it
-    themselves, or one a maintainer of the repository assigned. A PR has any number;
-    the login need not have signed in to the dashboard."""
+    """A person with a role on a PR in the service (design 2.3): one who claimed it
+    themselves, or one assigned it (owners by a maintainer of the repository,
+    reviewers by a maintainer or the PR's owner). A PR has any number of each, one
+    person may hold both, and the login need not have signed in to the dashboard."""
 
     repo: str
     number: int
     login: str
+    role: PrRole = "reviewer"
     kind: Literal["claimed", "assigned"] = "claimed"
     by: str
     """Who claimed or assigned it: the login itself for a claim."""

@@ -826,6 +826,11 @@ details.pv-section[open] > summary { margin-bottom: 6px; }
 .assignee .main { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .chip-person { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px 2px 3px; border-radius: 999px; font-size: 12px; background: var(--surface-2); border: 1px solid var(--border); color: var(--text); }
 .chip-person:hover { background: var(--accent-soft); }
+.owner-part { display: grid; gap: 6px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; }
+.owner-part.done { background: var(--ok-bg); border-color: transparent; }
+.owner-chip { display: inline-flex; align-items: center; gap: 6px; min-width: 0; font-size: 13px; overflow-wrap: anywhere; }
+.owner-chip > a { display: inline-flex; align-items: center; gap: 4px; }
+.owner-files { margin: 4px 0 0; padding-left: 18px; max-height: 180px; overflow: auto; }
 .clamp2 { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
 .score-num { font-variant-numeric: tabular-nums; font-weight: 600; }
 .score-big { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1; }

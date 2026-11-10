@@ -79,6 +79,7 @@ def _assignee(row: Row) -> PrAssignee:
         repo=row.repo,
         number=row.number,
         login=row.login,
+        role=row.role,
         kind=row.kind,
         by=row.by,
         at=datetime.fromisoformat(row.at),
@@ -752,6 +753,7 @@ class SqliteStore:
                         m.pr_assignees.c.repo == a.repo,
                         m.pr_assignees.c.number == a.number,
                         func.lower(m.pr_assignees.c.login) == a.login.lower(),
+                        m.pr_assignees.c.role == a.role,
                     )
                 )
             ).first()
@@ -765,6 +767,7 @@ class SqliteStore:
                         m.pr_assignees.c.repo == a.repo,
                         m.pr_assignees.c.number == a.number,
                         m.pr_assignees.c.login == kept.login,
+                        m.pr_assignees.c.role == a.role,
                     )
                     .values(kind=a.kind, by=a.by, at=ts(a.at))
                 )
@@ -774,6 +777,7 @@ class SqliteStore:
                     repo=a.repo,
                     number=a.number,
                     login=a.login,
+                    role=a.role,
                     kind=a.kind,
                     by=a.by,
                     at=ts(a.at),
@@ -781,13 +785,16 @@ class SqliteStore:
             )
             return a
 
-    async def remove_assignee(self, repo: str, number: int, login: str) -> bool:
+    async def remove_assignee(
+        self, repo: str, number: int, login: str, role: str
+    ) -> bool:
         async with self._write, self._engine.begin() as conn:
             result = await conn.execute(
                 delete(m.pr_assignees).where(
                     m.pr_assignees.c.repo == repo,
                     m.pr_assignees.c.number == number,
                     func.lower(m.pr_assignees.c.login) == login.lower(),
+                    m.pr_assignees.c.role == role,
                 )
             )
             return bool(result.rowcount)

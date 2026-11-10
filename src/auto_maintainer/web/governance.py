@@ -29,7 +29,6 @@ from typing import Any, Literal
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from ..domain.codeowners import codeowners_locations, parse_codeowners
 from ..domain.events import Event, EventKind
 from ..domain.governance import role_changes
 from ..domain.memory import MemoryChangeState
@@ -37,7 +36,7 @@ from ..domain.permissions import Permission
 from ..domain.secrets import redact_secrets
 from ..profiles.governance import check, governance_path
 from ..service import Service
-from .api import _repo, require_view, service_of
+from .api import _repo, read_codeowners, require_view, service_of
 from .auth import User, current_user
 
 MAX_CHECKED = 60
@@ -51,16 +50,13 @@ class AskBody(BaseModel):
 
 
 async def _codeowners(service: Service, repo: str, path: str | None) -> set[str]:
-    for location in [path] if path else list(codeowners_locations(repo)):
-        text = await service.a.forge.get_file(repo, location)
-        if text:
-            return {
-                owner.lower()
-                for rule in parse_codeowners(text)
-                for owner in rule.owners
-                if "/" not in owner and "@" not in owner
-            }
-    return set()
+    _, rules = await read_codeowners(service, repo, path)
+    return {
+        owner.lower()
+        for rule in rules
+        for owner in rule.owners
+        if "/" not in owner and "@" not in owner
+    }
 
 
 async def _permissions(

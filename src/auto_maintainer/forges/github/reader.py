@@ -405,6 +405,7 @@ class GitHubReader:
         required: set[str] | None = None
         strict: bool | None = None
         approvals: int | None = None
+        owners_review: bool | None = None
         protection_summary = (branch_data.get("protection") or {}).get(
             "required_status_checks"
         ) or {}
@@ -416,7 +417,7 @@ class GitHubReader:
                 if c.get("context")
             }
             if not branch_data.get("protected"):
-                strict, approvals = False, 0
+                strict, approvals, owners_review = False, 0, False
         protection = None
         if branch_data.get("protected"):
             protection = await self._client.get(
@@ -430,6 +431,7 @@ class GitHubReader:
             strict = bool(checks.get("strict")) if checks else False
             reviews = protection.get("required_pull_request_reviews") or {}
             approvals = int(reviews.get("required_approving_review_count") or 0)
+            owners_review = bool(reviews.get("require_code_owner_reviews"))
         rules = await self._client.get(
             f"/repos/{repo}/rules/branches/{quote(branch, safe='')}",
             repo=repo,
@@ -450,6 +452,9 @@ class GitHubReader:
             elif rule.get("type") == "pull_request":
                 count = int(params.get("required_approving_review_count") or 0)
                 approvals = max(approvals or 0, count)
+                owners_review = bool(
+                    owners_review or params.get("require_code_owner_review")
+                )
         return RepoInfo(
             # GitHub's own spelling: names are not case-sensitive there, and the
             # service keys a repository's records and memory folder by this one.
@@ -461,6 +466,7 @@ class GitHubReader:
             required_checks=sorted(required) if required is not None else None,
             requires_up_to_date=strict,
             required_approvals=approvals,
+            requires_code_owner_reviews=owners_review,
         )
 
     async def default_branch_sha(self, repo: str) -> str:

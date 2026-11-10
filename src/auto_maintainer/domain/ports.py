@@ -730,18 +730,20 @@ class Store(Protocol):
         ...
 
     async def add_assignee(self, assignee: PrAssignee) -> PrAssignee:
-        """Add a reviewer to a PR, or keep the one there: a claim never turns an
-        assignment back into a claim. Returns what is stored."""
+        """Give a person a role on a PR, or keep the one there: a claim never turns
+        an assignment back into a claim. Returns what is stored."""
         ...
 
-    async def remove_assignee(self, repo: str, number: int, login: str) -> bool:
-        """Take ``login`` off the PR; whether it was there."""
+    async def remove_assignee(
+        self, repo: str, number: int, login: str, role: str
+    ) -> bool:
+        """Take ``login`` off the PR in ``role``; whether they held it."""
         ...
 
     async def list_assignees(
         self, repo: str | None = None, number: int | None = None
     ) -> list[PrAssignee]:
-        """The reviewers on PRs, oldest first."""
+        """The owners and reviewers of PRs, oldest first."""
         ...
 
     async def acquire_lease(
