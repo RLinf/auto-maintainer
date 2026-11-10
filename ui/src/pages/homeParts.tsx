@@ -226,9 +226,11 @@ export function ReviewCard({ rows, all, loading, me, automations }: { rows: PrRo
   const [order, setOrder] = useReviewOrder();
   const words = query.toLowerCase().split(/\s+/).filter(Boolean);
   const searching = words.length > 0;
-  const ownedCount = rows.filter((p) => holds(p.assignees, me.login, "owner")).length;
-  const reviewingCount = rows.filter((p) => holds(p.assignees, me.login, "reviewer")).length;
-  const pool = (searching ? all.filter((p) => matches(p, words, aliasOf)) : rows).filter((p) => (!only || holds(p.assignees, me.login, only)) && STAFFED[staffed].keep(p));
+  // The PRs one owns or reviews matter whatever their review state, so these two
+  // filters look through every open PR, not only those waiting for a review.
+  const ownedCount = all.filter((p) => holds(p.assignees, me.login, "owner")).length;
+  const reviewingCount = all.filter((p) => holds(p.assignees, me.login, "reviewer")).length;
+  const pool = (searching ? all.filter((p) => matches(p, words, aliasOf)) : only ? all : rows).filter((p) => (!only || holds(p.assignees, me.login, only)) && STAFFED[staffed].keep(p));
   const sorted = [...pool].sort(REVIEW_ORDERS[order].compare);
   const shown = showAll || searching ? sorted : sorted.slice(0, 8);
   const waiting = new Set(rows.map(prKey));
@@ -256,7 +258,7 @@ export function ReviewCard({ rows, all, loading, me, automations }: { rows: PrRo
         />
         <h2>{t("Pull requests to review")}</h2>
         <span className="small muted" title={searching ? t("PRs that match, of the open PRs") : undefined}>
-          {searching ? `${sorted.length} / ${all.length}` : rows.length}
+          {searching || only ? `${sorted.length} / ${all.length}` : rows.length}
         </span>
         <span className="spacer" />
         <AgentPicker value={who} onChange={setWho} />
@@ -328,7 +330,7 @@ export function ReviewCard({ rows, all, loading, me, automations }: { rows: PrRo
         <span className="small muted">{t("No open PR matches the search.")}</span>
       ) : !pool.length ? (
         <span className="small muted">
-          {only === "owner" ? t("You own none of the PRs waiting for a review.") : only === "reviewer" ? t("You review none of the PRs waiting for a review.") : t("No PR needs a review.")}
+          {only === "owner" ? t("You own no open PR here.") : only === "reviewer" ? t("You review no open PR here.") : t("No PR needs a review.")}
         </span>
       ) : (
         <div className="list">
