@@ -1,8 +1,10 @@
-// Host setup in the browser: the address, the GitHub CLI login the service acts as, the
-// memory repository, the service's own repository, and the agent that runs tasks first. The service reaches GitHub only
-// through the GitHub CLI; when the host has none, the page installs it. On a new host,
-// whoever proves through GitHub that they maintain the service's repository owns the
-// setup; later, maintainers reach this page from Settings.
+// Host setup in the browser: the address, the service's repository (its owner's fork
+// or copy of auto-maintainer) and with it the main forge, GitHub or GitLab, signing in
+// there as an admin of that repository (who owns this service), the account the
+// service acts as, the checks that let it change its own code later, the memory
+// repository, and the agent that runs tasks first. On a new host, only an admin of the
+// repository this checkout came from may claim it without the setup link printed in
+// the terminal; later, the owner reaches this page from Settings.
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState, type ReactNode } from "react";
@@ -18,8 +20,21 @@ interface Person {
   login: string;
   name: string;
   avatar_url: string;
-  kind?: "gh";
   warning?: string;
+}
+
+interface Forge {
+  id: string;
+  kind: "github" | "gitlab";
+  web_url: string;
+  /** Whether its CLI can sign in with a one-time code. */
+  device: boolean;
+}
+
+interface Check {
+  id: string;
+  ok: boolean;
+  text: string;
 }
 
 interface SetupStatus {
@@ -27,21 +42,28 @@ interface SetupStatus {
   mine: boolean;
   busy?: string;
   code: boolean;
+  /** Whether signing in as an admin of the repository makes the caller its owner. */
+  may_claim: boolean;
   configured: boolean;
   base_url: string;
+  forge: Forge;
+  repo: string | null;
+  repo_link: string | null;
+  owner: string | null;
   identity: Person | null;
   claimer: Person | null;
+  /** Signed in as the owner, but not yet an admin of the repository named. */
+  candidate: Person | null;
+  checks: Check[];
   /** How the host reached GitHub before only the GitHub CLI remained, if it must connect again. */
   reconnect: string | null;
   memory: string | null;
-  code_repo: string | null;
-  approve_permission: string;
   /** The agent chosen at the last setup, if any. */
   default_agent: string | null;
   detected: {
-    gh: { installed: boolean; user?: Person; error?: string };
+    cli: { name: string; installed: boolean; user?: Person; error?: string };
     agents: Record<string, boolean>;
-    checkout_repo: string | null;
+    checkout: { web_url: string; path: string; link: string; kind?: string } | null;
     hostname: string;
   };
 }
@@ -53,6 +75,20 @@ const AGENT_NAMES: Record<string, string> = {
   opencode: "OpenCode",
   gemini: "Gemini CLI",
 };
+
+const KNOWN_HOSTS: Record<string, "github" | "gitlab"> = { "github.com": "github", "gitlab.com": "gitlab" };
+
+/** The host of a repository link, for guessing its forge. */
+function hostOf(link: string): string {
+  const m = link.trim().match(/^(?:[\w.-]+@([\w.-]+):|(?:https?|ssh|git):\/\/(?:[^@/]+@)?([\w.-]+))/);
+  return (m?.[1] ?? m?.[2] ?? "").toLowerCase();
+}
+
+function siteName(forge: Forge): string {
+  const name = forge.kind === "gitlab" ? "GitLab" : "GitHub";
+  const host = forge.web_url.replace(/^https?:\/\//, "");
+  return host === "github.com" || host === "gitlab.com" ? name : `${name} (${host})`;
+}
 
 /** The agent preselected on the page: the one chosen before, else the first installed. */
 function preferredAgent(s: SetupStatus): string | null {
@@ -70,25 +106,31 @@ export default function SetupPage({ firstRun = false }: { firstRun?: boolean }) 
   });
   const [baseUrl, setBaseUrl] = useState("");
   const [memoryRepo, setMemoryRepo] = useState("");
-  const [codeRepo, setCodeRepo] = useState("");
-  const [showOther, setShowOther] = useState(false);
+  const [link, setLink] = useState("");
+  const [kind, setKind] = useState<"github" | "gitlab" | "">("");
+  const [clientId, setClientId] = useState("");
+  const [moreRepo, setMoreRepo] = useState(false);
+  const [otherAccount, setOtherAccount] = useState(false);
   const [agent, setAgent] = useState<string | null | undefined>(undefined);
   const s = status.data;
   useEffect(() => {
     if (!s || s.busy) return;
     setBaseUrl((v) => v || (s.configured ? s.base_url : window.location.origin));
-    setCodeRepo((v) => v || s.code_repo || s.detected.checkout_repo || "");
+    setLink((v) => v || s.repo_link || s.detected.checkout?.link || "");
     const login = s.claimer?.login ?? s.identity?.login;
     setMemoryRepo((v) => v || s.memory || (login ? `${login}/auto-maintainer-memory` : ""));
     setAgent((v) => (v === undefined ? preferredAgent(s) : v));
   }, [s]);
   const refresh = () => client.invalidateQueries({ queryKey: ["setup"] });
-  const hostLogin = useAct(() => api.post<Person>("/api/setup/github"), [["setup"]]);
-  const memory = useAct((body: { repo: string | null; create: boolean }) => api.post<{ repo: string | null; created?: boolean }>("/api/setup/memory", body), [["setup"]]);
-  const finish = useAct(
-    () => api.post<{ redirect: string }>("/api/setup/finish", { base_url: baseUrl, code_repo: codeRepo || null, default_agent: agent ?? null }),
-    [],
+  const useRepo = useAct(
+    () => api.post<{ repo: string; forge: Forge }>("/api/setup/repo", { link, kind: kind || null, oauth_client_id: clientId || null }),
+    [["setup"]],
   );
+  const copy = useAct(() => api.post<{ repo: string }>("/api/setup/copy"), [["setup"]]);
+  const check = useAct(() => api.post<{ checks: Check[] }>("/api/setup/check"), [["setup"]]);
+  const hostLogin = useAct(() => api.post<Person>("/api/setup/host-login"), [["setup"]]);
+  const memory = useAct((body: { repo: string | null; create: boolean }) => api.post<{ repo: string | null; created?: boolean }>("/api/setup/memory", body), [["setup"]]);
+  const finish = useAct(() => api.post<{ redirect: string }>("/api/setup/finish", { base_url: baseUrl, default_agent: agent ?? null }), []);
 
   const shell = (children: ReactNode) => (
     <div style={firstRun ? { minHeight: "100vh", display: "flex", justifyContent: "center", padding: "48px 16px 96px" } : { display: "flex", justifyContent: "center" }}>
@@ -99,8 +141,8 @@ export default function SetupPage({ firstRun = false }: { firstRun?: boolean }) 
             <h1>{firstRun ? t("Set up auto-maintainer") : t("Host setup")}</h1>
             <span className="muted">
               {firstRun
-                ? t("Everything happens here and on GitHub. Nothing to type in a terminal, no files to edit.")
-                : t("Change how this host connects to GitHub. The service restarts on the new setup when you save.")}
+                ? t("Everything happens here and on your forge, GitHub or GitLab. Nothing to type in a terminal, no files to edit.")
+                : t("Change how this host connects to its forge. The service restarts on the new setup when you save.")}
             </span>
           </div>
         </div>
@@ -119,16 +161,25 @@ export default function SetupPage({ firstRun = false }: { firstRun?: boolean }) 
         <strong>
           {t("Someone is already setting this host up:")} {s.busy}
         </strong>
-        <span className="muted">{t("Only they can finish it. When they are done, sign in here with GitHub.")}</span>
+        <span className="muted">{t("Only they can finish it. When they are done, sign in here.")}</span>
       </div>,
     );
   }
 
-  const id = s.identity;
+  const forge = s.forge;
+  const site = siteName(forge);
   const owner = s.claimer;
-  const proven = !s.first_run || s.code || !!owner;
-  const ghUser = s.detected.gh.user;
-  const repo = s.detected.checkout_repo;
+  const checkout = s.detected.checkout;
+  const linkHost = hostOf(link);
+  const unknownHost = !!linkHost && !KNOWN_HOSTS[linkHost];
+  const linkKind = kind || KNOWN_HOSTS[linkHost] || "";
+  const savedLink = (s.repo_link ?? "").toLowerCase() === link.trim().replace(/\.git$/, "").replace(/\/+$/, "").toLowerCase();
+  const checksOk = s.checks.length > 0 && s.checks.every((c) => c.ok);
+  const repoChanged = (s.repo ?? "") !== "" && s.configured && !s.first_run && !!s.claimer;
+  const needOwner = s.first_run || repoChanged || !!s.code;
+  const ready = !!baseUrl && (!!s.identity || (s.configured && !s.first_run && !s.reconnect)) && (!needOwner || (!!owner && checksOk));
+  const canCopy = !!checkout && !!s.repo && !owner && (!!s.candidate || s.checks.some((c) => c.id === "code" && !c.ok));
+  const cliMissing = !s.detected.cli.installed;
 
   return shell(
     <>
@@ -143,22 +194,16 @@ export default function SetupPage({ firstRun = false }: { firstRun?: boolean }) 
         <div className="strip dev">
           {owner.avatar_url ? <img className="avatar" src={owner.avatar_url} alt="" /> : <Icon name="shield" />}
           <span>
-            {t("Signed in as")} <strong>{owner.login}</strong>
-            {repo && (
-              <>
-                {" "}
-                · {t("a maintainer of")} <code>{repo}</code>
-              </>
-            )}
+            {t("Signed in as")} <strong>{owner.login}</strong> · {t("an admin of")} <code>{s.repo}</code>, {t("who owns this service")}
           </span>
         </div>
       )}
       {s.first_run && !owner && !s.code && (
         <div className="notice small">
           <Icon name="shield" size={13} />{" "}
-          {repo
-            ? `${t("Only a maintainer of")} ${repo} ${t("can set this service up; you prove it by signing in with GitHub below.")}`
-            : t("This checkout has no GitHub repository, so ownership cannot be checked on GitHub. Open the setup link printed when the service started.")}
+          {checkout
+            ? `${t("Without the setup link printed when the service started, only an admin of")} ${checkout.path} ${t("can set this host up; you prove it by signing in below.")}`
+            : t("This checkout does not say where its code came from. Open the setup link printed when the service started.")}
         </div>
       )}
 
@@ -168,59 +213,153 @@ export default function SetupPage({ firstRun = false }: { firstRun?: boolean }) 
 
       <Step
         n={2}
-        title={t("Connect GitHub")}
-        done={!!id && proven}
-        hint={t("The account the service acts as, through the GitHub CLI: it reads pull requests and CI, and posts what maintainers approve. Everyone signs in the same way, with a one-time code on github.com.")}
+        title={t("Your auto-maintainer repository")}
+        done={!!s.repo && savedLink}
+        hint={t("Your own fork or copy of auto-maintainer. Its admin owns this service, updates are deployed from it, and the changes the service makes to itself are proposed there. Its forge, GitHub or GitLab, is where this service works.")}
       >
-        {id && (
-          <div className="row">
-            {id.avatar_url ? <img className="avatar" src={id.avatar_url} alt="" /> : <Icon name="cpu" />}
-            <strong>{id.login}</strong>
-            <span className="muted small">{t("through the GitHub CLI")}</span>
-            {id.warning && <span className="small" style={{ color: "var(--warn)" }}>{id.warning}</span>}
-            {!showOther && (
-              <button className="ghost sm right" onClick={() => setShowOther(true)}>
-                {t("Change")}
+        <div className="row" style={{ gap: 8 }}>
+          <input value={link} onChange={(e) => setLink(e.target.value)} placeholder="https://github.com/you/auto-maintainer" style={{ flex: 1, minWidth: 240 }} spellCheck={false} />
+          {unknownHost && (
+            <select value={kind} onChange={(e) => setKind(e.target.value as "github" | "gitlab" | "")} aria-label={t("Kind")}>
+              <option value="">{t("GitHub or GitLab?")}</option>
+              <option value="github">GitHub</option>
+              <option value="gitlab">GitLab</option>
+            </select>
+          )}
+          <button className={savedLink ? "sm" : "primary sm"} disabled={!link.trim() || (unknownHost && !kind) || useRepo.isPending} onClick={() => useRepo.mutate(undefined)}>
+            {t("Use it")}
+          </button>
+        </div>
+        {linkKind === "gitlab" && unknownHost && (
+          <button type="button" className="link-button small" style={{ alignSelf: "flex-start", color: "var(--info)" }} onClick={() => setMoreRepo(!moreRepo)}>
+            <Icon name={moreRepo ? "chevronDown" : "chevronRight"} size={13} />
+            {t("More options")}
+          </button>
+        )}
+        {moreRepo && linkKind === "gitlab" && unknownHost && (
+          <label className="stack" style={{ gap: 4 }}>
+            <span className="small muted">{t("OAuth application client id (self-managed GitLab, for the one-time code)")}</span>
+            <input value={clientId} onChange={(e) => setClientId(e.target.value)} spellCheck={false} />
+          </label>
+        )}
+        {s.repo && (
+          <span className="row small" style={{ gap: 6 }}>
+            <Status value="executed" label={s.repo} />
+            <span className="pill">{site}</span>
+            <span className="muted">{s.first_run ? t("the forge this service works on") : t("this host's forge")}</span>
+          </span>
+        )}
+        {canCopy && checkout && (
+          <Choice
+            icon="merge"
+            title={`${t("Make your own copy of")} ${checkout.path}`}
+            body={t("The service makes a fork, or an import on another forge, under the account you signed in with, and uses it as this service's repository. You own it as its admin.")}
+            action={
+              <button className="primary sm" disabled={copy.isPending} onClick={() => copy.mutate(undefined, { onSuccess: (r) => setLink(`${forge.web_url}/${r.repo}`) })}>
+                {copy.isPending ? t("Copying…") : t("Make my copy")}
+              </button>
+            }
+          />
+        )}
+        <ErrorBox error={useRepo.error || copy.error} />
+      </Step>
+
+      <Step
+        n={3}
+        title={`${t("Sign in on")} ${site}`}
+        done={!!owner || (!needOwner && !!s.identity)}
+        hint={t("Sign in as an admin of the repository: you become the owner of this service, and the service acts as your account there unless you choose another one below.")}
+      >
+        {!s.repo ? (
+          <span className="small muted">{t("Name the repository first.")}</span>
+        ) : cliMissing ? (
+          <CliInstall name={s.detected.cli.name} site={site} onDone={() => void refresh()} />
+        ) : (
+          <>
+            {s.candidate && !owner && (
+              <div className="notice small">
+                <strong>{s.candidate.login}</strong> {t("signed in, but is not an admin of")} <code>{s.repo}</code>. {t("Make your own copy above, or name a repository you are an admin of.")}
+              </div>
+            )}
+            {!owner && <ForgeSignIn role="owner" forge={forge} site={site} onDone={() => void refresh()} />}
+            {s.identity && (
+              <div className="row">
+                {s.identity.avatar_url ? <img className="avatar" src={s.identity.avatar_url} alt="" /> : <Icon name="cpu" />}
+                <span className="small">
+                  {t("The service acts as")} <strong>{s.identity.login}</strong>
+                </span>
+                {s.identity.warning && <span className="small" style={{ color: "var(--warn)" }}>{s.identity.warning}</span>}
+                {!otherAccount && (owner || s.code || !s.first_run) && (
+                  <button className="ghost sm right" onClick={() => setOtherAccount(true)}>
+                    {t("Use another account")}
+                  </button>
+                )}
+              </div>
+            )}
+            {otherAccount && (
+              <div className="choices">
+                <ForgeSignIn
+                  role="service"
+                  forge={forge}
+                  site={site}
+                  title={t("An account made for the service")}
+                  body={t("For a team, sign in as an account made for the service, so what it posts is not under your name. It needs write access to the repository.")}
+                  onDone={() => (setOtherAccount(false), void refresh())}
+                />
+                {(s.code || !s.first_run) && s.detected.cli.user && (
+                  <Choice
+                    icon="cpu"
+                    title={t("The CLI login already on this host")}
+                    body={
+                      <>
+                        {t("Logged in as")} <strong>{s.detected.cli.user.login}</strong>.
+                      </>
+                    }
+                    action={
+                      <button className="sm" disabled={hostLogin.isPending} onClick={() => hostLogin.mutate(undefined, { onSuccess: () => setOtherAccount(false) })}>
+                        {t("Use")} {s.detected.cli.user.login}
+                      </button>
+                    }
+                  />
+                )}
+              </div>
+            )}
+            <ErrorBox error={hostLogin.error} />
+          </>
+        )}
+      </Step>
+
+      <Step n={4} title={t("Checks")} done={checksOk} hint={t("So that the service can update itself and propose changes to its own code later.")}>
+        {s.checks.length === 0 ? (
+          <span className="small muted">{t("They run once you have signed in.")}</span>
+        ) : (
+          <div className="stack" style={{ gap: 6 }}>
+            {s.checks.map((c) => (
+              <span key={c.id} className="row small" style={{ gap: 8, alignItems: "flex-start", flexWrap: "nowrap" }}>
+                <span style={{ color: c.ok ? "var(--ok)" : "var(--bad)", flex: "none", marginTop: 2 }}>
+                  <Icon name={c.ok ? "check" : "x"} size={14} />
+                </span>
+                <span>{c.text}</span>
+              </span>
+            ))}
+            {!checksOk && (
+              <button className="sm" style={{ alignSelf: "flex-start" }} disabled={check.isPending} onClick={() => check.mutate(undefined)}>
+                {t("Check again")}
               </button>
             )}
           </div>
         )}
-        {(!id || showOther) && (
-          <div className="choices">
-            {s.detected.gh.installed ? (
-              <GhWebLogin onDone={() => (setShowOther(false), void refresh())} />
-            ) : (
-              <GhInstall path="/api/setup/gh/install" onDone={() => void refresh()} />
-            )}
-            {s.code && ghUser && (
-              <Choice
-                icon="cpu"
-                title={t("The GitHub CLI login already on this host")}
-                body={
-                  <>
-                    {t("Logged in as")} <strong>{ghUser.login}</strong>.
-                  </>
-                }
-                action={
-                  <button className="sm" disabled={hostLogin.isPending} onClick={() => hostLogin.mutate(undefined, { onSuccess: () => setShowOther(false) })}>
-                    {t("Use")} {ghUser.login}
-                  </button>
-                }
-              />
-            )}
-          </div>
-        )}
-        <ErrorBox error={hostLogin.error} />
+        <ErrorBox error={check.error} />
       </Step>
 
-      <Step n={3} title={t("Memory repository")} done={!!s.memory || memory.data?.repo === null} hint={t("A private repository where the service keeps profiles, settings, and what it learns, as reviewable commits.")}>
+      <Step n={5} title={t("Memory repository")} done={!!s.memory || memory.data?.repo === null} hint={t("A private repository where the service keeps profiles, settings, and what it learns, as reviewable commits.")}>
         {s.memory && <Status value="executed" label={s.memory} />}
         <div className="row">
-          <input value={memoryRepo} onChange={(e) => setMemoryRepo(e.target.value)} placeholder="owner/auto-maintainer-memory" style={{ flex: 1, minWidth: 220 }} />
-          <button className="primary sm" disabled={!memoryRepo || memory.isPending || !proven || !id} onClick={() => memory.mutate({ repo: memoryRepo, create: true })}>
+          <input value={memoryRepo} onChange={(e) => setMemoryRepo(e.target.value)} placeholder="you/auto-maintainer-memory" style={{ flex: 1, minWidth: 220 }} />
+          <button className="primary sm" disabled={!memoryRepo || memory.isPending || !s.identity} onClick={() => memory.mutate({ repo: memoryRepo, create: true })}>
             {t("Create or use")}
           </button>
-          <button className="ghost sm" disabled={memory.isPending || !proven} onClick={() => memory.mutate({ repo: null, create: false })}>
+          <button className="ghost sm" disabled={memory.isPending || !s.identity} onClick={() => memory.mutate({ repo: null, create: false })}>
             {t("Keep it on this host")}
           </button>
         </div>
@@ -232,12 +371,8 @@ export default function SetupPage({ firstRun = false }: { firstRun?: boolean }) 
         <ErrorBox error={memory.error} />
       </Step>
 
-      <Step n={4} title={t("The service's own repository")} done={!!codeRepo} optional hint={t("Its maintainers own the service settings and approve the changes the service makes to itself.")}>
-        <input value={codeRepo} onChange={(e) => setCodeRepo(e.target.value)} placeholder="owner/auto-maintainer" style={{ width: "100%" }} />
-      </Step>
-
       <Step
-        n={5}
+        n={6}
         title={t("The agent that does the work")}
         done={!!agent}
         hint={t("Every task runs on it first. When it cannot run, the other agents installed here take over. Model providers and per-task choices are on the Settings page.")}
@@ -269,7 +404,7 @@ export default function SetupPage({ firstRun = false }: { firstRun?: boolean }) 
         <button
           className="primary"
           style={{ height: 40, padding: "0 18px" }}
-          disabled={!baseUrl || !(id || (s.configured && !s.first_run && !s.reconnect)) || !proven || finish.isPending}
+          disabled={!ready || finish.isPending}
           onClick={() =>
             finish.mutate(undefined, {
               onSuccess: (r) => {
@@ -282,6 +417,83 @@ export default function SetupPage({ firstRun = false }: { firstRun?: boolean }) 
         </button>
       </div>
     </>,
+  );
+}
+
+/** Sign in on the main forge for the setup: the forge CLI's one-time code where it
+ * can, and on GitLab a personal access token too. */
+function ForgeSignIn({ role, forge, site, title, body, onDone }: { role: "owner" | "service"; forge: Forge; site: string; title?: string; body?: string; onDone: () => void }) {
+  const t = useT();
+  const [token, setToken] = useState("");
+  const withToken = useMutation({
+    mutationFn: () => api.post<{ state: string; error?: string }>("/api/setup/signin/token", { role, token }),
+    onSuccess: (r) => {
+      if (r.state === "done") {
+        setToken("");
+        onDone();
+      }
+    },
+  });
+  const failed = withToken.data?.state === "failed" ? new Error(withToken.data.error ?? t("The sign-in did not finish; try again.")) : null;
+  return (
+    <div className="stack" style={{ gap: 8 }}>
+      {forge.device && (
+        <GhWebLogin
+          startBody={{ role }}
+          site={site}
+          title={title ?? `${t("Sign in with")} ${site}`}
+          body={body ?? t("You enter a one-time code on the forge's site and authorize its CLI as yourself, an admin of the repository.")}
+          button={`${t("Sign in with")} ${site}`}
+          onDone={onDone}
+        />
+      )}
+      {forge.kind === "gitlab" && (
+        <Choice
+          icon="key"
+          title={t("With a personal access token")}
+          body={forge.device ? t("Or paste a token with the scopes api and read_user.") : t("This GitLab needs an OAuth application for the one-time code; paste a token with the scopes api and read_user instead.")}
+          action={
+            <form
+              className="row"
+              style={{ gap: 8 }}
+              onSubmit={(e) => {
+                e.preventDefault();
+                withToken.mutate();
+              }}
+            >
+              <input type="password" value={token} onChange={(e) => setToken(e.target.value)} autoComplete="off" style={{ flex: 1, minWidth: 200 }} />
+              <button className="primary sm" disabled={!token.trim() || withToken.isPending}>
+                {withToken.isPending ? t("Signing in…") : t("Sign in")}
+              </button>
+            </form>
+          }
+        />
+      )}
+      <ErrorBox error={withToken.error || failed} />
+    </div>
+  );
+}
+
+/** Install the main forge's CLI on a host that has none, from the forge's own release
+ * into the service's data folder. */
+function CliInstall({ name, site, onDone }: { name: string; site: string; onDone: () => void }) {
+  const t = useT();
+  const install = useMutation({ mutationFn: () => api.post<{ installed: boolean }>("/api/setup/cli/install"), onSuccess: onDone });
+  return (
+    <Choice
+      icon="download"
+      title={`${t("Install")} ${name}`}
+      body={`${t("The service reaches")} ${site} ${t("through its CLI, which this host does not have yet. Installing downloads the CLI's own release into the service's data folder and checks it against the release's checksums; nothing else on the host changes.")}`}
+      action={
+        <div className="stack" style={{ gap: 8 }}>
+          <button className="primary sm" disabled={install.isPending} onClick={() => install.mutate()}>
+            <Icon name="download" size={14} />
+            {install.isPending ? t("Installing…") : `${t("Install")} ${name}`}
+          </button>
+          <ErrorBox error={install.error} />
+        </div>
+      }
+    />
   );
 }
 
@@ -310,20 +522,28 @@ export function GhInstall({ path, onDone }: { path: string; onDone: () => void }
   );
 }
 
-/** Log the service's GitHub CLI in from the browser: show GitHub's one-time code and
- * wait until the person has entered it on github.com. */
+/** Log a forge's CLI in from the browser: show the forge's one-time code and wait
+ * until the person has entered it on the forge's site (GitHub by default). */
 export function GhWebLogin({
   onDone,
-  start: startPath = "/api/setup/gh/start",
-  poll: pollPath = "/api/setup/gh/poll",
+  start: startPath = "/api/setup/signin/start",
+  poll: pollPath = "/api/setup/signin/poll",
+  startBody,
+  site = "GitHub",
   title,
   body,
+  button,
 }: {
   onDone: () => void;
   start?: string;
   poll?: string;
+  /** Sent with the start request, such as whom the sign-in is for. */
+  startBody?: unknown;
+  /** The forge's name, as people know it. */
+  site?: string;
   title?: string;
   body?: string;
+  button?: string;
 }) {
   const t = useT();
   // The sign-in in progress outlives this component: going to GitHub in the same tab,
@@ -340,7 +560,7 @@ export function GhWebLogin({
   const poll = (flowId?: string) => {
     timer.current = window.setTimeout(async () => {
       try {
-        const r = await api.post<{ state?: string; pending?: boolean; error?: string; login?: string }>(pollPath, flowId ? { flow_id: flowId } : {});
+        const r = await api.post<{ state?: string; pending?: boolean; error?: string; login?: string }>(pollPath, flowId ? { flow_id: flowId } : undefined);
         if (r.state === "pending" || r.pending) return poll(flowId);
         reset();
         if (r.state === "done" || r.login) return onDone();
@@ -364,7 +584,7 @@ export function GhWebLogin({
   const start = async () => {
     setError(null);
     try {
-      const r = await api.post<{ code: string; url: string; flow_id?: string }>(startPath);
+      const r = await api.post<{ code: string; url: string; flow_id?: string }>(startPath, startBody);
       const flow = { ...r, exp: Date.now() + FLOW_MS };
       saveFlow(pollPath, flow);
       resumed.current = false;
@@ -404,7 +624,7 @@ export function GhWebLogin({
               </div>
               {copyFailed && <span className="small" style={{ color: "var(--warn)" }}>{t("This browser would not copy it. Click the code to select it, then press Ctrl+C (⌘C on a Mac).")}</span>}
               <a className="button primary" href={code.url} target="_blank" rel="noopener noreferrer" onClick={copy}>
-                {t("Copy the code and open GitHub")} <Icon name="external" size={12} />
+                {site === "GitHub" ? t("Copy the code and open GitHub") : `${t("Copy the code and open")} ${site}`} <Icon name="external" size={12} />
               </a>
               <span className="small muted row" style={{ gap: 6 }}>
                 <span className="typing" aria-hidden>
@@ -412,7 +632,9 @@ export function GhWebLogin({
                   <span />
                   <span />
                 </span>
-                {t("Waiting for you to authorize on GitHub. Paste the code there; this page keeps it, and finishes by itself once you authorize, even if you come back to it later.")}
+                {site === "GitHub"
+                  ? t("Waiting for you to authorize on GitHub. Paste the code there; this page keeps it, and finishes by itself once you authorize, even if you come back to it later.")
+                  : t("Waiting for you to authorize there. Paste the code there; this page keeps it, and finishes by itself once you authorize, even if you come back to it later.")}
               </span>
               <button className="ghost sm" style={{ alignSelf: "flex-start" }} onClick={() => void start()}>
                 {t("Get a new code")}
@@ -420,7 +642,7 @@ export function GhWebLogin({
             </>
           ) : (
             <button className="primary sm" onClick={() => void start()}>
-              {t("Sign in with GitHub")}
+              {button ?? t("Sign in with GitHub")}
             </button>
           )}
           <ErrorBox error={error} />

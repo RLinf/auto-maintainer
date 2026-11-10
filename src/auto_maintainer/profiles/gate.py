@@ -137,54 +137,61 @@ class ConfigGate:
     async def check_service(
         self,
         repo: str | None,
+        owner: str | None,
         login: str,
-        required: Permission,
         *,
         person: bool = False,
     ) -> GateDecision:
-        """Whether ``login`` may change the service's own settings (agents, providers,
-        default routes, system values, secrets).
+        """Whether ``login`` may act as the owner of this deployment: change the
+        service's settings (agents, providers, routes, system values, secrets), the
+        host setup, and the service's own code (design 2.3).
 
-        Those belong to the maintainers of the service's repository on the forge,
-        checked live, like a repository's configuration. Being an operator of the host
-        grants nothing here, and the service never approves its own changes; ``person``
-        means what it means for ``check``.
+        One person owns a deployment: ``owner``, while they are an admin of the
+        service's repository ``repo``, checked live on its forge. A deployment set up
+        before owners has none; then every admin of ``repo`` acts as owner until one
+        takes ownership. Being an operator of the host grants nothing here, and the
+        service never approves its own changes; ``person`` means what it means for
+        ``check``.
         """
-        if not repo:
+        required = Permission.ADMIN
+
+        def refuse(reason: str, actual: Permission = Permission.NONE) -> GateDecision:
             return GateDecision(
                 allowed=False,
-                repo="",
+                repo=repo or "",
                 login=login,
                 required=required,
-                actual=Permission.NONE,
-                reason=(
-                    "no repository owns this service's settings: set code_repo (or a "
-                    "memory remote) in local.yaml so its maintainers can change them"
-                ),
+                actual=actual,
+                reason=reason,
+            )
+
+        if not repo:
+            return refuse(
+                "this service has no repository of its own yet; set one on the setup "
+                "page (open the link `am setup` prints on the host)"
             )
         if login.lower() in self._service and not person:
-            return GateDecision(
-                allowed=False,
-                repo=repo,
-                login=login,
-                required=required,
-                actual=Permission.NONE,
-                reason="the service cannot approve its own configuration changes",
-            )
+            return refuse("the service cannot approve its own configuration changes")
+        if owner and login.lower() != owner.lower():
+            return refuse(f"only {owner}, who owns this service, may do this")
         actual = await self._forge.get_permission(repo, login)
-        allowed = actual.at_least(required)
-        reason = (
-            f"{login} has {actual} on {repo}"
-            if allowed
-            else f"{login} has {actual} on {repo}; changing the service's settings needs {required}"
-        )
+        if not actual.at_least(required):
+            return refuse(
+                f"{login} has {actual} on {repo}; the owner of this service must be "
+                "an admin of it",
+                actual,
+            )
         return GateDecision(
-            allowed=allowed,
+            allowed=True,
             repo=repo,
             login=login,
             required=required,
             actual=actual,
-            reason=reason,
+            reason=(
+                f"{login} owns this service and is an admin of {repo}"
+                if owner
+                else f"{login} is an admin of {repo}, and nobody has taken ownership yet"
+            ),
         )
 
 
@@ -203,8 +210,8 @@ def memory_change_ready(
         return True, "journal entries merge directly"
     if change.service:
         if any(change.approvals.values()):
-            return True, "approved by a maintainer of the service's repository"
-        return False, "waiting for a maintainer of the service's repository"
+            return True, "approved by the owner of this service"
+        return False, "waiting for the owner of this service"
     unapproved = [r for r in change.repos if not change.approvals.get(r)]
     if change.tier == Tier.T2 or not change.repos:
         if not change.repos:

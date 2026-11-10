@@ -45,7 +45,6 @@ from .domain.memory import (
     profile_path,
     repo_dir,
 )
-from .domain.permissions import Permission
 from .domain.ports import (
     AgentInstaller,
     AgentRunner,
@@ -164,7 +163,7 @@ class Adapters:
     people: PersonalAgents | None = None
     """Each person's own agent accounts (``store/people.py``)."""
     installer: AgentInstaller | None = None
-    """Installs agent CLIs on this host when maintainers of the service ask."""
+    """Installs agent CLIs on this host when the owner of the service asks."""
     background: list[Any] = field(default_factory=list)
     """Pieces that run alongside the service, each with ``start`` and ``stop`` (the
     agents' sandbox and its GitHub read proxy)."""
@@ -201,8 +200,9 @@ class ServiceSettings:
     base_url: str | None = None
     """Where the dashboard is reached, for links in alerts."""
     code_branch: str = "main"
-    code_approver: str = "maintain"
-    """Permission on ``code_repo`` needed to merge the service's own PRs and deploy them."""
+    owner: str | None = None
+    """The one person who owns this deployment (``local.yaml``); see
+    ``ConfigGate.check_service``."""
     confirm_deploy_after: float = 60.0
     """Seconds of running before a fresh deploy counts as healthy (no rollback)."""
     sandbox_repo: str | None = None
@@ -550,18 +550,15 @@ class Service:
     # -- service settings (design 8.1) ------------------------------------------------
 
     def settings_repo(self) -> str | None:
-        """The repository whose maintainers own the service's settings: the service's
-        code repository, or else its memory repository."""
-        return self.settings.code_repo or self.a.memory.remote_repo()
+        """The service's repository, whose admin owns this deployment."""
+        return self.settings.code_repo
 
     async def service_gate(self, login: str) -> GateDecision:
-        """Whether ``login``, a person signed in to the dashboard or using the CLI, may
-        change the service's settings (live, on the forge)."""
+        """Whether ``login``, a person signed in to the dashboard, acts as this
+        deployment's owner (live, on the forge): changes the service settings, the
+        host setup, and the service's own code."""
         return await self.gate.check_service(
-            self.settings_repo(),
-            login,
-            Permission(self.settings.code_approver),
-            person=True,
+            self.settings.code_repo, self.settings.owner, login, person=True
         )
 
     async def settings_text(self) -> tuple[str, dict[str, Any]]:
@@ -671,7 +668,7 @@ class Service:
     ) -> tuple[MemoryChange, GateDecision]:
         """Open a change to ``config/service.yaml``. With ``approve`` and a ``login`` who
         passes the service gate, making the change approves it and it applies at once;
-        otherwise it waits on the Settings page for a maintainer of the service's
+        otherwise it waits on the Settings page for the owner of the service's
         repository.
 
         Raises:

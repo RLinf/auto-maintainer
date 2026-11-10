@@ -1,7 +1,7 @@
 // Settings: how the service runs. Agents, model providers, default routes, and system
 // values in one place, each row showing its current value. Changes are made by asking
 // the agent (it drafts the edit, you apply it) or by editing the settings file; API keys
-// go only into their key fields. Only maintainers of the service's repository apply
+// go only into their key fields. Only the owner of the service's repository applies
 // changes; anyone else's wait for one.
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -18,6 +18,7 @@ import { useAgentsData } from "./Agents";
 import { SettingsChangeCard } from "../settingsChange";
 import { MyAgentsTab, ServiceSignIn } from "../agentAccounts";
 import { ForgesCard } from "../forgeSetup";
+import { OwnerCard } from "../ownerCard";
 import { Popover, Skeleton, Tabs, useTab, useToast } from "../ui";
 
 const CONTEXT: AgentContext = { page: "settings", repo: null, number: null, label: "Settings" };
@@ -156,6 +157,7 @@ export default function SettingsPage() {
       {tab === "system" && (
         <div className="stack" style={{ gap: 16 }}>
           <SystemTab v={v} ask={ask} />
+          <OwnerCard />
           <ForgesCard canChange={v.access.allowed} />
         </div>
       )}
@@ -253,7 +255,7 @@ const SKIP_FLAG: Record<string, string> = {
 };
 
 /** Turn an agent's own skip-permissions mode on or off: a settings change, applied at
- * once for a maintainer of the service's repository and proposed otherwise. */
+ * once for the owner of the service's repository and proposed otherwise. */
 /** The model and reasoning level an agent uses when a route names none, chosen among
  * what its CLI offers (asked of the CLI itself where it can say). */
 function ModelControls({ agent, choices, canChange }: { agent: SettingsAgent; choices: AgentChoices | null | undefined; canChange: boolean }) {
@@ -270,7 +272,7 @@ function ModelControls({ agent, choices, canChange }: { agent: SettingsAgent; ch
   const cliModel = nameOf(choices?.default_model);
   const cliEffort = choices?.default_effort;
   const disabled = !canChange || set.isPending;
-  const title = canChange ? undefined : t("Only maintainers of the service's repository change agents.");
+  const title = canChange ? undefined : t("Only the owner of this service changes agents.");
   return (
     <span className="row model-controls" style={{ gap: 6 }}>
       {models.length > 0 ? (
@@ -394,7 +396,7 @@ function FromSettings({ on }: { on: boolean }) {
 
 /** Where agents run on this host: each task in a fresh container of its own, holding
  *  none of the service's settings, keys, or data, or on the host. Its network and
- *  limits apply to the next agent run; a maintainer of the service's repository
+ *  limits apply to the next agent run; the owner of the service's repository
  *  changes them, and they are kept in this host's local.yaml. */
 function SandboxCard() {
   const t = useT();
@@ -481,7 +483,7 @@ function SandboxCard() {
   );
 }
 
-/** Install an agent CLI on this host (maintainers of the service's repository), and
+/** Install an agent CLI on this host (the owner of the service's repository), and
  * follow the install until it ends. */
 function InstallButton({ name, source, state, canInstall }: { name: string; source: string; state?: AgentInstall; canInstall: boolean }) {
   const t = useT();
@@ -501,7 +503,7 @@ function InstallButton({ name, source, state, canInstall }: { name: string; sour
       <button
         className="sm"
         disabled={!canInstall || running || install.isPending}
-        title={canInstall ? `${t("Install from")} ${source}` : t("Maintainers of the service's repository install agents")}
+        title={canInstall ? `${t("Install from")} ${source}` : t("The owner of this service installs agents")}
         onClick={() => install.mutate(undefined)}
       >
         <Icon name="download" size={14} />
@@ -796,7 +798,7 @@ function DefaultAgent({ v }: { v: SettingsView; ask: (p: string, send?: boolean)
         <select
           value={source === "settings" ? (name ?? "") : ""}
           disabled={!v.access.allowed || set.isPending}
-          title={v.access.allowed ? undefined : t("Only maintainers of the service's repository change agents.")}
+          title={v.access.allowed ? undefined : t("Only the owner of this service changes agents.")}
           aria-label={t("Default agent")}
           onChange={(e) =>
             set.mutate(e.target.value || null, {
@@ -1268,9 +1270,9 @@ function SystemTab({ v, ask }: { v: SettingsView; ask: (p: string, send?: boolea
         }
       >
         <dl className="props">
-          <dt>{t("Settings owned by")}</dt>
-          <dd>{v.repo ? <code>{v.repo}</code> : <span className="muted">{t("no repository")}</span>}</dd>
-          <dt>{t("Code repository")}</dt>
+          <dt>{t("Owner")}</dt>
+          <dd>{v.owner ? <strong>{v.owner}</strong> : <span className="muted">{t("nobody yet")}</span>}</dd>
+          <dt>{t("Service repository")}</dt>
           <dd>{h.code_repo ? <code>{h.code_repo}</code> : <span className="muted">—</span>}</dd>
           <dt>{t("Memory repository")}</dt>
           <dd>{h.memory_repo ? <code>{h.memory_repo}</code> : <span className="muted">{t("local only")}</span>}</dd>
@@ -1288,7 +1290,7 @@ function SystemTab({ v, ask }: { v: SettingsView; ask: (p: string, send?: boolea
           <dt>{t("Operators")}</dt>
           <dd>
             {h.operators.join(", ") || "—"}
-            <div className="small muted">{t("They run the host. They cannot change these settings unless they are maintainers.")}</div>
+            <div className="small muted">{t("They run the host. They cannot change these settings unless they own the service.")}</div>
           </dd>
         </dl>
       </Section>
@@ -1347,7 +1349,7 @@ function FileTab({ v }: { v: SettingsView }) {
                 setChecked(null);
                 toast({
                   title: r.approved ? t("Settings applied") : t("Change proposed"),
-                  body: r.approved ? undefined : t("A maintainer of the service's repository applies it."),
+                  body: r.approved ? undefined : t("The owner of this service applies it."),
                   icon: r.approved ? "check" : "inbox",
                 });
               },

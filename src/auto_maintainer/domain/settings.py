@@ -16,7 +16,7 @@
 the default route per task, and a few system values.
 
 They live in one document, ``config/service.yaml`` in the memory repo, which only
-maintainers of the service's repository change (design 2.3). API keys never appear in
+the owner of the service's repository changes (design 2.3). API keys never appear in
 it: a provider names a secret, and the secret's value stays on the host
 (``SecretStore``). Everything here is pure: parsing, merging over the defaults, and
 checking that the pieces fit together.

@@ -713,7 +713,7 @@ async def _code_pr(
                 role="assistant",
                 text=(
                     f"I opened {ref.url or f'{x.code_repo}#{ref.id}'} with the change. "
-                    f"A maintainer of {x.code_repo} has to approve it before it is merged, "
+                    "The owner of this service has to approve it before it is merged, "
                     "and again before the service runs it (Service page)."
                 ),
             )

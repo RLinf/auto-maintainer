@@ -219,7 +219,7 @@ def test_an_earlier_config_keeps_plain_http_on_7777(tmp_path: Path) -> None:
     assert (old.port, old.base_url) == (7777, "http://127.0.0.1:7777")
     config.save_host_config(old, tmp_path)
     saved = yaml.safe_load((tmp_path / "local.yaml").read_text())
-    assert saved["version"] == 3 and saved["port"] == 7777
+    assert saved["version"] == config.CONFIG_VERSION and saved["port"] == 7777
     assert config.load_host_config(tmp_path).port == 7777
 
     (tmp_path / "local.yaml").write_text("version: 2\n")

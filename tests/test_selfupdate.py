@@ -118,7 +118,7 @@ async def test_only_commits_on_the_default_branch_deploy(repos, tmp_path: Path) 
     side = git(other, "rev-parse", "HEAD")
     git(checkout, "fetch", "-q", "origin", "side")
     result = await _updater(checkout, tmp_path).deploy(side)
-    assert not result.ok and "is not on origin/main" in result.log
+    assert not result.ok and "is not on main of origin" in result.log
 
 
 async def test_local_changes_block_a_deploy(repos, tmp_path: Path) -> None:
@@ -200,3 +200,31 @@ async def test_a_change_is_published_on_its_own_branch(tmp_path: Path) -> None:
         git(bare, "log", "-1", "--format=%an %s", sha) == "auto-maintainer feat: ping"
     )
     assert git(bare, "show", f"{sha}:src/ping.py") == "print('pong')"
+
+
+async def test_updates_come_from_the_service_repo_not_the_checkouts_origin(
+    repos, tmp_path: Path
+) -> None:
+    """A host cloned from upstream runs what is merged in its owner's fork."""
+    origin, checkout, _ = repos
+    fork = tmp_path / "fork.git"
+    git(tmp_path, "clone", "-q", "--bare", str(origin), str(fork))
+    work = tmp_path / "fork-work"
+    git(tmp_path, "clone", "-q", str(fork), str(work))
+    target = _push_change(work, "from the fork\n")
+
+    async def source() -> tuple[str, str, str | None]:
+        return str(fork), "x-access-token", None
+
+    updater = GitServiceUpdater(
+        checkout,
+        tmp_path / "state",
+        source=source,
+        repo="alice/auto-maintainer",
+        test_command=["true"],
+        sync_command=["true"],
+    )
+    status = await updater.status()
+    assert status.upstream_sha == target and git(origin, "rev-parse", "main") != target
+    assert (await updater.deploy(target)).ok
+    assert (checkout / "app.txt").read_text() == "from the fork\n"

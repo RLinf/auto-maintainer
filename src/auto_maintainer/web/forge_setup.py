@@ -12,8 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Adding a forge from the dashboard (design 5.16): what ``am forge add`` and ``am
-forge login`` do, for maintainers of the service's repository.
+"""Adding a forge from the dashboard (design 5.16), for the deployment's owner.
 
 A new forge is a change to the host's setup, so it passes ``service_gate`` as every
 service setting does. ``steps`` (``hostsetup.ForgeSteps``, from the composition root)

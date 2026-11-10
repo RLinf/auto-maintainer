@@ -12,18 +12,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Host setup in the browser (design 7.3): the GitHub CLI login the service acts as,
-the memory repository, and the address, written to ``local.yaml`` so nobody edits a
-file or types a command. The service acts on GitHub only through the GitHub CLI; when
-the host has none, the page installs it (``ghcli.install``).
+"""Host setup in the browser (design 7.3): the address, the service's repository
+(its owner's fork or copy of auto-maintainer) and with it the main forge, GitHub or
+GitLab, the account the service acts as there through the forge's CLI, the memory
+repository, and the first agent, written to ``local.yaml`` so nobody edits a file or
+types a command. When the host has no CLI for its forge, the page installs it
+(``ghcli.install``, ``glabcli.install``).
 
-Who may set up a new host is decided by GitHub, like every other configuration
-change: the person must show that they maintain the service's own repository (the
-checkout's ``origin``) by authorizing the GitHub CLI login on github.com. Until
-someone has, anyone who reaches the page may start, and the first such maintainer
-owns the setup. The one-time code that ``am serve`` prints also proves ownership, for
-a checkout without a GitHub remote and for using the GitHub CLI's login already on
-the host. After setup, the same steps run from the dashboard behind the service gate.
+One person owns a deployment: an admin of the service's repository, who proves it
+by signing in on its forge (design 2.3). On a new host anyone who reaches the page
+may begin, but someone without the setup link that ``am serve`` prints may only
+claim it with the repository this checkout came from; with the link, any repository
+of theirs. The repository is checked before setup finishes: its owner is an admin
+there, it holds the code this host runs, and the service's account can push to it,
+so self-improvement works later. After setup, the same steps run from the dashboard
+for the owner, and the setup link (``am setup``) lets an admin of the service's
+repository take ownership when its owner cannot.
 """
 
 from __future__ import annotations
@@ -39,13 +43,11 @@ import socket
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import urlencode
-
-import httpx
 
 from . import ghcli, subproc
 from .config import (
     CONFIG_DIR,
+    FORGE_DEFAULTS,
     LEGACY_SECRETS,
     ForgeConfig,
     HostConfig,
@@ -56,6 +58,7 @@ from .config import (
     save_host_config,
     write_private_file,
 )
+from .domain.permissions import Permission
 
 AGENT_BINARIES = {
     "claude-code": "claude",
@@ -64,11 +67,6 @@ AGENT_BINARIES = {
     "opencode": "opencode",
     "gemini": "gemini",
 }
-
-LEVELS = ["pull", "triage", "push", "maintain", "admin"]
-"""GitHub's repository permission names, lowest first, as ``GET /repos`` reports them."""
-
-RunGh = Callable[[list[str]], Awaitable[tuple[int, str]]]
 
 
 class SetupError(ValueError):
@@ -81,12 +79,6 @@ async def _run_gh(args: list[str]) -> tuple[int, str]:
         return 127, ""
     result = await subproc.run([binary, *args], timeout=20)
     return result.exit_code, result.stdout.strip()
-
-
-def repo_from_remote(url: str) -> str | None:
-    """``owner/repo`` from a GitHub remote URL, ignoring any credentials in it."""
-    m = re.search(r"github\.com[:/]+([\w.-]+)/([\w.-]+?)(?:\.git)?/?$", url.strip())
-    return f"{m.group(1)}/{m.group(2)}" if m else None
 
 
 class GhLogin:
@@ -417,14 +409,17 @@ class ForgeRefused(SetupError):
 
 
 class ForgeSteps:
-    """Adding a forge to this host (design 5.16): what ``am forge add`` and ``am forge
-    login`` do, for the dashboard's form (``web/forge_setup.py``), which checks who
-    may. The service signs in on the forge into its own folder for that forge's CLI
-    under ``config_dir``, never the host user's."""
+    """The host setup's steps behind the Settings page, whose routes check who may:
+    adding a forge (``web/forge_setup.py``; the service signs in there into its own
+    folder for that forge's CLI under ``config_dir``, never the host user's), and the
+    service's repository and its owner (``web/ownership.py``)."""
 
-    def __init__(self, config_dir: Path, data_dir: Path) -> None:
+    def __init__(
+        self, config_dir: Path, data_dir: Path, checkout: Path | None = None
+    ) -> None:
         self.config_dir = config_dir
         self.data_dir = data_dir
+        self.checkout = checkout or Path(__file__).resolve().parents[2]
 
     def forges(self) -> list[dict[str, str]]:
         """The forges in ``local.yaml``, the default first."""
@@ -540,39 +535,162 @@ class ForgeSteps:
     def keep(self, cfg: HostConfig) -> None:
         save_host_config(cfg, self.config_dir)
 
+    # -- the service's repository and its owner -----------------------------------------
+
+    def locate(self, link: str) -> tuple[ForgeConfig, str]:
+        """The forge a repository link is on, and the repository's name as the
+        service names it (``group/name`` on the main forge, ``<forge>:group/name``
+        elsewhere).
+
+        Raises:
+            ForgeRefused: Not a repository's link, or on a forge this host does not
+                serve.
+        """
+        parsed = parse_link(link)
+        if parsed is None:
+            raise ForgeRefused(
+                "paste the repository's link, like https://github.com/you/auto-maintainer"
+            )
+        web, path = parsed
+        for i, forge in enumerate(load_host_config(self.config_dir).forges):
+            if forge.web.lower() == web.lower():
+                return forge, path if i == 0 else f"{forge.id}:{path}"
+        raise ForgeRefused(
+            f"this service does not serve {web}; add it under Forges first"
+        )
+
+    async def _service_token(self, forge: ForgeConfig) -> str | None:
+        if forge.kind == "gitlab":
+            from .forges.gitlab.client import GlabToken
+
+            return await GlabToken(forge.host, forge.cli_config_dir).token(None)
+        from .forges.github.auth import StaticTokenProvider
+
+        return await StaticTokenProvider(
+            None, gh_config_dir=forge.cli_config_dir
+        ).token(None)
+
+    async def check_repo(
+        self, forge: ForgeConfig, path: str
+    ) -> tuple[list[dict[str, Any]], str, str]:
+        """Check a repository as the service's repository, with the service's own
+        account there: it holds the code this host runs, and the service can push
+        to it. Returns the checks, its path as the forge spells it, and its default
+        branch."""
+        from .forges.registry import kind
+
+        account = kind(forge.kind).account
+        token = await self._service_token(forge)
+        access = await account.repo(forge.api, token, path) if token else None
+        if access is None:
+            return (
+                [
+                    {
+                        "id": "repo",
+                        "ok": False,
+                        "text": f"{path} does not exist, or the service's account cannot see it",
+                    }
+                ],
+                path,
+                "main",
+            )
+        assert token is not None
+        head = await subproc.run(
+            ["git", "-C", str(self.checkout), "rev-parse", "HEAD"], timeout=10
+        )
+        sha = head.stdout.strip() if head.exit_code == 0 else ""
+        checks = []
+        if sha:
+            holds = await account.has_commit(forge.api, token, access.path, sha)
+            checks.append(
+                {
+                    "id": "code",
+                    "ok": holds,
+                    "text": f"it holds the code this host runs ({sha[:10]})"
+                    if holds
+                    else f"it does not hold the code this host runs ({sha[:10]})",
+                }
+            )
+        push = access.permission.at_least(Permission.WRITE)
+        checks.append(
+            {
+                "id": "push",
+                "ok": push,
+                "text": "the service's account can push to it"
+                if push
+                else "the service's account cannot push to it; give it write access",
+            }
+        )
+        return checks, access.path, access.default_branch
+
+    def set_owner(self, owner: str) -> HostConfig:
+        """Name the owner in ``local.yaml``."""
+        cfg = load_host_config(self.config_dir)
+        cfg.owner = owner
+        save_host_config(cfg, self.config_dir)
+        return cfg
+
+    def with_repo(self, name: str, owner: str, branch: str) -> HostConfig:
+        """The host's setup as it is now, with another service repository and its
+        owner (not yet written)."""
+        cfg = load_host_config(self.config_dir)
+        cfg.code_repo, cfg.owner = name, owner
+        cfg.self_update.branch = branch
+        return HostConfig.model_validate(cfg.model_dump())
+
 
 class HostSetup:
-    """One setup in progress. Choices stay in memory until ``finish`` writes them."""
+    """One setup in progress. Choices stay in memory until ``finish`` writes them.
+
+    The main forge is where the service's repository lives (GitHub or GitLab); the
+    service acts there as the account signed in through that forge's CLI, kept in its
+    own folder under ``config_dir``. Whoever signs in as the owner must be an admin of
+    the service's repository; they own the deployment once setup finishes.
+
+    Args:
+        config_dir: Where ``local.yaml`` and the CLI logins go.
+        checkout: The service's own git checkout (its ``origin`` and running commit).
+        host_token: The token of the forge CLI already logged in on this host, for
+            ``(kind, web_url)``; ``None`` when it is not logged in.
+        login_factory: Makes the forge CLI's sign-in (``cli_login``).
+    """
 
     def __init__(
         self,
         config_dir: Path = CONFIG_DIR,
         *,
         checkout: Path | None = None,
-        run_gh: RunGh = _run_gh,
-        transport: httpx.AsyncBaseTransport | None = None,
+        host_token: Callable[[str, str], Awaitable[str | None]] | None = None,
+        login_factory: Callable[..., Any] = cli_login,
     ) -> None:
         self.config_dir = config_dir
         self.checkout = checkout or Path(__file__).resolve().parents[2]
-        self.run_gh = run_gh
-        self.transport = transport
+        self.host_token = host_token or _host_cli_token
+        self.login_factory = login_factory
         self.cfg = (
             load_host_config(config_dir) if is_configured(config_dir) else HostConfig()
         )
+        self.configured_repo = self.cfg.code_repo
         self.identity: dict[str, Any] | None = None
-        """The service's GitHub account once chosen: login, name, avatar, kind."""
+        """The account the service acts as, once chosen in this setup."""
         self.claimer: dict[str, Any] | None = None
-        """The maintainer who proved ownership and owns this setup."""
+        """The admin of the service's repository who signed in as its owner."""
+        self.checks: list[dict[str, Any]] = []
+        """The last verification of the service's repository (``verify``)."""
         self.reconnect = (
             legacy_github(config_dir) if is_configured(config_dir) else None
         )
         """How the host acted on GitHub before only the GitHub CLI remained (``"a
         GitHub App"``, ``"a token"``); such a host must connect the GitHub CLI."""
-        self._token: str | None = None
-        self._checkout_repo: str | None | Literal[False] = False
-        self._claimer_token: str | None = None
-        self.gh_login = GhLogin(config_dir / "gh", self.cfg.default_forge.web)
-        """The service's own GitHub CLI login, made in the browser."""
+        self._service_token: str | None = None
+        self._owner_token: str | None = None
+        self._candidate: tuple[dict[str, Any], str] | None = None
+        """Who signed in as the owner but is not yet an admin of the repository named:
+        they own it once they are (``_try_claim``), such as after making a copy."""
+        self._login: Any = None
+        self.signing: str | None = None
+        """Whom the sign-in in progress is for: ``owner`` or ``service``."""
+        self._checkout: dict[str, str] | None | Literal[False] = False
 
     # -- the one-time code ---------------------------------------------------------------
 
@@ -593,289 +711,504 @@ class HostSetup:
             code.strip(), self.code_path.read_text(encoding="utf-8").strip()
         )
 
-    # -- GitHub --------------------------------------------------------------------------
+    # -- the main forge and the service's repository -------------------------------------
 
-    def _client(self, base: str | None = None) -> httpx.AsyncClient:
-        return httpx.AsyncClient(
-            base_url=base or self.cfg.default_forge.api,
-            timeout=20,
-            transport=self.transport,
-            headers={
-                "Accept": "application/vnd.github+json",
-                "User-Agent": "auto-maintainer",
-            },
+    @property
+    def forge(self) -> ForgeConfig:
+        """The main forge: where the service's repository lives."""
+        return self.cfg.forges[0]
+
+    @property
+    def folder(self) -> Path:
+        """The service's own login folder for the main forge's CLI."""
+        return self.config_dir / (
+            "gh" if self.forge.kind == "github" else f"glab/{self.forge.id}"
         )
 
-    async def _user(self, token: str) -> dict[str, Any]:
-        async with self._client() as client:
-            r = await client.get("/user", headers={"Authorization": f"Bearer {token}"})
-        if r.status_code == 401:
-            raise SetupError("GitHub rejected this token")
-        if r.status_code != 200:
-            raise SetupError(f"GitHub answered {r.status_code} when asked who this is")
-        data = r.json()
-        scopes = [
-            s.strip()
-            for s in r.headers.get("x-oauth-scopes", "").split(",")
-            if s.strip()
-        ]
-        return {
-            "login": data["login"],
-            "name": data.get("name") or data["login"],
-            "avatar_url": data.get("avatar_url") or "",
-            "scopes": scopes,
-            "classic": "x-oauth-scopes" in r.headers,
-        }
+    def _kind(self) -> Any:
+        from .forges.registry import kind
 
-    async def gh_token(self) -> str | None:
-        code, out = await self.run_gh(["auth", "token"])
-        return out if code == 0 and out else None
+        return kind(self.forge.kind)
 
-    async def checkout_repo(self) -> str | None:
-        """The service's own repository on GitHub, from the checkout's ``origin``."""
-        if self._checkout_repo is not False:
-            return self._checkout_repo
-        repo = None
+    async def checkout_repo(self) -> dict[str, str] | None:
+        """Where this checkout came from (its ``origin``): ``web_url``, ``path``,
+        ``kind`` when the host says it, and ``link``."""
+        if self._checkout is not False:
+            return self._checkout
+        found = None
         if (self.checkout / ".git").exists():
             result = await subproc.run(
                 ["git", "-C", str(self.checkout), "remote", "get-url", "origin"],
                 timeout=10,
             )
-            if result.exit_code == 0:
-                repo = repo_from_remote(result.stdout)
-        self._checkout_repo = repo
-        return repo
+            parsed = parse_link(result.stdout) if result.exit_code == 0 else None
+            if parsed:
+                web, path = parsed
+                found = {"web_url": web, "path": path, "link": f"{web}/{path}"}
+                if kind := kind_of_host(web):
+                    found["kind"] = kind
+        self._checkout = found
+        return found
 
-    async def detect(self, *, private: bool) -> dict[str, Any]:
-        """What this host has. ``private`` adds the GitHub CLI's account, which only
-        the owner of the setup may see."""
-        gh: dict[str, Any] = {"installed": shutil.which("gh") is not None}
-        if private:
-            token = await self.gh_token()
-            if token:
-                try:
-                    gh["user"] = await self._user(token)
-                except SetupError as e:
-                    gh["error"] = str(e)
+    async def head(self) -> str | None:
+        """The commit this host runs."""
+        result = await subproc.run(
+            ["git", "-C", str(self.checkout), "rev-parse", "HEAD"], timeout=10
+        )
+        return result.stdout.strip() if result.exit_code == 0 else None
+
+    def repo_link(self) -> str | None:
+        return f"{self.forge.web}/{self.cfg.code_repo}" if self.cfg.code_repo else None
+
+    async def is_checkout_repo(self) -> bool:
+        """Whether the service's repository is the one this checkout came from: only
+        then may someone set a new host up without the host's setup link."""
+        mine = await self.checkout_repo()
+        return bool(
+            mine
+            and self.cfg.code_repo
+            and mine["web_url"].lower() == self.forge.web.lower()
+            and mine["path"].lower() == self.cfg.code_repo.lower()
+        )
+
+    async def set_repo(
+        self, link: str, kind: str | None = None, oauth_client_id: str | None = None
+    ) -> dict[str, Any]:
+        """Name the service's repository by its link. On a new host its forge
+        becomes the main forge; later it must be on the main forge (another forge's
+        repository is chosen from the Settings page).
+
+        Raises:
+            SetupError: The link is not a repository's, or names another forge.
+        """
+        parsed = parse_link(link)
+        if parsed is None:
+            raise SetupError(
+                "paste the repository's link, like https://github.com/you/auto-maintainer"
+            )
+        web, path = parsed
+        kind = kind or kind_of_host(web)
+        if kind not in ("github", "gitlab"):
+            raise SetupError(f"say whether {web} is GitHub or GitLab")
+        same = web.lower() == self.forge.web.lower() and kind == self.forge.kind
+        if not same:
+            if is_configured(self.config_dir):
+                raise SetupError(
+                    f"this host's main forge is {self.forge.web}; choose a repository "
+                    "on another forge from the Settings page (Owner)"
+                )
+            public = FORGE_DEFAULTS[kind]["web_url"]
+            self.cfg.forges[0] = ForgeConfig(
+                id=kind,
+                kind=kind,  # type: ignore[arg-type]
+                web_url="" if web == public else web,
+                oauth_client_id=oauth_client_id or None,
+            )
+            self.identity = self.claimer = self._candidate = None
+            self._service_token = self._owner_token = None
+        elif oauth_client_id is not None:
+            self.forge.oauth_client_id = oauth_client_id or None
+        self.cfg.code_repo = path
+        self.checks = []
+        if self.identity or self.claimer:
+            await self._try_claim()
+            self.checks = await self.verify()
+        return {"repo": path, "forge": self._forge_view()}
+
+    async def _try_claim(self) -> None:
+        """Make the person who signed in as the owner the owner, once they are an
+        admin of the repository named."""
+        if self._candidate is None or not self.cfg.code_repo:
+            return
+        person, token = self._candidate
+        access = await self._access(token)
+        if access is not None and access.permission is Permission.ADMIN:
+            self.claimer, self._owner_token = person, token
+            self._candidate = None
+
+    def _forge_view(self) -> dict[str, Any]:
         return {
-            "gh": gh,
-            "agents": {
-                name: bool(shutil.which(b)) for name, b in AGENT_BINARIES.items()
-            },
-            "checkout_repo": await self.checkout_repo(),
-            "hostname": socket.gethostname(),
+            "id": self.forge.id,
+            "kind": self.forge.kind,
+            "web_url": self.forge.web,
+            "device": self.forge.kind == "github"
+            or self.forge.web == FORGE_DEFAULTS["gitlab"]["web_url"]
+            or bool(self.forge.oauth_client_id),
         }
 
-    async def install_gh(self) -> dict[str, Any]:
-        """Install the GitHub CLI into the data folder (``ghcli.install``)."""
+    # -- the forge's CLI -----------------------------------------------------------------
+
+    def cli_name(self) -> str:
+        return "glab" if self.forge.kind == "gitlab" else "gh"
+
+    async def install_cli(self) -> dict[str, Any]:
+        """Install the main forge's CLI into the data folder."""
         try:
-            path = await ghcli.install(self.cfg.data_path, transport=self.transport)
-        except ghcli.InstallError as e:
+            if self.forge.kind == "gitlab":
+                from . import glabcli
+
+                path = await glabcli.install(self.cfg.data_path)
+            else:
+                path = await ghcli.install(self.cfg.data_path)
+        except Exception as e:
             raise SetupError(str(e)) from e
         return {"installed": True, "path": path}
 
-    # -- ownership -------------------------------------------------------------------------
+    async def _who(self, token: str) -> dict[str, Any]:
+        who = self._kind().who
+        try:
+            return dict(await who(self.forge.api, token))
+        except Exception as e:
+            raise SetupError(f"{self.forge.web} did not accept this sign-in") from e
 
-    async def claim(self, token: str) -> dict[str, Any]:
-        """Make the person whose token this is the owner of the setup, if they maintain
-        the service's own repository."""
-        user = await self._user(token)
-        repo = await self.checkout_repo()
-        if repo is None:
-            raise SetupError(
-                "this checkout has no GitHub repository to check maintainers against; "
-                "open the setup link that `am serve` printed instead"
-            )
-        need = self.cfg.self_update.approve_permission
-        async with self._client() as client:
-            r = await client.get(
-                f"/repos/{repo}", headers={"Authorization": f"Bearer {token}"}
-            )
-        perms = r.json().get("permissions", {}) if r.status_code == 200 else {}
-        have = max(
-            (i for i, level in enumerate(LEVELS) if perms.get(level)), default=-1
+    async def detect(self, *, private: bool) -> dict[str, Any]:
+        """What this host has. ``private`` adds the account the forge's CLI on the
+        host is logged in to, which only the owner of the setup may see."""
+        cli: dict[str, Any] = {
+            "name": self.cli_name(),
+            "installed": shutil.which(self.cli_name()) is not None,
+        }
+        if private:
+            token = await self.host_token(self.forge.kind, self.forge.web)
+            if token:
+                try:
+                    cli["user"] = await self._who(token)
+                except SetupError as e:
+                    cli["error"] = str(e)
+        return {
+            "cli": cli,
+            "agents": {
+                name: bool(shutil.which(b)) for name, b in AGENT_BINARIES.items()
+            },
+            "checkout": await self.checkout_repo(),
+            "hostname": socket.gethostname(),
+        }
+
+    # -- signing in ----------------------------------------------------------------------
+
+    def _new_login(self) -> Any:
+        staging = self.config_dir / "setup-signin"
+        if self._login is not None:
+            self._login.cancel()
+        shutil.rmtree(staging, ignore_errors=True)
+        self._login = self.login_factory(
+            self.forge.kind,
+            staging,
+            self.forge.web,
+            client_id=self.forge.oauth_client_id,
         )
-        wanted = LEVELS.index("push" if need == "write" else need)
-        if have < wanted:
-            raise SetupError(
-                f"{user['login']} does not have {need} on {repo}; only its maintainers "
-                "can set up this service"
-            )
-        if self.claimer and self.claimer["login"] != user["login"]:
-            raise SetupError(f"{self.claimer['login']} is already setting this up")
-        self.claimer = user
-        self._claimer_token = token
-        return user
+        return self._login
 
-    # -- the service's GitHub account ----------------------------------------------------------
+    async def signin_start(self, role: str) -> dict[str, str]:
+        """Start the forge CLI's one-time code: ``owner`` for the admin of the
+        service's repository (whose login the service then acts as too), ``service``
+        for another account the service acts as."""
+        self.signing = role
+        return await self._new_login().start()
 
-    def _warning(self, user: dict[str, Any]) -> str:
-        if user.get("classic") and "repo" not in user.get("scopes", []):
-            return "this token has no repo scope, so it cannot read private repositories or post"
-        return ""
-
-    async def use_gh(self) -> dict[str, Any]:
-        token = await self.gh_token()
-        if not token:
-            raise SetupError("the GitHub CLI on this host is not logged in")
-        user = await self._user(token)
-        self.cfg.default_forge.cli_config_dir = None
-        self._token = token
-        self.identity = {**user, "kind": "gh", "warning": self._warning(user)}
-        return self.identity
-
-    async def gh_web_start(self) -> dict[str, str]:
-        """Start a GitHub CLI login for the service; the page shows the code."""
-        return await self.gh_login.start()
-
-    async def gh_web_poll(self, *, claim: bool) -> dict[str, Any]:
-        """Whether the person has entered the code; once they have, the account they
-        authorized becomes the service's (and, on a new host, the setup's owner)."""
-        state = self.gh_login.state()
+    async def signin_poll(
+        self, *, may_claim: bool = True, trusted: bool = False
+    ) -> dict[str, Any]:
+        """Whether the person has entered the code; once they have, check the
+        account and keep its login as the service's."""
+        login = self._login
+        if login is None:
+            return {"state": "idle"}
+        state = login.state()
         if state in ("idle", "pending"):
             return {"state": state}
         if state == "failed":
-            return {"state": "failed", "error": " ".join(self.gh_login.output[-2:])}
-        token = await self.gh_login.token()
-        if token is None:
-            return {
-                "state": "failed",
-                "error": "the GitHub CLI has no token after the login",
-            }
+            output = " ".join(getattr(login, "output", [])[-2:])
+            login.discard()
+            return {"state": "failed", "error": output or "the sign-in did not finish"}
+        token = await login.token()
+        if not token:
+            login.discard()
+            return {"state": "failed", "error": "the forge's CLI holds no sign-in"}
         try:
-            user = await (self.claim(token) if claim else self._user(token))
+            person = await self._signed_in(
+                token, self.signing or "owner", may_claim=may_claim, trusted=trusted
+            )
         except SetupError as e:
-            shutil.rmtree(self.gh_login.config_dir, ignore_errors=True)
-            self.gh_login.proc = None
+            login.discard()
             return {"state": "failed", "error": str(e)}
-        self.cfg.default_forge.cli_config_dir = str(self.gh_login.config_dir)
-        self._token = token
-        self.identity = {**user, "kind": "gh", "warning": self._warning(user)}
-        return {"state": "done", "identity": self.identity}
+        return {"state": "done", "person": person}
 
-    # -- memory --------------------------------------------------------------------------
+    async def signin_token(
+        self, role: str, token: str, *, may_claim: bool = True, trusted: bool = False
+    ) -> dict[str, Any]:
+        """Sign in with a personal access token instead (GitLab)."""
+        if self.forge.kind != "gitlab":
+            raise SetupError("GitHub signs in with the one-time code")
+        self.signing = role
+        login = self._new_login()
+        await login.with_token(token)
+        try:
+            person = await self._signed_in(
+                token.strip(), role, may_claim=may_claim, trusted=trusted
+            )
+        except SetupError:
+            login.discard()
+            raise
+        return {"state": "done", "person": person}
 
-    def new_repo_url(self, repo: str) -> str:
-        owner, name = repo.split("/", 1)
-        q = urlencode(
-            {
-                "owner": owner,
-                "name": name,
-                "visibility": "private",
-                "description": "Memory of auto-maintainer",
-            }
-        )
-        return f"{self.cfg.default_forge.web}/new?{q}"
+    async def _signed_in(
+        self, token: str, role: str, *, may_claim: bool, trusted: bool
+    ) -> dict[str, Any]:
+        """Check who signed in; an owner must be an admin of the service's
+        repository. The login then replaces the service's own. ``trusted`` (the
+        setup link, or the owner after setup) keeps the login of someone not yet an
+        admin, who becomes the owner once they are, as after making a copy."""
+        person = await self._who(token)
+        owner = role != "owner"
+        if role == "owner":
+            if not self.cfg.code_repo:
+                raise SetupError("name the service's repository first")
+            if not may_claim:
+                raise SetupError(
+                    f"{self.cfg.code_repo} is not the repository this host's code came "
+                    "from, so only the setup link printed on the host may set it up "
+                    "with it"
+                )
+            access = await self._access(token)
+            owner = access is not None and access.permission is Permission.ADMIN
+            if not owner and not trusted:
+                raise SetupError(
+                    f"{person['login']} is not an admin of {self.cfg.code_repo}; its "
+                    "admin owns this service"
+                )
+            if owner:
+                self.claimer, self._owner_token = person, token
+                self._candidate = None
+            else:
+                self._candidate = (person, token)
+        self._keep_login()
+        self.identity = person
+        self._service_token = token
+        self.checks = await self.verify()
+        return {**person, "owner": owner}
 
-    async def _service_token(self) -> str | None:
-        """The credential the service itself will use: the GitHub CLI login chosen in
-        this setup, else the one made in the browser earlier, else the host's own.
-        ``None`` for a host that must connect again, whose old account is gone."""
-        if self._token:
-            return self._token
+    def _keep_login(self) -> None:
+        """Move the finished sign-in into the service's own login folder."""
+        assert self._login is not None
+        staging = Path(self._login.config_dir)
+        shutil.rmtree(self.folder, ignore_errors=True)
+        self.folder.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(staging, self.folder)
+        self._login = None
+        self.forge.cli_config_dir = str(self.folder)
+
+    async def use_host_login(self) -> dict[str, Any]:
+        """Act as the forge CLI login already on this host."""
+        token = await self.host_token(self.forge.kind, self.forge.web)
+        if not token:
+            raise SetupError(f"the {self.cli_name()} CLI on this host is not logged in")
+        person = await self._who(token)
+        self.forge.cli_config_dir = None
+        self.identity = person
+        self._service_token = token
+        self.checks = await self.verify()
+        return person
+
+    async def _token_now(self) -> str | None:
+        """The service's token: the login made in this setup, else the kept one,
+        else the host's own CLI login. ``None`` for a host that must connect again."""
+        if self._service_token:
+            return self._service_token
         if self.reconnect:
             return None
-        if self.cfg.default_forge.cli_config_dir:
-            token = await self.gh_login.token()
+        if self.forge.cli_config_dir:
+            kept = self.login_factory(
+                self.forge.kind,
+                Path(self.forge.cli_config_dir),
+                self.forge.web,
+                client_id=self.forge.oauth_client_id,
+            )
+            token = await kept.token()
             if token:
                 return token
-        return await self.gh_token()
+        return await self.host_token(self.forge.kind, self.forge.web)
+
+    # -- the service's repository ------------------------------------------------------
+
+    async def _access(self, token: str, path: str | None = None) -> Any:
+        account = self._kind().account
+        try:
+            return await account.repo(self.forge.api, token, path or self.cfg.code_repo)
+        except Exception as e:
+            raise SetupError(str(e)) from e
+
+    async def verify(self) -> list[dict[str, Any]]:
+        """Check the service's repository: its owner is an admin there, it holds
+        the code this host runs, and the service's account can push to it, which
+        self-improvement needs (design 5.12). Sets the branch deploys come from."""
+        repo = self.cfg.code_repo
+        if not repo:
+            return []
+        out: list[dict[str, Any]] = []
+        service = await self._token_now()
+        reader = self._owner_token or service
+        if reader is None:
+            return [{"id": "repo", "ok": False, "text": "sign in to check it"}]
+        access = await self._access(reader)
+        if access is None:
+            return [
+                {
+                    "id": "repo",
+                    "ok": False,
+                    "text": f"{repo} does not exist, or the account signed in cannot see it",
+                }
+            ]
+        self.cfg.code_repo = access.path
+        self.cfg.self_update.branch = access.default_branch
+        if self.claimer and self._owner_token:
+            theirs = (
+                access
+                if reader == self._owner_token
+                else await self._access(self._owner_token)
+            )
+            admin = theirs is not None and theirs.permission is Permission.ADMIN
+            login = self.claimer["login"]
+            out.append(
+                {
+                    "id": "owner",
+                    "ok": admin,
+                    "text": (
+                        f"{login} is an admin of {access.path} and owns this service"
+                        if admin
+                        else f"{login} is not an admin of {access.path}; its admin owns "
+                        "this service"
+                    ),
+                }
+            )
+        head = await self.head()
+        if head:
+            try:
+                holds = await self._kind().account.has_commit(
+                    self.forge.api, reader, access.path, head
+                )
+            except Exception as e:
+                raise SetupError(str(e)) from e
+            out.append(
+                {
+                    "id": "code",
+                    "ok": holds,
+                    "text": (
+                        f"it holds the code this host runs ({head[:10]})"
+                        if holds
+                        else f"it does not hold the code this host runs ({head[:10]}); "
+                        "push this checkout's branch to it, or fork the repository "
+                        "this host came from"
+                    ),
+                }
+            )
+        mine = await self._access(service) if service else None
+        push = bool(mine and mine.permission.at_least(Permission.WRITE))
+        who = (self.identity or {}).get("login", "the service's account")
+        out.append(
+            {
+                "id": "push",
+                "ok": push,
+                "text": (
+                    f"{who} can push to it, so the service opens its own changes there"
+                    if push
+                    else f"{who} cannot push to {access.path}; give it write access, so "
+                    "the service can open its own changes there"
+                ),
+            }
+        )
+        return out
+
+    async def copy_upstream(self) -> dict[str, Any]:
+        """Make the owner's own copy of the repository this host came from (a fork
+        on the same forge, else an import), and name it the service's repository."""
+        source = await self.checkout_repo()
+        if source is None:
+            raise SetupError("this checkout does not say where its code came from")
+        token = (
+            self._owner_token
+            or (self._candidate[1] if self._candidate else None)
+            or await self._token_now()
+        )
+        if not token:
+            raise SetupError("sign in first")
+        same = source["web_url"].lower() == self.forge.web.lower()
+        try:
+            made = await self._kind().account.copy(
+                self.forge.api, token, source["link"], source["path"] if same else None
+            )
+        except Exception as e:
+            raise SetupError(str(e)) from e
+        self.cfg.code_repo = made.path
+        await self._try_claim()
+        self.checks = await self.verify()
+        return {"repo": made.path}
+
+    # -- memory --------------------------------------------------------------------------
 
     async def memory(
         self, repo: str | None, create: bool, person_token: str | None = None
     ) -> dict[str, Any]:
-        """Use ``repo`` as the memory repository, creating it private when asked;
-        with ``repo`` empty, memory stays on this host.
+        """Use ``repo`` on the main forge as the memory repository, creating it
+        private when asked; with ``repo`` empty, memory stays on this host.
 
         The repository is looked up with each credential at hand in turn (the
-        signed-in maintainer's, the service's own, the host's GitHub CLI), because a
-        private repository is invisible to an account not given access to it. It is
-        created with the maintainer's account. The service's own account must then
-        reach it, since it keeps the memory there; that is checked last.
+        signed-in person's, the owner's, the service's own, the host's CLI), because
+        a private repository is invisible to an account not given access to it. It
+        is created with the person's account. The service's own account must then
+        be able to write to it, since it keeps the memory there.
         """
         if not repo:
             self.cfg.memory.remote = None
             return {"repo": None}
-        if not re.fullmatch(r"[\w.-]+/[\w.-]+", repo):
-            raise SetupError("name the repository as owner/name")
-        person = person_token or self._claimer_token
-        service = await self._service_token()
-        host = await self.gh_token()
+        if not re.fullmatch(r"[\w.-]+(/[\w.-]+)+", repo):
+            raise SetupError("name the repository by its path, like you/am-memory")
+        service = await self._token_now()
+        host = await self.host_token(self.forge.kind, self.forge.web)
+        person = person_token or self._owner_token
         candidates = [t for t in dict.fromkeys([person, service, host]) if t]
         if not candidates:
-            raise SetupError("sign in with GitHub first")
-        owner, name = repo.split("/", 1)
+            raise SetupError("sign in first")
+        account = self._kind().account
         tried: list[str] = []
-        found: dict[str, Any] | None = None
-        async with self._client() as client:
-            for token in candidates:
-                auth = {"Authorization": f"Bearer {token}"}
-                r = await client.get(f"/repos/{repo}", headers=auth)
-                if r.status_code == 200:
-                    found = r.json()
-                    break
-                if r.status_code not in (401, 403, 404):
-                    raise SetupError(f"GitHub answered {r.status_code} for {repo}")
-                tried.append(await self._login_of(client, auth))
+        found = None
+        for token in candidates:
+            found = await self._access(token, repo)
             if found is not None:
-                if not found.get("private"):
-                    raise SetupError(
-                        f"{repo} is public; the memory repository must be private"
-                    )
-                created = False
-            elif create:
-                auth = {"Authorization": f"Bearer {person or candidates[0]}"}
-                me = (await client.get("/user", headers=auth)).json().get("login")
-                path = "/user/repos" if owner == me else f"/orgs/{owner}/repos"
-                body = {
-                    "name": name,
-                    "private": True,
-                    "auto_init": True,
-                    "description": "Memory of auto-maintainer: profiles, knowledge, journals",
-                }
-                c = await client.post(path, headers=auth, json=body)
-                if c.status_code not in (200, 201):
-                    raise SetupError(
-                        f"GitHub did not create {repo} ({c.status_code}): "
-                        f"{c.json().get('message', '')}"
-                    )
-                created = True
-            else:
-                accounts = ", ".join(dict.fromkeys(tried)) or "no account"
+                break
+            with contextlib.suppress(SetupError):
+                tried.append((await self._who(token))["login"])
+        created = False
+        if found is None and create:
+            try:
+                found = await account.create_private(
+                    self.forge.api,
+                    person or candidates[0],
+                    repo,
+                    "Memory of auto-maintainer: profiles, knowledge, journals",
+                )
+            except Exception as e:
+                raise SetupError(str(e)) from e
+            created = True
+        if found is None:
+            accounts = ", ".join(dict.fromkeys(tried)) or "no account"
+            raise SetupError(
+                f"{repo} does not exist, or none of these can see it: {accounts}. "
+                "A private repository is visible only to accounts given access to it."
+            )
+        if not found.private:
+            raise SetupError(f"{repo} is public; the memory repository must be private")
+        if service is not None:
+            mine = await self._access(service, found.path)
+            if mine is None or not mine.permission.at_least(Permission.WRITE):
+                who = (self.identity or {}).get("login") or "the service's account"
                 raise SetupError(
-                    f"{repo} does not exist, or none of these can see it: {accounts}. "
-                    "A private repository is visible only to accounts given access "
-                    "to it."
+                    f"{found.path} is there, but {who} cannot write to it, and the "
+                    "service keeps its memory with that account. Give it write "
+                    "access, or use an account that has it."
                 )
-            if (
-                service is not None
-                and (
-                    await client.get(
-                        f"/repos/{repo}", headers={"Authorization": f"Bearer {service}"}
-                    )
-                ).status_code
-                != 200
-            ):
-                # Only a credential the service has, refused by GitHub, shows that the
-                # service cannot reach it; without one there is nothing to check.
-                who = (self.identity or {}).get("login") or await self._login_of(
-                    client, {"Authorization": f"Bearer {service}"}
-                )
-                raise SetupError(
-                    f"{repo} is there, but the service's account {who} cannot see it, "
-                    "and the service keeps its memory with that account. Give it write "
-                    "access to the repository, or use an account that has it."
-                )
-        self.cfg.memory.remote = repo
-        return {"repo": repo, "created": created}
-
-    async def _login_of(self, client: httpx.AsyncClient, auth: dict[str, str]) -> str:
-        """The account a credential belongs to, for messages; ``?`` when GitHub will
-        not say."""
-        r = await client.get("/user", headers=auth)
-        if r.status_code == 200:
-            return str(r.json().get("login") or "?")
-        return "?"
+        self.cfg.memory.remote = found.path
+        return {"repo": found.path, "created": created}
 
     # -- finishing -----------------------------------------------------------------------
 
@@ -883,34 +1216,51 @@ class HostSetup:
         return {
             "configured": is_configured(self.config_dir),
             "base_url": self.cfg.base_url,
+            "forge": self._forge_view(),
+            "repo": self.cfg.code_repo,
+            "repo_link": self.repo_link(),
+            "owner": self.cfg.owner,
             "identity": self.identity,
             "claimer": self.claimer,
+            "candidate": self._candidate[0] if self._candidate else None,
+            "checks": self.checks,
             "reconnect": self.reconnect,
             "memory": self.cfg.memory.remote,
-            "code_repo": self.cfg.code_repo,
-            "approve_permission": self.cfg.self_update.approve_permission,
             "default_agent": self.cfg.default_agent,
         }
 
-    def finish(
-        self, base_url: str, code_repo: str | None, default_agent: str | None = None
-    ) -> HostConfig:
-        """Write ``local.yaml``; the setup code expires. A host that must connect again
-        loses what its GitHub App or token setup kept: their secrets and the app's key."""
-        if self.identity is None and (
-            self.reconnect or not is_configured(self.config_dir)
-        ):
-            raise SetupError("connect the service's GitHub account first")
+    def finish(self, base_url: str, default_agent: str | None = None) -> HostConfig:
+        """Write ``local.yaml``; the setup code expires. A new host, or a changed
+        service repository, needs an owner who signed in as an admin of it and a
+        repository that passed every check. A host that must connect again loses
+        what its GitHub App or token setup kept: their secrets and the app's key."""
+        new = not is_configured(self.config_dir)
+        if self.identity is None and (self.reconnect or new):
+            raise SetupError("sign the service in first")
         if not re.match(r"^https?://[^\s/]+(:\d+)?/?$", base_url.strip()):
             raise SetupError(
                 "the address must look like https://host or http://host:7777"
             )
-        if code_repo and not re.fullmatch(r"[\w.-]+/[\w.-]+", code_repo):
-            raise SetupError("name the service's repository as owner/name")
         if default_agent and default_agent not in AGENT_BINARIES:
             raise SetupError(f"there is no agent named {default_agent!r}")
+        changed = (self.cfg.code_repo or "").lower() != (
+            self.configured_repo or ""
+        ).lower()
+        if new or changed or self.claimer:
+            if not self.cfg.code_repo:
+                raise SetupError("name the service's repository")
+            if self.claimer is None:
+                raise SetupError(
+                    f"sign in as an admin of {self.cfg.code_repo}, who owns this service"
+                )
+            failed = [c["text"] for c in self.checks if not c["ok"]]
+            if failed or not self.checks:
+                raise SetupError(
+                    "the service's repository does not pass its checks: "
+                    + ("; ".join(failed) or "check it first")
+                )
+            self.cfg.owner = self.claimer["login"]
         self.cfg.base_url = base_url.strip().rstrip("/")
-        self.cfg.code_repo = code_repo or None
         self.cfg.default_agent = default_agent or None
         for person in (self.claimer, self.identity):
             login = person["login"] if person else None
@@ -923,6 +1273,50 @@ class HostSetup:
             (self.config_dir / "github-app.pem").unlink(missing_ok=True)
             self.reconnect = None
         self.code_path.unlink(missing_ok=True)
-        if self.gh_login.state() == "pending":
-            self.gh_login.cancel()
+        if self._login is not None:
+            self._login.discard()
+            self._login = None
+        self.configured_repo = self.cfg.code_repo
         return self.cfg
+
+
+KNOWN_HOSTS = {"github.com": "github", "gitlab.com": "gitlab"}
+
+
+def kind_of_host(web_url: str) -> str | None:
+    """``github`` or ``gitlab`` for the public forges; ``None`` for others."""
+    host = web_url.split("://", 1)[-1].split("/", 1)[0].lower()
+    return KNOWN_HOSTS.get(host)
+
+
+def parse_link(link: str) -> tuple[str, str] | None:
+    """``(web_url, path)`` from a repository's web or git address (``https://host/
+    group/name``, ``git@host:group/name.git``, ``ssh://git@host/group/name``),
+    dropping any credentials and the ``.git`` suffix."""
+    text = link.strip()
+    if m := re.fullmatch(r"[\w.-]+@([\w.-]+):(.+?)(?:\.git)?/?", text):
+        host, path, scheme = m.group(1), m.group(2), "https"
+    elif m := re.fullmatch(
+        r"(https?|ssh|git)://(?:[^@/]+@)?([\w.-]+(?::\d+)?)/(.+?)(?:\.git)?/?", text
+    ):
+        scheme = "http" if m.group(1) == "http" else "https"
+        host, path = m.group(2), m.group(3)
+        if m.group(1) in ("ssh", "git"):
+            host = host.split(":", 1)[0]
+    else:
+        return None
+    path = path.split("/-/", 1)[0].strip("/")
+    if not re.fullmatch(r"[\w.-]+(/[\w.-]+)+", path):
+        return None
+    return f"{scheme}://{host}", path
+
+
+async def _host_cli_token(kind: str, web_url: str) -> str | None:
+    """The token of the forge CLI the host user is logged in with."""
+    host = web_url.split("://", 1)[-1].split("/", 1)[0]
+    if kind == "gitlab":
+        from .forges.gitlab.client import GlabToken
+
+        return await GlabToken(host).token(None)
+    code, out = await _run_gh(["auth", "token", "--hostname", host])
+    return out if code == 0 and out else None

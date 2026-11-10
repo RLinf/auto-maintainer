@@ -37,10 +37,12 @@ CONFIG_DIR = Path(
 
 HTTPS_PORT = 443
 """The only port the dashboard serves HTTPS on; every other port serves plain HTTP."""
-CONFIG_VERSION = 3
+CONFIG_VERSION = 4
 """The ``local.yaml`` schema. Version 1 (no ``version`` key) listened on port 7777
 with plain HTTP by default; version 2 defaults to HTTPS on ``HTTPS_PORT``; version 3
-lists the forges (``forges``) where version 2 had one ``github`` block."""
+lists the forges (``forges``) where version 2 had one ``github`` block; version 4
+names the deployment's ``owner`` where version 3 let everyone with
+``self_update.approve_permission`` on ``code_repo`` change it."""
 V1_PORT = 7777
 V1_BASE_URL = "http://127.0.0.1:7777"
 
@@ -149,12 +151,10 @@ class SelfUpdateConfig(_Cfg):
     """How the service changes and updates its own code (design 5.12)."""
 
     branch: str = "main"
-    """The default branch of ``code_repo``; deploys only go to commits on it."""
-    approve_permission: Literal["write", "maintain", "admin"] = "maintain"
-    """Permission on ``code_repo`` needed to merge the service's own PRs and deploy."""
+    """The default branch of ``code_repo``; deploys only go to commits on it, fetched
+    from ``code_repo`` itself, whatever the checkout's own remotes are."""
     checkout: str | None = None
     """The git checkout the service runs from; defaults to the installed source tree."""
-    remote: str = "origin"
     test_command: list[str] | None = None
     """Run in a staging worktree before a deploy; defaults to the unit tests."""
 
@@ -207,7 +207,16 @@ class HostConfig(_Cfg):
     """The forges the service serves; the first is the default (design 5.16)."""
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     code_repo: str | None = None
-    """``owner/repo`` of the service's own code, where self-improvements go."""
+    """The service's repository: its own fork or copy of auto-maintainer, named as
+    any repository is (``owner/name``, ``<forge>:group/name``). Deploys come from it
+    and self-improvements go to it as PRs, so the service's account there needs
+    write access (design 5.12)."""
+    owner: str | None = None
+    """The one person who owns this deployment, named as people are on
+    ``code_repo``'s forge. Only they change the service settings, the host setup, and
+    the service's code, and only while they are an admin of ``code_repo``; they hand
+    ownership on from the Settings page. ``None`` on a host set up before owners:
+    then every admin of ``code_repo`` acts as owner until one takes it (design 2.3)."""
     default_agent: str | None = None
     """The agent chosen during setup to run every task first; the service settings'
     ``default_agent`` overrides it."""
@@ -311,6 +320,10 @@ def load_host_config(config_dir: Path | None = None) -> HostConfig:
         if "gh_config_dir" in forge:
             forge["cli_config_dir"] = forge.pop("gh_config_dir")
         data["forges"] = [{"id": "github", "kind": "github", **forge}]
+    if version < 4:  # every admin of ``code_repo`` acts until one takes ownership
+        update = data.get("self_update") or {}
+        update.pop("approve_permission", None)
+        update.pop("remote", None)
     data["version"] = CONFIG_VERSION
     return HostConfig.model_validate(data)
 
@@ -412,20 +425,21 @@ def write_private_file(path: Path, text: str) -> None:
     _write_private(path, text)
 
 
-EXAMPLE = """# ~/.config/auto-maintainer/local.yaml
-version: 2
+EXAMPLE = """# ~/.config/auto-maintainer/local.yaml (the setup page writes it)
+version: 4
 port: 443                               # HTTPS; any other port serves plain HTTP
 host: 0.0.0.0                           # listen on every interface
 base_url: https://your-host             # what browsers open; links in alerts point here
 # tls: {cert: /path/server.crt, key: /path/server.key}  # your own certificate; else am tls
 operators: [your-login]
-github:
-  gh_config_dir: ~/.config/auto-maintainer/gh   # the GitHub CLI login the service acts as
+forges:
+  - id: github
+    kind: github
+    cli_config_dir: ~/.config/auto-maintainer/gh   # the GitHub CLI login the service acts as
 memory:
   remote: your-org/auto-maintainer-memory
-code_repo: your-org/auto-maintainer     # the service's own code; reviewers' requests become PRs here
-self_update:
-  approve_permission: maintain          # needed on code_repo to merge those PRs and to deploy
+code_repo: your-org/auto-maintainer     # your fork: deploys come from it, self-improvements go to it
+owner: your-login                       # an admin of code_repo; hands ownership on in Settings
 # sandbox_repo: your-org/sandbox        # am serve --dev then serves only this repository
 labs:
   gpu-host: {transport: ssh, host: gpu-host}

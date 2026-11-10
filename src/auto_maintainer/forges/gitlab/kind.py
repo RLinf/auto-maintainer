@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from ...domain.forges import ForgeCapabilities, ForgeInfo, ForgeTerms
 from ..base import ForgeEndpoints, ForgeKind, ForgeSite
+from .account import ACCOUNT
 from .ci import GitLabCi
 from .client import GitLabClient, GlabToken
 from .reader import GitLabReader
@@ -110,4 +111,5 @@ GITLAB = ForgeKind(
     webhook_target=hint,
     who=who,
     webhook_headers=("X-Gitlab-Token", "X-Gitlab-Event"),
+    account=ACCOUNT,
 )

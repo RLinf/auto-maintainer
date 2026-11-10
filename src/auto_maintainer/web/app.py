@@ -25,7 +25,13 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+    Response,
+)
 from fastapi.staticfiles import StaticFiles
 
 from ..domain.forges import check_repo, default_forge
@@ -38,6 +44,7 @@ from . import (
     governance,
     jobs,
     my_agents,
+    ownership,
     people_talk,
     review_talk,
     settings,
@@ -89,7 +96,7 @@ def create_app(
     ``gh_signin`` (a factory of ``hostsetup.GhLogin`` by flow id) enables signing in
     on the web by authorizing the GitHub CLI, the only way to sign in with GitHub;
     while ``gh`` is not on the server's ``PATH``, the sign-in page offers to install it.
-    ``setup_steps`` and ``on_host_change`` let maintainers of the service's repository
+    ``setup_steps`` and ``on_host_change`` let the owner of the service's repository
     change the host setup from the dashboard (``web/setup.py``), and with
     ``forge_steps`` (``hostsetup.ForgeSteps``) add a forge (``web/forge_setup.py``).
     ``ca_cert`` is the private authority's certificate when the dashboard serves
@@ -134,21 +141,45 @@ def create_app(
                 raise HTTPException(403, decision.reason)
             return {"by": user.login}
 
+        def setup_link(request: Request) -> bool:
+            """Whether this browser opened the setup link ``am setup`` printed."""
+            data = app.state.sessions.verify(request.cookies.get(setup.SETUP_COOKIE))
+            return bool(data and data.get("code"))
+
+        async def owner_or_link(request: Request) -> dict[str, Any]:
+            """The owner, or whoever holds the host's setup link: through it an admin
+            of the service's repository takes ownership when its owner cannot."""
+            if setup_link(request):
+                return {"code": True}
+            return await maintainer(request)
+
         async def own_token(request: Request) -> str | None:
-            user = auth.current_user(request)
+            try:
+                user = auth.current_user(request)
+            except HTTPException:
+                return None
             tokens = service.a.user_tokens
             kept = await tokens.get(user.login) if tokens is not None else None
             return kept.token if kept else None
+
+        @app.get("/setup/start")
+        async def setup_start(code: str) -> Any:
+            if not setup_steps().check_code(code):
+                return RedirectResponse("/setup?error=code", status_code=303)
+            response = RedirectResponse("/setup", status_code=303)
+            setup.remember_link(app, response)
+            return response
 
         if forge_steps is not None:
             app.include_router(
                 forge_setup.build_router(forge_steps, maintainer, on_host_change)
             )
+            app.include_router(ownership.build_router(forge_steps, on_host_change))
         app.include_router(
             setup.build_router(
                 setup_steps,
-                maintainer,
-                maintainer,
+                owner_or_link,
+                owner_or_link,
                 on_host_change,
                 first_run=False,
                 person_token=own_token,

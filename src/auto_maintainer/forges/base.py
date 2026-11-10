@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from ..domain.forges import ForgeInfo
+from ..domain.permissions import Permission
 from ..domain.ports import CiProvider, ForgeReader, ForgeWriter
 
 TokenFn = Callable[[str | None], Awaitable[str | None]]
@@ -73,6 +74,42 @@ class ForgeEndpoints:
 
 
 @dataclass(frozen=True)
+class RepoAccess:
+    """What one account sees of a repository on its forge, for setting a host up."""
+
+    path: str
+    """Its full path on the forge (``owner/name``, ``group/sub/name``)."""
+    private: bool
+    permission: Permission
+    """The account's own role there."""
+    default_branch: str
+    web_url: str
+
+
+class AccountError(RuntimeError):
+    """A forge refused or failed an account operation; the message says why."""
+
+
+@dataclass(frozen=True)
+class ForgeAccount:
+    """What setting a host up asks of a forge, each with one account's token: who it
+    is, what it sees of a repository, and making repositories (design 5.16)."""
+
+    repo: Callable[[str, str, str], Awaitable[RepoAccess | None]]
+    """``(api_url, token, path)``: the repository as that account sees it; ``None``
+    when it does not exist or the account cannot see it."""
+    has_commit: Callable[[str, str, str, str], Awaitable[bool]]
+    """``(api_url, token, path, sha)``: whether the repository holds that commit."""
+    create_private: Callable[[str, str, str, str], Awaitable[RepoAccess]]
+    """``(api_url, token, path, description)``: a new private repository, owned by
+    the account or a namespace it may create in; raises ``AccountError``."""
+    copy: Callable[[str, str, str, str | None], Awaitable[RepoAccess]]
+    """``(api_url, token, source_web_url, source_path)``: the account's own copy of a
+    repository, a fork when ``source_path`` names one on the same forge, else an
+    import of ``source_web_url``; raises ``AccountError``."""
+
+
+@dataclass(frozen=True)
 class ForgeKind:
     """One kind of forge: how to describe a site and build its adapters."""
 
@@ -92,3 +129,5 @@ class ForgeKind:
     ``name``, ``avatar_url``; raises when the token does not work."""
     webhook_headers: tuple[str, str] = ("X-Hub-Signature-256", "X-GitHub-Event")
     """The headers carrying a delivery's signature (or token) and its event name."""
+    account: ForgeAccount | None = None
+    """Account operations for the setup page and the owner's settings."""

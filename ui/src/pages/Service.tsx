@@ -68,8 +68,8 @@ export default function ServicePage() {
         title={t("Service")}
         sub={
           <>
-            {t("The service changes its own code when reviewers ask for it in a conversation. Merging and deploying need")} <strong>{v.approve_permission}</strong>{" "}
-            {t("on")} <code>{v.code_repo}</code>. {!v.can_approve && v.reason}
+            {t("The service changes its own code when reviewers ask for it in a conversation, in")} <code>{v.code_repo}</code>.{" "}
+            {t("Only its owner merges and deploys:")} <strong>{v.owner ?? t("any admin of it, until one takes ownership")}</strong>. {!v.can_approve && v.reason}
           </>
         }
         actions={

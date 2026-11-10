@@ -380,7 +380,7 @@ class PersonalAgent(BaseModel):
 
 
 class AgentInstall(BaseModel):
-    """An install of an agent CLI that a maintainer of the service asked for."""
+    """An install of an agent CLI that the owner of the service asked for."""
 
     name: str
     by: str

@@ -21,6 +21,7 @@ import httpx
 
 from ...domain.forges import ForgeCapabilities, ForgeInfo, ForgeTerms
 from ..base import ForgeEndpoints, ForgeKind, ForgeSite
+from .account import ACCOUNT
 from .auth import StaticTokenProvider
 from .ci import GitHubActionsCi
 from .client import GitHubClient
@@ -127,4 +128,5 @@ GITHUB = ForgeKind(
     webhook_target=hint,
     who=who,
     webhook_headers=("X-Hub-Signature-256", "X-GitHub-Event"),
+    account=ACCOUNT,
 )

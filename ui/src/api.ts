@@ -91,7 +91,7 @@ export interface Me {
 export interface ServiceView {
   code_repo: string | null;
   branch?: string;
-  approve_permission?: string;
+  owner?: string | null;
   can_approve?: boolean;
   reason?: string;
   status?: {
@@ -815,6 +815,8 @@ export interface SettingsView {
   installs: Record<string, AgentInstall>;
   access: GateDecision;
   repo: string | null;
+  /** The one person who owns this service; ``null`` until someone takes ownership. */
+  owner: string | null;
   document: string;
   status: { applied: boolean; problems: string[]; loaded_at: string | null };
   agents: SettingsAgent[];

@@ -150,7 +150,7 @@ class Harness:
         forge.set_permission(repo, maintainer, Permission.ADMIN)
         if code_repo:
             forge.add_repo(RepoInfo(name=code_repo, default_branch_sha="e" * 40))
-            forge.set_permission(code_repo, maintainer, Permission.MAINTAIN)
+            forge.set_permission(code_repo, maintainer, Permission.ADMIN)
         memory = FakeMemory()
         store = await SqliteStore.open(tmp / "am.db")
         runner = ScriptedRunner()
@@ -195,6 +195,7 @@ class Harness:
             schedules=schedules,
             dev_mode=dev_mode,
             code_repo=code_repo,
+            owner=maintainer if code_repo else None,
             confirm_deploy_after=0.0,
         )
         service = Service(adapters, settings, playbooks)

@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Installing an agent CLI on the service's host, which maintainers of the service's
+"""Installing an agent CLI on the service's host, which the owner of the service's
 repository ask for on the dashboard (``web/settings.py``).
 
 Each CLI comes from its publisher: from npm when the publisher ships it there

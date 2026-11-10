@@ -55,7 +55,7 @@ class MemoryChange(BaseModel):
     """Target repositories whose directories or configuration the change affects."""
     service: bool = False
     """The change edits the service's own settings (``config/service.yaml``). It needs
-    the approval of a maintainer of the service's repository, recorded in
+    the approval of the owner of the service's repository, recorded in
     ``approvals`` under that repository, instead of one per target repository."""
     author: str = "service"
     requested_by: str | None = None

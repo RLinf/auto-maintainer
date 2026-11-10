@@ -204,7 +204,7 @@ async def test_only_code_maintainers_merge_and_deploy(
     app = create_app(h.service, data_dir=tmp_path, allow_dev_login=True)
     async with _client(app, "walt") as walt:
         view = (await walt.get("/api/service")).json()
-        assert view["can_approve"] is False and "maintain" in view["reason"]
+        assert view["can_approve"] is False and "owns this service" in view["reason"]
         assert view["prs"][0]["self_improvement"] is True
         assert (await walt.post("/api/service/prs/7/merge")).status_code == 403
         assert (

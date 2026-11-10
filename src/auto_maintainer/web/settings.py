@@ -100,6 +100,7 @@ async def settings_view(service: Service, user: User) -> dict[str, Any]:
     return {
         "access": gate.model_dump(mode="json"),
         "repo": service.settings_repo(),
+        "owner": service.settings.owner,
         "document": text,
         "status": service.settings_status.model_dump(mode="json"),
         "agents": [
@@ -480,7 +481,7 @@ def build_router() -> APIRouter:
     async def set_sandbox(
         request: Request, body: SandboxBody, user: User = Depends(current_user)
     ) -> dict[str, Any]:
-        """Change it for this host (``local.yaml``); a maintainer of the service's
+        """Change it for this host (``local.yaml``); the owner of the service's
         repository only. The network and limits apply to the next agent run."""
         service = service_of(request)
         await _require_maintainer(service, user)
@@ -625,7 +626,7 @@ def build_router() -> APIRouter:
         user: User = Depends(current_user),
     ) -> dict[str, Any]:
         """Add or change a test machine: a settings change like any other, applied at
-        once for a maintainer of the service's repository, a proposal otherwise."""
+        once for the owner of the service's repository, a proposal otherwise."""
         service = service_of(request)
         machine = _connected(body)
         problems = machine_problems(name, machine)

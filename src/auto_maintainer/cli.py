@@ -42,10 +42,6 @@ profile_app = typer.Typer(help="Repository profiles.", no_args_is_help=True)
 import_app = typer.Typer(
     help="Import state from other tools (design 7.4).", no_args_is_help=True
 )
-forge_app = typer.Typer(
-    help="Forges the service serves (design 5.16).", no_args_is_help=True
-)
-app.add_typer(forge_app, name="forge")
 app.add_typer(repo_app, name="repo")
 app.add_typer(profile_app, name="profile")
 app.add_typer(import_app, name="import")
@@ -82,18 +78,25 @@ async def _service(dev: bool = False) -> AsyncIterator[Any]:
 
 
 async def _whoami() -> str:
-    """The caller's own GitHub login, from their ``gh`` token; it identifies them to the gate."""
-    import httpx
+    """The caller's own login on the main forge, from that forge's CLI on this host
+    (``gh``, ``glab``, or ``AM_USER_TOKEN``); it identifies them to the gate."""
+    from .forges.registry import kind
 
-    from .forges.github.auth import StaticTokenProvider
+    forge = _cfg().default_forge
+    token = os.environ.get("AM_USER_TOKEN")
+    if not token and forge.kind == "gitlab":
+        from .forges.gitlab.client import GlabToken
 
-    token = await StaticTokenProvider("AM_USER_TOKEN").token(None)
-    async with httpx.AsyncClient(trust_env=True, timeout=15) as client:
-        r = await client.get(
-            "https://api.github.com/user", headers={"Authorization": f"Bearer {token}"}
-        )
-        r.raise_for_status()
-        return r.json()["login"]
+        token = await GlabToken(forge.host).token(None)
+    elif not token:
+        from .forges.github.auth import StaticTokenProvider
+
+        token = await StaticTokenProvider("AM_USER_TOKEN").token(None)
+    who = kind(forge.kind).who
+    if not token or who is None:
+        typer.echo(f"sign in with the {forge.kind} CLI on this host first", err=True)
+        raise typer.Exit(1)
+    return (await who(forge.api, token))["login"]
 
 
 LINKS_FILE = "sign-in-links.json"
@@ -208,34 +211,35 @@ def _url(scheme: str, host: str, port: int) -> str:
     return f"{scheme}://{host}" + ("" if port == default else f":{port}")
 
 
-def _print_setup_link(port: int, code: str, https: bool = False) -> None:
+def _print_setup_link(
+    port: int, code: str, https: bool = False, *, set_up: bool = False
+) -> None:
     hosts = ["127.0.0.1", *([ip] if (ip := _lan_ip()) else [])]
     typer.echo(
-        "auto-maintainer is not set up yet. Open this in a browser to set it up:"
+        "Open this in a browser to change the host setup, or to take ownership as an "
+        "admin of the service's repository when its owner cannot:"
+        if set_up
+        else "auto-maintainer is not set up yet. Open this in a browser to set it up:"
     )
     scheme = "https" if https else "http"
     for h in hosts:
         typer.echo(f"  {_url(scheme, h, port)}/setup/start?code={code}")
     typer.echo(
-        "The code proves you are at this host; it stops working once setup is done."
+        "The code proves you are at this host; it stops working once setup is saved."
     )
 
 
 @app.command()
 def setup(port: int | None = None) -> None:
-    """Print the link to the setup page, where the host is set up on the web."""
+    """Print the link to the setup page, where the host is set up on the web; on a
+    host already set up, it lets an admin of the service's repository take
+    ownership."""
     from .config import is_configured, legacy_github
     from .hostsetup import HostSetup
 
-    if is_configured() and not legacy_github():
-        cfg = _cfg()
-        typer.echo(
-            f"already set up. Change it on the dashboard: {cfg.base_url}/setup "
-            "(needs maintain on the service's repository)."
-        )
-        return
+    set_up = is_configured() and not legacy_github()
     port = port or (_cfg().port if is_configured() else HostConfig().port)
-    _print_setup_link(port, HostSetup().code(), serves_https(port))
+    _print_setup_link(port, HostSetup().code(), serves_https(port), set_up=set_up)
 
 
 @app.command(hidden=True)
@@ -246,8 +250,8 @@ def init() -> None:
 
 @app.command()
 def login() -> None:
-    """Print a one-time link that signs you in to the dashboard as the GitHub account
-    logged in on this host (``gh``)."""
+    """Print a one-time link that signs you in to the dashboard as the account the
+    main forge's CLI on this host is logged in to (``gh``, ``glab``)."""
     from .web.auth import LINK_MINUTES, create_link
 
     cfg = _cfg()
@@ -304,105 +308,6 @@ def tls(
     typer.echo("Restart the service to serve it: am stop && am start")
 
 
-@forge_app.command("list")
-def forge_list() -> None:
-    """The forges this host serves, the default first, and whether the service is
-    signed in on each."""
-    cfg = _cfg()
-    for i, forge in enumerate(cfg.forges):
-        login = forge.cli_config_dir or "the host user's own CLI login"
-        mark = " (default)" if i == 0 else ""
-        typer.echo(f"{forge.id}{mark}: {forge.kind} at {forge.web}, as {login}")
-
-
-@forge_app.command("add")
-def forge_add(
-    forge_id: str,
-    kind: str = typer.Option("gitlab", help="github or gitlab"),
-    web_url: str = typer.Option("", help="Its web address; empty for the public one."),
-    api_url: str = typer.Option("", help="Its API's address; empty for the usual one."),
-    oauth_client_id: str = typer.Option(
-        "", help="A self-managed GitLab's OAuth application, for device sign-in."
-    ),
-) -> None:
-    """Serve repositories on one more forge; then sign the service in there with
-    ``am forge login``. Names on it begin with ``<forge_id>:``."""
-    from .config import CONFIG_DIR, is_configured
-    from .hostsetup import ForgeSteps
-
-    if not is_configured():
-        typer.echo("set the host up first (am serve, then the setup page)", err=True)
-        raise typer.Exit(1)
-    steps = ForgeSteps(CONFIG_DIR, load_host_config().data_path)
-    try:
-        forge = steps.new(forge_id, kind, web_url, api_url, oauth_client_id)
-        steps.keep(steps.with_forge(forge))
-    except ValueError as e:
-        typer.echo(str(e), err=True)
-        raise typer.Exit(1) from e
-    typer.echo(
-        f"added {forge_id}: {kind} at {forge.web}. Next: am forge login {forge_id}"
-    )
-
-
-@forge_app.command("login")
-def forge_login(
-    forge_id: str,
-    token_stdin: bool = typer.Option(
-        False, "--token-stdin", help="Read a personal access token from standard input."
-    ),
-) -> None:
-    """Sign the service in on a forge, as the account it acts as there: the forge
-    CLI's one-time code, or a personal access token. The login is kept in the
-    service's own CLI folder for that forge, never the host user's."""
-    import sys
-
-    from .config import CONFIG_DIR, save_host_config
-    from .hostsetup import ForgeSteps, GlabLogin, cli_login
-
-    cfg = _cfg()
-    try:
-        forge = cfg.forge(forge_id)
-    except KeyError:
-        typer.echo(f"no forge {forge_id!r}; see am forge list", err=True)
-        raise typer.Exit(1) from None
-    if forge.kind == "gitlab" and shutil.which("glab") is None:
-        from . import glabcli
-
-        typer.echo("installing the GitLab CLI into the data folder")
-        asyncio.run(glabcli.install(cfg.data_path))
-    folder = (
-        Path(forge.cli_config_dir)
-        if forge.cli_config_dir
-        else ForgeSteps(CONFIG_DIR, cfg.data_path).cli_folder(
-            forge.id, forge.kind, default=forge.id == cfg.default_forge.id
-        )
-    )
-    login = cli_login(forge.kind, folder, forge.web, client_id=forge.oauth_client_id)
-
-    async def run() -> bool:
-        if token_stdin:
-            if not isinstance(login, GlabLogin):
-                typer.echo("--token-stdin is for GitLab forges", err=True)
-                return False
-            await login.with_token(sys.stdin.read())
-            return True
-        started = await login.start()
-        typer.echo(f"Open {started['url']} and enter the code {started['code']}")
-        while login.state() == "pending":
-            await asyncio.sleep(2)
-        return login.state() == "done"
-
-    if not asyncio.run(run()):
-        typer.echo("the sign-in did not complete", err=True)
-        raise typer.Exit(1)
-    forge.cli_config_dir = str(folder)
-    save_host_config(cfg)
-    typer.echo(
-        f"signed in on {forge_id}. Restart the service to use it: am stop && am start"
-    )
-
-
 STOP_SECONDS = 15.0
 """How long the service may take to stop after the web server has."""
 
@@ -443,7 +348,7 @@ def _webhooks(cfg: HostConfig) -> dict[str, Any]:
 
 
 def _forge_signins(cfg: HostConfig) -> dict[str, Any]:
-    """Signing in with an account on each forge besides the default one, whose people
+    """Signing in with an account on each forge but a GitHub main forge, whose people
     sign in with the GitHub CLI (``_gh_signin``): the forge CLI's device code, each in
     a throwaway folder, or a personal access token."""
     from functools import partial
@@ -454,7 +359,9 @@ def _forge_signins(cfg: HostConfig) -> dict[str, Any]:
 
     root = cfg.data_path / "sign-in"
     out = {}
-    for forge in cfg.forges[1:]:
+    for i, forge in enumerate(cfg.forges):
+        if i == 0 and forge.kind == "github":
+            continue
         k = kind(forge.kind)
         if k.who is None:
             continue
@@ -545,10 +452,16 @@ class _Host:
             webhooks=_webhooks(cfg),
             forge_signins=_forge_signins(cfg),
             links_path=cfg.data_path / LINKS_FILE,
-            gh_signin=_gh_signin(cfg),
+            gh_signin=_gh_signin(cfg) if cfg.default_forge.kind == "github" else None,
             setup_steps=self.steps,
             on_host_change=self.start_service,
-            forge_steps=ForgeSteps(CONFIG_DIR, cfg.data_path),
+            forge_steps=ForgeSteps(
+                CONFIG_DIR,
+                cfg.data_path,
+                Path(cfg.self_update.checkout).expanduser()
+                if cfg.self_update.checkout
+                else None,
+            ),
             ca_cert=self.ca_cert,
         )
         old = self.service
@@ -979,7 +892,8 @@ def sandbox_build(
 
 @repo_app.command("add")
 def repo_add(repo: str) -> None:
-    """Start onboarding a repository. Needs your GitHub identity (gh auth) to pass the gate."""
+    """Start onboarding a repository. Needs your identity (the main forge's CLI
+    login on this host) to pass the gate."""
 
     async def main() -> None:
         login = await _whoami()

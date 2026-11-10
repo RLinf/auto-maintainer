@@ -239,7 +239,7 @@ def build_router() -> APIRouter:
         request: Request, user: User = Depends(current_user)
     ) -> list[dict[str, Any]]:
         """Request cards waiting in any conversation that ``user`` may decide (an
-        ``improve`` for maintainers of the service's repository, an ``add_repo`` for
+        ``improve`` for the owner of this service, an ``add_repo`` for
         those who may configure that repository), and their own."""
         service = service_of(request)
         out = []
@@ -379,9 +379,9 @@ def build_router() -> APIRouter:
                 "are private: never put them in public text. Before proposing improve, check the service guide below: "
                 "if the dashboard or a proposal already does what is asked, say how instead. When the maintainer asks for "
                 "something the service cannot do yet, or for a change in how it works that needs code rather than a "
-                "setting or a lesson, propose kind=improve with the request spelled out: once a maintainer of the "
-                "service's repository approves the card, the service changes its own code in the background and opens a "
-                "PR on its own repository, which a maintainer reviews before it is merged and deployed. A conversation "
+                "setting or a lesson, propose kind=improve with the request spelled out: once the owner of this "
+                "service approves the card, the service changes its own code in the background and opens a "
+                "PR on its own repository, which the owner reviews before it is merged and deployed. A conversation "
                 "runs one such change at a time: if the history shows one pending or running, do not propose it again.",
                 await _guide(service),
                 f"Your working directory is {where}.",
@@ -652,10 +652,7 @@ async def _lookup(
             or (await service.service_gate(user.login)).allowed
         )
         if not allowed:
-            return (
-                f"{what}: only operators and maintainers of the service's "
-                "repository read its log"
-            )
+            return f"{what}: only operators and the owner of this service read its log"
         if not q.text.strip() or log_path is None:
             return f"{what}: say what the lines contain"
         text = await asyncio.to_thread(_log_lines, log_path, q.text.strip())
@@ -893,9 +890,9 @@ async def _settings_block(service: Any, user: User) -> str:
     )
     return "\n".join(
         [
-            "Service settings (config/service.yaml in the memory repo). Only users with "
-            f"{service.settings.code_approver} on {service.settings_repo() or '(no repository)'} "
-            f"may apply them; {user.login} {'may' if decision.allowed else 'may not, so any change waits for a maintainer'}.",
+            "Service settings (config/service.yaml in the memory repo). Only the owner of "
+            f"this service ({service.settings.owner or 'any admin of ' + (service.settings_repo() or 'its repository') + ', until one takes ownership'}) "
+            f"may apply them; {user.login} {'may' if decision.allowed else 'may not, so any change waits for the owner'}.",
             "Current document:",
             text.strip() or "(empty: every default applies)",
             "Agents as they run now:",

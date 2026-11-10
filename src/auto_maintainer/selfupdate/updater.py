@@ -26,7 +26,9 @@ exits with ``RESTART_EXIT_CODE`` and the supervisor (or systemd) starts it again
 from __future__ import annotations
 
 import json
+import os
 import shutil
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -48,14 +50,28 @@ DEFAULT_TEST = [
 ]
 
 
+Source = Callable[[], Awaitable[tuple[str, str, str | None]]]
+"""Where the service's repository is fetched from: ``(url, git user, token)``."""
+
+_HELPER = "!f() { echo username=$AM_GIT_USER; echo password=$AM_GIT_TOKEN; }; f"
+TRACKING = "refs/remotes/am-code"
+"""Where fetched commits of the service's repository are kept in the checkout."""
+
+
 class GitServiceUpdater:
     """Implements ``ServiceUpdater`` over the git checkout the service runs from.
+
+    Updates come from the service's repository itself (``source``), whatever remotes
+    the checkout was cloned with, so a host cloned from one repository runs what is
+    merged in the fork its owner named.
 
     Args:
         checkout: The service's own git checkout.
         state_dir: Where staging worktrees and ``deploy.json`` go.
         branch: The default branch of the service's repository.
-        remote: The git remote that points at the service's repository.
+        source: Its URL and the service's credentials there; ``None`` fetches the
+            checkout's ``origin``.
+        repo: Its name, for messages.
         test_command: Run in the staging worktree; a non-zero exit stops the deploy.
     """
 
@@ -65,16 +81,56 @@ class GitServiceUpdater:
         state_dir: Path,
         *,
         branch: str = "main",
-        remote: str = "origin",
+        source: Source | None = None,
+        repo: str = "origin",
         test_command: list[str] | None = None,
         sync_command: list[str] | None = None,
     ) -> None:
         self.checkout = checkout
         self.state_dir = state_dir
         self.branch = branch
-        self.remote = remote
+        self.source = source
+        self.repo = repo
         self.test_command = test_command or DEFAULT_TEST
         self.sync_command = sync_command or ["uv", "sync", "--frozen"]
+
+    @property
+    def upstream(self) -> str:
+        return f"{TRACKING}/{self.branch}"
+
+    async def _fetch(self) -> None:
+        """The branch of the service's repository, into ``upstream``; the token goes
+        to git through a credential helper, never on the command line."""
+        url, user, token = (
+            await self.source() if self.source else ("origin", "x-access-token", None)
+        )
+        env = {
+            **os.environ,
+            "GIT_TERMINAL_PROMPT": "0",
+            "AM_GIT_USER": user,
+            "AM_GIT_TOKEN": token or "",
+        }
+        result = await run(
+            [
+                "git",
+                "-c",
+                "credential.helper=",
+                "-c",
+                f"credential.helper={_HELPER}",
+                "fetch",
+                "-q",
+                url,
+                f"+refs/heads/{self.branch}:{self.upstream}",
+            ],
+            cwd=self.checkout,
+            env=env,
+            timeout=120,
+        )
+        if not result.ok:
+            raise RuntimeError(
+                f"fetching {self.branch} of {self.repo} failed: "
+                f"{result.stderr.strip()[-500:]}"
+            )
 
     @property
     def state_file(self) -> Path:
@@ -112,10 +168,10 @@ class GitServiceUpdater:
         except RuntimeError as e:
             return UpdateStatus(running_sha="", error=str(e))
         try:
-            await self._git("fetch", "-q", self.remote, self.branch, timeout=120)
-            upstream = await self._git("rev-parse", f"{self.remote}/{self.branch}")
+            await self._fetch()
+            upstream = await self._git("rev-parse", self.upstream)
             log = await self._git(
-                "log", "--format=%H%x09%an%x09%s", f"HEAD..{self.remote}/{self.branch}"
+                "log", "--format=%H%x09%an%x09%s", f"HEAD..{self.upstream}"
             )
         except RuntimeError as e:
             return UpdateStatus(
@@ -144,7 +200,7 @@ class GitServiceUpdater:
                 previous_sha=previous,
                 log="the checkout has local changes",
             )
-        await self._git("fetch", "-q", self.remote, self.branch, timeout=120)
+        await self._fetch()
         target = await self._git("rev-parse", f"{sha}^{{commit}}")
         ancestor = await run(
             [
@@ -152,7 +208,7 @@ class GitServiceUpdater:
                 "merge-base",
                 "--is-ancestor",
                 target,
-                f"{self.remote}/{self.branch}",
+                self.upstream,
             ],
             cwd=self.checkout,
         )
@@ -161,7 +217,7 @@ class GitServiceUpdater:
                 ok=False,
                 sha=target,
                 previous_sha=previous,
-                log=f"{target[:12]} is not on {self.remote}/{self.branch}",
+                log=f"{target[:12]} is not on {self.branch} of {self.repo}",
             )
         staging = self.state_dir / "releases" / target[:12]
         shutil.rmtree(staging, ignore_errors=True)

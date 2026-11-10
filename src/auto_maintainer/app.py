@@ -104,6 +104,7 @@ async def build_service(cfg: HostConfig, dev: bool = False) -> Service:
         remote_repo=remote,
         branch=cfg.memory.branch,
         token=(lambda: home.token(remote)) if remote else None,
+        git_user=home.git_user,
     )
     await memory.open()
 
@@ -234,12 +235,20 @@ async def build_service(cfg: HostConfig, dev: bool = False) -> Service:
         if cfg.self_update.checkout
         else Path(__file__).resolve().parents[2]
     )
+
+    async def code_source() -> tuple[str, str, str | None]:
+        """The service's repository, fetched as the service's account there."""
+        assert cfg.code_repo
+        url, user = remote_of(cfg.code_repo)
+        return url, user, await service_token(cfg.code_repo)
+
     updater = (
         GitServiceUpdater(
             checkout,
             data / "deploys",
             branch=cfg.self_update.branch,
-            remote=cfg.self_update.remote,
+            source=code_source,
+            repo=cfg.code_repo or "origin",
             test_command=cfg.self_update.test_command,
         )
         if cfg.code_repo and (checkout / ".git").exists()
@@ -295,6 +304,6 @@ async def build_service(cfg: HostConfig, dev: bool = False) -> Service:
         base_url=cfg.base_url,
         sandbox_repo=cfg.sandbox_repo,
         code_branch=cfg.self_update.branch,
-        code_approver=cfg.self_update.approve_permission,
+        owner=cfg.owner,
     )
     return Service(adapters, settings)

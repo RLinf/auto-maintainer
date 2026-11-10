@@ -34,7 +34,7 @@ from ..subproc import ProcError, run
 
 TokenFn = Callable[[], Awaitable[str | None]]
 
-_HELPER = "!f() { echo username=x-access-token; echo password=$AM_GIT_TOKEN; }; f"
+_HELPER = "!f() { echo username=$AM_GIT_USER; echo password=$AM_GIT_TOKEN; }; f"
 
 
 class GitMemoryStore:
@@ -47,6 +47,7 @@ class GitMemoryStore:
         remote_repo: str | None = None,
         branch: str = "main",
         token: TokenFn | None = None,
+        git_user: str = "x-access-token",
         author_name: str = "auto-maintainer",
         author_email: str = "auto-maintainer@users.noreply.github.com",
     ) -> None:
@@ -55,6 +56,8 @@ class GitMemoryStore:
         self._remote_repo = remote_repo
         self.branch = branch
         self._token = token
+        self._git_user = git_user
+        """The user name git presents with the token on the memory repo's forge."""
         self._author = (author_name, author_email)
         self._lock = asyncio.Lock()
 
@@ -85,6 +88,7 @@ class GitMemoryStore:
             GIT_COMMITTER_EMAIL=self._author[1],
             GIT_TERMINAL_PROMPT="0",
         )
+        env["AM_GIT_USER"] = self._git_user
         if self._token:
             token = await self._token()
             if token:

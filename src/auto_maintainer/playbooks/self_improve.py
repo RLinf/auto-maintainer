@@ -75,7 +75,7 @@ MAX_DIFF_FOR_SUMMARY = 60_000
 
 
 class SelfImprove(Playbook):
-    """Runs only when a maintainer of the service's repository approved the request
+    """Runs only when the owner of this service approved the request
     (the chat's request card). The agent edits a worktree and does not need to answer
     in a fixed format: the diff says what it did, and a short second task describes
     the diff for the PR."""

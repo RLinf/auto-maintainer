@@ -197,7 +197,7 @@ async def test_anyone_else_only_proposes_even_an_operator(demo, login: str) -> N
     async with _client(app, login) as other:
         body = (await other.put("/api/settings", json={"yaml": text})).json()
         assert body["approved"] is False and body["change"]["state"] == "open"
-        assert "needs maintain" in body["gate"]["reason"]
+        assert "only maria, who owns this service" in body["gate"]["reason"]
         assert (
             await other.put(
                 "/api/settings/secrets/DEEPSEEK_API_KEY", json={"value": KEY}
@@ -276,15 +276,15 @@ def test_only_a_cli_with_a_bypass_mode_can_be_set_to_bypass() -> None:
 async def test_the_service_account_approves_only_when_a_person_signed_in_as_it(
     demo,
 ) -> None:
-    """With the GitHub CLI's login as the service's account (gh mode), its owner still
-    configures the service from the dashboard; the service itself never approves."""
+    """When the owner signed the service in as themselves, they still configure the
+    service from the dashboard; the service itself never approves."""
     h, _ = demo
     login = h.service.settings.login
+    h.service.settings.owner = login
     h.forge.set_permission("acme/auto-maintainer", login, Permission.ADMIN)
     h.forge.set_permission("acme/widget", login, Permission.ADMIN)
     gate = h.service.gate
-    need = Permission.MAINTAIN
-    refused = await gate.check_service("acme/auto-maintainer", login, need)
+    refused = await gate.check_service("acme/auto-maintainer", login, login)
     assert refused.allowed is False and "its own" in refused.reason
     assert (await h.service.service_gate(login)).allowed is True
     current = await h.service.profiles.active("acme/widget")
@@ -600,3 +600,23 @@ async def test_people_run_agents_on_their_own_accounts_and_nobody_elses(
             "state"
         ] == "done"
     assert await h.service.a.people.key("walt", "claude-code") == "sk-w"
+
+
+async def test_one_owner_acts_while_an_admin_of_the_service_repo(demo) -> None:
+    """The owner alone changes the service, and only while an admin of its
+    repository; another admin cannot, and a host set up before owners lets every
+    admin act until one takes ownership."""
+    h, _ = demo
+    repo = "acme/auto-maintainer"
+    h.forge.set_permission(repo, "ada", Permission.ADMIN)
+    assert (await h.service.service_gate("maria")).allowed is True
+    refused = await h.service.service_gate("ada")
+    assert refused.allowed is False and "only maria" in refused.reason
+    h.forge.set_permission(repo, "maria", Permission.MAINTAIN)
+    demoted = await h.service.service_gate("maria")
+    assert demoted.allowed is False and "must be an admin" in demoted.reason
+    h.service.settings.owner = None
+    assert (await h.service.service_gate("ada")).allowed is True
+    assert (await h.service.service_gate("maria")).allowed is False
+    h.service.settings.code_repo = None
+    assert "no repository of its own" in (await h.service.service_gate("ada")).reason

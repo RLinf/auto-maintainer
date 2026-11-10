@@ -535,7 +535,7 @@ async def test_the_agent_looks_up_why_a_post_failed(demo) -> None:
     assert "Diagnosing what the service did" in first
     assert "review.post at aaaaaaa: failed" in second and "priority tier" in second
     assert "other/secret#1: not a repository walt can see" in second
-    assert "only operators and maintainers" in second
+    assert "only operators and the owner" in second
 
 
 def test_a_log_lookup_returns_the_latest_lines_about_it(tmp_path: Path) -> None:

@@ -75,6 +75,7 @@ export default function SignIn() {
         <GhWebLogin
           start="/auth/gh/start"
           poll="/auth/gh/poll"
+          startBody={undefined}
           body={t(
             "Enter a one-time code on github.com to authorize the GitHub CLI. What you approve here then runs as you on every repository your account can reach. The token stays on this host, under your login only, and is deleted when you sign out.",
           )}
@@ -91,6 +92,9 @@ export default function SignIn() {
             <GhWebLogin
               start={`/auth/forges/${f.id}/start`}
               poll={`/auth/forges/${f.id}/poll`}
+              site={f.name}
+              title={`${t("Sign in with")} ${f.name}`}
+              button={`${t("Sign in with")} ${f.name}`}
               body={t("Enter a one-time code on the forge's site to authorize its CLI. What you approve here then runs as you there. The token stays on this host, under your login only, and is deleted when you sign out.")}
               onDone={() => void client.invalidateQueries()}
             />

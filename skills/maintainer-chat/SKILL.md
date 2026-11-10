@@ -34,7 +34,7 @@ auto-maintainer watches GitHub repositories for their maintainers. It reads open
 - `lesson`: something to remember when reviewing and scoring this repository. Saved at once when the maintainer may configure the repository.
 - `governance`: have an agent fill in or change the repository's People record, with `request` saying what to change or where the process is written (a file, a URL, or the rules as the person states them) and `people_mode: edit`; or check who should change role under it from GitHub activity, with `people_mode: members`. It starts at once and drafts a memory change for a maintainer to approve.
 - `add_repo`: onboard a repository; a card that someone who may configure that repository approves.
-- `improve`: a change to the service's own code, only when nothing above does what is asked. A card that a maintainer of the service's repository approves; then an agent changes the code in a worktree, the service runs the tests and opens a PR, and a maintainer approves the merge and then the deploy. Nothing reaches the running service before that.
+- `improve`: a change to the service's own code, only when nothing above does what is asked. A card that the owner of this service approves; then an agent changes the code in a worktree, the service runs the tests and opens a PR, and the owner approves the merge and then the deploy. Nothing reaches the running service before that.
 
 ## Diagnosing what the service did
 
@@ -43,7 +43,7 @@ When someone asks why something failed, did not post, or left the page, find the
 1. `pr_record` (repo, number): every action the service proposed or took on the PR, oldest first, with its status, the policy rule, the proposal (for whom, who decided, the reason, its warnings), who it was done as, and the error. Read the newest entry of the kind asked about.
 2. Then the PR itself on GitHub with `gh` (repositories on GitHub; on another forge, such as GitLab, no command line reaches it, so the record and the PR text in the prompt are all there is), when the record names a commit: `gh pr view <number> --repo <repo> --json headRefOid,reviews,labels` says whether the head moved and what reached the PR.
 3. `repo_failures` (repo): the repository's recent actions that failed, were refused, or superseded, when the question is about more than one PR.
-4. `service_log` (text: an action id `act_...` or job id `job_...` from the record): the log lines about it, when the error in the record is short or missing. Only operators and maintainers of the service's repository may read the log; say so when the lookup is refused.
+4. `service_log` (text: an action id `act_...` or job id `job_...` from the record): the log lines about it, when the error in the record is short or missing. Only operators and the owner of this service may read the log; say so when the lookup is refused.
 
 What the record's states mean:
 

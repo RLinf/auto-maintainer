@@ -555,18 +555,10 @@ class DeployBody(BaseModel):
 
 
 async def code_maintainer(service: Service, user: User) -> tuple[bool, str]:
-    """Whether ``user`` may merge and deploy the service's own code, and why not."""
-    repo = service.settings.code_repo
-    if not repo:
-        return False, "no code repo is configured"
-    need = Permission(service.settings.code_approver)
-    decision = await service.gate.check_service(repo, user.login, need, person=True)
-    if decision.allowed:
-        return True, ""
-    return (
-        False,
-        f"only users with {need.value} on {repo} can approve changes to the service",
-    )
+    """Whether ``user`` may approve changes to the service's own code (start a
+    self-improvement, merge, deploy), and why not: only its owner (design 5.12)."""
+    decision = await service.service_gate(user.login)
+    return decision.allowed, "" if decision.allowed else decision.reason
 
 
 class PrTarget(BaseModel):
@@ -2069,7 +2061,7 @@ def build_router() -> APIRouter:
         """Each agent installed and turned on here: its tokens in the last ``days``, and
         what its CLI says is left of its account's limits (``fresh`` asks the CLI
         again). Tokens count the runs in
-        repositories the user may view; operators and maintainers of the service's
+        repositories the user may view; operators and the owner of the service's
         repository see every run, also those outside any repository. ``mine``
         counts only the runs on the user's own agent accounts, and reads their own
         accounts' limits."""
@@ -2504,7 +2496,7 @@ def build_router() -> APIRouter:
         user: User = Depends(current_user),
     ) -> dict[str, Any]:
         """The end of the log ``am start`` keeps (``<data>/logs/service.log``), for
-        maintainers of the service's repository; anything that looks like a
+        the owner of the service's repository; anything that looks like a
         credential is removed."""
         service = service_of(request)
         allowed, why = await code_maintainer(service, user)
@@ -2561,7 +2553,7 @@ def build_router() -> APIRouter:
         return {
             "code_repo": repo,
             "branch": service.settings.code_branch,
-            "approve_permission": service.settings.code_approver,
+            "owner": service.settings.owner,
             "can_approve": allowed,
             "reason": reason,
             "status": status.model_dump(mode="json") if status else None,
