@@ -186,6 +186,17 @@ def recompute(
     )
 
 
+def priority_key(evaluation: Evaluation | None, rubric: Rubric) -> tuple[int, float]:
+    """How urgent a PR is, ascending: its tier's place among the rubric's tiers
+    first, since a maintainer's override sets the tier and leaves the score, then
+    its score, higher first. Unscored PRs come last."""
+    names = rubric.tier_names()
+    if evaluation is None:
+        return (len(names), 0.0)
+    rank = names.index(evaluation.tier) if evaluation.tier in names else len(names)
+    return (rank, -evaluation.total)
+
+
 def missing_dimensions(evaluation: Evaluation, rubric: Rubric) -> list[str]:
     """Dimensions of ``rubric`` that ``evaluation`` has no score for."""
     return [d for d in rubric.dimensions if d not in evaluation.scores]

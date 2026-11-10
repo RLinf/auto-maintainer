@@ -6,7 +6,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { api, type Me, type PrRow, type ReviewActivity, type ReviewStart } from "../api";
 import { useAgent } from "../agent";
 import { ErrorBox, Labels, PageHead, prPath, Quality, QUALITY_BANDS, qualityLabel, ReviewState, shownQuality, showsQuick, Tier, timeOf, useAct, When } from "../components";
-import { evaluationToast, prKey, qualityToast, REVIEW_ORDER, REVIEW_STATES, TIER_ORDER, usePrs, useReevaluate, useRepos, useScoreQuality, useSyncPrs } from "../data";
+import { evaluationToast, priorityRank, prKey, qualityToast, REVIEW_ORDER, REVIEW_STATES, TIER_ORDER, usePrs, useReevaluate, useRepos, useScoreQuality, useSyncPrs } from "../data";
 import { RepoTabs, useRepoScope } from "../repoScope";
 import { useT } from "../i18n";
 import { Icon } from "../icons";
@@ -74,11 +74,13 @@ export default function QueuePage({ me }: { me: Me }) {
       { id: "scored", label: t("Quality from"), values: (p) => (showsQuick(p.quality, p.quick_quality, p.head) ? t("Quick score") : p.quality ? t("Review") : t("Not scored yet")) },
       { id: "author", label: t("Author"), values: (p) => p.author },
       { id: "label", label: t("Label"), values: (p) => p.labels },
+      { id: "has_owner", label: t("Has an owner"), values: (p) => (namesOf(p, "owner") ? t("Yes") : t("No")) },
+      { id: "has_reviewers", label: t("Has reviewers"), values: (p) => (namesOf(p, "reviewer") ? t("Yes") : t("No")) },
       { id: "owners", label: t("Owners"), values: (p) => namesOf(p, "owner") ?? t("Nobody") },
       { id: "claimed", label: t("Reviewers"), values: (p) => namesOf(p, "reviewer") ?? t("Nobody") },
     ],
     sorts: [
-      { id: "priority", label: t("Priority"), value: (p) => p.total, descFirst: true },
+      { id: "priority", label: t("Priority"), value: (p) => priorityRank(p), descFirst: true },
       { id: "tier", label: t("Priority"), value: (p) => (p.tier ? TIER_ORDER.indexOf(p.tier) : null) },
       { id: "quality", label: t("Quality"), value: (p) => shownQuality(p.quality, p.quick_quality, p.head)?.score, descFirst: true },
       { id: "opened", label: t("Opened"), value: (p) => timeOf(p.created_at), descFirst: true },

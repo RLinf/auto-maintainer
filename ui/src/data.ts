@@ -81,6 +81,13 @@ export const REVIEW_ORDER = ["NEW_REVIEW", "FOLLOWUP_REVIEW", "APPROVED_NEW_COMM
 
 export const TIER_ORDER = ["P0", "P1", "P2", "P3"];
 
+/** How high a PR ranks: its tier first (an override sets the tier, not the score),
+ * then its score within the tier; higher is more urgent. Unscored PRs rank last. */
+export function priorityRank(p: { tier: string | null; total: number | null }): number {
+  const i = p.tier ? TIER_ORDER.indexOf(p.tier) : -1;
+  return (i < 0 ? 0 : TIER_ORDER.length - i) * 1000 + (p.total ?? -1);
+}
+
 export function prKey(p: { repo: string; number: number }) {
   return `${p.repo}#${p.number}`;
 }

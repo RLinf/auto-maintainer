@@ -32,8 +32,10 @@ from ..domain.events import Event, EventKind
 from ..domain.ids import same_commit
 from ..domain.profile import RepoProfile
 from ..domain.review import ReviewState
+from ..domain.scoring import priority_key
 from ..domain.snapshot import PrSnapshot
 from .base import Playbook, PlaybookContext, PlaybookResult, in_scope
+from .evaluate import rubric_of
 from .requests import FOLLOWUP_STATES
 
 SCAN_STATE = "review_scan:{repo}"
@@ -74,7 +76,8 @@ class ReviewScan(Playbook):
         if not scan_due(scan.schedule, last, now):
             return PlaybookResult(result={"skipped": "not due"})
         record = await ctx.store.get_repo(profile.repo)
-        candidates: list[tuple[float, PrSnapshot, str]] = []
+        rubric = rubric_of(profile)
+        candidates: list[tuple[tuple[int, float], PrSnapshot, str]] = []
         for pr in await ctx.store.list_snapshots(profile.repo, open_only=True):
             if not in_scope(pr, profile):
                 continue
@@ -88,8 +91,8 @@ class ReviewScan(Playbook):
             if await self._has_draft(ctx, pr):
                 continue
             evaluation = await ctx.store.get_evaluation(pr.repo, pr.number)
-            candidates.append((evaluation.total if evaluation else 0.0, pr, str(state)))
-        candidates.sort(key=lambda c: (-c[0], -c[1].number))
+            candidates.append((priority_key(evaluation, rubric), pr, str(state)))
+        candidates.sort(key=lambda c: (c[0], -c[1].number))
         picked = candidates[: scan.max_prs]
         events = [
             Event(

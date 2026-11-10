@@ -57,6 +57,7 @@ from auto_maintainer.domain.scoring import (
     Evaluation,
     Rubric,
     StageGoal,
+    priority_key,
     recompute,
 )
 from auto_maintainer.domain.snapshot import (
@@ -816,3 +817,17 @@ def test_review_progress_counts_each_reviewers_resolved_threads_over_time() -> N
         ("review", "carol", 0, 0, 0),
         ("review", "bob", 1, 1, 0),
     ]
+
+
+def test_priority_ranks_by_tier_before_score() -> None:
+    """An override sets a PR's tier and leaves its score, so ranking goes by tier
+    first: a P0 with a low score comes before a P1 with a high one."""
+
+    def ev(n: int, total: float, tier: str | None) -> Evaluation:
+        return Evaluation(repo="a/b", number=n, total=total, tier=tier)
+
+    pinned, scored, low = ev(1, 60.0, "P0"), ev(2, 75.0, "P1"), ev(3, 70.0, "P1")
+    ranked = sorted(
+        [scored, None, low, pinned], key=lambda e: priority_key(e, DEFAULT_RUBRIC)
+    )
+    assert ranked == [pinned, scored, low, None]

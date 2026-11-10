@@ -50,9 +50,11 @@ from ..domain.review import (
     review_chain,
     review_quality,
 )
+from ..domain.scoring import priority_key
 from ..domain.snapshot import PrSnapshot, PrState
 from ..profiles.layers import content_hash
 from .base import Playbook, PlaybookContext, PlaybookResult, in_scope
+from .evaluate import rubric_of
 from .hygiene import hygiene_key
 from .prompts import (
     DASHBOARD_LANGUAGES,
@@ -907,7 +909,8 @@ class QualityScan(Playbook):
         if any(job.playbook == "quick_quality" for job in active):
             return []
         now = ctx.clock.now()
-        due: list[tuple[int, float, PrSnapshot]] = []
+        rubric = rubric_of(profile)
+        due: list[tuple[int, tuple[int, float], PrSnapshot]] = []
         for pr, reviewed in prs:
             if pr.is_draft and not profile.scope.include_drafts:
                 continue
@@ -927,7 +930,7 @@ class QualityScan(Playbook):
             else:
                 rank = 0
             evaluation = await ctx.store.get_evaluation(pr.repo, pr.number)
-            due.append((rank, -(evaluation.total if evaluation else 0), pr))
+            due.append((rank, priority_key(evaluation, rubric), pr))
         due.sort(key=lambda d: (d[0], d[1], -d[2].number))
         return [
             Event(

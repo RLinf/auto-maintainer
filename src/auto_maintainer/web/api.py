@@ -99,7 +99,7 @@ from ..domain.review import (
 )
 from ..domain.review_progress import review_progress
 from ..domain.run_ci import plan_run_ci
-from ..domain.scoring import Evaluation, recompute
+from ..domain.scoring import Evaluation, priority_key, recompute
 from ..domain.secrets import redact_secrets
 from ..domain.snapshot import Mergeable, PrState, ReviewEventState
 from ..playbooks.evaluate import haystack, rubric_of
@@ -1276,6 +1276,7 @@ def build_router() -> APIRouter:
             if profile is None:
                 continue
             ids = service.info.identities | set(profile.people.review_identities)
+            rubric = rubric_of(profile)
             activity = await review_activity(service, name)
             quality = await review_qualities(service, name)
             own = await service.posted_as_people(name)
@@ -1311,6 +1312,7 @@ def build_router() -> APIRouter:
                         "updated_at": pr.updated_at,
                         "review_state": cls.state,
                         "reviewed_sha": (cls.reviewed_sha or "")[:7],
+                        "_rank": priority_key(ev, rubric),
                         "assignees": [assignee_row(a) for a in assignees],
                         "progress": review_progress(pr, assignees).summary(),
                         "tier": ev.tier if ev else None,
@@ -1329,7 +1331,9 @@ def build_router() -> APIRouter:
                         else None,
                     }
                 )
-        rows.sort(key=lambda x: (-(x["total"] or 0), -x["number"]))
+        rows.sort(key=lambda x: (x["_rank"], -x["number"]))
+        for row in rows:
+            del row["_rank"]
         return rows
 
     @r.post("/reviews")

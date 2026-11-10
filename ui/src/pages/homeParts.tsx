@@ -8,7 +8,7 @@ import { api, type AgentJob, type Automation, type ChatThread, type Me, type PrR
 import { useAgent } from "../agent";
 import { agentName, AgentPicker, reviewToast, useAgentChoice } from "../agentPicker";
 import { ErrorBox, prPath, Quality, Tier, timeOf, useAct, When } from "../components";
-import { prKey, REVIEW_STATES, useSettings } from "../data";
+import { priorityRank, prKey, REVIEW_STATES, useSettings } from "../data";
 import { useT } from "../i18n";
 import { Icon } from "../icons";
 import { ACTIVE, needsMe, ScoringRow, useWork, WorkRow } from "../jobs";
@@ -166,12 +166,23 @@ function matches(p: PrRow, words: string[], aliasOf: (login: string) => string |
   return words.every((w) => hay.includes(w));
 }
 
+type Staffed = "" | "owner" | "no-owner" | "reviewers" | "no-reviewers";
+
+/** Home's choice of PRs by whether someone owns or reviews them here. */
+const STAFFED: Record<Staffed, { label: string; keep: (p: PrRow) => boolean }> = {
+  "": { label: "With or without people", keep: () => true },
+  owner: { label: "Has an owner", keep: (p) => p.assignees.some((a) => a.role === "owner") },
+  "no-owner": { label: "No owner yet", keep: (p) => !p.assignees.some((a) => a.role === "owner") },
+  reviewers: { label: "Has reviewers", keep: (p) => p.assignees.some((a) => a.role === "reviewer") },
+  "no-reviewers": { label: "No reviewers yet", keep: (p) => !p.assignees.some((a) => a.role === "reviewer") },
+};
+
 type ReviewOrder = "priority" | "newest" | "oldest" | "updated";
 
 /** The orders Home's PRs to review offers: the repository's priorities (the default),
  *  or time, by when a PR was opened or last updated; PRs without the time go last. */
 const REVIEW_ORDERS: Record<ReviewOrder, { label: string; compare: (a: PrRow, b: PrRow) => number }> = {
-  priority: { label: "Priority", compare: (a, b) => (b.total ?? -1) - (a.total ?? -1) },
+  priority: { label: "Priority", compare: (a, b) => priorityRank(b) - priorityRank(a) },
   newest: { label: "Newest first", compare: (a, b) => (timeOf(b.created_at) ?? -Infinity) - (timeOf(a.created_at) ?? -Infinity) },
   oldest: { label: "Oldest first", compare: (a, b) => (timeOf(a.created_at) ?? Infinity) - (timeOf(b.created_at) ?? Infinity) },
   updated: { label: "Recently updated", compare: (a, b) => (timeOf(b.updated_at) ?? -Infinity) - (timeOf(a.updated_at) ?? -Infinity) },
@@ -210,13 +221,14 @@ export function ReviewCard({ rows, all, loading, me, automations }: { rows: PrRo
   const [showAll, setShowAll] = useState(false);
   const [query, setQuery] = useState("");
   const [only, setOnly] = useState<"owner" | "reviewer" | null>(null);
+  const [staffed, setStaffed] = useState<Staffed>("");
   const aliasOf = useAliasOf();
   const [order, setOrder] = useReviewOrder();
   const words = query.toLowerCase().split(/\s+/).filter(Boolean);
   const searching = words.length > 0;
   const ownedCount = rows.filter((p) => holds(p.assignees, me.login, "owner")).length;
   const reviewingCount = rows.filter((p) => holds(p.assignees, me.login, "reviewer")).length;
-  const pool = (searching ? all.filter((p) => matches(p, words, aliasOf)) : rows).filter((p) => !only || holds(p.assignees, me.login, only));
+  const pool = (searching ? all.filter((p) => matches(p, words, aliasOf)) : rows).filter((p) => (!only || holds(p.assignees, me.login, only)) && STAFFED[staffed].keep(p));
   const sorted = [...pool].sort(REVIEW_ORDERS[order].compare);
   const shown = showAll || searching ? sorted : sorted.slice(0, 8);
   const waiting = new Set(rows.map(prKey));
@@ -253,8 +265,8 @@ export function ReviewCard({ rows, all, loading, me, automations }: { rows: PrRo
           {review.isPending ? t("Starting…") : chosen.length ? `${t("Review")} ${chosen.length}` : t("Review selected")}
         </button>
       </div>
-      <div className="row" style={{ gap: 8, marginBottom: 8, flexWrap: "nowrap" }}>
-      <label className="search" style={{ minWidth: 0, flex: 1 }}>
+      <div className="row" style={{ gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
+      <label className="search" style={{ minWidth: 200, flex: 1 }}>
         <Icon name="search" />
         <input
           value={query}
@@ -289,6 +301,13 @@ export function ReviewCard({ rows, all, loading, me, automations }: { rows: PrRo
         >
           {t("I review")} {reviewingCount > 0 && <span className="n">{reviewingCount}</span>}
         </button>
+        <select value={staffed} onChange={(e) => setStaffed(e.target.value as Staffed)} aria-label={t("Owners and reviewers")} title={t("Owners and reviewers")} style={{ flex: "none", height: 34, width: "auto" }}>
+          {(Object.keys(STAFFED) as Staffed[]).map((k) => (
+            <option key={k} value={k}>
+              {t(STAFFED[k].label)}
+            </option>
+          ))}
+        </select>
         <select
           value={order}
           onChange={(e) => setOrder(e.target.value as ReviewOrder)}

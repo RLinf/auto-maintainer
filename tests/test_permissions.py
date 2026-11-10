@@ -457,3 +457,18 @@ async def test_people_choose_their_own_display_names_and_everyone_sees_them(
     async with _as(app, "bob") as bob:
         cleared = await bob.put("/api/me/alias", json={"alias": None})
         assert [a["login"] for a in cleared.json()["aliases"]] == ["walt"]
+
+
+async def test_the_pr_list_ranks_an_overridden_p0_above_higher_scored_p1s(demo) -> None:
+    h, app = demo
+    async with _as(app, "maria") as maria:
+        before = [r["number"] for r in (await maria.get("/api/prs")).json()]
+        last = before[-1]
+        pinned = await maria.post(
+            f"/api/prs/{REPO}/{last}/override",
+            json={"tier": "P0", "reason": "on the team's list"},
+        )
+        assert pinned.status_code == 200
+        rows = (await maria.get("/api/prs")).json()
+        assert rows[0]["number"] == last and rows[0]["tier"] == "P0"
+        assert "_rank" not in rows[0]
