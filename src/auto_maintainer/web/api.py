@@ -1646,6 +1646,7 @@ def build_router() -> APIRouter:
                 "parts": len(owners.parts),
                 "approved_parts": sum(1 for p in owners.parts if p.approved_by),
                 "people": [o.model_dump(mode="json") for o in owners.people],
+                "waiting": owners.waiting,
             },
             "head": pr.head_sha,
         }

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -124,6 +125,11 @@ class OwnerStanding(BaseModel):
     requested: bool = False
     """Whether GitHub asks them (or the team) for a review now."""
     files: int = 0
+    need: Literal["approved", "needed", "one_of", "covered", "author"] = "covered"
+    """What the merge waits on from them: ``approved`` (they did), ``needed`` (they
+    alone can approve some of the files), ``one_of`` (one of them and other owners
+    must), ``covered`` (another owner's approval covers all their files), or
+    ``author`` (GitHub does not count the author's approval)."""
 
 
 class OwnedPart(BaseModel):
@@ -142,6 +148,10 @@ class CodeOwnerReport(BaseModel):
     people: list[OwnerStanding] = Field(default_factory=list)
     unowned: list[str] = Field(default_factory=list)
     """Changed files no rule owns (or whose last matching rule names nobody)."""
+    waiting: list[list[str]] = Field(default_factory=list)
+    """The approvals still missing: for each, the owners any one of whom may give
+    it (the author left out), once per distinct group. An empty group means only
+    the author owns those files."""
 
 
 def code_owner_report(rules: list[OwnerRule], pr: PrSnapshot) -> CodeOwnerReport:
@@ -200,6 +210,29 @@ def code_owner_report(rules: list[OwnerRule], pr: PrSnapshot) -> CodeOwnerReport
                 and owner not in part.approved_by
             ):
                 part.approved_by.append(owner)
+    waiting: list[list[str]] = []
+    for part in parts.values():
+        if part.approved_by:
+            continue
+        group = [o for o in part.owners if o.lower() != author]
+        if group not in waiting:
+            waiting.append(group)
+    for standing in people.values():
+        key = standing.login.lower()
+        mine = [g for g in waiting if any(o.lower() == key for o in g)]
+        if standing.author:
+            standing.need = "author"
+        elif standing.verdict == ReviewEventState.APPROVED.value:
+            standing.need = "approved"
+        elif any(len(g) == 1 for g in mine):
+            standing.need = "needed"
+        elif mine:
+            standing.need = "one_of"
+        else:
+            standing.need = "covered"
     return CodeOwnerReport(
-        parts=list(parts.values()), people=list(people.values()), unowned=unowned
+        parts=list(parts.values()),
+        people=list(people.values()),
+        unowned=unowned,
+        waiting=waiting,
     )

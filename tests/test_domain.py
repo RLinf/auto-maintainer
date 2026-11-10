@@ -694,6 +694,29 @@ def test_code_owner_report_groups_files_and_reads_verdicts() -> None:
     assert people["acme/docs"].team and people["acme/docs"].requested
     assert people["lead"].requested and not people["core"].requested
     assert "walt" not in people
+    assert {login: p.need for login, p in people.items()} == {
+        "core": "approved",
+        "alice": "author",
+        "writer": "one_of",
+        "acme/docs": "one_of",
+        "lead": "needed",
+    }
+    assert report.waiting == [["writer", "acme/docs"], ["lead"]]
+
+
+def test_one_owners_approval_covers_a_co_owner() -> None:
+    """As on #1761: one person owns all the files and shares some with another; their
+    approval leaves nobody else needed, whatever the number of parts."""
+    rules = parse_codeowners("* @lin\n/rlinf/robotics/ @guo @lin\n")
+    pr = make_pr(
+        author="quanlu",
+        files=[PrFile(path="docs/a.md"), PrFile(path="rlinf/robotics/b.py")],
+        reviews=[Review(id=1, author="lin", state=ReviewEventState.APPROVED)],
+    )
+    report = code_owner_report(rules, pr)
+    assert len(report.parts) == 2 and report.waiting == []
+    people = {p.login: p.need for p in report.people}
+    assert people == {"lin": "approved", "guo": "covered"}
 
 
 def test_business_days() -> None:

@@ -476,7 +476,7 @@ export interface PrProgress {
   timeline: ProgressEvent[];
   /** The code owners' approvals: each owner's verdict, and how many parts of the
    * change an owner other than the author approved. */
-  code_owners: { file: string | null; required: boolean | null; parts: number; approved_parts: number; people: CodeOwnerStanding[] };
+  code_owners: { file: string | null; required: boolean | null; parts: number; approved_parts: number; people: CodeOwnerStanding[]; waiting: string[][] };
   head: string;
   /** The user resolves any comment (a maintainer or the PR's owner); a reviewer resolves their own. */
   can_resolve: boolean;
@@ -499,6 +499,10 @@ export interface CodeOwnerStanding {
   /** GitHub asks them (or the team) for a review now. */
   requested: boolean;
   files: number;
+  /** What the merge waits on from them: they approved, they alone can approve some
+   * files, one of them and others must, another owner's approval covers them, or
+   * they wrote the PR. */
+  need: "approved" | "needed" | "one_of" | "covered" | "author";
 }
 
 /** ``GET /api/prs/{repo}/{n}/code-owners``: whom to ask for the approvals a merge
@@ -511,6 +515,8 @@ export interface CodeOwners {
   parts: { owners: string[]; patterns: string[]; files: string[]; approved_by: string[] }[];
   people: CodeOwnerStanding[];
   unowned: string[];
+  /** The approvals still missing: for each, the owners any one of whom may give it. */
+  waiting: string[][];
   /** Others GitHub asks to review, who own none of the files. */
   requested: string[];
 }

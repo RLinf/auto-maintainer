@@ -8,6 +8,7 @@ import { useState } from "react";
 import { api, type CommentItem, type PrProgress, type ProgressEvent, type ProgressSummary, type ReviewerProgress } from "./api";
 import { useAliasOf } from "./aliases";
 import { Avatar, Named } from "./avatar";
+import { OwnerGroups, useCodeOwnerSummary } from "./codeOwners";
 import { ConnectGitHub } from "./connectGitHub";
 import { Empty, ErrorBox, Section, useAct, When } from "./components";
 import { useT } from "./i18n";
@@ -207,7 +208,7 @@ export function ReviewProgressPanel({ repo, number, me }: { repo: string; number
           </div>
         )}
       </Section>
-      <CodeOwnerApprovals d={d} />
+      <CodeOwnerApprovals d={d} repo={repo} />
       <Section title={t("Timeline")}>
         {d.timeline.length === 0 ? (
           <Empty icon="clock">{t("Nothing happened yet.")}</Empty>
@@ -233,52 +234,21 @@ export function ReviewProgressPanel({ repo, number, me }: { repo: string; number
 
 /** Whether the code owners approved: each owner's verdict, and how many parts of the
  * change have an approval from one of their owners. */
-function CodeOwnerApprovals({ d }: { d: PrProgress }) {
+function CodeOwnerApprovals({ d, repo }: { d: PrProgress; repo: string }) {
   const t = useT();
-  const aliasOf = useAliasOf();
   const c = d.code_owners;
+  const summary = useCodeOwnerSummary()(c.people, c.waiting ?? [], c.required);
   if (!c.file) return null;
-  const people = c.people;
   return (
     <Section
       title={t("Code owners")}
       hint={c.required ? t("GitHub merges only with their approval") : undefined}
-      aside={
-        c.parts > 0 ? (
-          <span
-            className={`pill ${c.approved_parts === c.parts ? "status-ok" : c.required ? "status-warn" : "status-muted"}`}
-            title={t("Parts of the change with an approval from one of their code owners; one person's approval covers every part they own.")}
-          >
-            {c.approved_parts}/{c.parts} {t("parts approved")}
-          </span>
-        ) : undefined
-      }
+      aside={summary ? <span className={`pill ${summary.tone}`}>{summary.text}</span> : undefined}
     >
-      {people.length === 0 ? (
+      {c.people.length === 0 ? (
         <span className="small muted">{t("No code owner owns the files this PR changes.")}</span>
       ) : (
-        <div className="list">
-          {people.map((o) => (
-            <div key={o.login} className="list-row progress-reviewer">
-              {o.team ? <Icon name="list" size={18} /> : <Avatar login={o.login} size={24} />}
-              <span className="main">
-                <Named login={o.login} alias={o.team ? undefined : aliasOf(o.login)} />
-                <span className="small muted" style={{ display: "block" }}>
-                  {[o.team ? t("a team") : null, `${o.files} ${o.files === 1 ? t("file") : t("files")}`, o.requested ? t("asked on GitHub") : null].filter(Boolean).join(" · ")}
-                </span>
-              </span>
-              {o.author ? (
-                <span className="pill status-muted" title={t("GitHub does not count an author's approval of their own PR")}>
-                  {t("author")}
-                </span>
-              ) : o.team ? (
-                <span className="pill status-muted">{o.requested ? t("review requested") : t("not asked")}</span>
-              ) : (
-                <Verdict r={{ verdict: o.verdict as ReviewerProgress["verdict"], at_head: o.at_head }} />
-              )}
-            </div>
-          ))}
-        </div>
+        <OwnerGroups repo={repo} people={c.people} waiting={c.waiting ?? []} />
       )}
     </Section>
   );

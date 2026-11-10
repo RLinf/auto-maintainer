@@ -843,6 +843,10 @@ details.pv-section[open] > summary { margin-bottom: 6px; }
 .owner-chip { display: inline-flex; align-items: center; gap: 6px; min-width: 0; font-size: 13px; overflow-wrap: anywhere; }
 .owner-chip > a { display: inline-flex; align-items: center; gap: 4px; }
 .owner-files { margin: 4px 0 0; padding-left: 18px; max-height: 180px; overflow: auto; }
+.owner-group { display: grid; grid-template-columns: minmax(96px, max-content) 1fr; gap: 6px 12px; align-items: center; }
+.owner-chip.muted { opacity: 0.7; }
+.owner-either { padding: 2px 8px; border: 1px dashed var(--border-strong); border-radius: 8px; }
+@media (max-width: 640px) { .owner-group { grid-template-columns: 1fr; } }
 .clamp2 { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
 .score-num { font-variant-numeric: tabular-nums; font-weight: 600; }
 .score-big { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1; }
