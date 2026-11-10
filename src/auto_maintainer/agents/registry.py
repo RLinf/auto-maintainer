@@ -37,6 +37,7 @@ from .adapters.dsh import DshRuntime
 from .adapters.gemini import GeminiRuntime
 from .adapters.generic import GenericRuntime
 from .adapters.opencode import OpenCodeRuntime
+from .adapters.pi import PiRuntime
 from .exec import ExecRuntime
 from .sandbox import register_secret
 
@@ -59,6 +60,7 @@ ADAPTERS: dict[str, type[ExecRuntime]] = {
     "antigravity": AntigravityRuntime,
     "opencode": OpenCodeRuntime,
     "dsh": DshRuntime,
+    "pi": PiRuntime,
     "gemini": GeminiRuntime,
     "generic": GenericRuntime,
 }

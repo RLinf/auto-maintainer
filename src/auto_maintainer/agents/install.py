@@ -16,7 +16,7 @@
 repository ask for on the dashboard (``web/settings.py``).
 
 Each CLI comes from its publisher: from npm when the publisher ships it there
-(Codex, Claude Code, DeepSeek Harness), where npm checks every package against the
+(Codex, Claude Code, DeepSeek Harness, pi), where npm checks every package against the
 registry's integrity hash; otherwise from the publisher's latest GitHub release,
 checked against the SHA-256 digest GitHub lists for the asset (Antigravity). Only
 the packages and repositories in ``SOURCES`` can be installed, by these exact names.
@@ -78,6 +78,7 @@ SOURCES: dict[str, Source] = {
     "codex": Source(binary="codex", npm="@openai/codex"),
     "claude-code": Source(binary="claude", npm="@anthropic-ai/claude-code"),
     "dsh": Source(binary="dsh", npm="@deepseek-ai/dsh"),
+    "pi": Source(binary="pi", npm="@mariozechner/pi-coding-agent"),
     "antigravity": Source(
         binary="agy",
         github="google-antigravity/antigravity-cli",

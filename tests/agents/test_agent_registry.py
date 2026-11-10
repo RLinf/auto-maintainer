@@ -33,7 +33,7 @@ from auto_maintainer.agents.registry import (
 from auto_maintainer.domain.ports import AgentRuntime
 
 
-def test_defaults_cover_every_cli_and_keep_placeholders_off() -> None:
+def test_defaults_cover_every_cli() -> None:
     assert set(DEFAULT_RUNTIMES) == {
         "claude-code",
         "codex",
@@ -43,7 +43,7 @@ def test_defaults_cover_every_cli_and_keep_placeholders_off() -> None:
         "pi",
         "dsh",
     }
-    assert not DEFAULT_RUNTIMES["pi"].enabled and DEFAULT_RUNTIMES["dsh"].enabled
+    assert DEFAULT_RUNTIMES["pi"].enabled and DEFAULT_RUNTIMES["dsh"].enabled
     runtimes = build_runtimes(merge_configs())
     assert set(runtimes) == {
         "claude-code",
@@ -51,16 +51,18 @@ def test_defaults_cover_every_cli_and_keep_placeholders_off() -> None:
         "antigravity",
         "opencode",
         "gemini",
+        "pi",
         "dsh",
     }
     assert isinstance(runtimes["dsh"], DshRuntime)
+    assert type(runtimes["pi"]).__name__ == "PiRuntime"
     assert all(isinstance(r, AgentRuntime) for r in runtimes.values())
 
 
 def test_overrides_merge_and_enable_generic_runtimes(tmp_path: Path) -> None:
     configs = merge_configs(
         {
-            "pi": {"enabled": True, "command": ["pi", "go", "{prompt}"]},
+            "mine": {"adapter": "generic", "command": ["mine", "go", "{prompt}"]},
             "claude-code": {
                 "model": "opus",
                 "options": {"setting_sources": ""},
@@ -69,8 +71,12 @@ def test_overrides_merge_and_enable_generic_runtimes(tmp_path: Path) -> None:
         }
     )
     runtimes = build_runtimes(configs, runs_dir=tmp_path)
-    pi = runtimes["pi"]
-    assert isinstance(pi, GenericRuntime) and pi.command == ["pi", "go", "{prompt}"]
+    mine = runtimes["mine"]
+    assert isinstance(mine, GenericRuntime) and mine.command == [
+        "mine",
+        "go",
+        "{prompt}",
+    ]
     claude = runtimes["claude-code"]
     assert (
         isinstance(claude, ClaudeCodeRuntime)

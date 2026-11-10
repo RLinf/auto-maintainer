@@ -110,7 +110,10 @@ def test_a_document_that_fits_has_no_problems() -> None:
         ),
         ("routing: {review: {primary: robot}}", "there is no agent named 'robot'"),
         ("routing: {dance: {primary: codex}}", "no task kind with that name"),
-        ("routing: {review: {primary: pi}}", "agent 'pi' is disabled"),
+        (
+            "agents: {pi: {enabled: false}}\nrouting: {review: {primary: pi}}",
+            "agent 'pi' is disabled",
+        ),
     ],
 )
 def test_pieces_that_do_not_fit_are_named(text: str, expected: str) -> None:
