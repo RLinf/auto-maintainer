@@ -49,6 +49,7 @@ from ..playbooks.prompts import no_code_rule, schema_hint, told_block
 from ..service import Service
 from .api import _repo, require_view, service_of
 from .auth import User, current_user
+from .chat import keep_session, turn_route
 from .records import open_door, reading_line
 
 log = logging.getLogger(__name__)
@@ -258,6 +259,7 @@ async def _turn(
     route = profile.route(str(TaskKind.GOVERNANCE), service.info.routing)
     if route is None:
         raise HTTPException(500, "no agent route for the People record")
+    route, resume = await turn_route(service, user.login, thread, route)
     task = AgentTask(
         kind=TaskKind.GOVERNANCE,
         prompt=prompt,
@@ -268,7 +270,7 @@ async def _turn(
         job_id=run,
         requested_by=user.login,
         untrusted_input=False,
-        resume_session=thread.session,
+        resume_session=resume,
         messages=True,
         records_token=token,
         env=door_env,
@@ -293,8 +295,7 @@ async def _turn(
         )
         raise HTTPException(502, f"the agent failed: {result.error}")
     answer = PeopleTurn.model_validate(result.structured)
-    thread.session = result.session or thread.session
-    thread.runtime = result.runtime
+    keep_session(thread, result)
     await service.store.save_thread(thread)
 
     notes: list[str] = []

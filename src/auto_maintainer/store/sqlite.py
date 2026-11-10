@@ -468,7 +468,8 @@ class SqliteStore:
                 m.agent_runs.c.created_at >= ts(since),
             )
         )
-        runs = _many(AgentRunRecord, rows)
+        # Runs on a person's own account are theirs, not the service's to budget.
+        runs = [r for r in _many(AgentRunRecord, rows) if r.account is None]
         return len(runs), sum(r.cost_usd or 0.0 for r in runs)
 
     # -- actions and proposals --------------------------------------------------------

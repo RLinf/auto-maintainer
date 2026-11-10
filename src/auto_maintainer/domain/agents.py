@@ -159,7 +159,12 @@ class AgentTask(BaseModel):
     """The PR the task is about, shown to reviewers next to the agent's questions."""
     job_id: str | None = None
     requested_by: str | None = None
-    """The maintainer who asked for this work; the agent's questions go to them first."""
+    """The maintainer who asked for this work; the agent's questions go to them first,
+    and the agents they run on their own accounts go first in its route."""
+    agent_chosen: bool = False
+    """The route's agent was chosen for this task (the requester picked it), so the
+    router keeps the route's order instead of putting the requester's own agents
+    first."""
     records_token: str | None = None
     """For a conversation with a person: the token of the service's records door
     (``web/records.py``) for that person. The run gets the ``am-read`` command and the

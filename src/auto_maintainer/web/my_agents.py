@@ -43,7 +43,7 @@ from ..service import Service
 from .api import service_of, visible_repos
 from .auth import User, current_user
 from .model_apis import ApiForm, ProbeBody, list_models, refused_address
-from .settings import examined, provider_row
+from .settings import can_sign_in, examined, provider_row
 
 
 class SetupBody(BaseModel):
@@ -68,11 +68,6 @@ def sign_in_options(runtime: Any) -> list[dict[str, str]]:
     return [
         {"id": o, "label": label} for o, label in getattr(runtime, "login_options", ())
     ]
-
-
-def can_sign_in(runtime: Any) -> bool:
-    can = getattr(runtime, "can_sign_in", None)
-    return bool(can and can())
 
 
 def _adapter(runtime: Any, name: str) -> str:

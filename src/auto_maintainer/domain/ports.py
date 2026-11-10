@@ -672,7 +672,10 @@ class Store(Protocol):
 
     async def agent_usage_since(
         self, runtime: str, since: datetime
-    ) -> tuple[int, float]: ...
+    ) -> tuple[int, float]:
+        """Runs and dollars of ``runtime`` on the service's own accounts since
+        ``since``, for its budget; runs on a person's own account do not count."""
+        ...
 
     # agents' questions
     async def save_question(self, question: AgentQuestion) -> None: ...

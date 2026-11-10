@@ -750,6 +750,19 @@ async def test_people_run_agents_on_their_own_accounts_and_nobody_elses(
             "model": "m1",
             "effort": "high",
         }
+
+        async def own(login: str) -> list[str]:
+            return ["claude-code"] if login == "walt" else []
+
+        h.runner.own_agents = own  # what the router reports
+        [row] = [
+            a
+            for a in (await walt.get("/api/settings")).json()["agents"]
+            if a["name"] == "claude-code"
+        ]
+        assert (row["mine"], row["can_sign_in"]) == ("api", True), (
+            "the pickers offer it to walt, on his API"
+        )
         assert (
             await walt.post("/api/settings/agents/claude-code/sign-in")
         ).status_code == 403
@@ -760,6 +773,12 @@ async def test_people_run_agents_on_their_own_accounts_and_nobody_elses(
         assert (
             await maria.post(f"/api/agent-logins/{mine['id']}/code", json={"code": "x"})
         ).status_code == 404
+        [row] = [
+            a
+            for a in (await maria.get("/api/settings")).json()["agents"]
+            if a["name"] == "claude-code"
+        ]
+        assert row["mine"] is None, "walt's account is not maria's"
         theirs = (await maria.get("/api/me/agents")).json()
         assert theirs["agents"][0]["setup"]["use_own"] is False, (
             "walt's setup is walt's alone"

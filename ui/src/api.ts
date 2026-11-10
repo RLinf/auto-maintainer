@@ -862,6 +862,11 @@ export interface SettingsAgent {
   installed: boolean | null;
   /** Installed, and its account signed in or a model provider set: it can run tasks. */
   usable: boolean;
+  /** Whether the work the signed-in person asks for runs on their own account of it
+   * (their own model API, or their own sign-in), and so tries it first. */
+  mine: "api" | "sign-in" | null;
+  /** Whether its CLI has a sign-in the dashboard can run; dsh has none and runs only on a model API. */
+  can_sign_in: boolean;
   provider: string | null;
   budget: { daily_usd: number | null; daily_runs: number | null };
   allow_bypass: boolean;

@@ -71,7 +71,7 @@ from ..playbooks.review_revise import (
 from ..service import Service
 from .api import is_maintainer, service_of
 from .auth import User, current_user
-from .chat import ProposedAction, save_lesson
+from .chat import ProposedAction, keep_session, save_lesson, turn_route
 from .jobs import _job, _payload
 from .records import open_door, reading_line
 
@@ -422,6 +422,9 @@ async def _turn(
         ]
         if part
     )
+    route, resume = await turn_route(
+        service, user.login, thread, _route(service, profile, kind, payload.runtime)
+    )
     run = new_id("run")
     token, door_env = await open_door(door, user.login)
     task = AgentTask(
@@ -435,16 +438,14 @@ async def _turn(
         job_id=run,
         requested_by=user.login,
         untrusted_input=not await author_is_team(service.a.forge, profile, pr),
-        resume_session=thread.session,
+        resume_session=resume,
         records_token=token,
         env=door_env,
     )
     thread.live_run = run
     await service.store.save_thread(thread)
     try:
-        result = await service.a.agents.run(
-            task, _route(service, profile, kind, payload.runtime), model
-        )
+        result = await service.a.agents.run(task, route, model)
     finally:
         if door is not None:
             door.revoke(token)
@@ -461,8 +462,7 @@ async def _turn(
         )
         raise HTTPException(502, f"the agent failed: {result.error}")
     answer = model.model_validate(result.structured)
-    thread.session = result.session or thread.session
-    thread.runtime = result.runtime
+    keep_session(thread, result)
     await service.store.save_thread(thread)
 
     notes: list[str] = []

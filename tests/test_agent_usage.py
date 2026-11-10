@@ -165,3 +165,29 @@ async def test_usage_counts_tokens_per_agent_and_reads_each_cli_sparingly(
         assert cli.asked == 1, "a fresh reading within half a minute is the kept one"
     finally:
         await h.close()
+
+
+async def test_runs_on_a_persons_own_account_count_against_no_service_budget(
+    tmp_path: Path,
+) -> None:
+    h = await build_demo(tmp_path)
+    try:
+        now = datetime.now(UTC)
+        for i, account in enumerate((None, "maria", None)):
+            await h.store.add_agent_run(
+                AgentRunRecord(
+                    id=f"run_b{i}",
+                    runtime="claude-code",
+                    task_kind="review",
+                    ok=True,
+                    cost_usd=1.0,
+                    account=account,
+                    requested_by=account,
+                    created_at=now,
+                )
+            )
+        assert await h.store.agent_usage_since(
+            "claude-code", now - timedelta(hours=1)
+        ) == (2, 2.0)
+    finally:
+        await h.close()

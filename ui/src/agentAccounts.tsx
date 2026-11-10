@@ -127,14 +127,23 @@ function StartSignIn({ url, options, signed, title, onStarted }: { url: string; 
   );
 }
 
-/** Whether an agent CLI is signed in for the service, and a sign-in for its owner. */
-export function ServiceSignIn({ name, options = [], canChange }: { name: string; options?: SignInOption[]; canChange: boolean }) {
+/** Whether an agent CLI is signed in for the service, and a sign-in for its owner. A
+ * CLI with no sign-in (dsh) only says whether it has a model API key. */
+export function ServiceSignIn({ name, options = [], canSignIn, canChange }: { name: string; options?: SignInOption[]; canSignIn: boolean; canChange: boolean }) {
   const t = useT();
   const status = useQuery({ queryKey: ["service-sign-ins"], queryFn: () => api.get<Record<string, boolean | null>>("/api/settings/agents/sign-ins"), staleTime: 30_000 });
   const [login, setLogin] = useState<AgentLogin | null>(null);
   const signed = status.data?.[name];
   if (login) return <SignInFlow login={login} onEnd={() => setLogin(null)} />;
   if (signed === undefined || signed === null) return null;
+  if (!canSignIn)
+    return signed ? (
+      <Status value="executed" label={t("Has a model API key")} />
+    ) : (
+      <span title={t("This CLI has no sign-in: it runs only on a model API. Choose one for it under Model providers.")}>
+        <Status value="pending" label={t("Needs a model API")} />
+      </span>
+    );
   return (
     <span className="row" style={{ gap: 6 }}>
       {signed ? <Status value="executed" label={t("Signed in")} /> : <Status value="pending" label={t("Not signed in")} />}
@@ -348,7 +357,7 @@ function MyAgentRow({ agent: a, apis }: { agent: MyAgent; apis: MyProvider[] }) 
       {a.isolated && !a.can_sign_in && usable.length === 0 && (
         <span className="small muted">
           {a.protocols.length > 0
-            ? t("This CLI has no sign-in the dashboard can run; add a model API of your own it can use, under Model providers.")
+            ? `${t("This CLI has no sign-in: it runs only on a model API. To run it on your own, add one under My model APIs that speaks")} ${a.protocols.map((p) => PROTOCOLS[p as keyof typeof PROTOCOLS] ?? p).join(` ${t("or")} `)}.`
             : t("This CLI has no sign-in the dashboard can run and takes no custom model API, so it runs on the service's account.")}
         </span>
       )}

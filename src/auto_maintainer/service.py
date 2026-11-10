@@ -927,6 +927,12 @@ class Service:
         ready = getattr(self.a.agents, "ready", None)
         return bool(ready(name)) if callable(ready) else True
 
+    async def own_agents(self, login: str) -> list[str]:
+        """The agents ``login`` runs on their own accounts here, which the work they
+        ask for tries first (``AgentRouter.own_agents``)."""
+        own = getattr(self.a.agents, "own_agents", None)
+        return list(await own(login)) if callable(own) else []
+
     def agent_usable(self, name: str) -> bool:
         """Whether agent ``name`` is ready and its account is not known to be signed
         out: what pickers offer and the default falls to."""

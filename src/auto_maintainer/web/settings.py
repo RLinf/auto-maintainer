@@ -80,6 +80,13 @@ async def _require_maintainer(service: Service, user: User) -> None:
         raise HTTPException(403, decision.reason)
 
 
+def can_sign_in(runtime: Any) -> bool:
+    """Whether an agent CLI has a sign-in the dashboard can run (dsh has none: it
+    runs only on a model API)."""
+    can = getattr(runtime, "can_sign_in", None)
+    return bool(can and can())
+
+
 async def settings_view(service: Service, user: User) -> dict[str, Any]:
     """Everything the Settings page shows, with each value's source."""
     text, legacy = await service.settings_text()
@@ -100,6 +107,8 @@ async def settings_view(service: Service, user: User) -> dict[str, Any]:
         for c in await service.store.list_memory_changes(MemoryChangeState.OPEN)
         if c.service
     ]
+    own = set(await service.own_agents(user.login))
+    setups = await service.a.people.get(user.login) if own and service.a.people else {}
     return {
         "access": gate.model_dump(mode="json"),
         "repo": service.settings_repo(),
@@ -127,6 +136,14 @@ async def settings_view(service: Service, user: User) -> dict[str, Any]:
                 "can_bypass": can_bypass(cfg),
                 "installed": service.agent_ready(name) if cfg.enabled else None,
                 "usable": service.agent_usable(name) if cfg.enabled else False,
+                # Whether the work this person asks for runs on their own account of
+                # it, and which: what pickers offer them and try first.
+                "mine": (
+                    "api" if setups.get(name) and setups[name].provider else "sign-in"
+                )
+                if name in own
+                else None,
+                "can_sign_in": can_sign_in(service.runtime(name)),
                 "confined": bool(cfg.command_prefix),
                 "from_settings": name in config.agents or name in legacy,
                 "providers_supported": sorted(PROVIDER_PROTOCOLS.get(cfg.adapter, ())),

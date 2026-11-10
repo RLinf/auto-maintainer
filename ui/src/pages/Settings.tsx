@@ -649,7 +649,7 @@ function AgentsTab({ v, ask }: { v: SettingsView; ask: (p: string, send?: boolea
                     <ModelControls agent={a} choices={choices} providers={v.providers} canChange={v.access.allowed} />
                   )}
                   {a.can_bypass && <AgentModeSwitch agent={a} canChange={v.access.allowed} />}
-                  {a.enabled && a.installed !== false && <ServiceSignIn name={a.name} options={a.sign_in_options} canChange={v.access.allowed} />}
+                  {a.enabled && a.installed !== false && <ServiceSignIn name={a.name} options={a.sign_in_options} canSignIn={a.can_sign_in} canChange={v.access.allowed} />}
                   {v.installable[a.name] && (a.installed === false || v.installs[a.name]?.state === "running") && (
                     <InstallButton name={a.name} source={v.installable[a.name]} state={v.installs[a.name]} canInstall={v.access.allowed} />
                   )}

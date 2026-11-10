@@ -45,7 +45,7 @@ from ..domain.actions import (
     RerunPayload,
     make_action,
 )
-from ..domain.agents import AgentTask, TaskKind
+from ..domain.agents import AgentResult, AgentTask, TaskKind
 from ..domain.events import Event, EventKind
 from ..domain.ids import check_repo, new_id
 from ..domain.memory import (
@@ -56,6 +56,7 @@ from ..domain.memory import (
     profile_path,
     repo_dir,
 )
+from ..domain.profile import Route
 from ..domain.records import ChatMessage, ChatRequest, ChatThread, JobStatus
 from ..domain.review import review_quality
 from ..domain.secrets import redact_secrets
@@ -69,6 +70,7 @@ from ..domain.settings import (
 from ..playbooks.prompts import schema_hint, untrusted
 from ..playbooks.quality import assessed_quality, quick_quality
 from ..profiles.layers import ProfileError, parse_yaml
+from ..service import Service
 from .api import (
     code_maintainer,
     require_view,
@@ -81,6 +83,37 @@ from .auth import User, current_user
 from .records import open_door, reading_line
 
 log = logging.getLogger(__name__)
+
+
+async def turn_route(
+    service: Service, login: str, thread: ChatThread, route: Route
+) -> tuple[Route, str | None]:
+    """The route of a conversation's next turn, and the session it resumes.
+
+    A session resumes only on the agent that holds it, which then goes first. When
+    ``login`` runs agents on their own accounts and the session is on another, the
+    turn starts afresh, and the router tries their own agents first: the prompt
+    carries the conversation so far."""
+    resume = thread.session
+    if not resume or not thread.runtime:
+        return route, None
+    own = await service.own_agents(login)
+    if (own and thread.runtime not in own) or not service.agent_ready(thread.runtime):
+        return route, None
+    rest = [a for a in [route.primary, *route.fallback] if a != thread.runtime]
+    model = route.model if route.primary == thread.runtime else None
+    return route.model_copy(
+        update={"primary": thread.runtime, "fallback": rest, "model": model}
+    ), resume
+
+
+def keep_session(thread: ChatThread, result: AgentResult) -> None:
+    """Remember the session and agent of a conversation's last turn; a session
+    belongs to the agent that made it."""
+    if result.runtime != thread.runtime:
+        thread.session = None
+    thread.session = result.session or thread.session
+    thread.runtime = result.runtime
 
 
 class ProposedAction(BaseModel):
@@ -381,6 +414,7 @@ def build_router() -> APIRouter:
         route = service.settings.routing.get("chat")
         if route is None:
             raise HTTPException(500, "no chat route is configured")
+        route, resume = await turn_route(service, user.login, thread, route)
         run = new_id("run")
         door = request.app.state.records
         token, door_env = await open_door(door, user.login)
@@ -389,7 +423,7 @@ def build_router() -> APIRouter:
             prompt=prompt,
             workdir=workdir,
             output_schema=ChatAnswer.model_json_schema(),
-            resume_session=thread.session,
+            resume_session=resume,
             job_id=run,
             requested_by=user.login,
             records_token=token,
@@ -406,8 +440,7 @@ def build_router() -> APIRouter:
             door.revoke(token)
             thread.live_run = None
             await service.store.save_thread(thread)
-        thread.session = result.session or thread.session
-        thread.runtime = result.runtime
+        keep_session(thread, result)
         await service.store.save_thread(thread)
         created: list[str] = []
         changes: list[str] = []

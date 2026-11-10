@@ -1,5 +1,6 @@
-// Which agent does a review: the one its route runs on (the first installed agent in
-// its order), or one the reviewer picks among the agents installed on the host.
+// Which agent does a review: by default the reviewer's own agent (one they run on their
+// own model API or sign-in), else the one its route runs on (the first usable agent in
+// its order), or one the reviewer picks among the agents usable here.
 
 import { useState } from "react";
 import type { ReviewStart } from "./api";
@@ -14,6 +15,8 @@ const NAMES: Record<string, string> = {
   antigravity: "Antigravity",
   opencode: "OpenCode",
   gemini: "Gemini CLI",
+  pi: "pi",
+  dsh: "DeepSeek Harness",
 };
 
 export function agentName(name: string | null | undefined): string {
@@ -55,22 +58,28 @@ export function AgentPicker({
   const t = useT();
   const settings = useSettings();
   // Only agents that can run here: turned on, their CLI installed on the host, and
-  // signed in or given a model provider.
-  const agents = (settings.data?.agents ?? []).filter((a) => a.enabled && a.installed !== false && a.usable !== false);
+  // signed in or given a model provider, for the service or on the person's own account.
+  const agents = (settings.data?.agents ?? []).filter((a) => a.enabled && a.installed !== false && (a.usable !== false || a.mine));
   const route = settings.data?.routing.find((r) => r.task === task);
-  const primary = route?.runs_on ?? route?.primary;
+  // What the person asks for tries their own agents first (verification keeps its route).
+  const own = task === "verify" ? undefined : agents.find((a) => a.mine);
+  const primary = own?.name ?? route?.runs_on ?? route?.primary;
+  const label = (name: string) => {
+    const mine = agents.find((a) => a.name === name)?.mine;
+    return mine ? `${agentName(name)} · ${mine === "api" ? t("my API") : t("my own sign-in")}` : agentName(name);
+  };
   // A remembered agent that was disabled since falls back to the default.
   const current = value && !agents.some((a) => a.name === value) && settings.data ? "" : value;
   return (
     <label className="row" style={{ gap: 6 }} title={t("Which agent does it")}>
       {!compact && <Icon name="cpu" size={14} />}
       <select value={current} onChange={(e) => onChange(e.target.value)} aria-label={t("Which agent does it")} style={{ height: compact ? 28 : 34 }}>
-        <option value="">{primary ? `${agentName(primary)} (${t("default")})` : t("Default agent")}</option>
+        <option value="">{primary ? `${label(primary)} (${t("default")})` : t("Default agent")}</option>
         {agents
           .filter((a) => a.name !== primary)
           .map((a) => (
             <option key={a.name} value={a.name}>
-              {agentName(a.name)}
+              {label(a.name)}
             </option>
           ))}
       </select>

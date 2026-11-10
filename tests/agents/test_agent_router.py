@@ -369,3 +369,74 @@ async def test_a_signed_out_agent_still_runs_on_its_requesters_own_account() -> 
     router.people = People()  # type: ignore[assignment]
     assert await router._unusable("a", "review", _task(requested_by="maria")) is None
     assert await router._unusable("a", "review", _task(requested_by="walt"))
+
+
+class _People:
+    """maria runs ``b`` on her own account; nobody else runs any."""
+
+    async def get(self, login: str) -> dict[str, object]:
+        from auto_maintainer.domain.agents import PersonalAgent
+
+        return (
+            {"b": PersonalAgent(agent="b", use_own=True)}
+            if login.lower() == "maria"
+            else {}
+        )
+
+    async def providers(self, login: str) -> dict[str, object]:
+        return {}
+
+    def home(self, login: str) -> Path:
+        return Path("/people") / login
+
+
+def _own(name: str, script: list) -> ScriptedAgentRuntime:
+    runtime = ScriptedAgentRuntime(name, script)
+    runtime.container_sandbox = object()  # type: ignore[attr-defined]
+    runtime.account_home = None  # type: ignore[attr-defined]
+    return runtime
+
+
+async def test_what_a_person_asks_for_tries_their_own_agents_first() -> None:
+    """Their own agent goes first, unless they chose the agent, the task resumes a
+    session, or it verifies (a second opinion from the route's agent); nobody
+    else's task moves."""
+    a = _own("a", [])
+    b = _own("b", [])
+    router, _ = _router(a, b)
+    router.people = _People()  # type: ignore[assignment]
+    route = Route(primary="a", fallback=[], model="a-model")
+    a.default = b.default = {"ok": True}
+
+    mine = await router.run(_task(requested_by="Maria"), route, Verdict)
+    assert mine.ok and mine.runtime == "b"
+    assert b.tasks[-1].model is None, "the route's model is the route's agent's"
+    assert (await router.run(_task(requested_by="walt"), route, Verdict)).runtime == "a"
+    assert (await router.run(_task(), route, Verdict)).runtime == "a"
+    for kept in (
+        _task(requested_by="maria", agent_chosen=True),
+        _task(requested_by="maria", resume_session="s1"),
+        _task(requested_by="maria", kind=TaskKind.VERIFY),
+    ):
+        assert (await router.run(kept, route, Verdict)).runtime == "a", kept
+    assert await router.own_agents("maria") == ["b"]
+    assert await router.own_agents("walt") == []
+
+
+async def test_a_persons_own_account_failing_leaves_the_services_running() -> None:
+    a = _own("a", [])
+    b = _own("b", [_fail("auth")])
+    b.default = a.default = {"ok": True}
+    router, _ = _router(a, b)
+    router.people = _People()  # type: ignore[assignment]
+    route = Route(primary="b", fallback=["a"])
+
+    first = await router.run(_task(requested_by="maria"), route, Verdict)
+    assert first.ok and first.runtime == "a", "her account failed; the route went on"
+    assert "b" not in router.breakers and router.breakers["b@maria"].open_until
+    assert (await router.run(_task(requested_by="maria"), route, Verdict)).runtime == (
+        "a"
+    ), "her own breaker is open"
+    assert (await router.run(_task(requested_by="walt"), route, Verdict)).runtime == (
+        "b"
+    ), "the service's account of b still runs"

@@ -24,6 +24,12 @@ reproduction that runs out of time, or a CLI that cannot answer one kind of task
 leaves the others running); both close after the cool-down. ``route.model`` applies to the primary runtime only, since
 model names differ between CLIs; ``route.effort`` (unless the agent has its own
 ``effort``) and ``route.timeout_seconds`` apply to every attempt.
+
+A task a person asked for tries first the agents they run on their own accounts
+(``own_agents``), then its route, unless they chose its agent, it resumes a session,
+or it is a verification (``KEEPS_OWN_PRIMARY``: a second opinion from another agent).
+A run on a person's own account has breakers of its own and counts against no
+budget of the service's: it says nothing about the service's accounts.
 """
 
 from __future__ import annotations
@@ -57,7 +63,12 @@ from ..domain.ports import (
 )
 from ..domain.profile import Route
 from ..domain.records import AgentRunRecord
-from ..domain.settings import Budget, ProviderBinding, protocol_for
+from ..domain.settings import (
+    KEEPS_OWN_PRIMARY,
+    Budget,
+    ProviderBinding,
+    protocol_for,
+)
 from .exec import Inbox, Told
 from .sandbox import scrub
 from .structured import extract_json, repair_prompt, schema_instructions, validate
@@ -245,9 +256,17 @@ class AgentRouter:
             else task.output_schema
         )
         names = list(dict.fromkeys([route.primary, *route.fallback]))
+        if (
+            task.requested_by
+            and not task.agent_chosen
+            and not task.resume_session
+            and str(task.kind) not in KEEPS_OWN_PRIMARY
+        ):
+            own = await self.own_agents(task.requested_by)
+            names = list(dict.fromkeys([*own, *names]))
         skipped: list[str] = []
         last: AgentResult | None = None
-        for index, name in enumerate(names):
+        for name in names:
             reason = await self._unusable(name, str(task.kind), task)
             if reason:
                 skipped.append(f"{name}: {reason}")
@@ -256,7 +275,9 @@ class AgentRouter:
             attempt = task.model_copy(
                 update={
                     **self._with_service_code(task),
-                    "model": (route.model or task.model) if index == 0 else None,
+                    "model": (route.model or task.model)
+                    if name == route.primary
+                    else None,
                     # An agent's own reasoning level wins over the route's, as its
                     # own permission mode does.
                     "effort": "low"
@@ -360,6 +381,32 @@ class AgentRouter:
 
     # -- internals -------------------------------------------------------------------
 
+    async def own_agents(self, login: str) -> list[str]:
+        """The agents ``login`` runs on their own accounts (``_account``) that are
+        ready here, in the order they are configured."""
+        if self.people is None:
+            return []
+        try:
+            setups = await self.people.get(login)
+        except ValueError:
+            return []
+        return [
+            name
+            for name, runtime in self.runtimes.items()
+            if (setup := setups.get(name)) is not None
+            and setup.use_own
+            and getattr(runtime, "container_sandbox", None) is not None
+            and hasattr(runtime, "account_home")
+            and self.ready(name)
+        ]
+
+    async def _breaker_key(self, runtime: AgentRuntime, task: AgentTask | None) -> str:
+        """Whose breakers an attempt of ``task`` on ``runtime`` answers to: the
+        runtime's, or for a run on a person's own account, theirs for that runtime."""
+        if task is not None and await self._on_own_account(runtime, task):
+            return f"{runtime.name}@{str(task.requested_by).lower()}"
+        return runtime.name
+
     async def _unusable(
         self, name: str, kind: str = "", task: AgentTask | None = None
     ) -> str | None:
@@ -371,26 +418,28 @@ class AgentRouter:
         installed = getattr(runtime, "installed", None)
         if callable(installed) and not installed():
             return "not installed on this host"
+        key = await self._breaker_key(runtime, task)
+        own = key != name
         if (
             self.signed_in_check is not None
             and getattr(runtime, "provider", None) is None
         ):
             if await self.signed_in_check(name) is False:
                 self.signed_out.add(name)
-                if task is None or not await self._on_own_account(runtime, task):
+                if not own:
                     return "not signed in, and it has no model provider"
             else:
                 self.signed_out.discard(name)
         for breaker in (
-            self.breakers.get(name),
-            self.output_breakers.get((name, kind)),
+            self.breakers.get(key),
+            self.output_breakers.get((key, kind)),
         ):
             if breaker and breaker.open_until:
                 if breaker.open_until > self.clock.now():
                     return f"circuit open ({breaker.reason})"
                 breaker.open_until = None
                 breaker.invalid_streak = 0
-        budget = self.budgets.get(name)
+        budget = None if own else self.budgets.get(name)
         if (
             budget
             and (budget.daily_runs is not None or budget.daily_usd is not None)
@@ -416,20 +465,21 @@ class AgentRouter:
                 update={"prompt": task.prompt + schema_instructions(schema)}
             )
         task = task.model_copy(update={"output_schema": schema})
+        key = await self._breaker_key(runtime, task)
         result = await self._attempt(runtime, task)
         if not result.ok and result.error_kind != "invalid_output":
-            self._failed(runtime.name, result, kind=str(task.kind))
+            self._failed(key, result, kind=str(task.kind))
             return result
         if output_model is None:
             if result.ok:
-                self._succeeded(runtime.name, str(task.kind))
+                self._succeeded(key, str(task.kind))
             else:
-                self._failed(runtime.name, result, kind=str(task.kind))
+                self._failed(key, result, kind=str(task.kind))
             return result
 
         checked, error = self._check(result, output_model)
         if checked is not None:
-            self._succeeded(runtime.name, str(task.kind))
+            self._succeeded(key, str(task.kind))
             return checked
 
         # One repair turn: resume the session when the runtime can, else start fresh.
@@ -446,11 +496,11 @@ class AgentRouter:
         repair = repair.model_copy(update={"id": f"{task.id}-repair"})
         second = await self._attempt(runtime, repair)
         if not second.ok and second.error_kind != "invalid_output":
-            self._failed(runtime.name, second, kind=str(task.kind))
+            self._failed(key, second, kind=str(task.kind))
             return second
         checked, error = self._check(second, output_model)
         if checked is not None:
-            self._succeeded(runtime.name, str(task.kind))
+            self._succeeded(key, str(task.kind))
             return checked
         failure = second.model_copy(
             update={
@@ -459,7 +509,7 @@ class AgentRouter:
                 "error_kind": "invalid_output",
             }
         )
-        self._failed(runtime.name, failure, streak=2, kind=str(task.kind))
+        self._failed(key, failure, streak=2, kind=str(task.kind))
         return failure
 
     def _check(
