@@ -2,11 +2,10 @@
 // an override), and whether it can merge. The agent opened here talks about this PR.
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api, type Evaluation, type Me, type PrDetail, type QuickQuality, type ReviewQuality, type ReviewStart, type RootCause, type RunCiPlan } from "../api";
-import { useAgent } from "../agent";
-import { agentName, AgentPicker, useAgentChoice } from "../agentPicker";
+import { agentName, useAgentChoice, useAgentOptions } from "../agentPicker";
 import {
   Empty,
   ErrorBox,
@@ -35,15 +34,16 @@ import { Icon } from "../icons";
 import { Markdown } from "../markdown";
 import { CommentOnDiff, parseDiff, usePrDiff } from "../diffview";
 import { DataTable, ListToolbar, useList, type Column } from "../list";
-import { ApproveButton, FixButton, MergeBaseButton, type InlineComment } from "../proposal";
-import { ReproduceButton } from "../reproduce";
-import { failedChecks, FixCiButton } from "../fixCi";
+import { ApproveButton, FixForm, MergeBaseButton, MergeBaseForm, type InlineComment } from "../proposal";
+import { ReproduceForm } from "../reproduce";
+import { failedChecks, FixCiButton, FixCiForm } from "../fixCi";
 import { PrPeopleCards } from "../assignees";
 import { CodeOwnersCard } from "../codeOwners";
 import { ReviewProgressPanel } from "../progress";
 import { ACTIVE, PrWork, usePrWork } from "../jobs";
 import { openJob } from "../openJob";
-import { Skeleton, Tabs, useTab, useToast } from "../ui";
+import { activePrActionPanel, describeRunCi, prMenuItems, type PrActionPanel } from "../prActions";
+import { MenuItem, Popover, Skeleton, Tabs, useTab, useToast } from "../ui";
 import { TranslateReview } from "../translate";
 import { forgeOf } from "../forges";
 
@@ -52,8 +52,8 @@ type TimelineRow = PrDetail["actions"][number];
 
 export default function PrPage({ me }: { me: Me }) {
   const t = useT();
+  const { lang } = useLang();
   const toast = useToast();
-  const agent = useAgent();
   // The repository's name may hold more slashes (forge:group/subgroup/project); the
   // PR's number is the last part.
   const rest = useParams()["*"] ?? "";
@@ -66,7 +66,8 @@ export default function PrPage({ me }: { me: Me }) {
   const row = rows.data?.find((p) => p.repo === full && String(p.number) === number);
   const keys = [["pr"], ["prs"]];
   const [reviewer, setReviewer] = useAgentChoice("review");
-  const review = useAct(() => api.post<ReviewStart>(`${base}/review`, { agent: reviewer || null }), [...keys, ["proposals"]]);
+  const agentOpts = useAgentOptions(reviewer, "review");
+  const review = useAct(() => api.post<ReviewStart>(`${base}/review`, { agent: agentOpts.current || null }), [...keys, ["proposals"]]);
   const arm = useAct(() => api.post(`${base}/merge`), keys);
   const disarm = useAct(() => api.del(`${base}/merge`), keys);
   const d = detail.data;
@@ -90,6 +91,15 @@ export default function PrPage({ me }: { me: Me }) {
   }
   if (detail.error || !d) return <ErrorBox error={detail.error} />;
   const pr = d.pr;
+  const canPush = !!me.can_post_as_me;
+  const failed = failedChecks(pr.checks);
+  const forgeName = forgeOf(full).terms.forge_name;
+  const openOnForge =
+    forgeName === "GitHub" || forgeName === "GitLab"
+      ? t(`Open on ${forgeName}`)
+      : lang === "zh"
+        ? `在 ${forgeName} 打开`
+        : `Open on ${forgeName}`;
   const mutationError = review.error || arm.error || disarm.error;
   const job = row?.review_activity.job;
   const reviewing = !!job && ["queued", "running", "waiting"].includes(job.status);
@@ -105,6 +115,13 @@ export default function PrPage({ me }: { me: Me }) {
     : null;
   const adds = pr.files.reduce((n, f) => n + f.additions, 0);
   const dels = pr.files.reduce((n, f) => n + f.deletions, 0);
+  const ciControls =
+    describeRunCi(d.run_ci.state, canPush).inline !== "none" || (pr.state === "OPEN" && failed.length > 0) ? (
+      <span className="row" style={{ gap: 6 }}>
+        <RunCiButton repo={full} number={pr.number} plan={d.run_ci} canPush={canPush} size="sm" />
+        {pr.state === "OPEN" && <FixCiButton repo={full} number={pr.number} failed={failed} canPush={canPush} size="sm" />}
+      </span>
+    ) : null;
 
   return (
     <>
@@ -116,13 +133,12 @@ export default function PrPage({ me }: { me: Me }) {
         title={
           <>
             {pr.title}{" "}
-            <a className="pr-number" href={pr.url} target="_blank" rel="noreferrer" title={t("Open on GitHub in a new tab")}>
+            <a className="pr-number" href={pr.url} target="_blank" rel="noreferrer" title={openOnForge}>
               #{pr.number}
               <Icon name="external" size={15} />
             </a>
           </>
         }
-        stacked
         sub={
           <span className="stack" style={{ gap: 6 }}>
             <span className="row" style={{ gap: 8 }}>
@@ -139,45 +155,91 @@ export default function PrPage({ me }: { me: Me }) {
         }
         actions={
           <>
-            <a className="button" href={pr.url} target="_blank" rel="noreferrer" title={t("Open on GitHub in a new tab")}>
-              {forgeOf(full).terms.forge_name} <Icon name="external" size={13} />
-            </a>
-            <button className="agent" onClick={() => agent.open()}>
-              <Icon name="sparkles" />
-              {t("Ask agent")}
-            </button>
-            <AgentPicker value={reviewer} onChange={setReviewer} />
-            <button
-              className="primary"
-              disabled={review.isPending}
-              title={reviewing ? reviewingText : undefined}
-              onClick={() =>
-                reviewing && job?.id
-                  ? openJob(job.id)
-                  : review.mutate(undefined, {
-                  onSuccess: (o) =>
-                    toast(
-                      o.run === "review" || o.run === "followup"
-                        ? {
-                            title: t("Review requested"),
-                            body: t("Watch the agent work; the draft comes back to you to edit and post."),
-                            icon: "pr",
-                            action: o.event ? { label: t("Watch"), onClick: () => openJob(o.event as string) } : undefined,
-                          }
-                        : o.run === "skip"
-                          ? { title: t("Nothing to review"), body: o.reason, icon: "check" }
-                          : {
-                              title: o.run === "joined" ? t("Already being reviewed") : t("Already drafted"),
-                              body: `${o.by ?? "—"} · ${agentName(o.agent) || t("Default agent")}`,
-                              icon: "pr",
-                            },
-                    ),
-                })
-              }
-            >
-              <Icon name="pr" size={15} />
-              {reviewing ? t("Reviewing…") : d.review_state.reviewed_sha ? t("Follow up") : t("Review")}
-            </button>
+            <div className="split-button">
+              <button
+                className="primary"
+                disabled={review.isPending}
+                title={
+                  reviewing
+                    ? reviewingText
+                    : agentOpts.current
+                      ? `${t("Which agent does it")}: ${agentOpts.label(agentOpts.current)}`
+                      : agentOpts.primary
+                        ? `${t("Which agent does it")}: ${agentOpts.label(agentOpts.primary)} (${t("default")})`
+                        : undefined
+                }
+                onClick={() =>
+                  reviewing && job?.id
+                    ? openJob(job.id)
+                    : review.mutate(undefined, {
+                        onSuccess: (o) =>
+                          toast(
+                            o.run === "review" || o.run === "followup"
+                              ? {
+                                  title: t("Review requested"),
+                                  body: t("Watch the agent work; the draft comes back to you to edit and post."),
+                                  icon: "pr",
+                                  action: o.event ? { label: t("Watch"), onClick: () => openJob(o.event as string) } : undefined,
+                                }
+                              : o.run === "skip"
+                                ? { title: t("Nothing to review"), body: o.reason, icon: "check" }
+                                : {
+                                    title: o.run === "joined" ? t("Already being reviewed") : t("Already drafted"),
+                                    body: `${o.by ?? "—"} · ${agentName(o.agent) || t("Default agent")}`,
+                                    icon: "pr",
+                                  },
+                          ),
+                      })
+                }
+              >
+                <Icon name="pr" size={15} />
+                {reviewing ? t("Reviewing…") : d.review_state.reviewed_sha ? t("Follow up") : t("Review")}
+                {!reviewing && agentOpts.current && <span className="agent-hint">· {agentName(agentOpts.current)}</span>}
+              </button>
+              <Popover
+                align="right"
+                label={t("Which agent does it")}
+                trigger={(open, toggle) => (
+                  <button
+                    type="button"
+                    className={`primary caret${open ? " on" : ""}`}
+                    aria-label={t("Which agent does it")}
+                    title={t("Which agent does it")}
+                    aria-expanded={open}
+                    onClick={toggle}
+                  >
+                    <Icon name="chevronDown" size={14} />
+                  </button>
+                )}
+              >
+                {(close) => (
+                  <>
+                    <div className="menu-label">{t("Which agent does it")}</div>
+                    <MenuItem
+                      checked={!agentOpts.current}
+                      onClick={() => {
+                        setReviewer("");
+                        close();
+                      }}
+                    >
+                      {agentOpts.primary ? `${agentOpts.label(agentOpts.primary)} (${t("default")})` : t("Default agent")}
+                    </MenuItem>
+                    {agentOpts.others.map((a) => (
+                      <MenuItem
+                        key={a.name}
+                        checked={agentOpts.current === a.name}
+                        onClick={() => {
+                          setReviewer(a.name);
+                          close();
+                        }}
+                      >
+                        {agentOpts.label(a.name)}
+                      </MenuItem>
+                    ))}
+                  </>
+                )}
+              </Popover>
+            </div>
             {pr.state === "OPEN" && (
               <ApproveButton
                 repo={full}
@@ -185,22 +247,18 @@ export default function PrPage({ me }: { me: Me }) {
                 head={pr.head_sha}
                 approved={myApproval(pr.reviews ?? [], me.login, pr.head_sha)}
                 own={pr.author.toLowerCase() === me.login.toLowerCase()}
-                canPost={!!me.can_post_as_me}
+                canPost={canPush}
               />
             )}
-            {latestReview && <FixButton repo={full} number={pr.number} review={latestReview} align="right" />}
-            {pr.state === "OPEN" && (
-              <MergeBaseButton
-                repo={full}
-                number={pr.number}
-                base={pr.base_ref}
-                conflicting={pr.mergeable === "CONFLICTING"}
-                canPush={!!me.can_post_as_me}
-              />
-            )}
-            <ReproduceButton repo={full} number={pr.number} />
-            <RunCiButton repo={full} number={pr.number} plan={d.run_ci} canPush={!!me.can_post_as_me} />
-            {pr.state === "OPEN" && <FixCiButton repo={full} number={pr.number} failed={failedChecks(pr.checks)} canPush={!!me.can_post_as_me} />}
+            <PrActionsButton
+              repo={full}
+              pr={pr}
+              plan={d.run_ci}
+              latestReview={latestReview}
+              failed={failed}
+              canPush={canPush}
+              openOnForge={openOnForge}
+            />
             <RefreshButton base={base} />
           </>
         }
@@ -211,13 +269,13 @@ export default function PrPage({ me }: { me: Me }) {
         <div className="stack" style={{ gap: 16, minWidth: 0 }}>
           <PrWork repo={full} number={pr.number} me={me.login} />
           <Tabs tabs={tabs} active={tab} onChange={setTab} />
-          {tab === "overview" && <Overview d={d} />}
+          {tab === "overview" && <Overview d={d} ciActions={ciControls} />}
           {tab === "progress" && <ReviewProgressPanel repo={full} number={pr.number} me={me.login} />}
           {tab === "files" && <Files d={d} />}
           {tab === "timeline" && <Timeline d={d} />}
           {tab === "reviews" && <ReviewsTab d={d} repo={full} number={pr.number} />}
           {tab === "ci" && (
-            <Section title={t("CI diagnoses")}>
+            <Section title={t("CI diagnoses")} aside={ciControls}>
               {d.ci.length ? (
                 <div className="list">
                   {d.ci.map((o, i) => (
@@ -258,16 +316,29 @@ export default function PrPage({ me }: { me: Me }) {
           <Section
             title={t("Merge")}
             aside={
-              d.arm ? (
-                <button className="danger sm" onClick={() => disarm.mutate(undefined)}>
-                  {t("Cancel merge")}
-                </button>
-              ) : (
-                <button className="sm" onClick={() => arm.mutate(undefined)} title={t("Merge automatically once every check passes")}>
-                  <Icon name="merge" size={14} />
-                  {t("Arm merge")}
-                </button>
-              )
+              <span className="row" style={{ gap: 6 }}>
+                {pr.state === "OPEN" && (
+                  <MergeBaseButton
+                    repo={full}
+                    number={pr.number}
+                    base={pr.base_ref}
+                    conflicting={pr.mergeable === "CONFLICTING"}
+                    canPush={canPush}
+                    size="sm"
+                    quiet={pr.mergeable !== "CONFLICTING"}
+                  />
+                )}
+                {d.arm ? (
+                  <button className="danger sm" onClick={() => disarm.mutate(undefined)}>
+                    {t("Cancel merge")}
+                  </button>
+                ) : (
+                  <button className="sm" onClick={() => arm.mutate(undefined)} title={t("Merge automatically once every check passes")}>
+                    <Icon name="merge" size={14} />
+                    {t("Arm merge")}
+                  </button>
+                )}
+              </span>
             }
           >
             {d.gate ? (
@@ -412,7 +483,7 @@ function ReviewsTab({ d, repo, number }: { d: PrDetail; repo: string; number: nu
   );
 }
 
-function Overview({ d }: { d: PrDetail }) {
+function Overview({ d, ciActions }: { d: PrDetail; ciActions?: ReactNode }) {
   const t = useT();
   const ev = d.evaluation;
   return (
@@ -432,7 +503,7 @@ function Overview({ d }: { d: PrDetail }) {
           <span className="muted small">{t("No description.")}</span>
         )}
       </Section>
-      <Section title={t("Checks")}>
+      <Section title={t("Checks")} aside={ciActions}>
         {d.pr.checks.length ? (
           <div className="list">
             {d.pr.checks.map((c) => (
@@ -694,11 +765,18 @@ function QualityCard({
   const main = isQuick ? quick : (quality ?? quick);
   const other = isQuick ? quality : quick;
   const moved = !!quality && qualityStale(quality, head);
+  const bandsTitle = QUALITY_BANDS.map((b) => `${b.floor}+ ${t(b.label)}`).join(" · ");
   return (
     <Section
       title={t("Quality")}
       hint={t("internal")}
-      aside={main ? <span className={`pill quality q-${main.band}${isQuick ? " quick" : ""}`}>{t(qualityLabel(main.band))}</span> : null}
+      aside={
+        main ? (
+          <span className={`pill quality q-${main.band}${isQuick ? " quick" : ""}`} title={bandsTitle}>
+            {t(qualityLabel(main.band))}
+          </span>
+        ) : null
+      }
     >
       {main ? (
         <div className={`stack small q-${main.band}`} style={{ gap: 8 }}>
@@ -707,7 +785,7 @@ function QualityCard({
             <span className="muted">/ 100</span>
             <span className="muted">· {isQuick ? t("at a glance") : t("after review")}</span>
           </div>
-          <div className="quality-meter" role="img" aria-label={`${main.score} / 100`}>
+          <div className="quality-meter" role="img" aria-label={`${main.score} / 100`} title={`${main.score} / 100 · ${bandsTitle}`}>
             <span style={{ width: `${main.score}%` }} />
           </div>
           <QualityChecks checks={main.checks} />
@@ -749,42 +827,33 @@ function QualityCard({
               )}
             </span>
           )}
-          <span className="row" style={{ gap: 4, flexWrap: "wrap" }}>
-            {QUALITY_BANDS.map((b) => (
-              <span key={b.band} className={`pill quality q-${b.band}`} style={{ fontSize: 11 }}>
-                {b.floor}+ {t(b.label)}
-              </span>
-            ))}
-          </span>
         </div>
       ) : (
         <span className="small muted">{t("An agent gives every open PR a quick score from its diff; its review gives the accurate one.")}</span>
       )}
-      {scoring ? (
-        <button className="ghost sm row" style={{ marginTop: 10, gap: 6 }} onClick={() => openJob(scoring.id)}>
-          <span className="pulse" />
-          {t("An agent is scoring its quality")}
-        </button>
-      ) : (
-        <div className="row" style={{ marginTop: 10, gap: 4 }}>
-          {reviewed && !moved ? (
-            <button className="ghost sm" disabled={score.isPending} onClick={() => start(false)} title={t("An agent judges the PR again by the repository's quality guide")}>
-              <Icon name="sparkles" size={14} />
-              {quality ? t("Score quality again") : t("Score quality")}
-            </button>
-          ) : moved ? (
-            <button className="ghost sm" disabled={score.isPending} onClick={() => start(true)} title={t("An agent scores the commits since the review quickly from the diff")}>
-              <Icon name="sparkles" size={14} />
-              {t("Score the new commits")}
-            </button>
-          ) : (
-            <button className="ghost sm" disabled={score.isPending} onClick={() => start(true)} title={t("An agent scores the PR quickly from its diff")}>
-              <Icon name="sparkles" size={14} />
-              {quick ? t("Quick score again") : t("Quick score")}
-            </button>
-          )}
-        </div>
-      )}
+      <div className="row" style={{ marginTop: 10, gap: 6 }}>
+        {scoring ? (
+          <button className="ghost sm" onClick={() => openJob(scoring.id)}>
+            <span className="pulse" />
+            {t("An agent is scoring its quality")}
+          </button>
+        ) : reviewed && !moved ? (
+          <button className="ghost sm" disabled={score.isPending} onClick={() => start(false)} title={t("An agent judges the PR again by the repository's quality guide")}>
+            <Icon name="sparkles" size={14} />
+            {score.isPending ? t("Starting…") : quality ? t("Score quality again") : t("Score quality")}
+          </button>
+        ) : moved ? (
+          <button className="ghost sm" disabled={score.isPending} onClick={() => start(true)} title={t("An agent scores the commits since the review quickly from the diff")}>
+            <Icon name="sparkles" size={14} />
+            {score.isPending ? t("Starting…") : t("Score the new commits")}
+          </button>
+        ) : (
+          <button className="ghost sm" disabled={score.isPending} onClick={() => start(true)} title={t("An agent scores the PR quickly from its diff")}>
+            <Icon name="sparkles" size={14} />
+            {score.isPending ? t("Starting…") : quick ? t("Quick score again") : t("Quick score")}
+          </button>
+        )}
+      </div>
       <ErrorBox error={score.error} />
     </Section>
   );
@@ -928,82 +997,259 @@ function EvaluationCard({ base, repo, number, evaluation }: { base: string; repo
 }
 
 
-/** Get CI going on the PR's head: add the CI gate label, or rerun what failed. The
- * click is the approval; it runs at once unless the policy holds it. */
-function RunCiButton({ repo, number, plan, canPush }: { repo: string; number: number; plan: RunCiPlan; canPush: boolean }) {
+/** Secondary PR actions in a single popover; actions that need options switch the panel
+ *  inline instead of nesting popovers. */
+function PrActionsButton({
+  repo,
+  pr,
+  plan,
+  latestReview,
+  failed,
+  canPush,
+  openOnForge,
+}: {
+  repo: string;
+  pr: PrDetail["pr"];
+  plan: RunCiPlan;
+  latestReview: string | null;
+  failed: string[];
+  canPush: boolean;
+  openOnForge: string;
+}) {
+  const t = useT();
+  return (
+    <Popover
+      align="right"
+      label={t("More actions")}
+      trigger={(open, toggle) => (
+        <button
+          type="button"
+          className={open ? "on" : ""}
+          aria-label={t("More actions")}
+          title={t("More actions")}
+          aria-expanded={open}
+          onClick={toggle}
+        >
+          {t("Actions")}
+          <Icon name="chevronDown" size={14} />
+        </button>
+      )}
+    >
+      {(close) => (
+        <PrActionsMenu
+          repo={repo}
+          pr={pr}
+          plan={plan}
+          latestReview={latestReview}
+          failed={failed}
+          canPush={canPush}
+          openOnForge={openOnForge}
+          onClose={close}
+        />
+      )}
+    </Popover>
+  );
+}
+
+function PrActionsMenu({
+  repo,
+  pr,
+  plan,
+  latestReview,
+  failed,
+  canPush,
+  openOnForge,
+  onClose,
+}: {
+  repo: string;
+  pr: PrDetail["pr"];
+  plan: RunCiPlan;
+  latestReview: string | null;
+  failed: string[];
+  canPush: boolean;
+  openOnForge: string;
+  onClose: () => void;
+}) {
+  const t = useT();
+  const [panel, setPanel] = useState<PrActionPanel>("menu");
+  const runCi = useRunCiAction(repo, pr.number, plan, canPush);
+  const state = {
+    isOpen: pr.state === "OPEN",
+    hasReviewFindings: !!latestReview,
+    failedCount: failed.length,
+    ciState: plan.state,
+  };
+  const active = activePrActionPanel(panel, state);
+  const items = prMenuItems(state);
+  const mergeLabel = pr.mergeable === "CONFLICTING" ? `${t("Resolve conflicts with")} ${pr.base_ref}` : `${t("Merge")} ${pr.base_ref}`;
+
+  if (active !== "menu") {
+    const titles: Record<Exclude<PrActionPanel, "menu">, string> = {
+      fix: t("Fix with agent"),
+      reproduce: t("Reproduce"),
+      "fix-ci": t("Fix CI"),
+      "merge-base": mergeLabel,
+    };
+    return (
+      <div>
+        <div className="pop-back">
+          <button type="button" className="ghost sm" aria-label={t("Back")} onClick={() => setPanel("menu")}>
+            ← {t("Actions")}
+          </button>
+          <span className="small muted truncate">{titles[active]}</span>
+        </div>
+        {active === "fix" && latestReview && <FixForm repo={repo} number={pr.number} review={latestReview} onClose={onClose} />}
+        {active === "reproduce" && <ReproduceForm repo={repo} number={pr.number} onClose={onClose} />}
+        {active === "fix-ci" && <FixCiForm repo={repo} number={pr.number} failed={failed} canPush={canPush} onClose={onClose} />}
+        {active === "merge-base" && (
+          <MergeBaseForm
+            repo={repo}
+            number={pr.number}
+            base={pr.base_ref}
+            conflicting={pr.mergeable === "CONFLICTING"}
+            canPush={canPush}
+            onClose={onClose}
+          />
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <>
+      {items.includes("fix") && (
+        <MenuItem icon="sparkles" onClick={() => setPanel("fix")}>
+          {t("Fix with agent")}
+        </MenuItem>
+      )}
+      {items.includes("reproduce") && (
+        <MenuItem icon="server" onClick={() => setPanel("reproduce")}>
+          {t("Reproduce")}
+        </MenuItem>
+      )}
+      {items.includes("fix-ci") && (
+        <MenuItem icon="activity" hint={failed.length} onClick={() => setPanel("fix-ci")}>
+          {t("Fix CI")}
+        </MenuItem>
+      )}
+      {items.includes("run-ci") && (
+        <MenuItem
+          icon={plan.state === "approval" ? "shield" : "play"}
+          disabled={runCi.disabled}
+          title={runCi.title}
+          onClick={() => runCi.trigger(onClose)}
+        >
+          {runCi.label}
+        </MenuItem>
+      )}
+      {items.includes("merge-base") && (
+        <MenuItem icon="merge" onClick={() => setPanel("merge-base")}>
+          {mergeLabel}
+        </MenuItem>
+      )}
+      {items.length > 1 && <div className="menu-sep" />}
+      <MenuItem icon="external" href={pr.url} onClick={onClose}>
+        {openOnForge}
+      </MenuItem>
+    </>
+  );
+}
+
+function useRunCiAction(repo: string, number: number, plan: RunCiPlan, canPush: boolean) {
   const t = useT();
   const toast = useToast();
   const run = useAct(
     () => api.post<{ actions: { kind: string; status: string; error: string | null }[] }>(`/api/prs/${repo}/${number}/ci`),
     [["pr"], ["prs"], ["audit"]],
   );
-  if (plan.state === "approval") {
-    const held = (plan.waiting ?? []).join(", ");
-    return (
-      <button
-        disabled={run.isPending || !canPush}
-        title={
-          canPush
-            ? `${t("GitHub holds these until a maintainer approves running them:")} ${held}. ${t("Approves them as you; read the PR's changes to its workflows first.")}`
-            : t("Sign in with GitHub, so the approval comes from you.")
-        }
-        onClick={() =>
-          run.mutate(undefined, {
-            onSuccess: (out) => {
-              const held2 = out.actions.filter((a) => !["executed", "queued", "intent"].includes(a.status));
-              toast(
-                held2.length
-                  ? { title: t("Not approved"), body: held2.map((a) => a.error || a.status).join("; "), icon: "pause" }
-                  : { title: t("CI approved"), body: `${t("GitHub runs")} ${held}.`, icon: "play" },
-              );
-            },
-            onError: (e) => toast({ title: t("Not approved"), body: String((e as Error).message), icon: "x" }),
-          })
-        }
-      >
-        <Icon name="shield" size={14} />
-        {run.isPending ? t("Approving…") : t("Approve and run CI")}
-      </button>
-    );
-  }
-  if (plan.state === "running")
-    return (
-      <button disabled title={t("CI is running at this commit")}>
-        <span className="pulse" /> {t("CI running")}
-      </button>
-    );
-  if (plan.state === "passed")
-    return (
-      <button disabled title={t("CI passed at this commit; there is nothing to run")}>
-        <Icon name="check" size={14} /> {t("CI passed")}
-      </button>
-    );
+  const display = describeRunCi(plan.state, canPush);
+  const held = (plan.waiting ?? []).join(", ");
   const what =
     plan.state === "gated"
       ? `${t("Adds the label")} ${plan.label}, ${t("which starts the full CI")}`
       : plan.state === "failed"
         ? `${t("Reruns the failed jobs of")} ${plan.reruns.map((r) => r.workflow || `#${r.run_id}`).join(", ")}`
-        : t("No CI ran at this commit; this repository starts it on push");
+        : "";
+  const title =
+    plan.state === "approval"
+      ? canPush
+        ? `${t("GitHub holds these until a maintainer approves running them:")} ${held}. ${t("Approves them as you; read the PR's changes to its workflows first.")}`
+        : t("Sign in with GitHub, so the approval comes from you.")
+      : what;
+  const label =
+    plan.state === "approval"
+      ? run.isPending
+        ? t("Approving…")
+        : t("Approve and run CI")
+      : run.isPending
+        ? t("Starting…")
+        : t("Run CI");
+  const trigger = (onDone?: () => void) =>
+    run.mutate(undefined, {
+      onSuccess: (out) => {
+        onDone?.();
+        const blocked = out.actions.filter((a) => !["executed", "queued", "intent"].includes(a.status));
+        if (plan.state === "approval") {
+          toast(
+            blocked.length
+              ? { title: t("Not approved"), body: blocked.map((a) => a.error || a.status).join("; "), icon: "pause" }
+              : { title: t("CI approved"), body: `${t("GitHub runs")} ${held}.`, icon: "play" },
+          );
+        } else {
+          toast(
+            blocked.length
+              ? { title: t("Not run"), body: blocked.map((a) => a.error || a.status).join("; "), icon: "pause" }
+              : { title: plan.state === "gated" ? t("CI started") : t("Rerunning failed CI"), body: what, icon: "play" },
+          );
+        }
+      },
+      onError: (e) =>
+        toast({
+          title: plan.state === "approval" ? t("Not approved") : t("Not run"),
+          body: String((e as Error).message),
+          icon: "x",
+        }),
+    });
+  return { display, disabled: display.disabled || run.isPending, title, label, trigger };
+}
+
+/** Get CI going on the PR's head: add the CI gate label, or rerun what failed. The
+ * click is the approval; it runs at once unless the policy holds it. */
+function RunCiButton({
+  repo,
+  number,
+  plan,
+  canPush,
+  size,
+}: {
+  repo: string;
+  number: number;
+  plan: RunCiPlan;
+  canPush: boolean;
+  size?: "sm";
+}) {
+  const t = useT();
+  const ci = useRunCiAction(repo, number, plan, canPush);
+  if (ci.display.inline === "none") return null;
+  if (ci.display.inline === "pill") {
+    return (
+      <span className="pill status-ok" title={t("CI passed at this commit; there is nothing to run")}>
+        <Icon name="check" size={12} />
+        {t("CI passed")}
+      </span>
+    );
+  }
+  if (ci.display.inline === "running") {
+    return (
+      <button className={size} disabled title={t("CI is running at this commit")}>
+        <span className="pulse" /> {t("CI running")}
+      </button>
+    );
+  }
   return (
-    <button
-      disabled={plan.state === "none" || run.isPending}
-      title={what}
-      onClick={() =>
-        run.mutate(undefined, {
-          onSuccess: (out) => {
-            const held = out.actions.filter((a) => !["executed", "queued", "intent"].includes(a.status));
-            toast(
-              held.length
-                ? { title: t("Not run"), body: held.map((a) => a.error || a.status).join("; "), icon: "pause" }
-                : { title: plan.state === "gated" ? t("CI started") : t("Rerunning failed CI"), body: what, icon: "play" },
-            );
-          },
-          onError: (e) => toast({ title: t("Not run"), body: String((e as Error).message), icon: "x" }),
-        })
-      }
-    >
-      <Icon name="play" size={14} />
-      {run.isPending ? t("Starting…") : t("Run CI")}
+    <button className={size} disabled={ci.disabled} title={ci.title} onClick={() => ci.trigger()}>
+      <Icon name={plan.state === "approval" ? "shield" : "play"} size={14} />
+      {ci.label}
     </button>
   );
 }

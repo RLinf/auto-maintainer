@@ -675,23 +675,23 @@ function KindBody({
   return <>{parts}</>;
 }
 
-/** Have an agent change the PR's code for a review's findings; the diff comes back as
- * a ``pr.fix`` draft for the person who asked. */
 /** Bring the PR's base branch into it, as the person who presses: GitHub updates the
  *  branch at once when they merge cleanly; otherwise an agent resolves the conflicts
  *  and the merge comes back as a draft to read and push. */
-export function MergeBaseButton({
+export function MergeBaseForm({
   repo,
   number,
   base,
   conflicting,
   canPush,
+  onClose,
 }: {
   repo: string;
   number: number;
   base: string;
   conflicting: boolean;
   canPush: boolean;
+  onClose: () => void;
 }) {
   const t = useT();
   const toast = useToast();
@@ -703,58 +703,80 @@ export function MergeBaseButton({
       }),
     [["pr"], ["prs"], ["proposals"], ["work"]],
   );
+  return (
+    <div className="stack" style={{ gap: 10, padding: 6, width: 340, maxWidth: "100%" }}>
+      <span className="small muted">
+        {conflicting
+          ? t("An agent merges the base branch into the PR and resolves the conflicts. You read the resolution, then push the merge onto the PR's branch as yourself, or open it as a PR into this PR when you cannot push there.")
+          : t("GitHub merges the base branch into the PR's branch now, as you.")}
+      </span>
+      <div className="row">
+        {conflicting && <AgentPicker value={agent} onChange={setAgent} task="fix" />}
+        <button
+          className="primary right"
+          disabled={merge.isPending || !canPush}
+          title={canPush ? undefined : t("Sign in with GitHub, so the merge is pushed as you.")}
+          onClick={() =>
+            merge.mutate(undefined, {
+              onSuccess: (out) => {
+                onClose();
+                if (out.run === "resolve") {
+                  toast({
+                    title: t("Resolving the conflicts"),
+                    body: t("The merge comes back to you as a draft; you push it as yourself."),
+                    icon: "sparkles",
+                    action: out.event ? { label: t("Watch"), onClick: () => openJob(out.event as string) } : undefined,
+                  });
+                } else if (out.status === "executed") {
+                  toast({ title: `${t("Merged")} ${base}`, body: t("GitHub updated the PR's branch as you."), icon: "check" });
+                } else {
+                  toast({ title: t("The branch was not updated"), body: out.error ?? out.status, icon: "x" });
+                }
+              },
+            })
+          }
+        >
+          {merge.isPending ? t("Starting…") : conflicting ? t("Start resolving") : t("Merge it as me")}
+        </button>
+      </div>
+      {!canPush && <span className="small muted">{t("Sign in with GitHub, so the merge is pushed as you.")}</span>}
+      <ErrorBox error={merge.error} />
+    </div>
+  );
+}
+
+export function MergeBaseButton({
+  repo,
+  number,
+  base,
+  conflicting,
+  canPush,
+  size,
+  quiet,
+}: {
+  repo: string;
+  number: number;
+  base: string;
+  conflicting: boolean;
+  canPush: boolean;
+  size?: "sm";
+  quiet?: boolean;
+}) {
+  const t = useT();
   const label = conflicting ? `${t("Resolve conflicts with")} ${base}` : `${t("Merge")} ${base}`;
+  const tone = conflicting ? "primary" : quiet ? "ghost" : "";
   return (
     <Popover
       align="right"
       label={label}
       trigger={(open, toggle) => (
-        <button className={open ? "on" : ""} onClick={toggle} aria-expanded={open}>
+        <button className={[tone, size, open ? "on" : ""].filter(Boolean).join(" ")} onClick={toggle} aria-expanded={open}>
           <Icon name="merge" size={14} />
           {label}
         </button>
       )}
     >
-      {(close) => (
-        <div className="stack" style={{ gap: 10, padding: 6, width: 340, maxWidth: "calc(100vw - 48px)" }}>
-          <span className="small muted">
-            {conflicting
-              ? t("An agent merges the base branch into the PR and resolves the conflicts. You read the resolution, then push the merge onto the PR's branch as yourself, or open it as a PR into this PR when you cannot push there.")
-              : t("GitHub merges the base branch into the PR's branch now, as you.")}
-          </span>
-          <div className="row">
-            {conflicting && <AgentPicker value={agent} onChange={setAgent} task="fix" />}
-            <button
-              className="primary right"
-              disabled={merge.isPending || !canPush}
-              title={canPush ? undefined : t("Sign in with GitHub, so the merge is pushed as you.")}
-              onClick={() =>
-                merge.mutate(undefined, {
-                  onSuccess: (out) => {
-                    close();
-                    if (out.run === "resolve") {
-                      toast({
-                        title: t("Resolving the conflicts"),
-                        body: t("The merge comes back to you as a draft; you push it as yourself."),
-                        icon: "sparkles",
-                        action: out.event ? { label: t("Watch"), onClick: () => openJob(out.event as string) } : undefined,
-                      });
-                    } else if (out.status === "executed") {
-                      toast({ title: `${t("Merged")} ${base}`, body: t("GitHub updated the PR's branch as you."), icon: "check" });
-                    } else {
-                      toast({ title: t("The branch was not updated"), body: out.error ?? out.status, icon: "x" });
-                    }
-                  },
-                })
-              }
-            >
-              {merge.isPending ? t("Starting…") : conflicting ? t("Start resolving") : t("Merge it as me")}
-            </button>
-          </div>
-          {!canPush && <span className="small muted">{t("Sign in with GitHub, so the merge is pushed as you.")}</span>}
-          <ErrorBox error={merge.error} />
-        </div>
-      )}
+      {(close) => <MergeBaseForm repo={repo} number={number} base={base} conflicting={conflicting} canPush={canPush} onClose={close} />}
     </Popover>
   );
 }
@@ -853,6 +875,59 @@ export function ApproveButton({
   );
 }
 
+/** Have an agent change the PR's code for a review's findings; the diff comes back as
+ *  a ``pr.fix`` draft for the person who asked. */
+export function FixForm({
+  repo,
+  number,
+  review,
+  onClose,
+}: {
+  repo: string;
+  number: number;
+  review?: string;
+  onClose: () => void;
+}) {
+  const t = useT();
+  const toast = useToast();
+  const [agent, setAgent] = useAgentChoice("fix");
+  const [note, setNote] = useState("");
+  const fix = useAct(
+    () => api.post<{ event: string }>(`/api/prs/${repo}/${number}/fix`, { review: review ?? null, agent: agent || null, note }),
+    [["pr"], ["prs"], ["proposals"], ["work"]],
+  );
+  return (
+    <div className="stack" style={{ gap: 10, padding: 6, width: 340, maxWidth: "100%" }}>
+      <span className="small muted">{t("An agent changes the code for the review's findings; you see the diff before a PR is opened.")}</span>
+      <textarea className="prose" rows={3} placeholder={t("Anything the agent should know (optional)")} value={note} onChange={(e) => setNote(e.target.value)} />
+      <div className="row">
+        <AgentPicker value={agent} onChange={setAgent} task="fix" />
+        <button
+          className="primary right"
+          disabled={fix.isPending}
+          onClick={() =>
+            fix.mutate(undefined, {
+              onSuccess: (out) => {
+                onClose();
+                setNote("");
+                toast({
+                  title: t("Fix started"),
+                  body: t("The diff comes back to you as a proposal; you open the PR as yourself."),
+                  icon: "sparkles",
+                  action: { label: t("Watch"), onClick: () => openJob(out.event) },
+                });
+              },
+            })
+          }
+        >
+          {fix.isPending ? t("Starting…") : t("Start the fix")}
+        </button>
+      </div>
+      <ErrorBox error={fix.error} />
+    </div>
+  );
+}
+
 export function FixButton({
   repo,
   number,
@@ -867,13 +942,6 @@ export function FixButton({
   quiet?: boolean;
 }) {
   const t = useT();
-  const toast = useToast();
-  const [agent, setAgent] = useAgentChoice("fix");
-  const [note, setNote] = useState("");
-  const fix = useAct(
-    () => api.post<{ event: string }>(`/api/prs/${repo}/${number}/fix`, { review: review ?? null, agent: agent || null, note }),
-    [["pr"], ["prs"], ["proposals"], ["work"]],
-  );
   return (
     <Popover
       align={align}
@@ -890,36 +958,7 @@ export function FixButton({
         </button>
       )}
     >
-      {(close) => (
-        <div className="stack" style={{ gap: 10, padding: 6, width: 340, maxWidth: "calc(100vw - 48px)" }}>
-          <span className="small muted">{t("An agent changes the code for the review's findings; you see the diff before a PR is opened.")}</span>
-          <textarea className="prose" rows={3} placeholder={t("Anything the agent should know (optional)")} value={note} onChange={(e) => setNote(e.target.value)} />
-          <div className="row">
-            <AgentPicker value={agent} onChange={setAgent} task="fix" />
-            <button
-              className="primary right"
-              disabled={fix.isPending}
-              onClick={() =>
-                fix.mutate(undefined, {
-                  onSuccess: (out) => {
-                    close();
-                    setNote("");
-                    toast({
-                      title: t("Fix started"),
-                      body: t("The diff comes back to you as a proposal; you open the PR as yourself."),
-                      icon: "sparkles",
-                      action: { label: t("Watch"), onClick: () => openJob(out.event) },
-                    });
-                  },
-                })
-              }
-            >
-              {fix.isPending ? t("Starting…") : t("Start the fix")}
-            </button>
-          </div>
-          <ErrorBox error={fix.error} />
-        </div>
-      )}
+      {(close) => <FixForm repo={repo} number={number} review={review} onClose={close} />}
     </Popover>
   );
 }

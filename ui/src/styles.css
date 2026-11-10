@@ -536,6 +536,10 @@ details > summary { cursor: pointer; color: var(--text-2); }
 .avatar { width: 26px; height: 26px; border-radius: 50%; }
 .hide-narrow {}
 
+@media (max-width: 1360px) {
+  body.agent-open .split { grid-template-columns: 1fr; }
+  body.agent-open .split > .side { position: static; }
+}
 @media (max-width: 1080px) {
   .split { grid-template-columns: 1fr; }
   .split > .side { position: static; }
@@ -594,7 +598,9 @@ textarea.mono-input { width: 100%; }
 /* one main button, with a choice beside it */
 .split-button { display: inline-flex; }
 .split-button > button.primary:first-child:not(:last-child) { border-top-right-radius: 0; border-bottom-right-radius: 0; }
-.split-button .pop > button.caret { border-top-left-radius: 0; border-bottom-left-radius: 0; padding: 0 8px; border-left: 1px solid rgba(255, 255, 255, 0.35); }
+.split-button .pop > button.caret { border-top-left-radius: 0; border-bottom-left-radius: 0; padding: 0 8px; border-left: 1px solid color-mix(in srgb, var(--accent-text) 30%, transparent); }
+.split-button .agent-hint { opacity: 0.85; font-weight: 450; font-size: 12.5px; }
+.pop-back { display: flex; align-items: center; gap: 6px; padding: 2px 4px 6px; margin-bottom: 2px; border-bottom: 1px solid var(--border); }
 
 /* Markdown as GitHub shows it */
 .md { font-size: 14px; line-height: 1.6; overflow-wrap: anywhere; min-width: 0; }
@@ -838,6 +844,10 @@ details.pv-section[open] > summary { margin-bottom: 6px; }
 .skill-option input { margin-top: 3px; }
 .skill-option.on { border-color: var(--accent); background: var(--accent-soft); }
 .translation { padding: 10px 14px; border-left: 3px solid var(--accent); border-radius: var(--r); background: var(--surface-2); min-width: 0; overflow-wrap: anywhere; }
+.pr-role-group { display: flex; flex-direction: column; gap: 8px; }
+.pr-role-group + .pr-role-group { padding-top: 10px; border-top: 1px solid var(--border); }
+.pr-role-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.pr-role-title { font-size: 12.5px; font-weight: 600; color: var(--text-2); }
 .assignee { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .assignee .main { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .chip-person { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px 2px 3px; border-radius: 999px; font-size: 12px; background: var(--surface-2); border: 1px solid var(--border); color: var(--text); }
