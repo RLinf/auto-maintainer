@@ -14,7 +14,7 @@ import { agentName, AgentPicker, reviewToast, useAgentChoice } from "../agentPic
 import { openJob } from "../openJob";
 import { ScoringProgress } from "../jobs";
 import { BulkBar, DataTable, ListToolbar, useList, type Column } from "../list";
-import { MenuItem, Popover, Skeleton, Tabs, useTab, useToast } from "../ui";
+import { MenuItem, Popover, Skeleton, Tabs, useRememberedView, useTab, useToast } from "../ui";
 import { holds, Person, PrPeopleLine } from "../avatar";
 import { useAliasOf } from "../aliases";
 import { ProgressInline } from "../progress";
@@ -32,6 +32,7 @@ export default function QueuePage({ me }: { me: Me }) {
   const repos = useRepos();
   const names = (repos.data ?? []).map((r) => r.repo).sort((a, b) => a.localeCompare(b));
   const [scope, setScope] = useRepoScope(names);
+  const viewParams = useRememberedView("prs", scope);
   const allRows = all.data ?? [];
   const rows = allRows.filter((p) => !scope || p.repo === scope);
   const myRows = rows.filter((p) => holds(p.assignees, me.login, "owner"));
@@ -44,7 +45,7 @@ export default function QueuePage({ me }: { me: Me }) {
     { id: "unrated", label: t("Not evaluated"), count: rows.filter((p) => !p.tier).length },
     { id: "reviewed", label: t("Reviewed"), count: rows.filter((p) => p.review_state === "UP_TO_DATE").length },
   ];
-  const [view, setView] = useTab(views);
+  const [view, setView] = useTab(views, "tab", viewParams);
   const source =
     view === "mine"
       ? myRows
@@ -106,7 +107,10 @@ export default function QueuePage({ me }: { me: Me }) {
       { id: "claimed", label: t("Reviewers"), value: (p) => namesOf(p, "reviewer")?.join(", ") ?? t("Nobody") },
     ],
     pageSize: 50,
+    searchParams: viewParams,
   });
+
+  const openPr = (p: PrRow) => navigate(prPath(p.repo, p.number), { state: { from: "prs" } });
 
   const [reviewer, setReviewer] = useAgentChoice("review");
   const again = useReevaluate();
@@ -155,7 +159,7 @@ export default function QueuePage({ me }: { me: Me }) {
       cell: (p) => (
         <div className="title-cell">
           <span className="title-line">
-            <Link to={prPath(p.repo, p.number)} style={{ color: "var(--text)", fontWeight: 550 }}>
+            <Link to={prPath(p.repo, p.number)} state={{ from: "prs" }} style={{ color: "var(--text)", fontWeight: 550 }}>
               {p.title}
             </Link>
             {p.labels.length > 0 && <Labels labels={p.labels} max={2} />}
@@ -226,7 +230,7 @@ export default function QueuePage({ me }: { me: Me }) {
           >
             {(close) => (
               <>
-                <MenuItem icon="eye" onClick={() => (navigate(prPath(p.repo, p.number)), close())}>
+                <MenuItem icon="eye" onClick={() => (openPr(p), close())}>
                   {t("Open")}
                 </MenuItem>
                 <MenuItem icon="pr" onClick={() => (startReview([p]), close())}>
@@ -356,7 +360,7 @@ export default function QueuePage({ me }: { me: Me }) {
         <DataTable
           list={list}
           columns={columns}
-          onOpen={(p) => navigate(prPath(p.repo, p.number))}
+          onOpen={openPr}
           selectable={(p) => p.review_state !== "UP_TO_DATE"}
           empty={view === "review" ? t("No PR needs a review.") : t("No open PRs.")}
         />

@@ -2,13 +2,14 @@
 // or hand the typed text to the agent.
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import type { Me } from "./api";
 import { useAgent } from "./agent";
 import { prPath } from "./components";
 import { usePrs, useRepos } from "./data";
 import { useT } from "./i18n";
 import { Icon, type IconName } from "./icons";
+import { navHref } from "./viewState";
 
 export interface Command {
   id: string;
@@ -52,6 +53,7 @@ function matches(haystack: string, query: string): number {
 export function CommandPalette({ open, onClose, commands, me }: { open: boolean; onClose: () => void; commands: Command[]; me: Me }) {
   const t = useT();
   const navigate = useNavigate();
+  const location = useLocation();
   const agent = useAgent();
   const prs = usePrs(open);
   const repos = useRepos(open);
@@ -69,7 +71,7 @@ export function CommandPalette({ open, onClose, commands, me }: { open: boolean;
   }, [open]);
 
   const items = useMemo(() => {
-    const go = (to: string) => () => navigate(to);
+    const go = (to: string) => () => navigate(navHref(to, location));
     const all: Command[] = [
       ...commands,
       ...NAV.map((n) => ({ id: `nav:${n.to}`, group: "Go to", label: t(n.label), sub: n.keys, icon: n.icon, keywords: n.hint, run: go(n.to) })),
@@ -112,7 +114,7 @@ export function CommandPalette({ open, onClose, commands, me }: { open: boolean;
     const order = ["Agent", "Commands", "Go to", "Pull requests", "Repositories"];
     if (query.trim()) order.push(order.shift()!);
     return out.sort((a, b) => order.indexOf(a.group) - order.indexOf(b.group));
-  }, [commands, prs.data, repos.data, me.repos, query, navigate, agent, t]);
+  }, [commands, prs.data, repos.data, me.repos, query, navigate, location, agent, t]);
 
   useEffect(() => setIndex(0), [query]);
   useEffect(() => {

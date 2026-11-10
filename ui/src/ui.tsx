@@ -12,9 +12,10 @@ import {
   type ReactNode,
   type RefObject,
 } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useLocation, useSearchParams } from "react-router-dom";
 import { Icon, type IconName } from "./icons";
 import { applyPopoverLayout } from "./popover";
+import { enterView, previewViewEntry, readSavedView, saveView, type ViewId } from "./viewState";
 
 // ---- popover / menu ----------------------------------------------------------------------
 
@@ -138,8 +139,9 @@ export interface TabDef {
 }
 
 /** Tabs whose selection lives in the URL (``?tab=``), so links and the back button keep it. */
-export function useTab(tabs: TabDef[], param = "tab"): [string, (id: string) => void] {
-  const [params, setParams] = useSearchParams();
+export function useTab(tabs: TabDef[], param = "tab", searchParams?: URLSearchParams): [string, (id: string) => void] {
+  const [urlParams, setParams] = useSearchParams();
+  const params = searchParams ?? urlParams;
   const current = params.get(param);
   const active = tabs.some((t) => t.id === current) ? (current as string) : tabs[0].id;
   const set = (id: string) =>
@@ -153,6 +155,63 @@ export function useTab(tabs: TabDef[], param = "tab"): [string, (id: string) => 
       { replace: true },
     );
   return [active, set];
+}
+
+/** Restore ``view``'s remembered URL parameters on bare page entry and keep storage synced as they change. */
+export function useRememberedView(view: ViewId, repo?: string): URLSearchParams {
+  const location = useLocation();
+  const [params, setParams] = useSearchParams();
+  const initial = useRef<URLSearchParams | null>(null);
+  if (initial.current === null) {
+    initial.current = previewViewEntry(view, location.search, { repo });
+  }
+  const initialized = useRef(false);
+  const syncing = useRef<string | null>(null);
+  const prevRepo = useRef(repo ?? "");
+
+  useLayoutEffect(() => {
+    if (!initialized.current) {
+      initialized.current = true;
+      const entry = enterView(view, location.search, { repo });
+      prevRepo.current = repo ?? "";
+      if (entry.restored) {
+        syncing.current = entry.params.toString();
+        setParams(entry.params, { replace: true });
+      }
+      return;
+    }
+    const current = new URLSearchParams(location.search);
+    if (syncing.current !== null) {
+      if (current.toString() !== syncing.current) {
+        setParams(new URLSearchParams(syncing.current), { replace: true });
+        return;
+      }
+      syncing.current = null;
+    }
+    if (view === "prs" && repo) {
+      const saved = readSavedView("prs", { repo });
+      if ((prevRepo.current && prevRepo.current !== repo && current.has("page")) || (!prevRepo.current && current.has("page") && !saved.has("page"))) {
+        prevRepo.current = repo;
+        current.delete("page");
+        saveView("prs", current, { repo });
+        setParams(current, { replace: true });
+        return;
+      }
+      prevRepo.current = repo;
+    }
+    saveView(view, current, { repo });
+  }, [view, location.search, repo, setParams]);
+
+  useEffect(() => {
+    if (syncing.current !== null && new URLSearchParams(location.search).toString() !== syncing.current) {
+      setParams(new URLSearchParams(syncing.current), { replace: true });
+    }
+  }, [location.search, setParams]);
+
+  if (!initialized.current || syncing.current !== null) {
+    return initial.current;
+  }
+  return params;
 }
 
 export function Tabs({ tabs, active, onChange }: { tabs: TabDef[]; active: string; onChange: (id: string) => void }) {
