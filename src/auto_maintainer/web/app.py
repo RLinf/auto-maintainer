@@ -34,6 +34,7 @@ from . import (
     api,
     auth,
     chat,
+    forge_setup,
     governance,
     jobs,
     my_agents,
@@ -74,6 +75,7 @@ def create_app(
     webhooks: Mapping[str, WebhookCheck] | None = None,
     setup_steps: Callable[[], Any] | None = None,
     on_host_change: Callable[[Any], Awaitable[None]] | None = None,
+    forge_steps: Any | None = None,
     log_path: Path | None = None,
     ca_cert: Path | None = None,
 ) -> FastAPI:
@@ -88,7 +90,8 @@ def create_app(
     on the web by authorizing the GitHub CLI, the only way to sign in with GitHub;
     while ``gh`` is not on the server's ``PATH``, the sign-in page offers to install it.
     ``setup_steps`` and ``on_host_change`` let maintainers of the service's repository
-    change the host setup from the dashboard (``web/setup.py``).
+    change the host setup from the dashboard (``web/setup.py``), and with
+    ``forge_steps`` (``hostsetup.ForgeSteps``) add a forge (``web/forge_setup.py``).
     ``ca_cert`` is the private authority's certificate when the dashboard serves
     HTTPS with one (``install_authority``).
     """
@@ -137,6 +140,10 @@ def create_app(
             kept = await tokens.get(user.login) if tokens is not None else None
             return kept.token if kept else None
 
+        if forge_steps is not None:
+            app.include_router(
+                forge_setup.build_router(forge_steps, maintainer, on_host_change)
+            )
         app.include_router(
             setup.build_router(
                 setup_steps,

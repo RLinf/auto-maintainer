@@ -17,6 +17,7 @@ import { agentName } from "../agentPicker";
 import { useAgentsData } from "./Agents";
 import { SettingsChangeCard } from "../settingsChange";
 import { MyAgentsTab, ServiceSignIn } from "../agentAccounts";
+import { ForgesCard } from "../forgeSetup";
 import { Popover, Skeleton, Tabs, useTab, useToast } from "../ui";
 
 const CONTEXT: AgentContext = { page: "settings", repo: null, number: null, label: "Settings" };
@@ -152,7 +153,12 @@ export default function SettingsPage() {
       {tab === "providers" && <ProvidersTab v={v} ask={ask} />}
       {tab === "routing" && <RoutingTab v={v} ask={ask} />}
       {tab === "labs" && <LabsTab v={v} ask={ask} />}
-      {tab === "system" && <SystemTab v={v} ask={ask} />}
+      {tab === "system" && (
+        <div className="stack" style={{ gap: 16 }}>
+          <SystemTab v={v} ask={ask} />
+          <ForgesCard canChange={v.access.allowed} />
+        </div>
+      )}
       {tab === "file" && <FileTab v={v} />}
     </>
   );

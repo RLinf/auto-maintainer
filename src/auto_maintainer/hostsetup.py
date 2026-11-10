@@ -47,6 +47,7 @@ from . import ghcli, subproc
 from .config import (
     CONFIG_DIR,
     LEGACY_SECRETS,
+    ForgeConfig,
     HostConfig,
     is_configured,
     legacy_github,
@@ -401,6 +402,143 @@ def cli_login(
     if kind == "gitlab":
         return GlabLogin(config_dir, web_url, throwaway=throwaway, client_id=client_id)
     return GhLogin(config_dir, web_url, throwaway=throwaway)
+
+
+FORGE_ID = re.compile(r"^[a-z][a-z0-9-]{0,30}$")
+_WEB = re.compile(r"^https?://[^\s/]+(/\S*)?$")
+
+
+class ForgeRefused(SetupError):
+    """A forge that cannot be added: ``status`` 409 when its id is taken, else 422."""
+
+    def __init__(self, message: str, status: int = 422) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+class ForgeSteps:
+    """Adding a forge to this host (design 5.16): what ``am forge add`` and ``am forge
+    login`` do, for the dashboard's form (``web/forge_setup.py``), which checks who
+    may. The service signs in on the forge into its own folder for that forge's CLI
+    under ``config_dir``, never the host user's."""
+
+    def __init__(self, config_dir: Path, data_dir: Path) -> None:
+        self.config_dir = config_dir
+        self.data_dir = data_dir
+
+    def forges(self) -> list[dict[str, str]]:
+        """The forges in ``local.yaml``, the default first."""
+        return [
+            {"id": f.id, "kind": f.kind, "web_url": f.web}
+            for f in load_host_config(self.config_dir).forges
+        ]
+
+    def cli_folder(self, forge_id: str, kind: str, *, default: bool = False) -> Path:
+        """The service's own folder for a forge's CLI: ``gh`` for the default forge
+        (the setup page's login), else one per forge."""
+        if kind == "github":
+            return self.config_dir / ("gh" if default else f"gh-{forge_id}")
+        return self.config_dir / "glab" / forge_id
+
+    def taken(self, forge_id: str) -> None:
+        if any(f.id == forge_id for f in load_host_config(self.config_dir).forges):
+            raise ForgeRefused(f"there is a forge {forge_id!r} already", 409)
+
+    def new(
+        self,
+        forge_id: str,
+        kind: str,
+        web_url: str = "",
+        api_url: str = "",
+        oauth_client_id: str = "",
+    ) -> ForgeConfig:
+        """A forge not yet in ``local.yaml``, with its own CLI folder.
+
+        Raises:
+            ForgeRefused: The id is malformed or taken, or an address is not one.
+        """
+        if not FORGE_ID.match(forge_id):
+            raise ForgeRefused(
+                "the id is lowercase letters, digits, and dashes, starting with a letter"
+            )
+        self.taken(forge_id)
+        web = web_url.strip().rstrip("/")
+        api = api_url.strip().rstrip("/")
+        for url in (web, api):
+            if url and not _WEB.match(url):
+                raise ForgeRefused(f"{url!r} is not a web address")
+        try:
+            return ForgeConfig(
+                id=forge_id,
+                kind=kind,  # type: ignore[arg-type]
+                web_url=web,
+                api_url=api,
+                oauth_client_id=oauth_client_id.strip() or None,
+                cli_config_dir=str(self.cli_folder(forge_id, kind)),
+            )
+        except ValueError as e:
+            raise ForgeRefused(str(e)) from e
+
+    async def install_cli(self, forge: ForgeConfig) -> None:
+        """Install the forge's CLI into the data folder when the host has none.
+
+        Raises:
+            SetupError: It could not be installed.
+        """
+        binary = "glab" if forge.kind == "gitlab" else "gh"
+        if shutil.which(binary) is not None:
+            return
+        try:
+            if forge.kind == "gitlab":
+                from . import glabcli
+
+                await glabcli.install(self.data_dir)
+            else:
+                await ghcli.install(self.data_dir)
+        except Exception as e:
+            raise SetupError(str(e)) from e
+
+    def login(self, forge: ForgeConfig) -> GhLogin | GlabLogin:
+        """The forge CLI's sign-in into the forge's own folder."""
+        return cli_login(
+            forge.kind,
+            Path(forge.cli_config_dir or ""),
+            forge.web,
+            client_id=forge.oauth_client_id,
+        )
+
+    async def account(self, forge: ForgeConfig, token: str) -> str:
+        """The login ``token`` acts as on ``forge``, as the forge spells it.
+
+        Raises:
+            SetupError: The forge did not accept the token.
+        """
+        from .forges.registry import kind
+
+        who = kind(forge.kind).who
+        assert who is not None
+        try:
+            return (await who(forge.api, token))["login"]
+        except Exception as e:
+            raise SetupError(f"{forge.web} did not accept the sign-in") from e
+
+    def with_forge(self, forge: ForgeConfig) -> HostConfig:
+        """The host's setup as it is now, with ``forge`` added last.
+
+        Raises:
+            ForgeRefused: Its id was taken meanwhile.
+        """
+        self.taken(forge.id)
+        current = load_host_config(self.config_dir)
+        return HostConfig.model_validate(
+            {
+                **current.model_dump(),
+                "forges": [*current.model_dump()["forges"], forge.model_dump()],
+            }
+        )
+
+    def keep(self, cfg: HostConfig) -> None:
+        save_host_config(cfg, self.config_dir)
 
 
 class HostSetup:

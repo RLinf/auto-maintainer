@@ -327,30 +327,19 @@ def forge_add(
 ) -> None:
     """Serve repositories on one more forge; then sign the service in there with
     ``am forge login``. Names on it begin with ``<forge_id>:``."""
-    from .config import ForgeConfig, is_configured, save_host_config
+    from .config import CONFIG_DIR, is_configured
+    from .hostsetup import ForgeSteps
 
     if not is_configured():
         typer.echo("set the host up first (am serve, then the setup page)", err=True)
         raise typer.Exit(1)
-    cfg = load_host_config()
-    if any(f.id == forge_id for f in cfg.forges):
-        typer.echo(f"there is a forge {forge_id!r} already", err=True)
-        raise typer.Exit(1)
-    web = web_url.rstrip("/")
+    steps = ForgeSteps(CONFIG_DIR, load_host_config().data_path)
     try:
-        forge = ForgeConfig(
-            id=forge_id,
-            kind=kind,  # type: ignore[arg-type]
-            web_url=web,
-            api_url=api_url or (f"{web}/api/v4" if kind == "gitlab" and web else ""),
-            oauth_client_id=oauth_client_id or None,
-        )
-        cfg.forges.append(forge)
-        cfg = type(cfg).model_validate(cfg.model_dump())
+        forge = steps.new(forge_id, kind, web_url, api_url, oauth_client_id)
+        steps.keep(steps.with_forge(forge))
     except ValueError as e:
         typer.echo(str(e), err=True)
         raise typer.Exit(1) from e
-    save_host_config(cfg)
     typer.echo(
         f"added {forge_id}: {kind} at {forge.web}. Next: am forge login {forge_id}"
     )
@@ -369,7 +358,7 @@ def forge_login(
     import sys
 
     from .config import CONFIG_DIR, save_host_config
-    from .hostsetup import GlabLogin, cli_login
+    from .hostsetup import ForgeSteps, GlabLogin, cli_login
 
     cfg = _cfg()
     try:
@@ -382,7 +371,13 @@ def forge_login(
 
         typer.echo("installing the GitLab CLI into the data folder")
         asyncio.run(glabcli.install(cfg.data_path))
-    folder = CONFIG_DIR / ("gh" if forge.kind == "github" else f"glab/{forge_id}")
+    folder = (
+        Path(forge.cli_config_dir)
+        if forge.cli_config_dir
+        else ForgeSteps(CONFIG_DIR, cfg.data_path).cli_folder(
+            forge.id, forge.kind, default=forge.id == cfg.default_forge.id
+        )
+    )
     login = cli_login(forge.kind, folder, forge.web, client_id=forge.oauth_client_id)
 
     async def run() -> bool:
@@ -537,6 +532,8 @@ class _Host:
         """Build the service for ``cfg`` and put it in place of the current one. If
         building fails, the current one keeps running and the error goes to the caller."""
         from .app import build_service
+        from .config import CONFIG_DIR
+        from .hostsetup import ForgeSteps
         from .web.app import create_app
 
         new = await build_service(cfg, dev=self.dev)
@@ -551,6 +548,7 @@ class _Host:
             gh_signin=_gh_signin(cfg),
             setup_steps=self.steps,
             on_host_change=self.start_service,
+            forge_steps=ForgeSteps(CONFIG_DIR, cfg.data_path),
             ca_cert=self.ca_cert,
         )
         old = self.service

@@ -57,10 +57,19 @@ class _Cfg(BaseModel):
 ForgeKindName = Literal["github", "gitlab"]
 
 FORGE_DEFAULTS: dict[str, dict[str, str]] = {
-    "github": {"web_url": "https://github.com", "api_url": "https://api.github.com"},
-    "gitlab": {"web_url": "https://gitlab.com", "api_url": "https://gitlab.com/api/v4"},
+    "github": {
+        "web_url": "https://github.com",
+        "api_url": "https://api.github.com",
+        "api_path": "/api/v3",
+    },
+    "gitlab": {
+        "web_url": "https://gitlab.com",
+        "api_url": "https://gitlab.com/api/v4",
+        "api_path": "/api/v4",
+    },
 }
-"""Each kind's public addresses; a self-hosted forge names its own."""
+"""Each kind's public addresses, and where a self-hosted one serves its API under its
+web address (GitHub Enterprise Server, self-managed GitLab)."""
 
 
 class ForgeConfig(_Cfg):
@@ -87,7 +96,14 @@ class ForgeConfig(_Cfg):
 
     @property
     def api(self) -> str:
-        return (self.api_url or FORGE_DEFAULTS[self.kind]["api_url"]).rstrip("/")
+        """``api_url``; else the public API, or a self-hosted one's under its web
+        address."""
+        if self.api_url:
+            return self.api_url.rstrip("/")
+        defaults = FORGE_DEFAULTS[self.kind]
+        if self.web == defaults["web_url"]:
+            return defaults["api_url"]
+        return self.web + defaults["api_path"]
 
     @property
     def host(self) -> str:
