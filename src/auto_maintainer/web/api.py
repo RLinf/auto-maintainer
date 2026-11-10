@@ -3187,7 +3187,9 @@ def build_router() -> APIRouter:
                 if await request.is_disconnected():
                     break
                 if event is None:
-                    yield ": ping\n\n"
+                    # An event, not a comment, so the page can tell a stream that
+                    # went quiet from one that died, and reconnect.
+                    yield "event: ping\ndata: {}\n\n"
                     continue
                 if event.repo is not None and event.repo not in visible:
                     continue

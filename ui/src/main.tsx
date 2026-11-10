@@ -1,13 +1,17 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { MutationCache, QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
 import { ApiError } from "./api";
 import App from "./App";
+import { refreshShown } from "./events";
 import { LangProvider } from "./i18n";
 import "./styles.css";
 
-const client = new QueryClient({
+const client: QueryClient = new QueryClient({
+  // Whatever a person did shows everywhere it appears on screen, not only in the
+  // queries the button names; work that finishes later arrives as a live event.
+  mutationCache: new MutationCache({ onSuccess: () => refreshShown(client) }),
   defaultOptions: {
     queries: {
       staleTime: 15_000,

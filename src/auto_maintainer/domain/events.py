@@ -80,6 +80,13 @@ class EventKind(StrEnum):
     JOB_PROGRESS = "job.progress"
     """A job's status or steps changed. Only the dashboard's event stream sees it
     (``EventBus.notify``); no playbook runs on it."""
+    PR_REFRESHED = "pr.refreshed"
+    """A PR's snapshot was read again after the service wrote to it, whether or not
+    anything that starts a playbook changed. Only dashboards see it."""
+    SERVICE_CHANGED = "service.changed"
+    """Something on the service's own pages changed: an agent was installed or signed
+    in or out, or the sign-in sweep found other agents usable. Only dashboards see
+    it."""
 
 
 class Event(BaseModel):

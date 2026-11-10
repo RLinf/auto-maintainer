@@ -660,6 +660,9 @@ class _Installer:
 async def test_only_maintainers_of_the_service_install_agents(demo) -> None:
     h, app = demo
     h.service.a.installer = _Installer()
+    told: list[str] = []
+    notify = h.service.bus.notify
+    h.service.bus.notify = lambda e: (told.append(e.kind), notify(e))  # type: ignore[method-assign]
     async with _client(app, "walt") as walt:
         refused = await walt.post("/api/settings/agents/codex/install")
         assert refused.status_code == 403
@@ -680,6 +683,7 @@ async def test_only_maintainers_of_the_service_install_agents(demo) -> None:
     )
     audit = await h.store.list_audit(limit=5)
     assert any("installed codex 9.9.9" in a.summary for a in audit)
+    assert "service.changed" in told, "open Settings pages show it installed"
 
 
 async def test_people_run_agents_on_their_own_accounts_and_nobody_elses(

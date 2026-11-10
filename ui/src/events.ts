@@ -1,8 +1,11 @@
 // Live updates: the /api/events server-sent event stream invalidates cached queries,
-// so pages refresh when something changes instead of polling.
+// so pages refresh when something changes instead of polling. The stream sends a
+// ping every 15 seconds; one quiet for longer is dead (a network that dropped it
+// without saying), so the page connects again, and after every reconnect it reloads
+// what it shows, for the events it missed meanwhile.
 
 import { useEffect } from "react";
-import { useQueryClient } from "@tanstack/react-query";
+import { type QueryClient, useQueryClient } from "@tanstack/react-query";
 
 const INVALIDATES: Record<string, string[][]> = {
   "proposal.created": [["proposals"], ["pr"], ["prs"], ["repos"]],
@@ -15,15 +18,36 @@ const INVALIDATES: Record<string, string[][]> = {
   "pr.updated": [["prs"], ["pr"]],
   "pr.labeled": [["prs"], ["pr"]],
   "pr.closed": [["prs"], ["repos"]],
-  "pr.review_submitted": [["pr"]],
+  "pr.review_submitted": [["pr"], ["prs"]],
+  "pr.comment": [["pr"], ["prs"]],
+  "pr.refreshed": [["pr"], ["prs"]],
   "checks.completed": [["pr"], ["ci"]],
   "merge.armed": [["pr"]],
   "merge.disarmed": [["pr"]],
   "priority.overridden": [["prs"], ["pr"]],
+  "repo.added": [["repos"]],
+  "code.changed": [["service"]],
+  "service.changed": [["agents"], ["agents-usage"], ["service-sign-ins"], ["my-agents"]],
   "question.asked": [["questions"], ["me"]],
   "question.answered": [["questions"], ["me"], ["audit"], ["job"], ["work"]],
   "job.progress": [["job"], ["work"], ["chat", "steps"]],
 };
+
+/** Events after which everything on screen loads again (at most once per
+ * ``SLOW_MS``): what an approval, a write, or a settings change touches shows in more
+ * places than any list here can name (a review's job, a chat's request card, the
+ * People record). */
+const BROAD = new Set([
+  "proposal.created",
+  "proposal.decided",
+  "action.executed",
+  "action.failed",
+  "memory.changed",
+  "service.changed",
+  "question.answered",
+  "repo.added",
+  "code.changed",
+]);
 
 /** Keys refreshed after a burst of events, at most once per ``SLOW_MS``: lists that are
  * costly to reload and change with a job's status rather than with each step. */
@@ -32,6 +56,19 @@ const SLOW: Record<string, string[][]> = {
   "job.progress": [["prs"], ["pr"]],
 };
 const SLOW_MS = 3000;
+
+/** Queries that a general refresh leaves alone: each read starts every agent CLI or
+ * reads their limits (``agents``, ``agents-usage``), or does not change after an
+ * action (``forges``, ``auth-config``, ``diff``); their own events refresh them. */
+const COSTLY = new Set(["agents", "agents-usage", "forges", "auth-config", "diff"]);
+
+/** Reload every query on screen (and mark the rest stale), but the costly ones. */
+export function refreshShown(client: QueryClient) {
+  void client.invalidateQueries({ predicate: (q) => !COSTLY.has(String(q.queryKey[0])) });
+}
+
+const PING_MS = 15_000;
+const DEAD_MS = 3 * PING_MS;
 
 /** Called for every ``question.asked`` event, to alert reviewers. */
 export const QUESTION_EVENT = "am-question";
@@ -42,11 +79,32 @@ export function useLiveEvents(enabled: boolean, login?: string) {
   const client = useQueryClient();
   useEffect(() => {
     if (!enabled || typeof EventSource === "undefined") return;
-    const source = new EventSource("/api/events", { withCredentials: true });
     const timers = new Map<string, number>();
+    let source: EventSource | null = null;
+    let heard = Date.now();
+    let connected = false;
+    // A broad refresh runs at once, and once more at the end of a burst.
+    let broadTimer: number | null = null;
+    let broadAgain = false;
+    const broad = () => {
+      if (broadTimer !== null) {
+        broadAgain = true;
+        return;
+      }
+      refreshShown(client);
+      broadTimer = window.setTimeout(() => {
+        broadTimer = null;
+        if (broadAgain) {
+          broadAgain = false;
+          broad();
+        }
+      }, SLOW_MS);
+    };
     const handler = (e: MessageEvent) => {
+      heard = Date.now();
       const keys = INVALIDATES[e.type];
       if (keys) keys.forEach((queryKey) => client.invalidateQueries({ queryKey }));
+      if (BROAD.has(e.type)) broad();
       const slow = SLOW[e.type];
       if (slow && !timers.has(e.type)) {
         timers.set(
@@ -59,9 +117,30 @@ export function useLiveEvents(enabled: boolean, login?: string) {
       }
       if (e.type === "question.asked") alertReviewer(e.data, login);
     };
-    Object.keys(INVALIDATES).forEach((kind) => source.addEventListener(kind, handler as EventListener));
+    const connect = () => {
+      source?.close();
+      heard = Date.now();
+      const s = new EventSource("/api/events", { withCredentials: true });
+      s.addEventListener("open", () => {
+        heard = Date.now();
+        // Whatever happened while the page was not listening.
+        if (connected) broad();
+        connected = true;
+      });
+      s.addEventListener("ping", () => {
+        heard = Date.now();
+      });
+      Object.keys(INVALIDATES).forEach((kind) => s.addEventListener(kind, handler as EventListener));
+      source = s;
+    };
+    connect();
+    const watchdog = window.setInterval(() => {
+      if (Date.now() - heard > DEAD_MS) connect();
+    }, PING_MS);
     return () => {
-      source.close();
+      source?.close();
+      window.clearInterval(watchdog);
+      if (broadTimer !== null) window.clearTimeout(broadTimer);
       timers.forEach((id) => window.clearTimeout(id));
     };
   }, [enabled, client, login]);

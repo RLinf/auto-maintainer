@@ -7,7 +7,7 @@
 // model APIs, which are theirs alone.
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { api, type AgentChoices, type AgentInstall, type LabMachine, type MachineCheck, type MachineDraft, type SettingsAgent, type SettingsCheck, type SandboxView, type SettingsProvider, type SettingsView } from "../api";
 import { useAgent, type AgentContext } from "../agent";
@@ -540,10 +540,9 @@ function InstallButton({ name, source, state, canInstall }: { name: string; sour
   const install = useAct(() => api.post<AgentInstall>(`/api/settings/agents/${name}/install`), [["settings"]]);
   const running = state?.state === "running";
   useEffect(() => {
-    if (!running) {
-      void client.invalidateQueries({ queryKey: ["agents"] });
-      return;
-    }
+    // Its progress lines; the end comes as a live event (service.changed), which
+    // refreshes the agents' status after this button is gone.
+    if (!running) return;
     const timer = window.setInterval(() => void client.invalidateQueries({ queryKey: ["settings"] }), 3000);
     return () => window.clearInterval(timer);
   }, [running, client]);
@@ -568,6 +567,15 @@ function InstallButton({ name, source, state, canInstall }: { name: string; sour
 function AgentsTab({ v, ask }: { v: SettingsView; ask: (p: string, send?: boolean) => void }) {
   const t = useT();
   const health = useAgentsData();
+  const client = useQueryClient();
+  // An agent installed (or removed) since: its status comes from a fresh probe.
+  const installed = v.agents.map((a) => `${a.name}:${a.installed}`).join(",");
+  const seen = useRef(installed);
+  useEffect(() => {
+    if (seen.current === installed) return;
+    seen.current = installed;
+    void client.invalidateQueries({ queryKey: ["agents"] });
+  }, [installed, client]);
   const byName = new Map((health.data?.health ?? []).map((h) => [h.name, h]));
   const status = (a: SettingsAgent) => {
     if (!a.enabled) return <Status value="cancelled" label={t("Off")} />;

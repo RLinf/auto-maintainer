@@ -39,6 +39,28 @@ class EventBus:
         self._busy = 0
         self._idle = asyncio.Event()
         self._idle.set()
+        self._later: set[asyncio.Task[None]] = set()
+
+    def later(self, work: Awaitable[None], name: str) -> None:
+        """Run ``work`` beside the dispatcher, for a handler's slow step (a read from
+        the forge): events are handed out one at a time, each after its handlers, so
+        a slow handler would hold back every other event, and every dashboard's
+        updates with them. ``drain`` waits for it as for the events."""
+        self._busy += 1
+        self._idle.clear()
+        task = asyncio.create_task(self._run_later(work), name=name)
+        self._later.add(task)
+        task.add_done_callback(self._later.discard)
+
+    async def _run_later(self, work: Awaitable[None]) -> None:
+        try:
+            await work
+        except Exception:
+            log.exception("background work after an event failed")
+        finally:
+            self._busy -= 1
+            if self._busy == 0:
+                self._idle.set()
 
     def subscribe(self, handler: Handler) -> None:
         self._handlers.append(handler)
@@ -82,6 +104,8 @@ class EventBus:
         await self._idle.wait()
 
     async def stop(self) -> None:
+        for task in list(self._later):
+            task.cancel()
         if self._task:
             self._task.cancel()
             with contextlib.suppress(asyncio.CancelledError):

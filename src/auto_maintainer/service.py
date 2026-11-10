@@ -21,6 +21,7 @@ This module never imports an adapter. ``app.py`` builds real adapters and
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import copy
 import logging
 from collections.abc import Awaitable, Callable
@@ -737,11 +738,13 @@ class Service:
             and self.serves(event.repo)
         ):
             # Show what the service just wrote (a label, a review) without waiting
-            # for the next poll.
-            try:
-                await self.poller.poll_pr(event.repo, event.number)
-            except Exception:
-                log.exception("refreshing %s#%s failed", event.repo, event.number)
+            # for the next poll; beside the bus, as it reads the forge.
+            later = getattr(self.bus, "later", None)
+            work = self._refresh_pr(event.repo, event.number)
+            if callable(later):
+                later(work, f"refresh-{event.repo}#{event.number}")
+            else:
+                await work
             return
         if event.kind != EventKind.MEMORY_CHANGED:
             return
@@ -750,6 +753,22 @@ class Service:
             await self.reload_settings()
         if event.repo and lock_path(event.repo) in paths:
             self.poll_now(event.repo)
+
+    async def _refresh_pr(self, repo: str, number: int) -> None:
+        try:
+            await self.poller.poll_pr(repo, number)
+        except Exception:
+            log.exception("refreshing %s#%s failed", repo, number)
+        self.tell_dashboards(EventKind.PR_REFRESHED, repo, number)
+
+    def tell_dashboards(
+        self, kind: EventKind, repo: str | None = None, number: int | None = None
+    ) -> None:
+        """Tell open dashboards that something they show changed (``kind`` is one
+        only dashboards see, such as ``SERVICE_CHANGED``)."""
+        notify = getattr(self.bus, "notify", None)
+        if callable(notify):
+            notify(Event(kind=kind, repo=repo, number=number))
 
     def installable(self) -> dict[str, str]:
         """The agent CLIs this host can install from the dashboard, with their source."""
@@ -799,6 +818,7 @@ class Service:
                 else f"installing {state.name} failed: {state.error}",
             )
         )
+        self.tell_dashboards(EventKind.SERVICE_CHANGED)
 
     def runtime(self, name: str, account: str | None = None) -> Any:
         """Agent ``name``'s runtime, or a copy of it on ``account``'s own home folder
@@ -856,13 +876,32 @@ class Service:
             agent=name, account=account, by=by, started_at=self.clock.now()
         )
         try:
-            self.logins[state.id] = runtime.start_login(  # type: ignore[attr-defined]
+            process = runtime.start_login(  # type: ignore[attr-defined]
                 self.account_home(account), state, option
             )
         except RuntimeError as e:
             raise ValueError(str(e)) from e
+        self.logins[state.id] = process
         self._signed_in.pop((name, account), None)
+        task = asyncio.create_task(
+            self._after_login(process, name, account), name=f"after-{state.id}"
+        )
+        self._install_tasks.add(task)
+        task.add_done_callback(self._install_tasks.discard)
         return state
+
+    async def _after_login(self, process: Any, name: str, account: str | None) -> None:
+        """Once a sign-in ends: ask the CLI again, let routes use an agent the
+        service's account now signs, and tell the dashboards."""
+        wait = getattr(process, "wait", None)
+        if callable(wait):
+            with contextlib.suppress(Exception):
+                await wait()
+        self.forget_signed_in(name, account)
+        state = getattr(process, "state", None)
+        if account is None and state is not None and state.state == "done":
+            await self.check_sign_ins()
+        self.tell_dashboards(EventKind.SERVICE_CHANGED)
 
     def forget_signed_in(self, name: str, account: str | None) -> None:
         """Ask the CLI again next time, after a sign-in or sign-out."""
@@ -946,6 +985,7 @@ class Service:
         router = self.a.agents
         if not hasattr(router, "signed_out"):
             return
+        before = set(router.signed_out)
         for name, runtime in list(getattr(router, "runtimes", {}).items()):
             if not self.agent_ready(name):
                 continue
@@ -955,6 +995,8 @@ class Service:
                 router.signed_out.add(name)
             else:
                 router.signed_out.discard(name)
+        if router.signed_out != before:
+            self.tell_dashboards(EventKind.SERVICE_CHANGED)
 
     def runs_on(self, route: Route | None) -> str | None:
         """The agent ``route`` runs on now: its first agent that is ready, else its

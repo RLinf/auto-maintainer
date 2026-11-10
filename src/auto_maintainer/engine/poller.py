@@ -182,15 +182,18 @@ class Poller:
             p.number: p for p in await self.store.list_snapshots(repo, open_only=True)
         }
         events: list[Event] = []
+        saved = False
         for number, pr in fresh.items():
             old = stored.get(number) or await self.store.get_snapshot(repo, number)
             if old is None or old.fingerprint() != pr.fingerprint():
                 events += diff_snapshots(old, pr, self.service_login, prefix)
                 await self.store.save_snapshot(pr)
+                saved = True
             elif old != pr:
                 # Nothing that makes an event changed (a commit's time, a file's
                 # counts): keep the fresher record without announcing a change.
                 await self.store.save_snapshot(pr)
+                saved = True
             if reconcile:
                 events.append(
                     Event(
@@ -219,6 +222,11 @@ class Poller:
             await self.store.save_repo(record)
         for event in events:
             await self.bus.publish(event)
+        notify = getattr(self.bus, "notify", None)
+        if saved and callable(notify):
+            # Dashboards show more than what starts playbooks (a resolved thread, a
+            # review asked for): one notice per poll that the repository's PRs changed.
+            notify(Event(kind=EventKind.PR_REFRESHED, repo=repo, source="poller"))
         return events
 
     async def poll_pr(self, repo: str, number: int) -> list[Event]:
