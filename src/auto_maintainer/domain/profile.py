@@ -163,12 +163,39 @@ class ReviewScan(_Section):
         return value
 
 
+class CommentChecks(_Section):
+    check: Literal["scan", "manual"] = "scan"
+    """``scan``: check open PRs' unresolved review comments against their code on
+    ``schedule``; ``manual``: only when someone asks on the dashboard. Neither runs on
+    each push."""
+    schedule: str = "0 */4 * * *"
+    """Cron (UTC) for the periodic check."""
+    max_prs: int = Field(default=10, ge=1, le=100)
+    """At most this many PRs per periodic check, highest priority first."""
+    max_comments: int = Field(default=20, ge=1, le=100)
+    """At most this many comments one check reads, the oldest first."""
+
+    @field_validator("schedule")
+    @classmethod
+    def _valid_cron(cls, value: str) -> str:
+        from croniter import croniter
+
+        if not croniter.is_valid(value):
+            raise ValueError(
+                f"review.comments.schedule is not a valid cron expression: {value!r}"
+            )
+        return value
+
+
 class Review(_Section):
     trigger: Literal["manual", "scan", "events"] = "manual"
     """What starts a review. ``manual``: a reviewer selects PRs (dashboard, ``/am review``,
     chat). ``scan``: a periodic scan on ``scan.schedule``. ``events``: as soon as a PR opens
     or gets new commits."""
     scan: ReviewScan = Field(default_factory=ReviewScan)
+    comments: CommentChecks = Field(default_factory=CommentChecks)
+    """Whether open review comments are addressed by the code: an agent reads only
+    each comment and the code around it (``playbooks/comment_check``)."""
     skill: str = "builtin:pr-review"
     """The skill reviews follow. ``builtin:<name>``: the repository's own review skill
     when it has one (a skill whose name or folder says review), else the service's

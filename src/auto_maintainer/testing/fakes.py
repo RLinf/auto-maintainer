@@ -374,6 +374,20 @@ class FakeForge:
             body=self._text(body),
         )
 
+    async def resolve_review_thread(
+        self, repo: str, number: int, thread_id: str
+    ) -> None:
+        self._record(
+            "resolve_review_thread", repo=repo, number=number, thread_id=thread_id
+        )
+        pr = self.prs.get((repo, number))
+        if pr is not None:
+            threads = [
+                t.model_copy(update={"is_resolved": True}) if t.id == thread_id else t
+                for t in pr.threads
+            ]
+            self.prs[(repo, number)] = pr.model_copy(update={"threads": threads})
+
     async def reply_to_review_comment(
         self, repo: str, number: int, comment_id: int, body: PublicText
     ) -> CommentRef:

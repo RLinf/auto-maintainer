@@ -89,6 +89,8 @@ class TaskKind(StrEnum):
     GOVERNANCE = "governance"
     TRANSLATE = "translate"
     """A review translated into the dashboard's language, for reading only."""
+    COMMENT_CHECK = "comment_check"
+    """Whether a PR's open review comments are addressed by its code now."""
 
 
 class Capabilities(BaseModel):

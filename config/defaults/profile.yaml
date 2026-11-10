@@ -8,6 +8,7 @@ policy:
   review.post: {level: shadow}
   review.update: {level: shadow}
   thread.reply: {level: shadow}
+  thread.resolve: {level: shadow}       # a person's Resolve button; only ever as them
   comment.upsert: {level: shadow}
   ci.rerun_failed: {level: shadow}
   ci.approve_run: {level: shadow}     # a person's Approve and run; only ever as them

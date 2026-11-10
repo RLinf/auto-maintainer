@@ -817,7 +817,7 @@ function DefaultAgent({ v }: { v: SettingsView; ask: (p: string, send?: boolean)
   const { name, source } = v.default_agent;
   const set = useAct((agent: string | null) => api.put<{ approved: boolean }>("/api/settings/default-agent", { agent }), [["settings"], ["memory"]]);
   // Only agents that can run here are offered.
-  const ready = v.agents.filter((a) => a.enabled && a.installed !== false);
+  const ready = v.agents.filter((a) => a.enabled && a.installed !== false && a.usable !== false);
   const runsOn = v.routing.find((r) => r.task === "review")?.runs_on;
   return (
     <div className="strip default-agent">
@@ -838,16 +838,19 @@ function DefaultAgent({ v }: { v: SettingsView; ask: (p: string, send?: boolean)
           <option value="">
             {source === "setup" && name
               ? `${agentName(name)} (${t("chosen during setup")})`
-              : `${runsOn ? agentName(runsOn) : t("none")} (${t("the first installed agent")})`}
+              : `${runsOn ? agentName(runsOn) : t("none")} (${t("the first agent that can run")})`}
           </option>
           {ready.map((a) => (
             <option key={a.name} value={a.name}>
               {agentName(a.name)}
             </option>
           ))}
+          {source === "settings" && name && !ready.some((a) => a.name === name) && (
+            <option value={name}>{`${agentName(name)} (${t("cannot run: not signed in, no model provider")})`}</option>
+          )}
         </select>
       </span>
-      <span className="small muted">{t("Every task tries it first; others installed here take over when it cannot run.")}</span>
+      <span className="small muted">{t("Every task tries it first; agents that are not signed in and have no model provider are passed over.")}</span>
     </div>
   );
 }

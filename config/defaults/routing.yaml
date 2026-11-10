@@ -18,3 +18,4 @@ self_improve: {primary: claude-code, fallback: [codex, antigravity, opencode, ge
 fix:          {primary: claude-code, fallback: [codex, antigravity, opencode, gemini], timeout_seconds: 2400}
 reproduce:    {primary: claude-code, fallback: [codex, antigravity, opencode, gemini], timeout_seconds: 1800}
 translate:    {primary: claude-code, fallback: [codex, antigravity, opencode, gemini], effort: low, timeout_seconds: 600}
+comment_check: {primary: claude-code, fallback: [codex, antigravity, opencode, gemini], effort: low, timeout_seconds: 600}

@@ -17,6 +17,7 @@ import { Markdown } from "./markdown";
 import { openJob } from "./openJob";
 import { MenuItem, Popover, useToast } from "./ui";
 import { TranslateReview } from "./translate";
+import { ConnectGitHub } from "./connectGitHub";
 
 export const PROPOSAL_KEYS = [["proposals"], ["pr"], ["prs"], ["repos"], ["audit"], ["work"], ["job"]];
 
@@ -825,7 +826,7 @@ export function ApproveButton({
               {approve.isPending ? t("Approving…") : t("Approve as me")}
             </button>
           </div>
-          {!canPost && <span className="small muted">{t("Sign in with GitHub, so the approval comes from you.")}</span>}
+          {!canPost && <ConnectGitHub why={t("Sign in with GitHub, so the approval comes from you.")} />}
           <ErrorBox error={approve.error} />
         </div>
       )}

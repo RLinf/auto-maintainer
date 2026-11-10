@@ -388,6 +388,8 @@ export interface GateItem {
 export interface ProgressSummary {
   threads: number;
   resolved: number;
+  /** Open threads a comment check found addressed in the code. */
+  fixed: number;
   /** Share of review threads resolved; ``null`` without threads. */
   addressed: number | null;
   approved: number;
@@ -406,7 +408,11 @@ export interface ReviewerProgress {
   resolved: number;
   /** Open threads whose lines changed since. */
   outdated: number;
+  /** Open threads a comment check found addressed in the code. */
+  fixed: number;
   addressed: number | null;
+  /** The review threads they opened, each with what a check found. */
+  comments: CommentItem[];
   last_at: string | null;
   /** A reviewer of the PR here (listed first). */
   assigned: boolean;
@@ -415,9 +421,36 @@ export interface ReviewerProgress {
   code_owner?: boolean;
 }
 
+/** What a comment check found of one review thread, at one head. */
+export interface CommentCheck {
+  thread_id: string;
+  status: "addressed" | "partly" | "open" | "unclear";
+  /** What the comment asks, in one line. */
+  summary: string;
+  reason: string;
+  fixed_in: string | null;
+  head_sha: string;
+  checked_at: string;
+}
+
+export interface CommentItem {
+  thread_id: string;
+  path: string | null;
+  line: number | null;
+  url: string;
+  /** The comment's first line, until a check sums it up. */
+  excerpt: string;
+  /** Resolved on GitHub. */
+  resolved: boolean;
+  outdated: boolean;
+  check: CommentCheck | null;
+  /** Resolved, or found addressed by a check. */
+  done: boolean;
+}
+
 export interface ProgressEvent {
   at: string | null;
-  kind: "opened" | "role" | "review" | "commits";
+  kind: "opened" | "role" | "review" | "commits" | "check";
   login: string;
   state: string | null;
   threads: number;
@@ -431,6 +464,7 @@ export interface PrProgress {
   threads: number;
   resolved: number;
   outdated: number;
+  fixed: number;
   addressed: number | null;
   approved_by: string[];
   approved_at_head: string[];
@@ -442,6 +476,12 @@ export interface PrProgress {
    * change an owner other than the author approved. */
   code_owners: { file: string | null; required: boolean | null; parts: number; approved_parts: number; people: CodeOwnerStanding[] };
   head: string;
+  /** The user resolves any comment (a maintainer or the PR's owner); a reviewer resolves their own. */
+  can_resolve: boolean;
+  /** The user signed in with GitHub, which resolving as them needs. */
+  signed_in: boolean;
+  /** "scan": checked on the repository's schedule too; "manual": only when asked. */
+  comment_checks: "scan" | "manual" | null;
 }
 
 /** A code owner of a PR's changed files and where they stand on it. */
@@ -820,6 +860,8 @@ export interface SettingsAgent {
   effort: string | null;
   /** Whether its CLI is on this host; ``null`` while it is turned off. */
   installed: boolean | null;
+  /** Installed, and its account signed in or a model provider set: it can run tasks. */
+  usable: boolean;
   provider: string | null;
   budget: { daily_usd: number | null; daily_runs: number | null };
   allow_bypass: boolean;

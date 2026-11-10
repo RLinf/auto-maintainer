@@ -187,6 +187,14 @@ class GitLabWriter:
             return await self.create_comment(repo, number, body)
         return CommentRef(id=0, url=f"{self._web}")
 
+    async def resolve_review_thread(
+        self, repo: str, number: int, thread_id: str
+    ) -> None:
+        await self._client.put(
+            f"{self._mr(repo, number)}/discussions/{thread_id}",
+            json={"resolved": True},
+        )
+
     async def reply_to_review_comment(
         self, repo: str, number: int, comment_id: int, body: PublicText
     ) -> CommentRef:

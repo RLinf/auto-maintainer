@@ -189,6 +189,13 @@ class ForgeWriter(Protocol):
         self, repo: str, number: int, comment_id: int, body: PublicText
     ) -> CommentRef: ...
 
+    async def resolve_review_thread(
+        self, repo: str, number: int, thread_id: str
+    ) -> None:
+        """Mark review thread ``thread_id`` (the id the reader keeps for it)
+        resolved."""
+        ...
+
     async def request_reviewers(
         self, repo: str, number: int, logins: list[str]
     ) -> None: ...

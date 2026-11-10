@@ -880,6 +880,22 @@ details.pv-section[open] > summary { margin-bottom: 6px; }
 .people-line { display: inline-flex; flex-wrap: wrap; align-items: baseline; gap: 2px 14px; }
 .people-group { display: inline-flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; }
 .people-line .is-me { font-weight: 600; }
-.progress-reviewer.first-other { border-top: 2px solid var(--border); }
+
 .progress-inline { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; flex: none; }
 .title-line { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+.progress-reviewer-block.first-other { border-top: 2px solid var(--border); }
+.progress-reviewer.expandable { cursor: pointer; }
+.progress-reviewer.expandable:hover { background: var(--surface-2); }
+.progress-reviewer .chevron { width: 12px; flex: none; color: var(--muted); display: inline-flex; }
+.comment-items { display: grid; gap: 2px; margin: 0 0 8px 46px; padding-left: 10px; border-left: 2px solid var(--border); }
+.comment-item { display: flex; align-items: flex-start; gap: 8px; padding: 6px 4px; min-width: 0; }
+.comment-item .main { flex: 1; min-width: 0; }
+.comment-summary { display: block; overflow-wrap: anywhere; }
+.comment-reason { display: block; overflow-wrap: anywhere; }
+.comment-mark { flex: none; width: 18px; height: 18px; border-radius: 50%; display: inline-grid; place-items: center; font-size: 12px; background: var(--surface-3); color: var(--muted); margin-top: 1px; }
+.comment-done .comment-mark { background: var(--ok-bg); color: var(--ok); }
+.comment-done .comment-summary { color: var(--muted); }
+.comment-partly .comment-mark { background: var(--warn-bg); color: var(--warn); }
+.comment-open .comment-mark { background: var(--bad-bg); color: var(--bad); }
+.comment-unclear .comment-mark { background: var(--info-bg); color: var(--info); }
+.comment-actions { flex: none; }

@@ -42,6 +42,9 @@ class EventKind(StrEnum):
     REPO_FILES_CHANGED = "repo.files_changed"
     SCHEDULE_TICK = "schedule.tick"
     DASHBOARD_COMMAND = "dashboard.command"
+    COMMENT_CHECK = "comments.check"
+    """Check a PR's open review comments against its code (``thread_ids``: only
+    those, checked again even at the same head)."""
     REVIEW_REPRODUCE = "review.reproduce"
     """No longer sent: reviews test in their own session. Kept so jobs and events
     stored before that still load (the reproduce playbook ends them)."""

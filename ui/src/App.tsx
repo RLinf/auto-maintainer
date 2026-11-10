@@ -33,6 +33,7 @@ import SignIn from "./pages/SignIn";
 import { MenuItem, Popover, Skeleton, ToastProvider, useHotkey, useTheme, useToast } from "./ui";
 import { useForgesLoader } from "./forges";
 import { OwnAliasForm, useAliasOf } from "./aliases";
+import { ConnectGitHub } from "./connectGitHub";
 
 export { useMe } from "./data";
 
@@ -80,6 +81,7 @@ function Shell({ me }: { me: Me }) {
   const [palette, setPalette] = useState(false);
   const [help, setHelp] = useState(false);
   const [naming, setNaming] = useState(false);
+  const [connecting, setConnecting] = useState(false);
   const aliasOf = useAliasOf();
 
   const counts = {
@@ -227,6 +229,16 @@ function Shell({ me }: { me: Me }) {
                     {me.operator ? ` · ${t("operator")}` : ""}
                   </div>
                 </div>
+                {!me.can_post_as_me &&
+                  (connecting ? (
+                    <div style={{ padding: "6px 10px", maxWidth: 340 }}>
+                      <ConnectGitHub />
+                    </div>
+                  ) : (
+                    <MenuItem icon="key" onClick={() => setConnecting(true)}>
+                      {t("Sign in with GitHub to act as you")}
+                    </MenuItem>
+                  ))}
                 {naming ? (
                   <OwnAliasForm login={me.login} onDone={() => setNaming(false)} />
                 ) : (

@@ -4,13 +4,15 @@
 // shows the summary in a cell; the PR page shows it all on its Review progress tab.
 
 import { useQuery } from "@tanstack/react-query";
-import { api, type PrProgress, type ProgressEvent, type ProgressSummary, type ReviewerProgress } from "./api";
+import { useState } from "react";
+import { api, type CommentItem, type PrProgress, type ProgressEvent, type ProgressSummary, type ReviewerProgress } from "./api";
 import { useAliasOf } from "./aliases";
 import { Avatar, Named } from "./avatar";
-import { Empty, ErrorBox, Section, When } from "./components";
+import { ConnectGitHub } from "./connectGitHub";
+import { Empty, ErrorBox, Section, useAct, When } from "./components";
 import { useT } from "./i18n";
 import { Icon } from "./icons";
-import { Skeleton } from "./ui";
+import { Skeleton, useToast } from "./ui";
 
 function percent(x: number | null): string {
   return x === null ? "—" : `${Math.round(x * 100)}%`;
@@ -93,6 +95,7 @@ function Verdict({ r }: { r: Pick<ReviewerProgress, "verdict" | "at_head"> }) {
 }
 
 function eventText(e: ProgressEvent, t: (s: string) => string, name: (login: string) => string): string {
+  if (e.kind === "check") return `${t("checked")} ${e.threads} ${t("comments against the code")} (${e.resolved} ${t("addressed")}) ${t("at")} ${e.detail}`;
   if (e.kind === "opened") return e.commits ? `${t("opened the PR with")} ${e.commits} ${t("commits")}` : t("opened the PR");
   if (e.kind === "role") return `${e.state === "owner" ? t("became an owner") : t("became a reviewer")} (${e.detail.startsWith("assigned by") ? `${t("assigned by")} ${name(e.detail.slice(12))}` : t("claimed")})`;
   if (e.kind === "commits") return `${t("pushed")} ${e.commits} ${e.commits === 1 ? t("commit") : t("commits")}${e.detail ? `: ${e.detail}` : ""}`;
@@ -101,13 +104,28 @@ function eventText(e: ProgressEvent, t: (s: string) => string, name: (login: str
   return e.threads ? `${verdict}, ${e.threads} ${t("threads")} (${e.resolved} ${t("resolved now")})` : verdict;
 }
 
-const ICONS: Record<ProgressEvent["kind"], "pr" | "check" | "upload" | "message"> = { opened: "pr", role: "check", commits: "upload", review: "message" };
+const ICONS: Record<ProgressEvent["kind"], "pr" | "check" | "upload" | "message" | "search"> = { opened: "pr", role: "check", commits: "upload", review: "message", check: "search" };
 
 /** The PR page's Review progress tab. */
-export function ReviewProgressPanel({ repo, number }: { repo: string; number: number }) {
+export function ReviewProgressPanel({ repo, number, me }: { repo: string; number: number; me: string }) {
   const t = useT();
+  const toast = useToast();
   const aliasOf = useAliasOf();
-  const q = useQuery({ queryKey: ["pr", repo, String(number), "progress"], queryFn: () => api.get<PrProgress>(`/api/prs/${repo}/${number}/progress`) });
+  const [checkingSince, setCheckingSince] = useState<number | null>(null);
+  const q = useQuery({
+    queryKey: ["pr", repo, String(number), "progress"],
+    queryFn: () => api.get<PrProgress>(`/api/prs/${repo}/${number}/progress`),
+    // While a check runs, look again every few seconds for its results (at most 3 minutes).
+    refetchInterval: checkingSince && Date.now() - checkingSince < 180_000 ? 4000 : false,
+  });
+  const check = useAct((ids: string[]) => api.post<{ event: string }>(`/api/prs/${repo}/${number}/comment-check`, { thread_ids: ids }), []);
+  const startCheck = (ids: string[]) =>
+    check.mutate(ids, {
+      onSuccess: () => {
+        setCheckingSince(Date.now());
+        toast({ title: t("Checking the comments against the code"), body: t("Results appear here in a minute or two."), icon: "search" });
+      },
+    });
   if (q.isLoading) return <Skeleton rows={5} />;
   if (!q.data) return <ErrorBox error={q.error} />;
   const d = q.data;
@@ -115,7 +133,23 @@ export function ReviewProgressPanel({ repo, number }: { repo: string; number: nu
   const name = (l: string) => aliasOf(l) ?? l;
   return (
     <>
-      <Section title={t("Review progress")} hint={t("for the PR's owners")}>
+      <Section
+        title={t("Review progress")}
+        hint={t("for the PR's owners")}
+        aside={
+          d.threads > 0 ? (
+            <button
+              className="sm"
+              disabled={check.isPending}
+              onClick={() => startCheck([])}
+              title={d.comment_checks === "scan" ? t("Also checked on the repository's schedule; this checks now") : t("This repository checks comments only when asked")}
+            >
+              <Icon name="search" size={13} />
+              {t("Check comments")}
+            </button>
+          ) : undefined
+        }
+      >
         <div className="progress-stats">
           <div className="stack" style={{ gap: 4 }}>
             <span className="small muted">{t("Feedback addressed")}</span>
@@ -124,7 +158,7 @@ export function ReviewProgressPanel({ repo, number }: { repo: string; number: nu
               <AddressedBar value={d.addressed} width={120} />
             </span>
             <span className="small muted">
-              {d.resolved}/{d.threads} {t("review threads resolved")}
+              {d.resolved} {t("resolved on GitHub")} · {d.fixed} {t("fixed in the code")} · {d.threads} {t("comments")}
               {d.outdated > 0 && ` · ${d.outdated} ${t("changed since, not resolved")}`}
             </span>
           </div>
@@ -145,34 +179,30 @@ export function ReviewProgressPanel({ repo, number }: { repo: string; number: nu
             <span className="small muted">{d.changes_requested_by.length ? d.changes_requested_by.map(name).join(", ") : t("by nobody")}</span>
           </div>
         </div>
+        <ErrorBox error={check.error} />
       </Section>
       <Section title={t("Reviewers")} hint={t("assigned here first, then anyone else who reviewed")}>
+        {!d.signed_in && d.can_resolve && d.threads > d.resolved && (
+          <div style={{ marginBottom: 10 }}>
+            <ConnectGitHub why={t("Sign in with GitHub to resolve comments as yourself.")} />
+          </div>
+        )}
         {d.reviewers.length === 0 ? (
           <Empty icon="pr">{t("Nobody reviews this PR yet.")}</Empty>
         ) : (
           <div className="list">
             {d.reviewers.map((r, i) => (
-              <div key={r.login} className={`list-row progress-reviewer${!r.assigned && i > 0 && d.reviewers[i - 1].assigned ? " first-other" : ""}`}>
-                <Avatar login={r.login} size={24} />
-                <span className="main">
-                  <Named login={r.login} alias={aliasOf(r.login)} />
-                  {r.code_owner && <span className="pill status-info" style={{ marginLeft: 6 }}>{t("code owner")}</span>}
-                  <span className="small muted" style={{ display: "block" }}>
-                    {[r.assigned ? t("assigned reviewer") : t("not assigned here"), r.requested ? t("asked on GitHub") : null, r.reviews ? `${r.reviews} ${r.reviews === 1 ? t("review") : t("reviews")}` : null].filter(Boolean).join(" · ")}
-                    {r.last_at && (
-                      <>
-                        {" · "}
-                        <When at={r.last_at} />
-                      </>
-                    )}
-                  </span>
-                </span>
-                <Verdict r={r} />
-                <span className="row small" style={{ gap: 6, flexWrap: "nowrap", minWidth: 150 }} title={r.outdated ? `${r.outdated} ${t("changed since, not resolved")}` : undefined}>
-                  <AddressedBar value={r.addressed} width={60} />
-                  {r.threads ? `${r.resolved}/${r.threads} ${t("resolved")}` : <span className="muted">{t("no threads")}</span>}
-                </span>
-              </div>
+              <ReviewerRow
+                key={r.login}
+                r={r}
+                first={!r.assigned && i > 0 && d.reviewers[i - 1].assigned}
+                mayResolve={d.can_resolve || r.login.toLowerCase() === me.toLowerCase()}
+                signedIn={d.signed_in}
+                repo={repo}
+                number={number}
+                onCheck={(id) => startCheck([id])}
+                checking={check.isPending}
+              />
             ))}
           </div>
         )}
@@ -248,5 +278,174 @@ function CodeOwnerApprovals({ d }: { d: PrProgress }) {
         </div>
       )}
     </Section>
+  );
+}
+
+/** A reviewer's progress, which opens to the comments they left. */
+function ReviewerRow({
+  r,
+  first,
+  mayResolve,
+  signedIn,
+  repo,
+  number,
+  onCheck,
+  checking,
+}: {
+  r: ReviewerProgress;
+  first: boolean;
+  mayResolve: boolean;
+  signedIn: boolean;
+  repo: string;
+  number: number;
+  onCheck: (threadId: string) => void;
+  checking: boolean;
+}) {
+  const t = useT();
+  const aliasOf = useAliasOf();
+  const [open, setOpen] = useState(false);
+  const done = r.comments.filter((c) => c.done).length;
+  const has = r.comments.length > 0;
+  return (
+    <div className={`progress-reviewer-block${first ? " first-other" : ""}`}>
+      <div
+        className={`list-row progress-reviewer${has ? " expandable" : ""}`}
+        role={has ? "button" : undefined}
+        tabIndex={has ? 0 : undefined}
+        aria-expanded={has ? open : undefined}
+        onClick={() => has && setOpen(!open)}
+        onKeyDown={(e) => has && (e.key === "Enter" || e.key === " ") && (e.preventDefault(), setOpen(!open))}
+      >
+        <span className="chevron">{has && <Icon name={open ? "chevronDown" : "chevronRight"} size={12} />}</span>
+        <Avatar login={r.login} size={24} />
+        <span className="main">
+          <Named login={r.login} alias={aliasOf(r.login)} />
+          {r.code_owner && (
+            <span className="pill status-info" style={{ marginLeft: 6 }}>
+              {t("code owner")}
+            </span>
+          )}
+          <span className="small muted" style={{ display: "block" }}>
+            {[r.assigned ? t("assigned reviewer") : t("not assigned here"), r.requested ? t("asked on GitHub") : null, r.reviews ? `${r.reviews} ${r.reviews === 1 ? t("review") : t("reviews")}` : null].filter(Boolean).join(" · ")}
+            {r.last_at && (
+              <>
+                {" · "}
+                <When at={r.last_at} />
+              </>
+            )}
+          </span>
+        </span>
+        <Verdict r={r} />
+        <span className="row small" style={{ gap: 6, flexWrap: "nowrap", minWidth: 150 }}>
+          <AddressedBar value={r.addressed} width={60} />
+          {has ? `${done}/${r.comments.length} ${t("done")}` : <span className="muted">{t("no comments")}</span>}
+        </span>
+      </div>
+      {open && (
+        <div className="comment-items">
+          {r.comments.map((c) => (
+            <CommentRow key={c.thread_id} c={c} mayResolve={mayResolve} signedIn={signedIn} repo={repo} number={number} onCheck={onCheck} checking={checking} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** One review comment: what it asks in one line, whether it is done, and buttons to
+ * check it against the code now and to resolve it on GitHub as oneself. */
+function CommentRow({
+  c,
+  mayResolve,
+  signedIn,
+  repo,
+  number,
+  onCheck,
+  checking,
+}: {
+  c: CommentItem;
+  mayResolve: boolean;
+  signedIn: boolean;
+  repo: string;
+  number: number;
+  onCheck: (threadId: string) => void;
+  checking: boolean;
+}) {
+  const t = useT();
+  const toast = useToast();
+  const [resolvedHere, setResolvedHere] = useState(false);
+  const resolve = useAct(
+    () => api.post<{ status: string; error: string | null; reason: string | null }>(`/api/prs/${repo}/${number}/threads/${encodeURIComponent(c.thread_id)}/resolve`),
+    [["pr", repo, String(number), "progress"]],
+  );
+  const resolved = c.resolved || resolvedHere;
+  const [kind, label] = resolved
+    ? ["done", t("resolved on GitHub")]
+    : !c.check
+      ? ["unchecked", t("not checked yet")]
+      : c.check.status === "addressed"
+        ? ["done", c.check.fixed_in ? `${t("fixed in the code")} (${c.check.fixed_in.slice(0, 7)})` : t("fixed in the code")]
+        : c.check.status === "partly"
+          ? ["partly", t("partly addressed")]
+          : c.check.status === "open"
+            ? ["open", t("not addressed yet")]
+            : ["unclear", t("unclear from the code")];
+  const mark = { done: "✓", partly: "◐", open: "○", unclear: "?", unchecked: "·" }[kind];
+  return (
+    <div className={`comment-item comment-${kind}`}>
+      <span className="comment-mark" aria-hidden>
+        {mark}
+      </span>
+      <span className="main">
+        <span className="comment-summary">{c.check?.summary || c.excerpt || t("(no text)")}</span>
+        <span className="small muted" style={{ display: "block" }}>
+          {c.url ? (
+            <a href={c.url} target="_blank" rel="noreferrer">
+              <code>{c.path ? `${c.path}${c.line ? `:${c.line}` : ""}` : t("the comment")}</code>
+            </a>
+          ) : (
+            c.path && <code>{c.path}</code>
+          )}
+          {" · "}
+          <span className={kind === "done" ? "check-ok" : undefined}>{label}</span>
+          {c.check && !resolved && (
+            <>
+              {" · "}
+              {t("checked")} <When at={c.check.checked_at} />
+            </>
+          )}
+        </span>
+        {c.check?.reason && !resolved && <span className="small muted comment-reason">{c.check.reason}</span>}
+      </span>
+      {!resolved && (
+        <span className="row comment-actions" style={{ gap: 4 }}>
+          <button className="ghost sm" disabled={checking} onClick={() => onCheck(c.thread_id)} title={t("Check whether the code now does what this comment asks")}>
+            {t("Check")}
+          </button>
+          {mayResolve && (
+            <button
+              className="sm"
+              disabled={!signedIn || resolve.isPending}
+              title={signedIn ? t("Resolve this comment on GitHub, as you") : t("Sign in with GitHub to resolve comments as yourself")}
+              onClick={() =>
+                resolve.mutate(undefined, {
+                  onSuccess: (r) => {
+                    if (["queued", "intent", "executed"].includes(r.status)) {
+                      setResolvedHere(true);
+                      toast({ title: t("Comment resolved"), icon: "check" });
+                    } else {
+                      toast({ title: t("Not resolved"), body: r.error || r.reason || r.status, icon: "x" });
+                    }
+                  },
+                })
+              }
+            >
+              {t("Resolve")}
+            </button>
+          )}
+        </span>
+      )}
+      <ErrorBox error={resolve.error} />
+    </div>
   );
 }

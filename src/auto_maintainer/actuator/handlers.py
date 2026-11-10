@@ -49,6 +49,7 @@ from ..domain.actions import (
     ReviewUpdatePayload,
     ServiceDeployPayload,
     ThreadReplyPayload,
+    ThreadResolvePayload,
 )
 from ..domain.diffs import commentable, fits
 from ..domain.ids import same_commit
@@ -284,6 +285,24 @@ async def _thread_reply(
         action.repo, pr.number, p.comment_id, body
     )
     return {"comment_id": ref.id}
+
+
+async def _thread_resolve(
+    x: ExecContext,
+    action: Action,
+    profile: RepoProfile | None,
+    pr: PrSnapshot | None,
+    approver: str | None,
+) -> dict[str, Any]:
+    assert pr is not None
+    p = ThreadResolvePayload.model_validate(action.payload)
+    thread = next((t for t in pr.threads if t.id == p.thread_id), None)
+    if thread is None:
+        raise Stale(f"the review thread {p.thread_id} is no longer on the PR")
+    if thread.is_resolved:
+        raise Noop("the review thread is already resolved")
+    await x.writer.resolve_review_thread(action.repo, pr.number, p.thread_id)
+    return {"thread_id": p.thread_id}
 
 
 async def _comment_upsert(
@@ -834,6 +853,7 @@ HANDLERS: dict[ActionKind, HandlerSpec] = {
     # An edited review still covers the commit it reviewed, whatever came since.
     ActionKind.REVIEW_UPDATE: HandlerSpec(_review_update, needs_pr=True),
     ActionKind.THREAD_REPLY: HandlerSpec(_thread_reply, needs_pr=True),
+    ActionKind.THREAD_RESOLVE: HandlerSpec(_thread_resolve, needs_pr=True),
     ActionKind.COMMENT_UPSERT: HandlerSpec(_comment_upsert, needs_pr=True),
     ActionKind.CI_RERUN_FAILED: HandlerSpec(
         _rerun, needs_pr=True, needs_current_head=True

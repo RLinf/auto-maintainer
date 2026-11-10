@@ -155,6 +155,14 @@ class AgentRouter:
         self.record_run = record_run
         self.cooldown = timedelta(seconds=cooldown_seconds)
         self.disabled = set(disabled)
+        self.signed_in_check: Callable[[str], Awaitable[bool | None]] | None = None
+        """Whether the service's own account of an agent is signed in
+        (``Service.signed_in``). An agent found not signed in that has no model
+        provider is not used, except for the tasks of a person who runs it on their
+        own account."""
+        self.signed_out: set[str] = set()
+        """Agents last found not signed in and without a model provider: ``usable``
+        and ``runs_on`` pass over them."""
         self.breakers: dict[str, BreakerState] = {}
         self.output_breakers: dict[tuple[str, str], BreakerState] = {}
         """Breakers opened by invalid answers, per runtime and task kind."""
@@ -211,6 +219,7 @@ class AgentRouter:
         the runtime they started with; breakers of runtimes that changed are reset."""
         changed = {n for n in runtimes if self.runtimes.get(n) is not runtimes[n]}
         self.runtimes = dict(runtimes)
+        self.signed_out -= changed
         self.budgets = dict(budgets or {})
         for name in changed | (set(self.breakers) - set(runtimes)):
             self.breakers.pop(name, None)
@@ -239,7 +248,7 @@ class AgentRouter:
         skipped: list[str] = []
         last: AgentResult | None = None
         for index, name in enumerate(names):
-            reason = await self._unusable(name, str(task.kind))
+            reason = await self._unusable(name, str(task.kind), task)
             if reason:
                 skipped.append(f"{name}: {reason}")
                 continue
@@ -297,13 +306,18 @@ class AgentRouter:
         installed = getattr(runtime, "installed", None)
         return not callable(installed) or bool(installed())
 
+    def usable(self, name: str) -> bool:
+        """Whether ``name`` is ready and not known to be signed out (for the
+        service's own account, without a model provider)."""
+        return self.ready(name) and name not in self.signed_out
+
     def runs_on(self, route: Route) -> str | None:
-        """The agent ``route`` runs on now: its first ready runtime."""
+        """The agent ``route`` runs on now: its first usable runtime."""
         return next(
             (
                 n
                 for n in dict.fromkeys([route.primary, *route.fallback])
-                if self.ready(n)
+                if self.usable(n)
             ),
             None,
         )
@@ -346,14 +360,27 @@ class AgentRouter:
 
     # -- internals -------------------------------------------------------------------
 
-    async def _unusable(self, name: str, kind: str = "") -> str | None:
+    async def _unusable(
+        self, name: str, kind: str = "", task: AgentTask | None = None
+    ) -> str | None:
         if name not in self.runtimes:
             return "not configured"
         if name in self.disabled:
             return "disabled"
-        installed = getattr(self.runtimes[name], "installed", None)
+        runtime = self.runtimes[name]
+        installed = getattr(runtime, "installed", None)
         if callable(installed) and not installed():
             return "not installed on this host"
+        if (
+            self.signed_in_check is not None
+            and getattr(runtime, "provider", None) is None
+        ):
+            if await self.signed_in_check(name) is False:
+                self.signed_out.add(name)
+                if task is None or not await self._on_own_account(runtime, task):
+                    return "not signed in, and it has no model provider"
+            else:
+                self.signed_out.discard(name)
         for breaker in (
             self.breakers.get(name),
             self.output_breakers.get((name, kind)),
@@ -454,6 +481,20 @@ class AgentRouter:
                 "error_kind": None,
             }
         ), None
+
+    async def _on_own_account(self, runtime: AgentRuntime, task: AgentTask) -> bool:
+        """Whether ``task`` runs on its requester's own account of ``runtime``."""
+        if (
+            self.people is None
+            or not task.requested_by
+            or getattr(runtime, "container_sandbox", None) is None
+        ):
+            return False
+        try:
+            setup = (await self.people.get(task.requested_by)).get(runtime.name)
+        except ValueError:
+            return False
+        return setup is not None and setup.use_own
 
     async def _account(
         self, runtime: AgentRuntime, task: AgentTask

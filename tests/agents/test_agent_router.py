@@ -321,3 +321,51 @@ async def test_every_run_may_read_the_services_own_code(tmp_path: Path) -> None:
     first, second = a.tasks
     assert first.reference_dirs == [code] and f"is at {code}, read-only" in first.prompt
     assert second.reference_dirs == [] and str(code) not in second.prompt
+
+
+async def test_an_agent_signed_out_without_a_provider_is_passed_over() -> None:
+    """An agent whose account is not signed in and that has no model provider would
+    only fail, so routes and the default pass over it; with a provider it runs."""
+    a = ScriptedAgentRuntime("a", [{"ok": True}])
+    b = ScriptedAgentRuntime("b", [{"ok": True}])
+    router, records = _router(a, b)
+    signed = {"a": False, "b": None}
+
+    async def check(name: str) -> bool | None:
+        return signed[name]
+
+    router.signed_in_check = check
+    route = Route(primary="a", fallback=["b"])
+    result = await router.run(_task(), route, Verdict)
+    assert result.ok and result.runtime == "b"
+    assert [r.runtime for r in records] == ["b"], "a never ran"
+    assert router.runs_on(route) == "b" and not router.usable("a")
+    assert router.ready("a"), "it is still installed"
+
+    signed["a"] = True
+    a.provider = None
+    assert await router._unusable("a") is None and router.usable("a")
+
+
+async def test_a_signed_out_agent_still_runs_on_its_requesters_own_account() -> None:
+    from auto_maintainer.domain.agents import PersonalAgent
+
+    a = ScriptedAgentRuntime("a", [{"ok": True}])
+    a.container_sandbox = object()  # type: ignore[attr-defined]
+    router, _ = _router(a)
+
+    async def check(name: str) -> bool | None:
+        return False
+
+    class People:
+        async def get(self, login: str) -> dict[str, PersonalAgent]:
+            return (
+                {"a": PersonalAgent(agent="a", use_own=True)}
+                if login == "maria"
+                else {}
+            )
+
+    router.signed_in_check = check
+    router.people = People()  # type: ignore[assignment]
+    assert await router._unusable("a", "review", _task(requested_by="maria")) is None
+    assert await router._unusable("a", "review", _task(requested_by="walt"))

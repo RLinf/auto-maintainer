@@ -32,6 +32,9 @@ from .client import GitHubClient, GitHubError
 _DRAFT_MUTATION = """
 mutation($id: ID!) { convertPullRequestToDraft(input: {pullRequestId: $id}) { pullRequest { isDraft } } }
 """
+_RESOLVE_MUTATION = """
+mutation($id: ID!) { resolveReviewThread(input: {threadId: $id}) { thread { isResolved } } }
+"""
 _PR_NODE_QUERY = """
 query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) { pullRequest(number: $number) { id } }
@@ -178,6 +181,11 @@ class GitHubWriter:
             json={"body": _public(body, repo, "body")},
         )
         return CommentRef(id=int(data["id"]), url=data.get("html_url") or "")
+
+    async def resolve_review_thread(
+        self, repo: str, number: int, thread_id: str
+    ) -> None:
+        await self._client.graphql(_RESOLVE_MUTATION, {"id": thread_id}, repo=repo)
 
     async def request_reviewers(
         self, repo: str, number: int, logins: list[str]

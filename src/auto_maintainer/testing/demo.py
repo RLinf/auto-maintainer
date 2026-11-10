@@ -30,6 +30,8 @@ from ..domain.snapshot import (
     PrFile,
     Review,
     ReviewEventState,
+    ReviewThread,
+    ThreadComment,
 )
 from ..store.people import PeopleAgents
 from .fakes import make_pr
@@ -470,6 +472,8 @@ def _translated(task: AgentTask) -> dict[str, Any]:
 
 def _answer(task: AgentTask) -> dict[str, Any]:
     kind = str(task.kind)
+    if kind == "comment_check":
+        return _comment_check(task)
     if kind == "translate":
         return _translated(task)
     if kind == "review" and task.prompt.startswith("You judge the quality of PR"):
@@ -889,6 +893,65 @@ DEMO_OWN_API = Provider(
 """The demo maintainer's own model API, used only by their own agents."""
 
 
+DEMO_THREADS = [
+    ReviewThread(
+        id="RT_demo_1",
+        path="src/loader.py",
+        line=14,
+        comments=[
+            ThreadComment(
+                id=901,
+                author="bob",
+                body="Return early when the batch is empty instead of indexing it.",
+                commit_sha="c" * 40,
+            )
+        ],
+    ),
+    ReviewThread(
+        id="RT_demo_2",
+        path="tests/test_loader.py",
+        line=8,
+        comments=[
+            ThreadComment(
+                id=902,
+                author="bob",
+                body="Add a test for a batch of one item too.",
+                commit_sha="c" * 40,
+            )
+        ],
+    ),
+    ReviewThread(
+        id="RT_demo_3",
+        path="src/loader.py",
+        line=3,
+        is_resolved=True,
+        comments=[ThreadComment(id=903, author="maria", body="Typo in the docstring.")],
+    ),
+]
+"""Review comments on the demo's PR #42, for its review progress."""
+
+
+def _comment_check(task: AgentTask) -> dict[str, Any]:
+    """The demo's comment check: the first comment fixed, the rest open."""
+    items = []
+    for i, block in enumerate(task.prompt.split("### Item ")[1:]):
+        cid = block.split(":", 1)[0].strip()
+        items.append(
+            {
+                "id": cid,
+                "summary": "Return early on an empty batch"
+                if i == 0
+                else "Test a batch of one item",
+                "status": "addressed" if i == 0 else "open",
+                "reason": "load() returns [] before indexing"
+                if i == 0
+                else "no test for a single item yet",
+                "fixed_in": "c" * 7 if i == 0 else None,
+            }
+        )
+    return {"items": items}
+
+
 async def build_demo(root: Path) -> Harness:
     h = await Harness.create(
         root,
@@ -917,6 +980,7 @@ async def build_demo(root: Path) -> Harness:
         "reproduce",
         "governance",
         "translate",
+        "comment_check",
     ):
         h.runner.on(kind, _answer)
     h.forge.put_file(DEMO_REPO, ".github/CODEOWNERS", "* @maria\n/docs/ @bob\n")
@@ -944,6 +1008,7 @@ async def build_demo(root: Path) -> Harness:
                     sha="c" * 40, message="fix(loader): handle empty batches" + signed
                 )
             ],
+            threads=DEMO_THREADS,
             checks=[
                 CheckRun(
                     id=1,

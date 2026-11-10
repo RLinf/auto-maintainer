@@ -29,6 +29,7 @@ handshake and ``session/new`` passed; prompts were not run, for want of a key.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -52,6 +53,14 @@ class DshRuntime(AcpRuntime):
 
     def task_env(self, task: AgentTask) -> dict[str, str]:
         return {"DSH_HOME": str(Path.home() / ".dsh")}
+
+    async def signed_in(self, home: Path | None = None) -> bool | None:
+        """DeepSeek Harness has no sign-in: it can run when it has a key, from its
+        model provider or the host's ``DEEPSEEK_API_KEY``."""
+        return bool(
+            (self.provider is not None and self.provider.api_key)
+            or os.environ.get("DEEPSEEK_API_KEY")
+        )
 
     def provider_env(self) -> dict[str, str | None]:
         p = self.provider

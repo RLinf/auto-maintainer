@@ -54,8 +54,9 @@ export function AgentPicker({
 }) {
   const t = useT();
   const settings = useSettings();
-  // Only agents that can run here: turned on, and their CLI installed on the host.
-  const agents = (settings.data?.agents ?? []).filter((a) => a.enabled && a.installed !== false);
+  // Only agents that can run here: turned on, their CLI installed on the host, and
+  // signed in or given a model provider.
+  const agents = (settings.data?.agents ?? []).filter((a) => a.enabled && a.installed !== false && a.usable !== false);
   const route = settings.data?.routing.find((r) => r.task === task);
   const primary = route?.runs_on ?? route?.primary;
   // A remembered agent that was disabled since falls back to the default.

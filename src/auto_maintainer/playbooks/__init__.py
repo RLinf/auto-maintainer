@@ -20,6 +20,7 @@ from .base import Playbook
 from .calibrate import Calibrate
 from .ci_doctor import CiDoctor
 from .commands import Commands
+from .comment_check import CommentCheckPlaybook, CommentScan
 from .evaluate import EvaluatePlaybook
 from .fix import FixPlaybook
 from .fix_ci import FixCiPlaybook
@@ -50,6 +51,8 @@ def all_playbooks() -> list[Playbook]:
         ReviewPlaybook(),
         ReviewScan(),
         Followup(),
+        CommentCheckPlaybook(),
+        CommentScan(),
         EvaluatePlaybook(),
         Calibrate(),
         LearnFromRejection(),

@@ -38,6 +38,8 @@ class ActionKind(StrEnum):
     REVIEW_POST = "review.post"
     REVIEW_UPDATE = "review.update"
     THREAD_REPLY = "thread.reply"
+    THREAD_RESOLVE = "thread.resolve"
+    """Resolve a review thread, as the person who pressed its Resolve button."""
     COMMENT_UPSERT = "comment.upsert"
     CI_RERUN_FAILED = "ci.rerun_failed"
     CI_APPROVE_RUN = "ci.approve_run"
@@ -285,6 +287,12 @@ class ThreadReplyPayload(_Payload):
     body: str
 
 
+class ThreadResolvePayload(BaseModel):
+    thread_id: str = Field(min_length=1, max_length=200)
+    """The forge's id for the review thread, as the snapshot keeps it."""
+    path: str | None = None
+
+
 class CommentUpsertPayload(_Payload):
     purpose: str
     """One comment per purpose and PR, such as ``hygiene`` or ``ci``."""
@@ -461,6 +469,7 @@ PAYLOADS: dict[ActionKind, type[BaseModel]] = {
     ActionKind.REVIEW_POST: ReviewPostPayload,
     ActionKind.REVIEW_UPDATE: ReviewUpdatePayload,
     ActionKind.THREAD_REPLY: ThreadReplyPayload,
+    ActionKind.THREAD_RESOLVE: ThreadResolvePayload,
     ActionKind.COMMENT_UPSERT: CommentUpsertPayload,
     ActionKind.CI_RERUN_FAILED: RerunPayload,
     ActionKind.CI_APPROVE_RUN: ApproveRunsPayload,

@@ -212,7 +212,7 @@ export default function PrPage({ me }: { me: Me }) {
           <PrWork repo={full} number={pr.number} me={me.login} />
           <Tabs tabs={tabs} active={tab} onChange={setTab} />
           {tab === "overview" && <Overview d={d} />}
-          {tab === "progress" && <ReviewProgressPanel repo={full} number={pr.number} />}
+          {tab === "progress" && <ReviewProgressPanel repo={full} number={pr.number} me={me.login} />}
           {tab === "files" && <Files d={d} />}
           {tab === "timeline" && <Timeline d={d} />}
           {tab === "reviews" && <ReviewsTab d={d} repo={full} number={pr.number} />}

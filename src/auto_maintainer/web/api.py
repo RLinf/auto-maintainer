@@ -55,6 +55,7 @@ from ..domain.actions import (
     RequestReviewersPayload,
     RerunPayload,
     ServiceDeployPayload,
+    ThreadResolvePayload,
     UpdateBranchPayload,
     make_action,
 )
@@ -97,7 +98,7 @@ from ..domain.review import (
     review_chain,
     review_quality,
 )
-from ..domain.review_progress import review_progress
+from ..domain.review_progress import checks_key, load_checks, review_progress
 from ..domain.run_ci import plan_run_ci
 from ..domain.scoring import Evaluation, priority_key, recompute
 from ..domain.secrets import redact_secrets
@@ -520,6 +521,11 @@ class AssignBody(BaseModel):
 
 class ClaimBody(BaseModel):
     role: PrRole = "reviewer"
+
+
+class CommentCheckBody(BaseModel):
+    thread_ids: list[str] = Field(default_factory=list, max_length=100)
+    """Only these review threads; empty: every open one not checked at the head."""
 
 
 class AnswerBody(BaseModel):
@@ -1583,7 +1589,12 @@ def build_router() -> APIRouter:
         pr = await service.store.get_snapshot(repo, number)
         if pr is None:
             raise HTTPException(404, f"{repo}#{number} is not known yet")
-        progress = review_progress(pr, await service.store.list_assignees(repo, number))
+        assignees = await service.store.list_assignees(repo, number)
+        progress = review_progress(
+            pr,
+            assignees,
+            load_checks(await service.store.get_state(checks_key(repo, number))),
+        )
         info = await service.a.forge.get_repo(repo)
         on_default = info.default_branch == pr.base_ref
         profile = await service.profiles.active(repo)
@@ -1597,12 +1608,20 @@ def build_router() -> APIRouter:
             "addressed": progress.addressed,
             "reviewers": [
                 {
-                    **r.model_dump(mode="json"),
+                    **r.model_dump(mode="json", exclude={"comments"}),
                     "addressed": r.addressed,
                     "code_owner": r.login.lower() in owner_logins,
+                    "comments": [
+                        {**c.model_dump(mode="json"), "done": c.done}
+                        for c in r.comments
+                    ],
                 }
                 for r in progress.reviewers
             ],
+            "can_resolve": await is_maintainer(service, user, repo)
+            or holds(assignees, user.login, "owner"),
+            "signed_in": await service.can_post_as(user.login),
+            "comment_checks": profile.review.comments.check if profile else None,
             "required_approvals": info.required_approvals if on_default else None,
             "code_owners": {
                 "file": location,
@@ -1612,6 +1631,96 @@ def build_router() -> APIRouter:
                 "people": [o.model_dump(mode="json") for o in owners.people],
             },
             "head": pr.head_sha,
+        }
+
+    @r.post("/prs/{repo:path}/{number:int}/comment-check")
+    async def check_comments(
+        request: Request,
+        repo: str,
+        number: int,
+        body: CommentCheckBody,
+        user: User = Depends(current_user),
+    ) -> dict[str, Any]:
+        """Check the PR's open review comments against its code now: those named in
+        ``thread_ids`` (checked again even at the same head), or every one not
+        checked at its head. An agent reads only each comment and the code around
+        it; nothing is posted."""
+        service = service_of(request)
+        repo = _repo(repo)
+        await require_view(service, user, repo)
+        if await service.store.get_snapshot(repo, number) is None:
+            raise HTTPException(404, f"{repo}#{number} is not known yet")
+        event = Event(
+            kind=EventKind.COMMENT_CHECK,
+            repo=repo,
+            number=number,
+            payload={
+                "by": user.login,
+                "thread_ids": body.thread_ids,
+                "source": "dashboard",
+            },
+            source="dashboard",
+        )
+        await service.bus.publish(event)
+        return {"event": event.id}
+
+    @r.post("/prs/{repo:path}/{number:int}/threads/{thread_id}/resolve")
+    async def resolve_thread(
+        request: Request,
+        repo: str,
+        number: int,
+        thread_id: str,
+        user: User = Depends(current_user),
+    ) -> dict[str, Any]:
+        """Resolve one review thread on the forge, as the person who pressed the
+        button and with their own sign-in: maintainers of the repository and the PR's
+        owners resolve any thread, a reviewer their own. The service's account never
+        resolves one."""
+        service = service_of(request)
+        repo = _repo(repo)
+        await require_view(service, user, repo)
+        pr = await service.store.get_snapshot(repo, number)
+        thread = (
+            next((t for t in pr.threads if t.id == thread_id), None) if pr else None
+        )
+        if pr is None or thread is None:
+            raise HTTPException(404, "no such review thread on this PR")
+        opener = thread.comments[0].author if thread.comments else ""
+        if not (
+            opener.lower() == user.login.lower()
+            or await is_maintainer(service, user, repo)
+            or holds(
+                await service.store.list_assignees(repo, number), user.login, "owner"
+            )
+        ):
+            raise HTTPException(
+                403,
+                "only maintainers, the PR's owners, and the comment's author resolve it",
+            )
+        if not await service.can_post_as(user.login):
+            raise HTTPException(
+                403, "sign in with GitHub, so the comment is resolved by you"
+            )
+        record = await _run_now(
+            service,
+            user,
+            make_action(
+                ActionKind.THREAD_RESOLVE,
+                repo,
+                ThreadResolvePayload(thread_id=thread_id, path=thread.path),
+                number=number,
+                head_sha=pr.head_sha,
+                discriminator=thread_id,
+                rationale=f"{user.login} resolved a review comment",
+                draft_for=user.login,
+                provenance=Provenance(requested_by=user.login),
+            ),
+            as_them=True,
+        )
+        return {
+            "status": record.status,
+            "error": record.error,
+            "reason": record.decision.reason if record.decision else None,
         }
 
     @r.get("/prs/{repo:path}/{number:int}/code-owners")

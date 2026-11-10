@@ -291,6 +291,10 @@ class Service:
         self.progress = JobProgress(adapters.store, self.bus, adapters.clock)
         """What agents do in each job, for the dashboard's live view."""
         adapters.agents.bind_progress(self.progress.observe)
+        if hasattr(adapters.agents, "signed_in_check"):
+            # An agent its account is not signed in to, without a model provider,
+            # is passed over: it would only fail.
+            adapters.agents.signed_in_check = self.signed_in
         self.exec = ExecContext(
             store=adapters.store,
             reader=adapters.actuator_reader,
@@ -641,6 +645,9 @@ class Service:
             await self.a.reconfigure(
                 effective_agents(config, legacy), await self.provider_bindings(config)
             )
+        sweep = asyncio.create_task(self.check_sign_ins(), name="check-sign-ins")
+        self._install_tasks.add(sweep)
+        sweep.add_done_callback(self._install_tasks.discard)
 
     async def provider_bindings(
         self, config: ServiceConfig
@@ -886,6 +893,12 @@ class Service:
             return None
         found = await check(self.account_home(account))
         self._signed_in[(name, account)] = (now, found)
+        signed_out = getattr(self.a.agents, "signed_out", None)
+        if account is None and isinstance(signed_out, set):
+            if found is False and getattr(runtime, "provider", None) is None:
+                signed_out.add(name)
+            else:
+                signed_out.discard(name)
         return found
 
     async def agent_quota(
@@ -913,6 +926,29 @@ class Service:
         runners that cannot tell (the test fakes)."""
         ready = getattr(self.a.agents, "ready", None)
         return bool(ready(name)) if callable(ready) else True
+
+    def agent_usable(self, name: str) -> bool:
+        """Whether agent ``name`` is ready and its account is not known to be signed
+        out: what pickers offer and the default falls to."""
+        usable = getattr(self.a.agents, "usable", None)
+        return bool(usable(name)) if callable(usable) else self.agent_ready(name)
+
+    async def check_sign_ins(self) -> None:
+        """Ask each installed agent CLI whether the service's account is signed in,
+        so routes and pickers pass over those that are not and have no model
+        provider (``AgentRouter.signed_out``)."""
+        router = self.a.agents
+        if not hasattr(router, "signed_out"):
+            return
+        for name, runtime in list(getattr(router, "runtimes", {}).items()):
+            if not self.agent_ready(name):
+                continue
+            if getattr(runtime, "provider", None) is not None:
+                router.signed_out.discard(name)
+            elif await self.signed_in(name) is False:
+                router.signed_out.add(name)
+            else:
+                router.signed_out.discard(name)
 
     def runs_on(self, route: Route | None) -> str | None:
         """The agent ``route`` runs on now: its first agent that is ready, else its
