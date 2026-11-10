@@ -84,6 +84,7 @@ from .domain.settings import (
     parse_legacy_runtimes,
     parse_settings,
 )
+from .domain.snapshot import RepoInfo
 from .engine.bus import EventBus
 from .engine.engine import Engine
 from .engine.poller import Poller
@@ -113,6 +114,8 @@ log = logging.getLogger(__name__)
 INSTALL_LINES = 12
 """How many of an installer's last lines of output the Settings page shows."""
 SIGNED_IN_SECONDS = 60
+VIEW_CACHE_SECONDS = 300
+"""How long the dashboard's views reuse a repository's settings and CODEOWNERS."""
 """How long whether an agent CLI is signed in is shown before it is asked again."""
 QUOTA_SECONDS = 300
 """How long an agent's quota reading is shown before its CLI is asked again."""
@@ -226,6 +229,8 @@ class Service:
         self.logins: dict[str, Any] = {}
         """Agent sign-ins started from the dashboard, by id (``agents/login.py``)."""
         self._signed_in: dict[tuple[str, str | None], tuple[datetime, bool | None]] = {}
+        self._views: dict[tuple[str, ...], tuple[datetime, Any]] = {}
+        self._view_reads: dict[tuple[str, ...], asyncio.Future[Any]] = {}
         self.installs: dict[str, AgentInstall] = {}
         """The latest install of each agent CLI asked for since the service started."""
         self._install_tasks: set[asyncio.Task[None]] = set()
@@ -998,6 +1003,38 @@ class Service:
                 router.signed_out.discard(name)
         if router.signed_out != before:
             self.tell_dashboards(EventKind.SERVICE_CHANGED)
+
+    async def view_repo(self, repo: str) -> RepoInfo:
+        """``repo``'s settings and branch rules for the dashboard's views, read from
+        the forge at most once every ``VIEW_CACHE_SECONDS`` (each PR's progress and
+        code owners need them, and the PR list shows many PRs at once). What the
+        service acts on reads them live."""
+        return await self._view_cached(
+            ("repo", repo), lambda: self.a.forge.get_repo(repo)
+        )
+
+    async def view_file(self, repo: str, path: str, ref: str | None) -> str | None:
+        """A file of ``repo`` at ``ref`` for the dashboard's views (CODEOWNERS), kept
+        like ``view_repo``."""
+        return await self._view_cached(
+            ("file", repo, path, ref or ""),
+            lambda: self.a.forge.get_file(repo, path, ref),
+        )
+
+    async def _view_cached(self, key: tuple[str, ...], read: Any) -> Any:
+        now = self.clock.now()
+        hit = self._views.get(key)
+        if hit is not None and (now - hit[0]).total_seconds() < VIEW_CACHE_SECONDS:
+            return hit[1]
+        reading = self._view_reads.get(key)
+        if reading is None:
+            # One read for every view that asks at once.
+            reading = asyncio.ensure_future(read())
+            self._view_reads[key] = reading
+            reading.add_done_callback(lambda _: self._view_reads.pop(key, None))
+        value = await asyncio.shield(reading)
+        self._views[key] = (now, value)
+        return value
 
     async def runs_on_for(
         self, route: Route | None, login: str | None, kind: str

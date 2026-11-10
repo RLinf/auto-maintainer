@@ -363,7 +363,7 @@ async def read_codeowners(
     ``None``): the profile's ``people.codeowners`` when it names one, else the first
     of the forge's places that has one; with its rules, or ``(None, [])``."""
     for location in [path] if path else list(codeowners_locations(repo)):
-        text = await service.a.forge.get_file(repo, location, ref)
+        text = await service.view_file(repo, location, ref)
         if text:
             return location, parse_codeowners(text)
     return None, []
@@ -1519,7 +1519,7 @@ def build_router() -> APIRouter:
         arm = await service.store.get_arm(repo, number)
         gate = None
         if profile is not None and arm is not None:
-            info = await service.a.forge.get_repo(repo)
+            info = await service.view_repo(repo)
             perms = {
                 r_.author: await permission(service, User(login=r_.author), repo)
                 for r_ in pr.reviews
@@ -1612,7 +1612,7 @@ def build_router() -> APIRouter:
             assignees,
             load_checks(await service.store.get_state(checks_key(repo, number))),
         )
-        info = await service.a.forge.get_repo(repo)
+        info = await service.view_repo(repo)
         on_default = info.default_branch == pr.base_ref
         profile = await service.profiles.active(repo)
         location, rules = await read_codeowners(
@@ -1767,7 +1767,7 @@ def build_router() -> APIRouter:
         report = code_owner_report(rules, pr)
         required: bool | None = None
         if location:
-            info = await service.a.forge.get_repo(repo)
+            info = await service.view_repo(repo)
             if info.default_branch == pr.base_ref:
                 required = info.requires_code_owner_reviews
         owners = {o.login.lower() for o in report.people}
