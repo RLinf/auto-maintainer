@@ -717,6 +717,7 @@ def test_one_owners_approval_covers_a_co_owner() -> None:
     assert len(report.parts) == 2 and report.waiting == []
     people = {p.login: p.need for p in report.people}
     assert people == {"lin": "approved", "guo": "covered"}
+    assert [p.covered_by for p in report.people if p.login == "guo"] == [["lin"]]
 
 
 def test_business_days() -> None:

@@ -504,6 +504,8 @@ export interface CodeOwnerStanding {
    * files, one of them and others must, another owner's approval covers them, or
    * they wrote the PR. */
   need: "approved" | "needed" | "one_of" | "covered" | "author";
+  /** For ``covered``: the owners whose approval covers all their files. */
+  covered_by?: string[];
 }
 
 /** ``GET /api/prs/{repo}/{n}/code-owners``: whom to ask for the approvals a merge

@@ -130,6 +130,8 @@ class OwnerStanding(BaseModel):
     alone can approve some of the files), ``one_of`` (one of them and other owners
     must), ``covered`` (another owner's approval covers all their files), or
     ``author`` (GitHub does not count the author's approval)."""
+    covered_by: list[str] = Field(default_factory=list)
+    """For ``covered``: the owners whose approval covers all their files."""
 
 
 class OwnedPart(BaseModel):
@@ -230,6 +232,11 @@ def code_owner_report(rules: list[OwnerRule], pr: PrSnapshot) -> CodeOwnerReport
             standing.need = "one_of"
         else:
             standing.need = "covered"
+            for part in parts.values():
+                if any(o.lower() == key for o in part.owners):
+                    for login in part.approved_by:
+                        if login not in standing.covered_by:
+                            standing.covered_by.append(login)
     return CodeOwnerReport(
         parts=list(parts.values()),
         people=list(people.values()),

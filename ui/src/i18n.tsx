@@ -1163,6 +1163,7 @@ const zh: Record<string, string> = {
   "This CLI has no sign-in: it runs only on a model API. To run it on your own, add one under My model APIs that speaks": "这个 CLI 没有登录方式，只能通过模型 API 运行。要用你自己的，请在“我的模型 API”里添加一个支持以下协议的：",
   "This CLI has no sign-in: it runs only on a model API. Choose one for it under Model providers.": "这个 CLI 没有登录方式，只能通过模型 API 运行。请在“模型服务商”里为它选一个。",
   "Has a model API key": "已有模型 API 密钥",
+  "covered by": "已覆盖，批准人",
   "Changes requested by": "要求修改：",
   "Needs": "还需要",
   "more approval": "个批准",

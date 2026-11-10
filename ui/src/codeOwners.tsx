@@ -160,7 +160,11 @@ export function OwnerGroups({ repo, people, waiting }: { repo: string; people: C
   const chip = (login: string, quiet = false) => {
     const o = byLogin.get(login.toLowerCase()) ?? unknownOwner(login);
     const url = ownerUrl(repo, o);
-    const s = standing(o, t);
+    // Why someone is not needed says more than whether GitHub asked them.
+    const s =
+      o.need === "covered" && o.covered_by?.length
+        ? { text: `${t("covered by")} ${o.covered_by.map((l) => aliasOf(l) ?? l).join(", ")}`, tone: "status-muted" }
+        : standing(o, t);
     const name = (
       <>
         {o.team ? <Icon name="list" size={13} /> : <Avatar login={prefix + o.login} size={18} />}
