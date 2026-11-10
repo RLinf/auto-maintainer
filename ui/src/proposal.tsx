@@ -6,6 +6,7 @@
 
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Link, useSearchParams } from "react-router-dom";
+import { unwatchAction, watchAction } from "./events";
 import { api, type ProposalWithAction } from "./api";
 import { AgentPicker, useAgentChoice } from "./agentPicker";
 import { Diff, ErrorBox, prPath, RejectButton, Status, useAct, When } from "./components";
@@ -44,6 +45,11 @@ export interface InlineComment {
   start_line?: number | null;
   side?: string;
   body: string;
+}
+
+/** How a notice names an action: what it does, and on which PR. */
+export function actionTitle(kind: string, number: number | null | undefined, t: (s: string) => string): string {
+  return `${t(KIND_LABELS[kind] ?? kind)}${number ? ` · #${number}` : ""}`;
 }
 
 const KIND_LABELS: Record<string, string> = {
@@ -178,10 +184,17 @@ export function ProposalCard({
           }
       : {}),
   });
-  const approve = useAct((as?: boolean) => {
+  const approve = useAct(async (as?: boolean) => {
     const edited = editing || changedTarget || dropped.length ? editedPayload() : undefined;
     const mine = as ?? postAsMe;
-    return api.post(`/api/proposals/${proposal.id}/approve`, { ...(edited ? { payload: edited } : {}), ...(mine ? { as_me: true } : {}) });
+    // The approval returns before the action runs; the page says how it went.
+    watchAction(proposal.action_id, actionTitle(kind, action?.number, t));
+    try {
+      return await api.post(`/api/proposals/${proposal.id}/approve`, { ...(edited ? { payload: edited } : {}), ...(mine ? { as_me: true } : {}) });
+    } catch (e) {
+      unwatchAction(proposal.action_id);
+      throw e;
+    }
   }, PROPOSAL_KEYS);
   // Keeps the edits on the draft without posting it; posting later sends what was saved.
   const save = useAct(() => api.post(`/api/proposals/${proposal.id}/edit`, { payload: editedPayload() }), PROPOSAL_KEYS);

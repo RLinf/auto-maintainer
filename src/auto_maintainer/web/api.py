@@ -3226,6 +3226,12 @@ def build_router() -> APIRouter:
                     data["asked_for"] = event.payload.get("asked_for")
                 if event.kind == EventKind.JOB_PROGRESS:
                     data["job"] = event.payload.get("job")
+                if event.kind in (EventKind.ACTION_EXECUTED, EventKind.ACTION_FAILED):
+                    # The page that approved it says how it went (``ui/src/events.ts``).
+                    data["action"] = {
+                        key: event.payload.get(key)
+                        for key in ("action_id", "kind", "status", "error")
+                    }
                 yield f"event: {event.kind}\ndata: {json.dumps(data)}\n\n"
 
         return StreamingResponse(stream(), media_type="text/event-stream")

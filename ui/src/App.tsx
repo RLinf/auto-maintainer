@@ -9,7 +9,7 @@ import { api, ApiError, type Me } from "./api";
 import { AgentProvider, useAgent } from "./agent";
 import { Empty, ErrorBox } from "./components";
 import { useMe, useMemoryChanges, useProposals } from "./data";
-import { QUESTION_EVENT, useLiveEvents } from "./events";
+import { ACTION_EVENT, QUESTION_EVENT, useLiveEvents, type ActionOutcome } from "./events";
 import { JobDrawer } from "./jobs";
 import { useLang, useT } from "./i18n";
 import { Icon } from "./icons";
@@ -106,6 +106,18 @@ function Shell({ me }: { me: Me }) {
     window.addEventListener(QUESTION_EVENT, onAsk);
     return () => window.removeEventListener(QUESTION_EVENT, onAsk);
   }, [toast, navigate, t]);
+  useEffect(() => {
+    const onAction = (e: Event) => {
+      const o = (e as CustomEvent<ActionOutcome>).detail;
+      toast(
+        o.ok
+          ? { title: `${o.label}: ${o.status === "noop" ? t("nothing to do") : t("done")}`, icon: "check" }
+          : { title: `${o.label}: ${t("not done")}`, body: o.error || t(o.status), icon: "x" },
+      );
+    };
+    window.addEventListener(ACTION_EVENT, onAction);
+    return () => window.removeEventListener(ACTION_EVENT, onAction);
+  }, [toast, t]);
 
   const signOut = async () => {
     await fetch("/auth/logout", { method: "POST", credentials: "same-origin" });

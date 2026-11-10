@@ -1163,6 +1163,8 @@ const zh: Record<string, string> = {
   "This CLI has no sign-in: it runs only on a model API. To run it on your own, add one under My model APIs that speaks": "这个 CLI 没有登录方式，只能通过模型 API 运行。要用你自己的，请在“我的模型 API”里添加一个支持以下协议的：",
   "This CLI has no sign-in: it runs only on a model API. Choose one for it under Model providers.": "这个 CLI 没有登录方式，只能通过模型 API 运行。请在“模型服务商”里为它选一个。",
   "Has a model API key": "已有模型 API 密钥",
+  "not done": "未完成",
+  "nothing to do": "无需操作",
   "Stop the agent; you can send the next message right away": "停止智能体；你可以立刻发送下一条消息",
   "Stop the agent and send this instead": "停止智能体，改为发送这条",
   "Parts of the change with an approval from one of their code owners; one person's approval covers every part they own.": "已获其代码所有者之一批准的变更部分数；一个人的批准覆盖其拥有的所有部分。",

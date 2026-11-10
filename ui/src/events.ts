@@ -70,6 +70,46 @@ export function refreshShown(client: QueryClient) {
 const PING_MS = 15_000;
 const DEAD_MS = 3 * PING_MS;
 
+/** Dispatched with an ``ActionOutcome`` when an action this page approved ran. */
+export const ACTION_EVENT = "am-action";
+
+export interface ActionOutcome {
+  label: string;
+  ok: boolean;
+  status: string;
+  error: string | null;
+}
+
+/** Actions approved from this page, waiting to run, with how to name them. */
+const watched = new Map<string, { label: string; at: number }>();
+
+/** Say how the action ``id`` went once it runs: an approval returns before its
+ * action does (a push, a post), and a failure would otherwise show nowhere the
+ * approver looks. Called before the approval is sent, so a quick run is not missed. */
+export function watchAction(id: string, label: string) {
+  const now = Date.now();
+  for (const [key, w] of watched) if (now - w.at > 30 * 60_000) watched.delete(key);
+  watched.set(id, { label, at: now });
+}
+
+export function unwatchAction(id: string) {
+  watched.delete(id);
+}
+
+function reportAction(raw: string) {
+  try {
+    const action = (JSON.parse(raw) as { action?: { action_id?: string; status?: string; error?: string | null } }).action;
+    const w = action?.action_id ? watched.get(action.action_id) : undefined;
+    if (!action?.action_id || !w) return;
+    watched.delete(action.action_id);
+    const status = action.status ?? "";
+    const detail: ActionOutcome = { label: w.label, ok: status === "executed" || status === "noop", status, error: action.error ?? null };
+    window.dispatchEvent(new CustomEvent(ACTION_EVENT, { detail }));
+  } catch {
+    // an outcome the page cannot read stays in the PR's timeline
+  }
+}
+
 /** Called for every ``question.asked`` event, to alert reviewers. */
 export const QUESTION_EVENT = "am-question";
 
@@ -116,6 +156,7 @@ export function useLiveEvents(enabled: boolean, login?: string) {
         );
       }
       if (e.type === "question.asked") alertReviewer(e.data, login);
+      if (e.type === "action.executed" || e.type === "action.failed") reportAction(e.data);
     };
     const connect = () => {
       source?.close();

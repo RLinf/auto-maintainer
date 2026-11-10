@@ -10,7 +10,8 @@ import { useProposals } from "../data";
 import { useT } from "../i18n";
 import { Icon } from "../icons";
 import { BulkBar, ListToolbar, useList } from "../list";
-import { kindLabel, ProposalCard, PROPOSAL_KEYS } from "../proposal";
+import { watchAction } from "../events";
+import { actionTitle, kindLabel, ProposalCard, PROPOSAL_KEYS } from "../proposal";
 import { Skeleton, Tabs, useTab, useToast } from "../ui";
 
 export { useProposals } from "../data";
@@ -55,7 +56,11 @@ export default function InboxPage({ me }: { me: Me }) {
   // Changes to the service's code and repositories to add, asked for in conversations.
   const requests = useQuery({ queryKey: ["chat", "requests"], queryFn: () => api.get<PendingRequest[]>("/api/chat/requests") });
   const bulk = useAct(async (ids: string[]) => {
-    for (const id of ids) await api.post(`/api/proposals/${id}/approve`, {});
+    for (const id of ids) {
+      const p = rows.find((r) => r.id === id);
+      if (p?.action) watchAction(p.action_id, actionTitle(p.action.action.kind, p.action.action.number, t));
+      await api.post(`/api/proposals/${id}/approve`, {});
+    }
     return ids.length;
   }, PROPOSAL_KEYS);
 
