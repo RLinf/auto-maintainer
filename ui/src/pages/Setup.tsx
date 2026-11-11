@@ -217,8 +217,8 @@ export default function SetupPage({ firstRun = false }: { firstRun?: boolean }) 
         done={!!s.repo && savedLink}
         hint={t("Your own fork or copy of auto-maintainer. Its admin owns this service, updates are deployed from it, and the changes the service makes to itself are proposed there. Its forge, GitHub or GitLab, is where this service works.")}
       >
-        <div className="row" style={{ gap: 8 }}>
-          <input value={link} onChange={(e) => setLink(e.target.value)} placeholder="https://github.com/you/auto-maintainer" style={{ flex: 1, minWidth: 240 }} spellCheck={false} />
+        <div className="row form-row" style={{ gap: 8 }}>
+          <input value={link} onChange={(e) => setLink(e.target.value)} placeholder="https://github.com/you/auto-maintainer" className="grow-input" spellCheck={false} />
           {unknownHost && (
             <select value={kind} onChange={(e) => setKind(e.target.value as "github" | "gitlab" | "")} aria-label={t("Kind")}>
               <option value="">{t("GitHub or GitLab?")}</option>
@@ -354,8 +354,8 @@ export default function SetupPage({ firstRun = false }: { firstRun?: boolean }) 
 
       <Step n={5} title={t("Memory repository")} done={!!s.memory || memory.data?.repo === null} hint={t("A private repository where the service keeps profiles, settings, and what it learns, as reviewable commits.")}>
         {s.memory && <Status value="executed" label={s.memory} />}
-        <div className="row">
-          <input value={memoryRepo} onChange={(e) => setMemoryRepo(e.target.value)} placeholder="you/auto-maintainer-memory" style={{ flex: 1, minWidth: 220 }} />
+        <div className="row form-row">
+          <input value={memoryRepo} onChange={(e) => setMemoryRepo(e.target.value)} placeholder="you/auto-maintainer-memory" className="grow-input" />
           <button className="primary sm" disabled={!memoryRepo || memory.isPending || !s.identity} onClick={() => memory.mutate({ repo: memoryRepo, create: true })}>
             {t("Create or use")}
           </button>
@@ -454,14 +454,14 @@ function ForgeSignIn({ role, forge, site, title, body, onDone }: { role: "owner"
           body={forge.device ? t("Or paste a token with the scopes api and read_user.") : t("This GitLab needs an OAuth application for the one-time code; paste a token with the scopes api and read_user instead.")}
           action={
             <form
-              className="row"
+              className="row form-row"
               style={{ gap: 8 }}
               onSubmit={(e) => {
                 e.preventDefault();
                 withToken.mutate();
               }}
             >
-              <input type="password" value={token} onChange={(e) => setToken(e.target.value)} autoComplete="off" style={{ flex: 1, minWidth: 200 }} />
+              <input type="password" value={token} onChange={(e) => setToken(e.target.value)} autoComplete="off" className="grow-input" />
               <button className="primary sm" disabled={!token.trim() || withToken.isPending}>
                 {withToken.isPending ? t("Signing in…") : t("Sign in")}
               </button>

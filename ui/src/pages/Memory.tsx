@@ -150,7 +150,7 @@ function FileBrowser() {
   });
   const files = (tree.data ?? []).filter((f) => f.toLowerCase().includes(filter.toLowerCase()));
   return (
-    <div className="split" style={{ gridTemplateColumns: "320px minmax(0, 1fr)" }}>
+    <div className="split memory-browser">
       <Section title={t("Files")} hint={`${files.length}`}>
         <label className="search" style={{ minWidth: 0, width: "100%", marginBottom: 8 }}>
           <Icon name="search" />

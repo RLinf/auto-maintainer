@@ -451,13 +451,13 @@ export function RejectButton({
   }
   return (
     <form
-      className="row"
+      className="row form-row"
       onSubmit={(e) => {
         e.preventDefault();
         if (reason.trim()) onReject(reason.trim());
       }}
     >
-      <input autoFocus value={reason} onChange={(e) => setReason(e.target.value)} placeholder={t("Reason (required)")} style={size ? { height: 28 } : undefined} />
+      <input autoFocus value={reason} onChange={(e) => setReason(e.target.value)} placeholder={t("Reason (required)")} className="grow-input" style={size ? { height: 28 } : undefined} />
       <button className={`danger solid ${size ?? ""}`} disabled={!reason.trim() || busy}>
         {t(label)}
       </button>

@@ -54,7 +54,7 @@ export function FixCiForm({
     [["work"], ["pr"], ["proposals"]],
   );
   return (
-    <div className="stack" style={{ gap: 8, padding: 6, width: 360, maxWidth: "100%" }}>
+    <div className="stack" style={{ gap: 8, padding: 6, width: "min(360px, calc(100vw - 24px))", maxWidth: "100%" }}>
       <span className="small muted">
         {t("An agent reads why these jobs fail and fixes the PR's code:")} <strong>{failed.join(", ")}</strong>.{" "}
         {t("On a test machine it copies its change there and runs the failing steps until they pass. You get the fix as a draft and push it as yourself.")}
@@ -100,7 +100,7 @@ export function FixCiForm({
         value={note}
         onChange={(e) => setNote(e.target.value)}
       />
-      <div className="row" style={{ flexWrap: "nowrap" }}>
+      <div className="row">
         <AgentPicker value={agent} onChange={setAgent} task="fix" />
         <button
           className="primary right"

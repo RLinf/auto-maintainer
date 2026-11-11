@@ -93,7 +93,7 @@ function Abilities({ m }: { m: ModelSpec }) {
 export function ApiSummary({ row, extra }: { row: ApiRow; extra?: React.ReactNode }) {
   const t = useT();
   return (
-    <dl className="props" style={{ paddingLeft: 26 }}>
+    <dl className="props provider-indent">
       <dt>{t("Base URL")}</dt>
       <dd>
         <code>{row.base_url}</code>

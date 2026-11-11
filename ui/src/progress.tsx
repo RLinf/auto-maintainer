@@ -318,7 +318,7 @@ function ReviewerRow({
           </span>
         </span>
         <Verdict r={r} />
-        <span className="row small" style={{ gap: 6, flexWrap: "nowrap", minWidth: 150 }}>
+        <span className="row small reviewer-addressed">
           <AddressedBar value={r.addressed} width={60} />
           {has ? `${done}/${r.comments.length} ${t("done")}` : <span className="muted">{t("no comments")}</span>}
         </span>

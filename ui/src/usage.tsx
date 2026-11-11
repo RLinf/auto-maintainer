@@ -200,7 +200,7 @@ export function AgentsUsageSection({ mine = false }: { mine?: boolean }) {
         <div className="list">
           {u.agents.map((a) => (
             <div key={a.name} className="list-row" style={{ alignItems: "flex-start", flexWrap: "wrap", gap: 16 }}>
-              <span className="main" style={{ minWidth: 180 }}>
+              <span className="main usage-agent-main">
                 <span className="t mono">{a.name}</span>
                 <span className="meta">
                   {tokens(a.input_tokens + a.output_tokens)} {t("tokens")} · {a.runs} {t("runs")}
@@ -224,7 +224,7 @@ function QuotaView({ quota }: { quota: AgentQuota | null }) {
   if (!quota) return <span className="small muted">{t("This CLI does not report its limits.")}</span>;
   if (!quota.buckets.length) return <span className="small muted">{quota.note}</span>;
   return (
-    <div className="stack" style={{ gap: 6, flex: "1 1 280px", minWidth: 0 }}>
+    <div className="stack usage-quota" style={{ gap: 6 }}>
       {quota.buckets.map((b) => {
         const left = b.remaining;
         const color = left == null ? "var(--muted)" : left > 0.5 ? "var(--ok)" : left > 0.2 ? "var(--warn)" : "var(--bad)";

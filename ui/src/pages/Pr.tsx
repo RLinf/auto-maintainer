@@ -692,16 +692,12 @@ function RootCauseView({ cause, prUrl, sha }: { cause: RootCause; prUrl: string;
 
 function ScoreBar({ name, value }: { name: string; value: number }) {
   return (
-    <div className="row" style={{ gap: 8, flexWrap: "nowrap" }} title={`${name}: ${value}`}>
-      <span className="small" style={{ width: 104, flexShrink: 0 }}>
-        {name.replace(/_/g, " ")}
+    <div className="score-bar" title={`${name}: ${value}`}>
+      <span className="small score-bar-name">{name.replace(/_/g, " ")}</span>
+      <span className="score-bar-track">
+        <span style={{ width: `${Math.max(0, Math.min(10, value)) * 10}%` }} />
       </span>
-      <span style={{ flex: 1, height: 6, borderRadius: 3, background: "var(--surface-3)", overflow: "hidden" }}>
-        <span style={{ display: "block", width: `${Math.max(0, Math.min(10, value)) * 10}%`, height: "100%", borderRadius: 3, background: "var(--accent)" }} />
-      </span>
-      <span className="small" style={{ width: 28, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
-        {value}
-      </span>
+      <span className="small score-bar-val">{value}</span>
     </div>
   );
 }

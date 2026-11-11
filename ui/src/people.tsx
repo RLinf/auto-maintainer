@@ -593,7 +593,7 @@ function RolesView({ repo, gov, roles, name }: { repo: string; gov: Governance; 
             <summary>
               <RoleBadge role={r} />
               <span className="ellipsis role-desc small muted">{r.description}</span>
-              <span className="row small" style={{ gap: 6, marginLeft: "auto", flexShrink: 0 }}>
+              <span className="row small role-pills">
                 {r.maintains && (
                   <span className="pill status-ok" title={t("Its holders configure the repository here, assign reviewers, and decide every proposal.")}>
                     {t("maintains")}

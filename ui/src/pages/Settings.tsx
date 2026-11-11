@@ -225,7 +225,7 @@ function AskCard({ onAsk }: { onAsk: (prompt: string, send?: boolean) => void })
 
 function Row({ icon, title, sub, value, actions }: { icon?: IconName; title: ReactNode; sub?: ReactNode; value?: ReactNode; actions?: ReactNode }) {
   return (
-    <div className="list-row" style={{ padding: "12px 4px", alignItems: "flex-start" }}>
+    <div className="list-row settings-row">
       {icon && (
         <span style={{ paddingTop: 2 }}>
           <Icon name={icon} />
@@ -241,8 +241,8 @@ function Row({ icon, title, sub, value, actions }: { icon?: IconName; title: Rea
           </span>
         )}
       </span>
-      {value && <span className="small" style={{ textAlign: "right", maxWidth: "45%" }}>{value}</span>}
-      {actions && <span className="row" style={{ gap: 4, flexWrap: "nowrap" }}>{actions}</span>}
+      {value && <span className="small settings-row-value">{value}</span>}
+      {actions && <span className="row settings-row-actions">{actions}</span>}
     </div>
   );
 }
@@ -387,7 +387,7 @@ function AgentModeSwitch({ agent, canChange }: { agent: SettingsAgent; canChange
       )}
     >
       {(close) => (
-        <div className="stack" style={{ gap: 10, padding: 8, width: 380, maxWidth: "calc(100vw - 48px)" }}>
+        <div className="stack" style={{ gap: 10, padding: 8, width: "min(380px, calc(100vw - 24px))", maxWidth: "100%" }}>
           <strong className="small">
             {agent.name}: {t("skip permission checks on every task")}
           </strong>
@@ -547,7 +547,7 @@ function InstallButton({ name, source, state, canInstall }: { name: string; sour
     return () => window.clearInterval(timer);
   }, [running, client]);
   return (
-    <span className="stack" style={{ gap: 2, alignItems: "flex-end", maxWidth: 320 }}>
+    <span className="stack install-status">
       <button
         className="sm"
         disabled={!canInstall || running || install.isPending}
@@ -557,7 +557,7 @@ function InstallButton({ name, source, state, canInstall }: { name: string; sour
         <Icon name="download" size={14} />
         {running ? t("Installing…") : t("Install")}
       </button>
-      {running && state.lines.length > 0 && <span className="small muted truncate" style={{ maxWidth: 320 }}>{state.lines[state.lines.length - 1]}</span>}
+      {running && state.lines.length > 0 && <span className="small muted truncate" style={{ maxWidth: "100%" }}>{state.lines[state.lines.length - 1]}</span>}
       {state?.state === "failed" && <span className="small danger-text" style={{ whiteSpace: "normal" }}>{state.error}</span>}
       {install.error && <ErrorBox error={install.error} />}
     </span>
@@ -801,7 +801,7 @@ function ProviderRow({ p, canEdit }: { p: SettingsProvider; canEdit: boolean }) 
         }
       />
       {test.data && (
-        <div className={test.data.ok ? "notice small" : "error"} style={{ marginLeft: 26 }}>
+        <div className={`${test.data.ok ? "notice small" : "error"} provider-offset`}>
           {test.data.ok ? (
             <>
               <Icon name="check" size={13} /> {t("Connected")}: {test.data.models.length} {t("models")}
@@ -811,7 +811,7 @@ function ProviderRow({ p, canEdit }: { p: SettingsProvider; canEdit: boolean }) 
           )}
         </div>
       )}
-      <div style={{ paddingLeft: 26 }}>
+      <div className="provider-indent">
         <ErrorBox error={test.error || remove.error} />
       </div>
     </div>
@@ -1026,7 +1026,7 @@ function MachineRow({ m, canChange }: { m: LabMachine; canChange: boolean }) {
   const c = check.data;
   return (
     <div className="stack" style={{ gap: 8 }}>
-      <div className="list-row" style={{ padding: "12px 4px", alignItems: "flex-start" }}>
+      <div className="list-row settings-row">
         <span style={{ paddingTop: 2 }}>
           <Icon name="server" />
         </span>
@@ -1062,7 +1062,7 @@ function MachineRow({ m, canChange }: { m: LabMachine; canChange: boolean }) {
           <ErrorBox error={check.error || remove.error} />
         </span>
         {canChange && (
-          <span className="row" style={{ gap: 4 }}>
+          <span className="row settings-row-actions">
             <button className="sm" disabled={check.isPending} onClick={() => check.mutate(undefined)}>
               {check.isPending ? t("Checking…") : t("Check")}
             </button>
@@ -1375,8 +1375,8 @@ function FileTab({ v }: { v: SettingsView }) {
         rows={Math.min(28, Math.max(10, text.split("\n").length + 2))}
         placeholder={"schema: 1\nproviders:\n  my-gateway:\n    protocol: openai\n    base_url: https://gateway.example/v1\n    api_key: MY_GATEWAY_KEY\n    models: [some-model]\nagents:\n  codex: {provider: my-gateway}\n"}
       />
-      <div className="row" style={{ marginTop: 8 }}>
-        <input value={title} onChange={(e) => setTitle(e.target.value)} aria-label={t("Change title")} style={{ flex: 1, minWidth: 200 }} />
+      <div className="row form-row" style={{ marginTop: 8 }}>
+        <input value={title} onChange={(e) => setTitle(e.target.value)} aria-label={t("Change title")} className="grow-input" />
         <button disabled={!dirty || check.isPending} onClick={() => check.mutate(text, { onSuccess: setChecked })}>
           {t("Check")}
         </button>

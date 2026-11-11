@@ -251,7 +251,7 @@ function LogsSection() {
           </code>
         )}
         <span className="spacer" />
-        <input placeholder={t("Filter")} value={filter} onChange={(e) => setFilter(e.target.value)} style={{ width: 180, height: 30 }} />
+        <input placeholder={t("Filter")} value={filter} onChange={(e) => setFilter(e.target.value)} className="log-filter" />
         <label className="row small" style={{ gap: 6 }}>
           <input type="checkbox" checked={problems} onChange={(e) => setProblems(e.target.checked)} />
           {t("Errors and warnings only")}

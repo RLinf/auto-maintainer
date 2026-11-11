@@ -29,7 +29,7 @@ export function ReproduceForm({ repo, number, onClose }: { repo: string; number:
     [["work"], ["pr"]],
   );
   return (
-    <div className="stack" style={{ gap: 10, padding: 6, width: 360, maxWidth: "100%" }}>
+    <div className="stack" style={{ gap: 10, padding: 6, width: "min(360px, calc(100vw - 24px))", maxWidth: "100%" }}>
       <span className="small muted">{t("An agent plans how to check what the PR claims. You approve the plan; then the agent does it on the machine step by step, and the result goes into the PR's review.")}</span>
       {view.isLoading ? (
         <Skeleton rows={2} />

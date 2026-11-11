@@ -471,8 +471,8 @@ function SettingsEditor({
       {editing ? (
         <>
           <textarea value={text} onChange={(e) => setText(e.target.value)} rows={Math.min(30, Math.max(8, text.split("\n").length + 2))} spellCheck={false} />
-          <div className="row" style={{ marginTop: 8 }}>
-            <input value={title} onChange={(e) => setTitle(e.target.value)} style={{ flex: 1, minWidth: 200 }} aria-label={t("Change title")} />
+          <div className="row form-row" style={{ marginTop: 8 }}>
+            <input value={title} onChange={(e) => setTitle(e.target.value)} className="grow-input" aria-label={t("Change title")} />
             <button
               type="button"
               className="ghost"
