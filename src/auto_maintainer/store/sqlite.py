@@ -638,7 +638,7 @@ class SqliteStore:
                 id=signal.id,
                 repo=signal.repo,
                 kind=signal.kind.value,
-                consumed=False,
+                consumed=signal.consumed_by is not None,
                 created_at=ts(signal.created_at),
                 data=_dump(signal),
             )
@@ -1028,6 +1028,30 @@ class SqliteStore:
             .where(m.chat_messages.c.id == message.id)
             .values(data=_dump(message))
         )
+
+    async def list_said(
+        self, limit: int = 20_000
+    ) -> list[tuple[str, ChatThread | None, ChatMessage]]:
+        rows = await self._fetch(
+            select(m.chat_messages.c.data)
+            .order_by(m.chat_messages.c.created_at.desc())
+            .limit(limit * 4)
+        )
+        said = [
+            msg
+            for msg in reversed(_many(ChatMessage, rows))
+            if msg.role == "user" and msg.text.strip()
+        ][-limit:]
+        threads: dict[str, ChatThread | None] = {}
+        out = []
+        for msg in said:
+            if msg.thread_id not in threads:
+                threads[msg.thread_id] = await self.get_thread(msg.thread_id)
+            thread = threads[msg.thread_id]
+            who = msg.author or (thread.owner if thread else None)
+            if who:
+                out.append((who, thread, msg))
+        return out
 
     async def list_messages(self, thread_id: str) -> list[ChatMessage]:
         stmt = (

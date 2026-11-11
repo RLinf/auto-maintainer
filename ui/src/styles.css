@@ -302,6 +302,15 @@ a.list-row:hover { background: var(--surface-2); text-decoration: none; }
 .row-action { opacity: 0.55; }
 tr:hover .row-action, .row-action:focus-visible { opacity: 1; }
 /* Settings → Usage: limits per person, and each person's tokens by kind of task. */
+.note-list { display: grid; gap: 6px; }
+.note-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; align-items: center; gap: 8px; }
+.note-row input { width: 100%; }
+.note-row select { width: 150px; }
+.note-row .pill { min-width: 92px; justify-content: center; text-align: center; }
+@media (max-width: 720px) {
+  .note-row { grid-template-columns: auto minmax(0, 1fr) auto; }
+  .note-row input { grid-column: 1 / -1; }
+}
 .limit-row { display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap; padding: 8px 0; border-bottom: 1px solid var(--border); }
 .limit-row:last-of-type { border-bottom: none; }
 .limit-who { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 180px; }

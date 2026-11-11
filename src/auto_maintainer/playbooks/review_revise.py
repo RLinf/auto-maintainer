@@ -146,10 +146,12 @@ def revision_blocks(
     diff: str,
     payload: ReviewPostPayload,
     diff_limit: int = 120_000,
+    reviewer: str = "",
 ) -> list[str]:
     """Everything a revising agent reads after its instructions: the skill and the
     format, ``reproduction`` (a ``reproduction_block``), the lessons, the checkout, the
-    PR, and the review as data and as text."""
+    PR, and the review as data and as text. ``reviewer``: the notes about reviews of
+    the person the draft is for (``person_notes.notes_block``)."""
     _, field = names(kind)
     if kind == TaskKind.REVIEW:
         format_block = (
@@ -170,6 +172,7 @@ def revision_blocks(
         f"Review lessons from this repository's maintainers:\n{lessons}"
         if lessons
         else "",
+        reviewer,
         f"The working directory is a checkout of the reviewed commit {head}. "
         f"Compare against origin/{default_branch}."
         + (

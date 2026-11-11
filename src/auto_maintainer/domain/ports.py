@@ -831,6 +831,14 @@ class Store(Protocol):
 
     async def list_messages(self, thread_id: str) -> list[ChatMessage]: ...
 
+    async def list_said(
+        self, limit: int = 20_000
+    ) -> list[tuple[str, ChatThread | None, ChatMessage]]:
+        """Messages people wrote in conversations, oldest first, the newest
+        ``limit``: who wrote each (its author, else its thread's owner), its thread,
+        and the message."""
+        ...
+
     # users, audit, service state
     async def save_user(self, user: UserRecord) -> None: ...
     async def get_user(self, login: str) -> UserRecord | None: ...

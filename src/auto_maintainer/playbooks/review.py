@@ -55,6 +55,7 @@ from .base import (
     may_succeed_later,
 )
 from .feedback import declined_labels, rejections_block, rejections_on
+from .person_notes import load_notes, notes_block
 from .prompts import (
     accepted_labels,
     headless,
@@ -192,6 +193,11 @@ class ReviewPlaybook(Playbook):
                 )
             )
             lessons = await ctx.knowledge.review_lessons(pr.repo, profile)
+            reviewer = (
+                notes_block(await load_notes(ctx.store, ctx.requested_by), "reviews")
+                if ctx.requested_by
+                else ""
+            )
             own_format = skill_owns_format(profile, workdir)
             testing = machine.testing(ctx.requested_by) if machine.token else None
             prompt = "\n\n".join(
@@ -212,6 +218,7 @@ class ReviewPlaybook(Playbook):
                     f"Review lessons from this repository's maintainers:\n{lessons}"
                     if lessons
                     else "",
+                    reviewer,
                     f"The working directory is a checkout of the PR head {pr.head_sha}. "
                     f"Compare against origin/{info.default_branch}.",
                     pr_block(pr, diff),

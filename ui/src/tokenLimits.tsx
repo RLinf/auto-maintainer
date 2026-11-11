@@ -68,6 +68,7 @@ const KINDS: Record<string, string> = {
   onboard: "Onboarding",
   learn: "Lessons",
   self_improve: "Self-improvement",
+  person_notes: "Preferences",
 };
 
 export function kindLabel(kind: string, t: T): string {

@@ -45,6 +45,7 @@ from .base import (
     may_succeed_later,
 )
 from .feedback import declined_labels, rejections_block, rejections_on
+from .person_notes import load_notes, notes_block
 from .prompts import (
     accepted_labels,
     headless,
@@ -191,6 +192,11 @@ class Followup(Playbook):
                     ),
                     writing_block(profile),
                     quality_block(profile, followup=True),
+                    notes_block(
+                        await load_notes(ctx.store, ctx.requested_by), "reviews"
+                    )
+                    if ctx.requested_by
+                    else "",
                     f"Last reviewed commit: {previous_sha or 'unknown'}. Head: {pr.head_sha}.",
                     testing_block(
                         machine,

@@ -32,6 +32,7 @@ from .learn import LearnFromRejection
 from .merge import MergePlaybook
 from .merge_base import MergeBasePlaybook
 from .onboard import Onboard, ProfileDrift
+from .person_notes import LearnPersonNotes, PersonNotesScan
 from .quality import (
     QualityPlaybook,
     QualityScan,
@@ -75,6 +76,8 @@ def all_playbooks() -> list[Playbook]:
         QuickQualityPlaybook(),
         QuickLearnPlaybook(),
         QualityScan(),
+        LearnPersonNotes(),
+        PersonNotesScan(),
     ]
 
 

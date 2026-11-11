@@ -51,11 +51,13 @@ from ..domain.diffs import commentable
 from ..domain.events import Event, EventKind
 from ..domain.ids import new_id
 from ..domain.labs import unusable
+from ..domain.memory import SignalKind
 from ..domain.profile import RepoProfile, Route
 from ..domain.records import ActionRecord, ChatMessage, ChatThread, Job
 from ..domain.secrets import redact_secrets
 from ..domain.snapshot import PrSnapshot
 from ..playbooks.base import author_is_team
+from ..playbooks.person_notes import load_notes, notes_block, remember_said
 from ..playbooks.prompts import reproduction_block, schema_hint, told_block
 from ..playbooks.review import reproduction_record
 from ..playbooks.review_revise import (
@@ -372,6 +374,16 @@ async def _tell(
         while_running=True,
     )
     await service.store.add_message(message)
+    await remember_said(
+        service.store,
+        user.login,
+        text,
+        repo=job.repo,
+        number=job.number,
+        where="review discussion",
+        kind=SignalKind.REVIEW_DISCUSSION,
+        message_id=message.id,
+    )
     if removed:
         await service.store.add_message(
             ChatMessage(
@@ -421,8 +433,18 @@ async def _turn(
     apply_thread_agent(service, thread, agent, default_agent=default_agent)
     text, removed = redact_secrets(said)
     await service.store.save_thread(thread)
-    await service.store.add_message(
-        ChatMessage(thread_id=thread.id, role="user", text=text, author=user.login)
+    said = ChatMessage(thread_id=thread.id, role="user", text=text, author=user.login)
+    await service.store.add_message(said)
+    await remember_said(
+        service.store,
+        user.login,
+        text,
+        repo=job.repo,
+        number=job.number,
+        where="review discussion",
+        kind=SignalKind.REVIEW_DISCUSSION,
+        action_kind=record.action.kind,
+        message_id=said.id,
     )
     history = await service.store.list_messages(thread.id)
     head = record.action.head_sha or pr.head_sha
@@ -471,7 +493,14 @@ async def _turn(
                 diff=diff,
                 payload=payload,
                 diff_limit=TALK_DIFF_LIMIT,
+                reviewer=notes_block(
+                    await load_notes(service.store, record.action.draft_for),
+                    "reviews",
+                )
+                if record.action.draft_for
+                else "",
             ),
+            notes_block(await load_notes(service.store, user.login), "conversations"),
             reading_line(user.login) if door is not None else "",
             schema_hint(model.model_json_schema()),
             f"Answer the newest message, from {user.login}, above.",

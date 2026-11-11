@@ -47,6 +47,7 @@ from . import (
     my_agents,
     ownership,
     people_talk,
+    person_notes,
     review_talk,
     settings,
     setup,
@@ -141,6 +142,7 @@ def create_app(
     app.include_router(translate.build_router())
     app.include_router(my_agents.build_router())
     app.include_router(aliases.build_router())
+    app.include_router(person_notes.build_router())
     if setup_steps is not None and on_host_change is not None:
 
         async def maintainer(request: Request) -> dict[str, Any]:

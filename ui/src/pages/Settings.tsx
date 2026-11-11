@@ -19,6 +19,7 @@ import { agentName } from "../agentPicker";
 import { useAgentsData } from "./Agents";
 import { SettingsChangeCard } from "../settingsChange";
 import { MyAgentsSection, MyApisSection, ServiceSignIn } from "../agentAccounts";
+import { MyNotesSection } from "../personNotes";
 import { ApiForm, ApiSummary, modelsFor, PROTOCOLS } from "../providerForm";
 import { ForgesCard } from "../forgeSetup";
 import { OwnerCard } from "../ownerCard";
@@ -147,6 +148,7 @@ export default function SettingsPage() {
         <div className="stack" style={{ gap: 16 }}>
           <AgentsTab v={v} ask={ask} />
           <MyAgentsSection />
+          <MyNotesSection />
           <SandboxCard />
         </div>
       )}

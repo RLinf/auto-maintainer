@@ -931,6 +931,18 @@ Each knowledge entry records `id`, text, source signals, `added_by`, `added_at`,
 
 Skills whose content depends on memory, such as the rubric section of `pr-priority`, are rendered per repository from memory at task time rather than edited in place.
 
+**Each person's notes** (`playbooks/person_notes.py`). Besides what holds for a repository, the service keeps, per person, a short list of what they want from its agents. Each note is about the reviews drafted for them, about how the agents talk with them, or both; there are at most sixteen learned notes, plus any they write. Everything the person says and does teaches it:
+- every message they write in a conversation: the chat, a review's discussion, the People conversation (`conversation`, `review_discussion`);
+- their edits to review and follow-up drafts before posting (`draft_edited`);
+- what they turned down and why (`proposal_rejected`);
+- what they ask to remember (`chat_instruction`).
+
+What a person writes in a conversation is kept as a signal for their notes alone, consumed at once (`consumed_by: person_notes`), so the journal never writes it to the memory repo. The first scan also keeps the conversations people had before (`backfill_said`), each message once (its signal's id is the message's).
+
+On each review scan, a person with five new signals, whose notes last learned at least six hours ago, gets one quick agent run (`person_notes`, in the `quality` pool, `budget: quick`). It turns the new signals and the current notes into the notes as they should be. A note the person wrote, or changed, is theirs: learning keeps it as it is. Every review, follow-up, and revision drafted for them reads their notes about reviews; every conversation with them (chat, review discussions, the People conversation) reads those about conversations. The repository's lessons win where the two differ. Scans and events work for nobody and read none.
+
+The notes shape only what the agents do for that person, so they belong to the person and need nobody's approval: they live in the service's store (`person_notes:<login>`). Each person sees and edits their own, choosing what each is about, and turns their learning off, under Settings → Agents → **My preferences** (`/api/me/notes`). The same section shows how many of the review drafts they posted they edited first, over the last 30 days and the 30 before. A conversation saves a preference the person states (`preference` proposals, with what it is about). A note about reviews that the agent finds other people hold too, and that holds for every review of a repository rather than one person's taste, is proposed as that repository's review lesson, which waits for a maintainer.
+
 ### 5.12 Self-evolution and self-update
 
 The service grows in two ways. Its memory grows from what reviewers teach it (5.11). Its code grows from what they ask for: a reviewer asks in chat for something the service cannot do yet, the service changes its own code, and its maintainers decide whether that code is merged and when the service runs it.

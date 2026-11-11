@@ -81,6 +81,10 @@ class SignalKind(StrEnum):
     PR_OUTCOME = "pr_outcome"
     CI_OUTCOME = "ci_outcome"
     CHAT_INSTRUCTION = "chat_instruction"
+    REVIEW_DISCUSSION = "review_discussion"
+    """What a reviewer said discussing a review or follow-up draft with its agent."""
+    CONVERSATION = "conversation"
+    """What a person said in a conversation with the service's agents."""
     HUMAN_ACTION = "human_action"
 
 

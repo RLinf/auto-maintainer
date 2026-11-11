@@ -45,6 +45,7 @@ from ..domain.memory import MemoryChangeState
 from ..domain.records import ChatMessage, ChatThread
 from ..domain.secrets import redact_secrets
 from ..playbooks.governance import TALK, PeopleTurn, base_record, record_block, revised
+from ..playbooks.person_notes import load_notes, notes_block, remember_said
 from ..playbooks.prompts import no_code_rule, schema_hint, told_block
 from ..service import Service
 from .api import _repo, require_view, service_of
@@ -230,6 +231,14 @@ async def _tell(
         while_running=True,
     )
     await service.store.add_message(message)
+    await remember_said(
+        service.store,
+        user.login,
+        text,
+        repo=thread.repo,
+        where="People conversation",
+        message_id=message.id,
+    )
     return message.model_dump(mode="json")
 
 
@@ -255,8 +264,15 @@ async def _turn(
     apply_thread_agent(service, thread, agent, default_agent=default_agent)
     text, removed = redact_secrets(said)
     await service.store.save_thread(thread)
-    await service.store.add_message(
-        ChatMessage(thread_id=thread.id, role="user", text=text, author=user.login)
+    said = ChatMessage(thread_id=thread.id, role="user", text=text, author=user.login)
+    await service.store.add_message(said)
+    await remember_said(
+        service.store,
+        user.login,
+        text,
+        repo=repo,
+        where="People conversation",
+        message_id=said.id,
     )
     history = await service.store.list_messages(thread.id)
     loaded, current, replaced = await base_record(
@@ -288,6 +304,7 @@ async def _turn(
             f"The newest message, from {user.login}, which you answer:\n{text}",
             record_block(current, draft=replaced is not None, loaded=loaded),
             *([reading_line(user.login)] if door is not None else []),
+            notes_block(await load_notes(service.store, user.login), "conversations"),
             schema_hint(PeopleTurn.model_json_schema()),
             f"Answer the newest message, from {user.login}, above.",
         ]

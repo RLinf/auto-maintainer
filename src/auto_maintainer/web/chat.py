@@ -67,6 +67,12 @@ from ..domain.settings import (
     effective_routing,
     secret_names,
 )
+from ..playbooks.person_notes import (
+    add_note,
+    load_notes,
+    notes_block,
+    remember_said,
+)
 from ..playbooks.prompts import schema_hint, untrusted
 from ..playbooks.quality import assessed_quality, quick_quality
 from ..profiles.layers import ProfileError, parse_yaml
@@ -219,6 +225,7 @@ class ProposedAction(BaseModel):
         "change",
         "evaluate",
         "lesson",
+        "preference",
         "improve",
         "add_repo",
         "configure",
@@ -238,7 +245,14 @@ class ProposedAction(BaseModel):
     body: str = ""
     lesson: str = Field(
         default="",
-        description="For kind=lesson: a review lesson to remember for this repository.",
+        description="For kind=lesson: a review lesson to remember for this repository. "
+        "For kind=preference: what the person wants from the agents for themselves, "
+        "in one sentence.",
+    )
+    about: Literal["reviews", "conversations", "both"] = Field(
+        default="both",
+        description="For kind=preference: whether it is about the reviews drafted for "
+        "them, how the agents talk with them, or both.",
     )
     request: str = Field(
         default="",
@@ -497,8 +511,16 @@ def build_router() -> APIRouter:
         await service.store.save_thread(thread)
         repos = await visible_repos(service, user)
         text, removed = redact_secrets(body.text)
-        await service.store.add_message(
-            ChatMessage(thread_id=thread_id, role="user", text=text)
+        said = ChatMessage(thread_id=thread_id, role="user", text=text)
+        await service.store.add_message(said)
+        await remember_said(
+            service.store,
+            user.login,
+            text,
+            repo=thread.repo,
+            number=thread.number,
+            where="chat",
+            message_id=said.id,
         )
         history = await service.store.list_messages(thread_id)
         page = body.context.page if body.context else ""
@@ -535,7 +557,8 @@ def build_router() -> APIRouter:
                 "is told when its diff is ready, and the person reads it and pushes it as themselves (nothing is "
                 "pushed before); never edit the PR's code yourself; "
                 "a lesson is saved at once when this maintainer may configure the repository, and otherwise waits for one "
-                "who may; an improve request and add_repo (onboard a repository: the service reads it and drafts its "
+                "who may; a preference (what this person wants from the agents for themselves, about their reviews or how "
+                "you talk with them, not a rule for everyone) is saved to their own notes at once; an improve request and add_repo (onboard a repository: the service reads it and drafts its "
                 "profile for its maintainers to approve) wait on a request card for a person who may approve them. Say "
                 "which of these happens; never ask the maintainer to approve a lesson they may save. Internal priorities "
                 "are private: never put them in public text. Before proposing improve, check the service guide below: "
@@ -549,6 +572,9 @@ def build_router() -> APIRouter:
                 await _guide(service),
                 f"Your working directory is {where}.",
                 reading_line(user.login),
+                notes_block(
+                    await load_notes(service.store, user.login), "conversations"
+                ),
                 f"Memory index:\n{memory_index or '(empty)'}",
                 queue_block,
                 await _page_block(service, user, body.context, repos),
@@ -640,6 +666,14 @@ def build_router() -> APIRouter:
             if p.kind == "lesson":
                 if p.repo in repos and p.lesson.strip():
                     changes.append(await save_lesson(service, user, p))
+                continue
+            if p.kind == "preference":
+                if p.lesson.strip():
+                    await add_note(service.store, user.login, p.lesson, p.about)
+                    notes.append(
+                        "Saved to your preferences (Settings → Agents → My "
+                        "preferences); the agents follow them for you."
+                    )
                 continue
             if p.kind == "evaluate":
                 if p.repo in repos:
