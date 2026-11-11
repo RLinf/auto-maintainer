@@ -847,7 +847,7 @@ export function ServiceMergeBaseButton({
       )}
     >
       {(close) => (
-        <div className="stack" style={{ gap: 10, padding: 6, width: 340, maxWidth: "calc(100vw - 48px)" }}>
+        <div className="stack" style={{ gap: 10, padding: 6, width: "min(340px, calc(100vw - 24px))" }}>
           <span className="small muted">
             {conflicting
               ? t("An agent merges the base branch into this self-improvement PR and resolves the conflicts; you read the resolution diff and approve pushing it.")
