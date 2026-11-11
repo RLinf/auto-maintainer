@@ -98,6 +98,43 @@ async def test_only_their_requests_on_the_service_agents_count(demo) -> None:
     assert (await ledger.used("walt"))["day"] == 1100
 
 
+async def test_work_a_person_started_counts_as_theirs(demo) -> None:
+    """A run whose task did not name its requester (recorded before its playbook
+    passed it on) counts toward the person whose event started its job; the
+    service's own work stays the service's, by repository and by day."""
+    from auto_maintainer.domain.records import Job
+
+    h, app = demo
+    asked = Job(
+        playbook="self_improve",
+        key="k1",
+        events=[{"kind": "dashboard.command", "payload": {"by": "walt"}}],
+    )
+    scan = Job(playbook="ci_doctor", key="k2", events=[{"kind": "checks.completed"}])
+    for job in (asked, scan):
+        await h.store.upsert_job(job)
+    await _run(h, timedelta(hours=1), 800, task_kind="self_improve", job_id=asked.id)
+    await _run(
+        h,
+        timedelta(hours=1),
+        300,
+        task_kind="ci_diagnose",
+        job_id=scan.id,
+        repo="acme/widget",
+        cached_input_tokens=200,
+    )
+    assert (await h.service.ledger.used("walt"))["day"] == 800
+    async with _as(app, "maria") as maria:
+        view = (await maria.get("/api/people/usage?days=7")).json()
+    [walt] = [p for p in view["people"] if p["login"] == "walt"]
+    assert walt["service"]["by_kind"]["self_improve"]["tokens"] == 800
+    service = view["background"]
+    assert set(service["by_kind"]) == {"ci_diagnose"}
+    assert service["by_repo"]["acme/widget"]["cached_input_tokens"] == 200
+    today = (h.clock.now() - timedelta(hours=1)).date().isoformat()
+    assert service["by_day"][today] == {"ci_diagnose": 300}
+
+
 async def test_usage_by_person_and_kind_and_who_sees_it(demo) -> None:
     h, app = demo
     await _run(h, timedelta(hours=1), 100, requested_by="walt")

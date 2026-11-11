@@ -234,6 +234,7 @@ def _codex_steps(server_request: dict, answer_marker: str) -> list[dict]:
                         "tokenUsage": {
                             "total": {
                                 "inputTokens": 100,
+                                "cachedInputTokens": 60,
                                 "outputTokens": 7,
                                 "reasoningOutputTokens": 3,
                             }
@@ -277,6 +278,7 @@ async def test_codex_user_input_goes_to_a_reviewer(tmp_path: Path, talking_cli) 
     _, result = await _run(rt, _task(tmp_path, output_schema=SCHEMA, effort="max"))
     assert result.ok and result.structured == {"ok": True} and result.session == "t1"
     assert result.usage.input_tokens == 100 and result.usage.output_tokens == 10
+    assert result.usage.cached_input_tokens == 60, "a part of Codex's input"
     [question] = desk.questions
     assert question.kind == QuestionKind.INPUT
     assert (
@@ -418,7 +420,11 @@ async def test_acp_settles_safe_requests_and_asks_for_the_rest(
                         "id": 4,
                         "result": {
                             "stopReason": "end_turn",
-                            "usage": {"inputTokens": 10, "outputTokens": 2},
+                            "usage": {
+                                "inputTokens": 10,
+                                "cachedReadTokens": 30,
+                                "outputTokens": 2,
+                            },
                         },
                     },
                 ],
@@ -433,7 +439,8 @@ async def test_acp_settles_safe_requests_and_asks_for_the_rest(
     )
     events, result = await _run(rt, _task(tmp_path, output_schema=SCHEMA))
     assert result.ok and result.structured == {"ok": True}, result.error
-    assert result.usage.input_tokens == 10
+    assert result.usage.input_tokens == 40, "ACP counts cache reads apart"
+    assert result.usage.cached_input_tokens == 30
     [question] = desk.questions
     assert question.detail == "curl https://x.test" and question.tool == "execute"
     replies = {

@@ -744,18 +744,36 @@ export interface AgentRun {
   created_at: string;
 }
 
+/** Tokens of some runs. ``input_tokens`` includes ``cached_input_tokens``, the part
+ * read from the provider's prompt cache (recorded since 2026-11-11). */
+export interface UsagePart {
+  runs: number;
+  failed: number;
+  tokens: number;
+  input_tokens: number;
+  cached_input_tokens: number;
+  output_tokens: number;
+  cost_usd: number | null;
+}
+
 export interface UsageRow {
   /** null: the service's own work, such as scans and scheduled checks. */
   login: string | null;
   runs: number;
   failed: number;
   input_tokens: number;
+  cached_input_tokens: number;
   output_tokens: number;
   cost_usd: number | null;
   seconds: number;
   last_at: string | null;
-  by_kind: Record<string, { runs: number; tokens: number }>;
-  by_runtime: Record<string, { runs: number; tokens: number }>;
+  /** By task kind, or the activity when the run names one (a review's discussion). */
+  by_kind: Record<string, UsagePart>;
+  by_runtime: Record<string, UsagePart>;
+  /** By repository; "" for runs outside any. */
+  by_repo: Record<string, UsagePart>;
+  /** Tokens by UTC day (YYYY-MM-DD), then task kind. */
+  by_day: Record<string, Record<string, number>>;
 }
 
 /** The most tokens one person's requests may use on the service's agents in a

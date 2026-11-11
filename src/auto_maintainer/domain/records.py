@@ -131,6 +131,11 @@ class AgentRunRecord(BaseModel):
     error: str | None = None
     session: str | None = None
     input_tokens: int = 0
+    """Every token the model read, including ``cached_input_tokens``."""
+    cached_input_tokens: int = 0
+    """The part read from the provider's prompt cache. Before 2026-11-11 it was not
+    recorded, and runs over ACP (Antigravity, OpenCode, Gemini CLI) left cache reads
+    out of ``input_tokens``."""
     output_tokens: int = 0
     cost_usd: float | None = None
     transcript_path: str | None = None

@@ -327,6 +327,9 @@ class CodexConversation(Conversation):
                     partial(
                         usage={
                             "input_tokens": int(total.get("inputTokens") or 0),
+                            "cached_input_tokens": int(
+                                total.get("cachedInputTokens") or 0
+                            ),
                             "output_tokens": int(total.get("outputTokens") or 0)
                             + int(total.get("reasoningOutputTokens") or 0),
                         }

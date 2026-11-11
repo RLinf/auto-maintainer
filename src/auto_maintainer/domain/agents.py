@@ -287,7 +287,12 @@ class AgentEventType(StrEnum):
 
 class Usage(BaseModel):
     input_tokens: int = 0
+    """Every token the model read, including ``cached_input_tokens``."""
+    cached_input_tokens: int = 0
+    """The part of ``input_tokens`` read from the provider's prompt cache, which
+    costs a fraction of the rest."""
     output_tokens: int = 0
+    """Every token the model wrote, including its reasoning."""
     cost_usd: float | None = None
 
 

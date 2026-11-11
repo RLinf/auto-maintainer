@@ -567,7 +567,12 @@ class AcpConversation(Conversation):
                     partial(
                         text=self.last_message,
                         usage={
-                            "input_tokens": int(usage.get("inputTokens") or 0),
+                            "input_tokens": int(usage.get("inputTokens") or 0)
+                            + int(usage.get("cachedReadTokens") or 0)
+                            + int(usage.get("cachedWriteTokens") or 0),
+                            "cached_input_tokens": int(
+                                usage.get("cachedReadTokens") or 0
+                            ),
                             "output_tokens": int(usage.get("outputTokens") or 0)
                             + int(usage.get("thoughtTokens") or 0),
                         }

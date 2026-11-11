@@ -673,6 +673,7 @@ class AgentRouter:
                     error=result.error,
                     session=result.session,
                     input_tokens=result.usage.input_tokens,
+                    cached_input_tokens=result.usage.cached_input_tokens,
                     output_tokens=result.usage.output_tokens,
                     cost_usd=result.usage.cost_usd,
                     transcript_path=result.transcript_path,

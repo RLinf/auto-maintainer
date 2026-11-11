@@ -356,6 +356,9 @@ class ClaudeCodeRuntime(ExecRuntime):
                         "input_tokens": int(usage.get("input_tokens") or 0)
                         + int(usage.get("cache_creation_input_tokens") or 0)
                         + int(usage.get("cache_read_input_tokens") or 0),
+                        "cached_input_tokens": int(
+                            usage.get("cache_read_input_tokens") or 0
+                        ),
                         "output_tokens": int(usage.get("output_tokens") or 0),
                         "cost_usd": data.get("total_cost_usd"),
                     },

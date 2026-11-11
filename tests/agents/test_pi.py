@@ -169,7 +169,12 @@ def test_pis_json_events_become_steps_usage_and_the_answer() -> None:
         AgentEventType.FINAL,
     ]
     assert events[0].text.startswith("bash:") and events[1].text == "a.py"
-    assert events[2].data == {"input_tokens": 120, "output_tokens": 7, "cost_usd": 0.01}
+    assert events[2].data == {
+        "input_tokens": 120,
+        "cached_input_tokens": 20,
+        "output_tokens": 7,
+        "cost_usd": 0.01,
+    }
     assert events[3].text == '{"ok": true}'
     failed = pi.parse_line(
         json.dumps(

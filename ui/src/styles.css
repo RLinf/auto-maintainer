@@ -43,12 +43,32 @@
   --sans: "Inter", "InterVariable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans SC", sans-serif;
   --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   --header-h: 56px;
+  /* Chart series (Settings → Usage), in a fixed order checked for color-blind
+     separation on --surface; never reused for status. */
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
+  --series-4: #eda100;
+  --series-5: #e87ba4;
+  --series-6: #008300;
+  --series-7: #6250d6;
+  --series-8: #e34948;
+  --series-other: #a3a9b6;
   color-scheme: light;
 }
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     --bg: #0b0d12;
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --series-3: #199e70;
+    --series-4: #c98500;
+    --series-5: #d55181;
+    --series-6: #008300;
+    --series-7: #9085e9;
+    --series-8: #e66767;
+    --series-other: #5d6474;
     --surface: #12151c;
     --surface-2: #181c25;
     --surface-3: #212633;
@@ -91,6 +111,15 @@
 
 :root[data-theme="dark"] {
   --bg: #0b0d12;
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --series-3: #199e70;
+  --series-4: #c98500;
+  --series-5: #d55181;
+  --series-6: #008300;
+  --series-7: #9085e9;
+  --series-8: #e66767;
+  --series-other: #5d6474;
   --surface: #12151c;
   --surface-2: #181c25;
   --surface-3: #212633;
@@ -283,9 +312,54 @@ tr:hover .row-action, .row-action:focus-visible { opacity: 1; }
 .limit-meters { display: grid; gap: 4px; }
 .limit-meter-row { display: grid; grid-template-columns: 64px auto; align-items: center; gap: 8px; }
 .limit-meters .quality-meter { width: 72px; }
-.usage-people td, .usage-people th { white-space: nowrap; }
-.usage-people tr.expandable { cursor: pointer; }
-.usage-detail { display: grid; gap: 4px; padding: 4px 0 4px 22px; white-space: normal; }
+.usage-detail { display: grid; gap: 4px; white-space: normal; }
+/* Settings → Usage: a bar per person on one scale, split by kind of task. */
+.chart-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; }
+.chart-key { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-2); white-space: nowrap; }
+.chart-key i { width: 10px; height: 10px; border-radius: 3px; background: var(--c); flex: none; }
+.chart-tip { position: absolute; bottom: calc(100% + 6px); transform: translateX(-50%); background: var(--text); color: var(--surface); font-size: 12px; line-height: 1.3; padding: 4px 8px; border-radius: 6px; white-space: nowrap; pointer-events: none; z-index: 5; box-shadow: var(--shadow-sm); }
+.ubar-rows { display: grid; gap: 2px; }
+.ubar-row { display: grid; grid-template-columns: minmax(110px, 190px) minmax(0, 1fr) 76px; align-items: center; gap: 12px; padding: 7px 6px; border-radius: 8px; cursor: pointer; }
+.ubar-row.with-limits { grid-template-columns: minmax(110px, 190px) minmax(0, 1fr) 76px 230px; }
+.ubar-row:hover, .ubar-person.open .ubar-row { background: var(--surface-2); }
+.ubar-who { display: flex; align-items: center; justify-content: flex-start; justify-self: stretch; width: 100%; gap: 6px; min-width: 0; border: 0; background: none; padding: 0; color: var(--text); font: inherit; text-align: left; box-shadow: none; height: auto; cursor: pointer; }
+.ubar-track { position: relative; display: block; height: 14px; min-width: 0; }
+.ubar { display: flex; gap: 2px; height: 100%; }
+.ubar > span { flex-basis: 0; min-width: 2px; height: 100%; background: var(--c); outline-offset: 2px; }
+.ubar > span:last-child { border-radius: 0 4px 4px 0; }
+.ubar > span:hover, .ubar > span:focus-visible { filter: brightness(1.12); }
+.ubar-total { display: flex; flex-direction: column; align-items: flex-end; font-variant-numeric: tabular-nums; line-height: 1.25; }
+.ubar-limits .limit-meter-row { grid-template-columns: 74px 56px auto; white-space: nowrap; }
+.ubar-limits .limit-meters .quality-meter { width: 60px; }
+.ubar-detail { display: grid; gap: 12px; padding: 6px 6px 14px 30px; }
+.usage-kinds td, .usage-kinds th { white-space: nowrap; }
+.chart-cols { position: relative; display: flex; align-items: flex-end; gap: 2px; border-bottom: 1px solid var(--border-strong); }
+.chart-col { flex: 1 1 0; min-width: 2px; height: 100%; display: flex; align-items: flex-end; }
+.chart-col-fill { display: flex; flex-direction: column-reverse; gap: 1px; width: 100%; }
+.chart-col-fill > span { flex-basis: 0; min-height: 1px; background: var(--c); }
+.chart-col-fill > span:last-child { border-radius: 3px 3px 0 0; }
+.chart-col:hover .chart-col-fill, .chart-col:focus-visible .chart-col-fill { filter: brightness(1.12); }
+.usage-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; }
+.usage-stat { display: grid; gap: 2px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-2); }
+.usage-stat strong { font-size: 20px; font-weight: 600; }
+.usage-ranked-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; }
+.ranked { display: grid; gap: 6px; }
+.ranked-row { display: grid; grid-template-columns: minmax(90px, 150px) minmax(0, 1fr) 84px; align-items: center; gap: 10px; font-size: 13px; }
+.ranked-row:has(.ranked-extra) { grid-template-columns: minmax(90px, 150px) minmax(0, 1fr) 84px 76px; }
+.ranked-track { display: block; height: 10px; }
+.ranked-track > span { display: block; height: 100%; border-radius: 0 4px 4px 0; background: var(--series-1); }
+.ranked-value { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.ranked-extra { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+@media (max-width: 720px) {
+  .ubar-row, .ubar-row.with-limits { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "who total" "bar bar" "limits limits"; row-gap: 6px; }
+  .ubar-who { grid-area: who; }
+  .ubar-row > .ubar-track { grid-area: bar; }
+  .ubar-total { grid-area: total; }
+  .ubar-limits { grid-area: limits; }
+  .ubar-detail { padding-left: 6px; }
+  .ranked-row, .ranked-row:has(.ranked-extra) { grid-template-columns: minmax(80px, 110px) minmax(0, 1fr) 76px; }
+  .ranked-extra { display: none; }
+}
 .aliases-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 2px 16px; }
 .aliases-row { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 5px 4px; border-radius: 8px; }
 .aliases-row:hover { background: var(--surface-2); }

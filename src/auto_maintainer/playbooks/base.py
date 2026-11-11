@@ -222,7 +222,9 @@ class PlaybookContext:
     may run in bypass mode only for trusted input (unless the route says otherwise),
     and reviewers see it next to the agent's questions."""
     requested_by: str | None = None
-    """The maintainer who asked for this job; set by the playbook once it knows."""
+    """The maintainer who asked for this job; set by the playbook once it knows.
+    Until then the job's agent tasks go to the person whose event started it
+    (``Job.asked_by``), so their tokens count as that person's, not the service's."""
     agent: str | None = None
     """A runtime the requester chose; the job's main task runs on it with no fallback."""
     own_reviews: frozenset[str] = frozenset()
@@ -286,7 +288,9 @@ class PlaybookContext:
                 "repo": task.repo or self.repo,
                 "pr": task.pr if task.pr is not None else self.job.number,
                 "job_id": task.job_id or self.job.id,
-                "requested_by": task.requested_by or self.requested_by,
+                "requested_by": task.requested_by
+                or self.requested_by
+                or self.job.asked_by,
             }
         )
         earlier = await self._earlier_answers()

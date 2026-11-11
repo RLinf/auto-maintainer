@@ -258,7 +258,9 @@ class PiRuntime(ExecRuntime):
                     type=AgentEventType.USAGE,
                     data={
                         "input_tokens": int(usage.get("input") or 0)
-                        + int(usage.get("cacheRead") or 0),
+                        + int(usage.get("cacheRead") or 0)
+                        + int(usage.get("cacheWrite") or 0),
+                        "cached_input_tokens": int(usage.get("cacheRead") or 0),
                         "output_tokens": int(usage.get("output") or 0),
                         "cost_usd": float(cost) if cost is not None else None,
                     },

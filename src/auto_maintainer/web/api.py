@@ -90,7 +90,6 @@ from ..domain.records import (
     ActionRecord,
     AgentRunRecord,
     AuditEntry,
-    Job,
     JobStatus,
     PrAssignee,
     PrRole,
@@ -303,48 +302,65 @@ USAGE_RUNS = 20_000
 """The most runs a usage summary reads; the answer says when it hit this."""
 
 
-def _job_requester(job: Job) -> str | None:
-    """Who asked for a job: ``by`` in the payload of the event that started it."""
-    first = job.events[0] if job.events else {}
-    payload = (first.get("payload") if isinstance(first, dict) else None) or {}
-    by = payload.get("by")
-    return str(by) if by else None
+def _usage_part() -> dict[str, Any]:
+    return {
+        "runs": 0,
+        "failed": 0,
+        "tokens": 0,
+        "input_tokens": 0,
+        "cached_input_tokens": 0,
+        "output_tokens": 0,
+        "cost_usd": None,
+    }
+
+
+def _add_part(part: dict[str, Any], run: AgentRunRecord) -> None:
+    """Count ``run`` into ``part``; a cost adds up only from runs that report one."""
+    part["runs"] += 1
+    part["failed"] += 0 if run.ok else 1
+    if "tokens" in part:
+        part["tokens"] += run.input_tokens + run.output_tokens
+    part["input_tokens"] += run.input_tokens
+    part["cached_input_tokens"] += run.cached_input_tokens
+    part["output_tokens"] += run.output_tokens
+    if run.cost_usd is not None:
+        part["cost_usd"] = (part["cost_usd"] or 0.0) + run.cost_usd
 
 
 def _usage_row(login: str | None) -> dict[str, Any]:
+    """A usage row: totals, and the same per task kind (``by_kind``: the activity
+    when the run names one), per agent, per repository (``""`` for none), and per
+    day (UTC) and task kind (``by_day``: tokens)."""
+    row = _usage_part()
+    del row["tokens"]
     return {
         "login": login,
-        "runs": 0,
-        "failed": 0,
-        "input_tokens": 0,
-        "output_tokens": 0,
-        "cost_usd": None,
+        **row,
         "seconds": 0.0,
         "last_at": None,
         "by_kind": {},
         "by_runtime": {},
+        "by_repo": {},
+        "by_day": {},
     }
 
 
 def _add_usage(row: dict[str, Any], run: AgentRunRecord) -> None:
-    """Count ``run`` into a usage row; a cost adds up only from runs that report one."""
-    row["runs"] += 1
-    row["failed"] += 0 if run.ok else 1
-    row["input_tokens"] += run.input_tokens
-    row["output_tokens"] += run.output_tokens
+    """Count ``run`` into a usage row (``_usage_row``)."""
+    _add_part(row, run)
     row["seconds"] += run.duration_seconds
-    if run.cost_usd is not None:
-        row["cost_usd"] = (row["cost_usd"] or 0.0) + run.cost_usd
     at = run.created_at.isoformat()
     if row["last_at"] is None or at > row["last_at"]:
         row["last_at"] = at
+    kind = run.activity or run.task_kind
     for key, value in (
-        ("by_kind", run.activity or run.task_kind),
+        ("by_kind", kind),
         ("by_runtime", run.runtime),
+        ("by_repo", run.repo or ""),
     ):
-        part = row[key].setdefault(value, {"runs": 0, "tokens": 0})
-        part["runs"] += 1
-        part["tokens"] += run.input_tokens + run.output_tokens
+        _add_part(row[key].setdefault(value, _usage_part()), run)
+    day = row["by_day"].setdefault(run.created_at.date().isoformat(), {})
+    day[kind] = day.get(kind, 0) + run.input_tokens + run.output_tokens
 
 
 def assignee_row(a: PrAssignee) -> dict[str, Any]:
@@ -2430,16 +2446,10 @@ def build_router() -> APIRouter:
         await require_view(service, user, repo)
         since = service.clock.now() - timedelta(days=days)
         runs = await service.store.list_agent_runs(USAGE_RUNS, repo=repo, since=since)
-        jobs: dict[str, Job | None] = {}
         people: dict[str | None, dict[str, Any]] = {}
         total = _usage_row(None)
         for run in runs:
-            who = run.requested_by
-            if who is None and run.job_id:
-                if run.job_id not in jobs:
-                    jobs[run.job_id] = await service.store.get_job(run.job_id)
-                job = jobs[run.job_id]
-                who = _job_requester(job) if job else None
+            who = await service.ledger.whose(run) or run.account
             _add_usage(total, run)
             key = who.lower() if who else None
             row = people.setdefault(key, _usage_row(who))
@@ -2533,8 +2543,9 @@ def build_router() -> APIRouter:
         days: int = Query(default=30, ge=1, le=365),
         user: User = Depends(current_user),
     ) -> dict[str, Any]:
-        """Each person's agent tokens in the last ``days``, by task kind and agent:
-        what their requests used on the service's agent accounts and model APIs
+        """Each person's agent tokens in the last ``days`` (``_usage_row``): what the
+        work they asked for, or started on the dashboard or in a conversation
+        (``TokenLedger.whose``), used on the service's agent accounts and model APIs
         (``service``, which their token limit counts) apart from their own accounts
         (``own``), with their limit and what they used of it in the last day, week,
         and month. The owner of the service and operators see everyone and the
@@ -2548,13 +2559,10 @@ def build_router() -> APIRouter:
         people: dict[str, dict[str, Any]] = {}
         background = _usage_row(None)
         for run in runs:
-            login = run.requested_by
+            login = await service.ledger.whose(run) or run.account
             if not login:
-                if run.account:
-                    login = run.account
-                else:
-                    _add_usage(background, run)
-                    continue
+                _add_usage(background, run)
+                continue
             if not everything and login.lower() != me:
                 continue
             row = people.setdefault(

@@ -15,8 +15,9 @@
 """The tokens each person's requests used on the service's own agents, for their
 limits (``TokenLimits`` in the service settings).
 
-A run counts toward a person when they asked for it (``AgentRunRecord.requested_by``)
-and it ran on the service's account of an agent or one of the service's model APIs
+A run counts toward a person when it worked for their request (``TokenLedger.whose``:
+``AgentRunRecord.requested_by``, else whoever started its job, ``Job.asked_by``) and it
+ran on the service's account of an agent or one of the service's model APIs
 (``account`` unset). Runs on their own agent accounts or model APIs, and the service's
 own work that nobody asked for, never count. The ledger keeps the last
 ``LONGEST`` of such runs in memory: it reads them from the store once, then only the
@@ -43,11 +44,8 @@ LONGEST = max(WINDOWS.values())
 OVERLAP = timedelta(minutes=10)
 """How far back each read reaches before the last one, for runs recorded late."""
 READ_LIMIT = 50_000
-
-
-def counts(run: AgentRunRecord) -> bool:
-    """Whether ``run`` counts toward the limit of the person who asked for it."""
-    return bool(run.requested_by) and run.account is None
+ASKERS_KEPT = 20_000
+"""How many jobs' askers ``TokenLedger.whose`` keeps before it reads them again."""
 
 
 def tokens(run: AgentRunRecord) -> int:
@@ -71,15 +69,35 @@ class TokenLedger:
         """Per login (lowercased), the runs that count: id -> (when, tokens)."""
         self._read_to: datetime | None = None
         self._lock = asyncio.Lock()
+        self._askers: dict[str, str | None] = {}
+        """Who started each job read so far (``Job.asked_by``), by job id."""
+
+    async def whose(self, run: AgentRunRecord) -> str | None:
+        """The person whose request ``run`` worked for: who asked for its task, or
+        else who started its job on the dashboard or in a conversation (a run
+        recorded before its playbook passed that on). ``None`` for the service's own
+        work."""
+        if run.requested_by:
+            return run.requested_by
+        if not run.job_id:
+            return None
+        if run.job_id not in self._askers:
+            if len(self._askers) >= ASKERS_KEPT:
+                self._askers.clear()
+            job = await self.store.get_job(run.job_id)
+            self._askers[run.job_id] = job.asked_by if job else None
+        return self._askers[run.job_id]
 
     async def _refresh(self) -> None:
         async with self._lock:
             now = self.clock.now()
             since = (self._read_to - OVERLAP) if self._read_to else now - LONGEST
             for run in await self.store.list_agent_runs(READ_LIMIT, since=since):
-                if counts(run):
-                    login = str(run.requested_by).lower()
-                    self._by.setdefault(login, {})[run.id] = (
+                if run.account is not None:
+                    continue
+                who = await self.whose(run)
+                if who:
+                    self._by.setdefault(who.lower(), {})[run.id] = (
                         run.created_at,
                         tokens(run),
                     )
