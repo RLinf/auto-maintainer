@@ -63,6 +63,7 @@ class ActionKind(StrEnum):
     MEMORY_COMMIT = "memory.commit"
     MEMORY_CHANGE = "memory.change"
     CODE_PR = "code.pr"
+    CODE_UPDATE = "code.update"
     CODE_MERGE = "code.merge"
     SERVICE_DEPLOY = "service.deploy"
     NOTIFY = "notify"
@@ -81,6 +82,7 @@ _INTERNAL_KINDS = {
     ActionKind.MEMORY_COMMIT,
     ActionKind.MEMORY_CHANGE,
     ActionKind.CODE_PR,
+    ActionKind.CODE_UPDATE,
     ActionKind.CODE_MERGE,
     ActionKind.SERVICE_DEPLOY,
     ActionKind.NOTIFY,
@@ -442,6 +444,25 @@ class CodePrPayload(_Payload):
     """The chat thread the request came from, told about the PR."""
 
 
+class CodeUpdatePayload(_Payload):
+    """Bring the base branch into a self-improvement PR on ``code_repo``: through the
+    forge when clean, or by pushing ``merge_sha`` with ``resolved`` after approval."""
+
+    base_ref: str = "main"
+    title: str = ""
+    body: str = ""
+    patch: str = ""
+    """The resolution diff of ``files``, shown to the owner before pushing."""
+    base_sha: str = ""
+    merge_ref: str | None = None
+    merge_sha: str | None = None
+    resolved: dict[str, str] = Field(default_factory=dict)
+    files: list[str] = Field(default_factory=list)
+    runtime: str | None = None
+    requested_by: str | None = None
+    approved_by: str = ""
+
+
 class CodeMergePayload(_Payload):
     """Merge a PR on the service's own repository, approved by one of its maintainers."""
 
@@ -486,6 +507,7 @@ PAYLOADS: dict[ActionKind, type[BaseModel]] = {
     ActionKind.MEMORY_COMMIT: MemoryCommitPayload,
     ActionKind.MEMORY_CHANGE: MemoryChangePayload,
     ActionKind.CODE_PR: CodePrPayload,
+    ActionKind.CODE_UPDATE: CodeUpdatePayload,
     ActionKind.PR_FIX: FixPrPayload,
     ActionKind.LAB_REPRODUCE: LabReproducePayload,
     ActionKind.LAB_REVIEW: LabReproducePayload,

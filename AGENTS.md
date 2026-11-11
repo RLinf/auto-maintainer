@@ -89,7 +89,7 @@ These hold everywhere. Reviewers reject changes that break them; `tests/test_lay
 ## The service changing itself
 
 - A reviewer's `improve` request in chat becomes a request card; once the owner approves it, `playbooks/self_improve.py` runs: an agent edits a worktree of `code_repo`, the playbook runs the tests and Ruff, and the actuator pushes `am/self/...` and opens a PR (design 5.12). Never start an agent on the service's own code without that approval. Write that agent's instructions here, in this file: it reads `AGENTS.md` first.
-- Merging (`code.merge`) and deploying (`service.deploy`) need the owner, checked live in `web/api.py:code_maintainer`. Never add a path that merges or deploys without that check, for operators, for chat, or for the service itself. Deploys fetch the default branch of `code_repo` itself (`selfupdate/updater.py`), never whatever remote the checkout has.
+- Updating a self-improvement branch (`code.update`), merging (`code.merge`), and deploying (`service.deploy`) need the owner, checked live in `web/api.py:code_maintainer`. Never add a path that updates, merges, or deploys without that check, for operators, for chat, or for the service itself. Deploys fetch the default branch of `code_repo` itself (`selfupdate/updater.py`), never whatever remote the checkout has.
 - A deploy only moves the service's checkout to a commit on the default branch, after that commit's tests pass in a staging worktree; `am supervise` rolls back a deploy whose code fails to start.
 
 ## Extending

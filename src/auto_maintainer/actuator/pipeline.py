@@ -192,9 +192,11 @@ class ActionPipeline:
             )
         if (
             action.draft_for
-            and action.kind.touches_repository
+            and (
+                (action.kind.touches_repository and not self.capped(action.repo))
+                or action.kind == ActionKind.CODE_UPDATE
+            )
             and decision.kind in (DecisionKind.SHADOW, DecisionKind.EXECUTE)
-            and not self.capped(action.repo)
         ):
             decision = Decision(
                 kind=DecisionKind.PROPOSE,
@@ -430,12 +432,26 @@ class ActionPipeline:
         action = record.action
         profile = await self._profile_for(action)
         if profile is None:
-            record.status = ActionStatus.FAILED
-            record.error = f"{action.repo} has no approved profile"
-            await self.store.save_action(record)
-            await self._back_to_reviewers(action.id, record.error)
-            return
-        decision = decide(action, profile, await self._facts(action, login))
+            if action.kind.touches_repository:
+                record.status = ActionStatus.FAILED
+                record.error = f"{action.repo} has no approved profile"
+                await self.store.save_action(record)
+                await self._back_to_reviewers(action.id, record.error)
+                return
+            if await self.paused(action.repo):
+                decision = Decision(
+                    kind=DecisionKind.PROPOSE,
+                    rule=PAUSED_RULE,
+                    reason="the service is paused",
+                )
+            else:
+                decision = Decision(
+                    kind=DecisionKind.EXECUTE,
+                    rule="internal",
+                    reason=f"approved by {login}",
+                )
+        else:
+            decision = decide(action, profile, await self._facts(action, login))
         if (
             action.draft_for
             and decision.kind == DecisionKind.SHADOW

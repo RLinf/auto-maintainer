@@ -25,7 +25,7 @@ auto-maintainer watches GitHub repositories for their maintainers. It reads open
 - **Memory**: changes to the memory repository waiting for approval, and a browser over it.
 - **Settings**: agents (installed or not, what each runs on, model and thinking level, permission mode) and the person's own agents, the default agent, model providers (the service's and the person's own: each added through a form that finds the endpoint's models and tests each by talking to it, which fills in what it can do and which agents can run it) and their keys, which agent does each task, test machines, system values, the settings file, and Host setup.
 - **Conversations and the Agent panel**: every conversation composer (the slide-out **Agent** panel and **Conversations**, **Discuss** on a review once it is not actively running `while_running`, and **People** talk) has an agent picker so the person can choose which agent answers before sending the first message or switch agents at any point during an active conversation; switching starts a fresh CLI session on the chosen agent with the conversation so far in its prompt.
-- **Service**: the running version, updates, the service's own PRs (self-improvements) with Merge and Deploy for maintainers of its repository, and the log.
+- **Service**: the running version, updates, the service's own PRs (self-improvements) with **Merge <base>** / **Resolve conflicts with <base>**, **Approve and merge**, and **Deploy** for the owner, and the log.
 
 ## Proposals
 

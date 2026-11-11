@@ -102,7 +102,18 @@ export interface ServiceView {
     dirty: boolean;
     error: string | null;
   } | null;
-  prs?: { number: number; title: string; author: string; branch: string; url: string; self_improvement: boolean }[];
+  prs?: {
+    number: number;
+    title: string;
+    author: string;
+    branch: string;
+    base?: string;
+    url: string;
+    head_sha?: string;
+    mergeable?: string;
+    conflicting?: boolean;
+    self_improvement: boolean;
+  }[];
   history?: { kind: string; status: string; summary: string; error: string | null; at: string | null }[];
 }
 
