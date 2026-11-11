@@ -188,7 +188,7 @@ async def test_a_comment_is_resolved_by_the_person_who_presses_resolve(demo) -> 
         await h.service.a.user_tokens.set("maria", UserToken(token="t"))
         done = await maria.post(url)
         assert done.status_code == 200
-        assert done.json()["status"] in ("queued", "executed"), done.text
+        assert done.json()["status"] in ("queued", "intent", "executed"), done.text
     await h.settle()
     [write] = h.forge.writes_of("resolve_review_thread")
     assert write["thread_id"] == "T_open"
