@@ -224,8 +224,9 @@ class ProposedAction(BaseModel):
     request: str = Field(
         default="",
         description=(
-            "For kind=improve: the new behavior or fix the service's own code needs, "
-            "precise enough to implement and test. For kind=governance: what to change "
+            "For kind=improve: what the person asked for, in a few sentences, and what "
+            "you found that the implementing agent needs (a file, an error, a record); "
+            "no parts they did not ask for. For kind=governance: what to change "
             "in the repository's People record, or where its process is written."
         ),
     )
@@ -501,7 +502,8 @@ def build_router() -> APIRouter:
                 "are private: never put them in public text. Before proposing improve, check the service guide below: "
                 "if the dashboard or a proposal already does what is asked, say how instead. When the maintainer asks for "
                 "something the service cannot do yet, or for a change in how it works that needs code rather than a "
-                "setting or a lesson, propose kind=improve with the request spelled out: once the owner of this "
+                "setting or a lesson, propose kind=improve with a request that says what they asked for, at the "
+                "size they asked for it, and leaves the design to the agent that implements it: once the owner of this "
                 "service approves the card, the service changes its own code in the background and opens a "
                 "PR on its own repository, which the owner reviews before it is merged and deployed. A conversation "
                 "runs one such change at a time: if the history shows one pending or running, do not propose it again.",

@@ -27,7 +27,8 @@ import pytest
 from auto_maintainer.domain.actions import ActionKind, ActionStatus
 from auto_maintainer.domain.agents import AgentResult, AgentTask
 from auto_maintainer.domain.permissions import Permission
-from auto_maintainer.playbooks.self_improve import LINT, TESTS
+from auto_maintainer.domain.ports import CommandResult
+from auto_maintainer.playbooks.self_improve import FORMAT, LINT, MAX_REPAIRS, TESTS
 from auto_maintainer.testing.fakes import make_pr
 from auto_maintainer.testing.harness import Harness
 from auto_maintainer.web.app import create_app
@@ -195,6 +196,91 @@ async def test_no_change_means_no_pr(h: Harness, tmp_path: Path) -> None:
     )
     assert h.forge.writes_of("create_service_pr") == []
     assert h.service.a.publisher.published == []  # type: ignore[union-attr]
+
+
+def _failing(output: str) -> CommandResult:
+    return CommandResult(exit_code=1, stdout=output)
+
+
+async def _improve(h: Harness, thread_id: str | None = None) -> None:
+    from auto_maintainer.domain.events import Event, EventKind
+
+    await h.emit(
+        Event(
+            kind=EventKind.DASHBOARD_COMMAND,
+            payload={
+                "command": "improve",
+                "request": "Add a ping endpoint.",
+                "by": "walt",
+                "thread_id": thread_id,
+            },
+        )
+    )
+
+
+async def test_failing_checks_go_back_to_the_same_agent_session(h: Harness) -> None:
+    def work(task: AgentTask) -> AgentResult | dict:
+        if task.mode == "read_only":
+            return {"title": "add a ping endpoint", "summary": "Adds ping()."}
+        target = Path(task.workdir) / "src" / "ping.py"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("def ping() -> str:\n    return 'pong'\n")
+        return AgentResult(
+            runtime="codex", ok=True, text="Added ping().", session="sess-1"
+        )
+
+    h.runner.on("self_improve", work)
+    # The first round: the tests fail and Ruff passes; the second: all pass.
+    h.sandbox.results = [
+        _failing("FAILED tests/test_ping.py::test_ping"),
+        *[CommandResult(exit_code=0)] * 5,
+    ]
+    await _improve(h)
+
+    edits = [
+        t for t in h.runner.tasks if t.kind == "self_improve" and t.mode != "read_only"
+    ]
+    assert len(edits) == 2
+    first, repair = edits
+    assert first.resume_session is None
+    assert repair.resume_session == "sess-1", "the agent goes on in its own session"
+    assert "FAILED tests/test_ping.py::test_ping" in repair.prompt
+    assert "Add a ping endpoint." in repair.prompt
+    route = h.runner.routes[h.runner.tasks.index(repair)]
+    assert route.primary == "codex" and "codex" not in route.fallback
+    assert h.sandbox.runs.count(TESTS) == 2 and FORMAT in h.sandbox.runs
+    [pr] = h.forge.writes_of("create_service_pr")
+    assert "tests: `" in pr["body"] and "failed" not in pr["body"].split("## Checks")[1]
+
+
+async def test_checks_that_keep_failing_open_no_pr(h: Harness, tmp_path: Path) -> None:
+    def work(task: AgentTask) -> AgentResult:
+        (Path(task.workdir) / "ping.py").write_text("def ping(): ...\n")
+        return AgentResult(runtime="codex", ok=True, text="Tried.", session="s")
+
+    h.runner.on("self_improve", work)
+    h.sandbox.results = [
+        CommandResult(exit_code=0),
+        _failing("E501 line too long"),
+        CommandResult(exit_code=0),
+    ] * (MAX_REPAIRS + 1)
+    app = create_app(h.service, data_dir=tmp_path, allow_dev_login=True)
+    async with _client(app, "walt") as walt:
+        thread = (await walt.post("/api/chat/threads", json={"text": "ping"})).json()
+        await _improve(h, thread["id"])
+        messages = (await walt.get(f"/api/chat/threads/{thread['id']}/messages")).json()
+
+    assert h.forge.writes_of("create_service_pr") == []
+    assert h.service.a.publisher.published == []  # type: ignore[union-attr]
+    edits = [t for t in h.runner.tasks if t.kind == "self_improve"]
+    assert len(edits) == 1 + MAX_REPAIRS, "no summary task for a change that fails"
+    [told] = [m["text"] for m in messages if m["role"] == "assistant"]
+    assert "I did not open a PR" in told and "lint" in told and "E501" in told
+    assert "ping.py" in told
+    [job] = [
+        j for j in await h.store.list_jobs(limit=100) if j.playbook == "self_improve"
+    ]
+    assert job.status == "failed" and "lint" in (job.error or "")
 
 
 async def test_only_code_maintainers_merge_and_deploy(

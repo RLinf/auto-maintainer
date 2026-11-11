@@ -38,7 +38,7 @@ uv run am import evaluations <file> --repo <owner>/<repo>
 cd ui && npm ci && npm run dev            # dashboard dev server against am serve --demo
 ```
 
-Pre-commit runs Ruff and the commit-message checks:
+CI (`.github/workflows/ci.yml`) runs Ruff, the format check, the tests, and the dashboard build on every PR; the self-improvement playbook runs the same Python checks before it opens one. Pre-commit runs Ruff and the commit-message checks:
 
 ```bash
 pre-commit install --hook-type commit-msg
@@ -88,7 +88,7 @@ These hold everywhere. Reviewers reject changes that break them; `tests/test_lay
 
 ## The service changing itself
 
-- A reviewer's `improve` request in chat becomes a request card; once the owner approves it, `playbooks/self_improve.py` runs: an agent edits a worktree of `code_repo`, the playbook runs the tests and Ruff, and the actuator pushes `am/self/...` and opens a PR (design 5.12). Never start an agent on the service's own code without that approval. Write that agent's instructions here, in this file: it reads `AGENTS.md` first.
+- A reviewer's `improve` request in chat becomes a request card; once the owner approves it, `playbooks/self_improve.py` runs: an agent edits a worktree of `code_repo`, the playbook runs the tests and Ruff and sends what fails back to the agent, and only a change that passes becomes a PR: the actuator pushes `am/self/...` and opens it (design 5.12). Never start an agent on the service's own code without that approval. Write that agent's instructions here, in this file: it reads `AGENTS.md` first.
 - Updating a self-improvement branch (`code.update`), merging (`code.merge`), and deploying (`service.deploy`) need the owner, checked live in `web/api.py:code_maintainer`. Never add a path that updates, merges, or deploys without that check, for operators, for chat, or for the service itself. Deploys fetch the default branch of `code_repo` itself (`selfupdate/updater.py`), never whatever remote the checkout has.
 - A deploy only moves the service's checkout to a commit on the default branch, after that commit's tests pass in a staging worktree; `am supervise` rolls back a deploy whose code fails to start.
 

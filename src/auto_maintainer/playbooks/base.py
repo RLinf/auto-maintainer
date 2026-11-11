@@ -274,7 +274,12 @@ class PlaybookContext:
         task: AgentTask,
         output_model: type[BaseModel] | None = None,
         kind: TaskKind | None = None,
+        *,
+        after: AgentResult | None = None,
     ) -> AgentResult:
+        """Run ``task`` on its route. ``after`` is an earlier run of this job that
+        ``task`` continues: its agent goes first and resumes its session when it has
+        one; the rest of the route follows, starting afresh."""
         task = task.model_copy(
             update={
                 "untrusted_input": not self.trusted_input,
@@ -298,6 +303,17 @@ class PlaybookContext:
             # The requester chose the agent; verification keeps its own route.
             route = route.model_copy(update={"primary": self.agent, "fallback": []})
             task = task.model_copy(update={"agent_chosen": True})
+        if after is not None and after.runtime:
+            rest = [route.primary, *route.fallback]
+            route = route.model_copy(
+                update={
+                    "primary": after.runtime,
+                    "fallback": [n for n in rest if n != after.runtime],
+                }
+            )
+            task = task.model_copy(
+                update={"agent_chosen": True, "resume_session": after.session}
+            )
         earlier = await self._cut_off(task.kind)
         if earlier is not None:
             kept = LAB_KEPT if task.lab_session else ""

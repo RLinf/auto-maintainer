@@ -16,11 +16,12 @@
 
 A request comes from chat (``dashboard.command`` with ``command: improve``). An agent
 changes a worktree of the service's own repository at its default branch, following
-that repository's ``AGENTS.md``, and adds tests. The playbook runs the test suite and
-the linter itself, then proposes the change as a ``code.pr`` action; the actuator
-pushes it to an ``am/self/...`` branch and opens the PR. Nothing reaches the service's
-default branch or its running code until a maintainer of its repository approves the
-merge and, separately, the deploy.
+that repository's ``AGENTS.md``, and adds tests. The playbook runs the test suite,
+the linter, and the format check itself; what fails goes back to the agent, at most
+``MAX_REPAIRS`` times. Only a change that passes them all becomes a ``code.pr``
+action; the actuator pushes it to an ``am/self/...`` branch and opens the PR. Nothing
+reaches the service's default branch or its running code until a maintainer of its
+repository approves the merge and, separately, the deploy.
 """
 
 from __future__ import annotations
@@ -34,10 +35,11 @@ from pydantic import BaseModel, Field
 from ..domain.actions import ActionKind, CodePrPayload, make_action
 from ..domain.agents import AgentTask, TaskKind
 from ..domain.events import Event, EventKind
+from ..domain.ports import CommandResult
 from ..domain.profile import RepoProfile
 from ..domain.records import ChatMessage
 from .base import Playbook, PlaybookContext, PlaybookResult, may_succeed_later
-from .prompts import schema_hint
+from .prompts import schema_hint, untrusted
 
 TESTS = [
     "uv",
@@ -50,6 +52,16 @@ TESTS = [
     "not live_agent and not live",
 ]
 LINT = ["uv", "run", "--frozen", "ruff", "check", "."]
+FORMAT = ["uv", "run", "--frozen", "ruff", "format", "--check", "."]
+CHECKS = (("tests", TESTS, 1800), ("lint", LINT, 300), ("format", FORMAT, 300))
+"""What a change must pass before it becomes a PR: name, command, timeout. The code
+repository's CI (``.github/workflows/ci.yml``) runs the same."""
+
+MAX_REPAIRS = 2
+"""Turns the agent gets, after its first, to fix what the checks found."""
+
+FAILURE_OUTPUT = 6_000
+"""Characters of a failed check's output, from its end, that the agent reads."""
 
 
 class ImproveSummary(BaseModel):
@@ -146,8 +158,46 @@ class SelfImprove(Playbook):
                     + (f" {account[-1500:]}" if account else ""),
                 )
                 return PlaybookResult(result={"done": False})
-            tests = await ctx.sandbox.run(TESTS, cwd=path, timeout=1800)
-            lint = await ctx.sandbox.run(LINT, cwd=path, timeout=300)
+            checks = await _run_checks(ctx, path)
+            repairs = 0
+            while _failed(checks) and repairs < MAX_REPAIRS:
+                repairs += 1
+                fixed = await ctx.ask(
+                    AgentTask(
+                        kind=TaskKind.SELF_IMPROVE,
+                        prompt=_repair_prompt(request, checks),
+                        workdir=path,
+                        mode="workspace_write",
+                        repo=code_repo,
+                    ),
+                    after=work,
+                )
+                if not fixed.ok:
+                    break
+                work = fixed
+                account = fixed.text.strip() or account
+                checks = await _run_checks(ctx, path)
+            if _failed(checks):
+                changes = await ctx.workspace.changes(path)
+                failing = ", ".join(_failed(checks))
+                tries = f"{repairs + 1} {'tries' if repairs else 'try'}"
+                await _tell(
+                    ctx,
+                    thread_id,
+                    f"I did not open a PR: after {tries}, these checks still fail: "
+                    f"{failing}. Files I changed: "
+                    f"{', '.join(changes.files[:40]) or 'none'}.\n\n"
+                    + "\n".join(
+                        _check(name, " ".join(argv), result)
+                        for name, argv, result in checks
+                        if result.exit_code != 0
+                    ),
+                )
+                return PlaybookResult(
+                    failed=f"checks still fail after {tries}: {failing}",
+                    result={"files": changes.files, "failed": _failed(checks)},
+                )
+            changes = await ctx.workspace.changes(path)
             described = await ctx.ask(
                 AgentTask(
                     kind=TaskKind.SELF_IMPROVE,
@@ -179,15 +229,9 @@ class SelfImprove(Playbook):
                 "> " + request.replace("\n", "\n> "),
                 "## What changed\n" + summary.summary,
                 "## Checks\n"
-                + _check(
-                    "tests",
-                    " ".join(TESTS),
-                    tests.exit_code,
-                    tests.stdout + tests.stderr,
-                )
-                + "\n"
-                + _check(
-                    "lint", " ".join(LINT), lint.exit_code, lint.stdout + lint.stderr
+                + "\n".join(
+                    _check(name, " ".join(argv), result)
+                    for name, argv, result in checks
                 ),
                 "## The agent's account\n" + account[-3000:] if account else "",
                 "## Notes for the reviewer\n" + summary.notes if summary.notes else "",
@@ -216,34 +260,82 @@ class SelfImprove(Playbook):
         action.rationale = f"self-improvement requested by {by or 'a reviewer'}"
         return PlaybookResult(
             actions=[action],
-            result={
-                "branch": branch,
-                "files": changes.files,
-                "tests_ok": tests.exit_code == 0,
-                "lint_ok": lint.exit_code == 0,
-            },
+            result={"branch": branch, "files": changes.files, "repairs": repairs},
         )
+
+
+CLOSING = (
+    "Do not commit, push, or open a PR: the service does that, and a maintainer approves "
+    "it. Wait for every command you start to finish and read its result; do not end "
+    "while one still runs. When you are done, end with a short message: what you "
+    "changed, and the commands you ran with their results."
+)
 
 
 def _prompt(request: str, by: Any, context: str) -> str:
     parts = [
         "You are changing auto-maintainer's own code: this worktree is its repository. "
-        "Read AGENTS.md first and follow it, then the sections of docs/design.md it points to "
-        "for the modules you touch.",
+        "Read AGENTS.md first and follow it. docs/design.md is long: find the sections "
+        "for the modules you touch (search its headings) and read those, not the whole "
+        "file.",
         f"A reviewer{f' ({by})' if by else ''} asked for this in a conversation with the service:\n\n{request}",
     ]
     if context:
         parts.append(f"What they wrote earlier in that conversation:\n\n{context}")
     parts.append(
-        "Implement it with the smallest change that fits the existing design, with tests, and "
-        "update AGENTS.md and docs/design.md where the behavior they describe changes. Run "
-        "`uv run ruff format .`, `uv run ruff check .`, and `uv run pytest -q` and fix what fails. "
-        "Do not commit, push, or open a PR: the service does that, and a maintainer approves it. "
-        "If the request cannot or should not be done, change nothing and say why. When you "
-        "are done, end with a short message: what you changed, and the commands you ran "
-        "with their results."
+        "Implement what was asked, and no more, with the smallest change that fits the "
+        "existing design, with tests, and update AGENTS.md and docs/design.md where the "
+        "behavior they describe changes. Run `uv run ruff format .`, `uv run ruff check "
+        ".`, and the tests of what you changed (`uv run pytest -q tests/<file>`), and fix "
+        "what fails. After you finish, the service runs the whole suite, Ruff, and the "
+        "format check, and sends you anything that fails. If the request cannot or "
+        "should not be done, change nothing and say why. " + CLOSING
     )
     return "\n\n".join(parts)
+
+
+def _repair_prompt(
+    request: str, checks: list[tuple[str, list[str], CommandResult]]
+) -> str:
+    """The next turn of the editing agent, or a fresh agent in the same worktree:
+    what was asked, and the end of each failing check's output."""
+    failures = [
+        f"`{' '.join(argv)}` exited with {result.exit_code}"
+        + (" (timed out)" if result.timed_out else "")
+        + ":\n"
+        + untrusted(
+            f"checks.{name}",
+            (result.stdout + result.stderr).strip()[-FAILURE_OUTPUT:],
+            FAILURE_OUTPUT,
+        )
+        for name, argv, result in checks
+        if result.exit_code != 0
+    ]
+    return "\n\n".join(
+        [
+            "The service ran its checks on your change to auto-maintainer's own code, "
+            "and some failed. The worktree still holds the change. Fix what they report, "
+            "keeping to what was asked; if a check fails for a reason the change did not "
+            "cause, say so.",
+            f"What was asked:\n\n{request}",
+            *failures,
+            "Run what failed again (the failing tests, Ruff, or the format check) "
+            "before you end. " + CLOSING,
+        ]
+    )
+
+
+async def _run_checks(
+    ctx: PlaybookContext, path: Any
+) -> list[tuple[str, list[str], CommandResult]]:
+    return [
+        (name, argv, await ctx.sandbox.run(argv, cwd=path, timeout=timeout))
+        for name, argv, timeout in CHECKS
+    ]
+
+
+def _failed(checks: list[tuple[str, list[str], CommandResult]]) -> list[str]:
+    return [name for name, _, result in checks if result.exit_code != 0]
 
 
 def _summary_prompt(request: str, patch: str, account: str) -> str:
@@ -285,9 +377,10 @@ def _slug(title: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", text).strip("-")[:40] or "change"
 
 
-def _check(name: str, command: str, code: int, output: str) -> str:
+def _check(name: str, command: str, result: CommandResult) -> str:
+    code = result.exit_code
     mark = "passed" if code == 0 else f"failed (exit {code})"
-    tail = output.strip()[-1500:]
+    tail = (result.stdout + result.stderr).strip()[-1500:]
     return f"- {name}: `{command}` {mark}" + (
         f"\n\n<details><summary>output</summary>\n\n```\n{tail}\n```\n</details>"
         if tail

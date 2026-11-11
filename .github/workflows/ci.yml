@@ -1,0 +1,52 @@
+# The checks every change must pass before it merges: the same ones the service runs on
+# its own self-improvement changes (playbooks/self_improve.py:CHECKS), plus the
+# dashboard's type check and build.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    name: Tests and Ruff
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      # The dashboard's own tests (tests/test_ui_*.py) run its TypeScript with Node.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - run: uv sync --frozen
+      - run: uv run --frozen ruff check .
+      - run: uv run --frozen ruff format --check .
+      - run: uv run --frozen pytest -q -m "not live_agent and not live"
+
+  dashboard:
+    name: Dashboard build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: ui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm run build
