@@ -39,8 +39,9 @@
   ]},
   "assignees": {"nodes": [{"login": "dave"}]},
   "reviewRequests": {"nodes": [
-    {"requestedReviewer": {"login": "carol"}},
-    {"requestedReviewer": {"slug": "core-team"}}
+    {"asCodeOwner": false, "requestedReviewer": {"login": "carol"}},
+    {"asCodeOwner": true, "requestedReviewer": {"login": "owen"}},
+    {"asCodeOwner": true, "requestedReviewer": {"slug": "core-team"}}
   ]},
   "headCommit": {"nodes": [{"commit": {"checkSuites": {"nodes": [
     {"workflowRun": {"databaseId": 555, "runAttempt": 2, "workflow": {"name": "CI"}},

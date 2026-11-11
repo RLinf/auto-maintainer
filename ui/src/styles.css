@@ -999,6 +999,7 @@ details.pv-section[open] > summary { margin-bottom: 6px; }
 .people-line .is-me { font-weight: 600; }
 
 .progress-inline { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; flex: none; }
+.approval-line { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
 .title-line { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
 .progress-reviewer-block.first-other { border-top: 2px solid var(--border); }
 .progress-reviewer.expandable { cursor: pointer; }

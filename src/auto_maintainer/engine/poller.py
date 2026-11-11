@@ -29,6 +29,7 @@ from ..domain.codeowners import CODEOWNERS_LOCATIONS
 from ..domain.events import Event, EventKind, parse_commands
 from ..domain.markers import parse_markers
 from ..domain.ports import EventSink, ForgeReader, Store
+from ..domain.records import PrAssignee
 from ..domain.snapshot import CheckStatus, PrSnapshot, PrState
 from ..profiles.loader import IN_REPO_PATH
 from ..profiles.service import ProfileService
@@ -154,6 +155,74 @@ def diff_snapshots(
     return events
 
 
+FORGE_ROLES = "forge_roles:{repo}#{number}"
+"""The roles last copied from the forge for a PR (``sync_roles``), as ``role:login``."""
+
+
+def forge_name(pr: PrSnapshot) -> str:
+    """What the dashboard calls the forge ``pr`` is on."""
+    return "GitLab" if "/-/merge_requests/" in pr.url else "GitHub"
+
+
+async def sync_roles(store: Store, pr: PrSnapshot) -> bool:
+    """Copy the roles people gave on the forge itself into ``pr``'s roles here: a
+    review request a person made (``requested_directly``, not one the forge made for
+    a code owner) makes a reviewer, an assignee an owner; the PR's author takes
+    neither. Only what changed on the forge since the last copy is copied, so a role
+    someone removed here is not given back while the forge still lists it. A role
+    from the forge goes when the forge withdraws it, unless the person reviewed (a
+    review ends GitHub's request; their role stays). Roles given here are never
+    touched. Returns whether any role changed."""
+    author = pr.author.lower()
+    wanted = {
+        f"{role}:{login.lower()}": (role, login)
+        for role, logins in (
+            ("reviewer", pr.requested_directly),
+            ("owner", pr.assignees),
+        )
+        for login in logins
+        if login.lower() != author
+    }
+    key = FORGE_ROLES.format(repo=pr.repo, number=pr.number)
+    before = set(await store.get_state(key) or [])
+    if before == set(wanted):
+        return False
+    held = {
+        f"{a.role}:{a.login.lower()}": a
+        for a in await store.list_assignees(pr.repo, pr.number)
+    }
+    reviewed = {r.author.lower() for r in pr.reviews} | {
+        c.author.lower() for t in pr.threads for c in t.comments
+    }
+    changed = False
+    for entry in set(wanted) - before:
+        if entry in held:
+            continue
+        role, login = wanted[entry]
+        await store.add_assignee(
+            PrAssignee(
+                repo=pr.repo,
+                number=pr.number,
+                login=login,
+                role=role,  # type: ignore[arg-type]
+                kind="forge",
+                by=forge_name(pr),
+            )
+        )
+        changed = True
+    for entry in before - set(wanted):
+        role, login = entry.split(":", 1)
+        a = held.get(entry)
+        if a is None or a.kind != "forge":
+            continue
+        if role == "reviewer" and login in reviewed:
+            continue
+        await store.remove_assignee(pr.repo, pr.number, a.login, role)
+        changed = True
+    await store.set_state(key, sorted(wanted))
+    return changed
+
+
 class Poller:
     def __init__(
         self,
@@ -193,6 +262,8 @@ class Poller:
                 # Nothing that makes an event changed (a commit's time, a file's
                 # counts): keep the fresher record without announcing a change.
                 await self.store.save_snapshot(pr)
+                saved = True
+            if await sync_roles(self.store, pr):
                 saved = True
             if reconcile:
                 events.append(
@@ -239,6 +310,7 @@ class Poller:
         if fresh is None:
             return []
         old = await self.store.get_snapshot(repo, number)
+        await sync_roles(self.store, fresh)
         if old is not None and old.fingerprint() == fresh.fingerprint():
             if old != fresh:
                 await self.store.save_snapshot(fresh)

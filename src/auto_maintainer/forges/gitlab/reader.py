@@ -425,6 +425,8 @@ class GitLabReader:
             additions=added,
             deletions=removed,
             requested_reviewers=[self._person(r) for r in mr.get("reviewers") or []],
+            # GitLab asks nobody on its own: every reviewer is someone's choice.
+            requested_directly=[self._person(r) for r in mr.get("reviewers") or []],
             assignees=[self._person(a) for a in mr.get("assignees") or []],
         )
 

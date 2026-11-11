@@ -167,7 +167,8 @@ export interface Assignee {
   /** "owner": answers for the whole PR's progress; "reviewer": reviews it. */
   role: "owner" | "reviewer";
   /** "claimed": they took it themselves; "assigned": someone (``by``) gave it to them. */
-  kind: "claimed" | "assigned";
+  /** ``forge``: asked on the forge itself (a review request, an assignee). */
+  kind: "claimed" | "assigned" | "forge";
   by: string;
   at: string;
 }
@@ -398,7 +399,24 @@ export interface GateItem {
   pending: boolean;
 }
 
+/** Where a PR's approvals stand, the same on its row and its page. */
+export interface ApprovalSummary {
+  /** Approvals that count under the base branch's rules. */
+  approved: number;
+  /** Approvals the branch requires; null when its rules are not known. */
+  required: number | null;
+  /** Approvals still needed (a waiting code owner counts); null when unknown. */
+  needed: number | null;
+  owners_waiting: number;
+  /** Reviewers assigned on the dashboard, and those of them who approved. */
+  assigned: number;
+  assigned_approved: number;
+  assigned_waiting: string[];
+  changes_requested: number;
+}
+
 export interface ProgressSummary {
+  approval?: ApprovalSummary;
   threads: number;
   resolved: number;
   /** Open threads a comment check found addressed in the code. */
@@ -489,6 +507,7 @@ export interface PrProgress {
    * change an owner other than the author approved. */
   code_owners: { file: string | null; required: boolean | null; parts: number; approved_parts: number; people: CodeOwnerStanding[]; waiting: string[][] };
   approvals: ApprovalStatus;
+  approval?: ApprovalSummary;
   head: string;
   /** The user resolves any comment (a maintainer or the PR's owner); a reviewer resolves their own. */
   can_resolve: boolean;
@@ -549,6 +568,7 @@ export interface CodeOwners {
   /** The approvals still missing: for each, the owners any one of whom may give it. */
   waiting: string[][];
   approvals: ApprovalStatus;
+  approval?: ApprovalSummary;
   /** Others GitHub asks to review, who own none of the files. */
   requested: string[];
 }

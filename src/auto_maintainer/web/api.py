@@ -61,7 +61,7 @@ from ..domain.actions import (
     make_action,
 )
 from ..domain.agents import AgentAnswer, AgentQuestion, QuestionState, SkillInfo
-from ..domain.approvals import approval_status
+from ..domain.approvals import ApprovalStatus, approval_status, approval_summary
 from ..domain.codeowners import (
     CodeOwnerReport,
     OwnerRule,
@@ -391,6 +391,43 @@ async def read_codeowners(
     return None, []
 
 
+class _OwnerRules:
+    """A repository's CODEOWNERS rules by base branch, read once per listing."""
+
+    def __init__(self, service: Service, repo: str, path: str | None) -> None:
+        self.service, self.repo, self.path = service, repo, path
+        self._rules: dict[str, list[OwnerRule]] = {}
+
+    async def of(self, base: str) -> list[OwnerRule]:
+        if base not in self._rules:
+            _, self._rules[base] = await read_codeowners(
+                self.service, self.repo, self.path, base
+            )
+        return self._rules[base]
+
+
+async def _progress_row(
+    service: Service,
+    repo: str,
+    pr: PrSnapshot,
+    assignees: list[PrAssignee],
+    rules: _OwnerRules,
+) -> dict[str, Any]:
+    """A PR's review progress for its row: the same numbers its page shows (the
+    comment checks' findings counted, approvals by the branch's rules), in short."""
+    progress = review_progress(
+        pr,
+        assignees,
+        load_checks(await service.store.get_state(checks_key(repo, pr.number))),
+    )
+    owners = code_owner_report(await rules.of(pr.base_ref), pr)
+    status = await approvals_of(service, repo, pr, owners)
+    return {
+        **progress.summary(),
+        "approval": approval_summary(status, progress).model_dump(mode="json"),
+    }
+
+
 async def _assignees(service: Service, repo: str, number: int) -> list[dict[str, Any]]:
     return [assignee_row(a) for a in await service.store.list_assignees(repo, number)]
 
@@ -439,6 +476,13 @@ async def _can_push(service: Service, user: User, record: ActionRecord) -> bool 
 async def approvals_view(
     service: Service, repo: str, pr: PrSnapshot, owners: CodeOwnerReport
 ) -> dict[str, Any]:
+    """``approvals_of`` as the dashboard shows it."""
+    return (await approvals_of(service, repo, pr, owners)).model_dump(mode="json")
+
+
+async def approvals_of(
+    service: Service, repo: str, pr: PrSnapshot, owners: CodeOwnerReport
+) -> ApprovalStatus:
     """Where ``pr``'s reviews stand against its base branch's review rules, as GitHub
     counts them (``domain/approvals.py``): the rules are known for the default
     branch, and approvers' write access is read for each of them."""
@@ -457,7 +501,7 @@ async def approvals_view(
             Permission.WRITE
         )
     }
-    return approval_status(pr, branch, owners, writers).model_dump(mode="json")
+    return approval_status(pr, branch, owners, writers)
 
 
 async def permission(service: Service, user: User, repo: str) -> Permission:
@@ -1341,9 +1385,10 @@ def build_router() -> APIRouter:
     ) -> list[dict[str, Any]]:
         """The PRs of the person's repositories. A PR's ``assignees`` are its owners
         and reviewers here, who claimed the role or were assigned it; ``mine`` keeps
-        the PRs the person owns, ``reviewing`` those they review. Reviews GitHub
-        requested, such as its code owners' automatic ones, and the forge's own
-        assignees give nobody a role."""
+        the PRs the person owns, ``reviewing`` those they review. Roles come from
+        the dashboard, and from the forge itself (``engine/poller.py:sync_roles``):
+        a review request a person made there, and an assignee; the requests GitHub
+        makes on its own for code owners give nobody a role."""
         service = service_of(request)
         repos_ = [repo] if repo else await visible_repos(service, user)
         if repo:
@@ -1362,6 +1407,7 @@ def build_router() -> APIRouter:
             activity = await review_activity(service, name)
             quality = await review_qualities(service, name)
             own = await service.posted_as_people(name)
+            owner_rules = _OwnerRules(service, name, profile.people.codeowners)
             for pr in await service.store.list_snapshots(name):
                 cls = classify_review_state(
                     pr,
@@ -1396,7 +1442,9 @@ def build_router() -> APIRouter:
                         "reviewed_sha": (cls.reviewed_sha or "")[:7],
                         "_rank": priority_key(ev, rubric),
                         "assignees": [assignee_row(a) for a in assignees],
-                        "progress": review_progress(pr, assignees).summary(),
+                        "progress": await _progress_row(
+                            service, name, pr, assignees, owner_rules
+                        ),
                         "tier": ev.tier if ev else None,
                         "total": ev.total if ev else None,
                         "summary": ev.summary if ev else "",
@@ -1679,6 +1727,7 @@ def build_router() -> APIRouter:
         )
         owners = code_owner_report(rules, pr)
         owner_logins = {o.login.lower() for o in owners.people if not o.team}
+        status = await approvals_of(service, repo, pr, owners)
         return {
             **progress.model_dump(mode="json", exclude={"reviewers"}),
             "addressed": progress.addressed,
@@ -1707,7 +1756,8 @@ def build_router() -> APIRouter:
                 "people": [o.model_dump(mode="json") for o in owners.people],
                 "waiting": owners.waiting,
             },
-            "approvals": await approvals_view(service, repo, pr, owners),
+            "approvals": status.model_dump(mode="json"),
+            "approval": approval_summary(status, progress).model_dump(mode="json"),
             "head": pr.head_sha,
         }
 

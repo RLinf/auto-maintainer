@@ -5,7 +5,7 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
-import { api, type CommentItem, type PrProgress, type ProgressEvent, type ProgressSummary, type ReviewerProgress } from "./api";
+import { api, type ApprovalSummary, type CommentItem, type PrProgress, type ProgressEvent, type ProgressSummary, type ReviewerProgress } from "./api";
 import { useAliasOf } from "./aliases";
 import { Avatar, Named } from "./avatar";
 import { ApprovalsBlock, OwnerGroups, useApprovalBadge } from "./codeOwners";
@@ -28,15 +28,47 @@ export function AddressedBar({ value, width = 72 }: { value: number | null; widt
   );
 }
 
-/** Review progress in one short line: feedback addressed, approvals, changes
- * requested, and how many reviewers reviewed; nothing before any review. */
+/** Where a PR's approvals stand, in short: approvals that count against those
+ * required, how many more are needed, and the assigned reviewers who approved. */
+export function ApprovalLine({ a }: { a: ApprovalSummary | undefined }) {
+  const t = useT();
+  const aliasOf = useAliasOf();
+  if (!a) return null;
+  const met = a.needed === 0;
+  const count = a.required != null ? `${a.approved}/${a.required}` : String(a.approved);
+  const title = [
+    `${a.approved} ${t("approvals count")}${a.required != null ? ` / ${a.required} ${t("required")}` : ""}`,
+    a.needed ? `${a.needed} ${t("more needed")}` : met ? t("approvals met") : "",
+    a.owners_waiting ? `${a.owners_waiting} ${t("code-owner parts wait for an owner")}` : "",
+    a.assigned
+      ? `${t("Assigned reviewers")}: ${a.assigned_approved}/${a.assigned} ${t("approved")}` +
+        (a.assigned_waiting.length ? ` (${t("waiting for")} ${a.assigned_waiting.map((l) => aliasOf(l) ?? l).join(", ")})` : "")
+      : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  return (
+    <span className="approval-line" title={title}>
+      <span className={met ? "check-ok" : a.needed ? "check-wait" : undefined}>✓{count}</span>
+      {a.needed ? <span className="check-wait">{a.needed} {t("more needed")}</span> : met ? <span className="check-ok">{t("approvals met")}</span> : null}
+      {a.assigned > 0 && (
+        <span className="muted">
+          {a.assigned_approved}/{a.assigned} {t("assigned approved")}
+        </span>
+      )}
+    </span>
+  );
+}
+
+/** Review progress in one short line: feedback addressed, approvals against those
+ * required, changes requested, and how many reviewers reviewed. */
 export function ProgressInline({ p }: { p: ProgressSummary | undefined }) {
   const t = useT();
-  if (!p || (!p.reviewed && !p.threads)) return null;
+  if (!p || (!p.reviewed && !p.threads && !p.approval?.needed)) return null;
   return (
     <span
       className="progress-inline small"
-      title={`${p.resolved}/${p.threads} ${t("review threads resolved")} · ${p.approved} ${t("approved")} · ${p.changes_requested} ${t("changes requested")} · ${p.reviewed}/${p.reviewers} ${t("reviewed")}`}
+      title={`${p.resolved}/${p.threads} ${t("review threads resolved")}, ${p.fixed} ${t("fixed in the code")} · ${p.reviewed}/${p.reviewers} ${t("reviewed")}`}
     >
       {p.threads > 0 && (
         <>
@@ -44,33 +76,34 @@ export function ProgressInline({ p }: { p: ProgressSummary | undefined }) {
           <span>{percent(p.addressed)}</span>
         </>
       )}
-      {p.approved > 0 && <span className="check-ok">✓{p.approved}</span>}
+      <ApprovalLine a={p.approval} />
       {p.changes_requested > 0 && <span style={{ color: "var(--bad)" }}>✗{p.changes_requested}</span>}
-      <span className="muted">
-        {p.reviewed}/{p.reviewers}
-      </span>
     </span>
   );
 }
 
-/** The PR list's cell: feedback addressed, approvals, and changes requested. */
+/** The PR list's cell: feedback addressed, then approvals against those required. */
 export function ProgressCell({ p }: { p: ProgressSummary | undefined }) {
   const t = useT();
-  if (!p || (!p.reviewed && !p.threads)) return <span className="muted small">{t("no review yet")}</span>;
+  if (!p) return <span className="muted small">{t("no review yet")}</span>;
+  const reviewed = p.reviewed > 0 || p.threads > 0;
   return (
     <span
       className="stack small"
       style={{ gap: 2 }}
-      title={`${p.resolved}/${p.threads} ${t("review threads resolved")} · ${p.approved} ${t("approved")} · ${p.changes_requested} ${t("changes requested")}`}
+      title={`${p.resolved}/${p.threads} ${t("review threads resolved")}, ${p.fixed} ${t("fixed in the code")} · ${p.reviewed}/${p.reviewers} ${t("reviewed")}`}
     >
-      <span className="row" style={{ gap: 6, flexWrap: "nowrap" }}>
-        <AddressedBar value={p.addressed} width={56} />
-        <span>{percent(p.addressed)}</span>
-      </span>
-      <span className="muted" style={{ whiteSpace: "nowrap" }}>
-        {p.approved > 0 && <span className="check-ok">✓{p.approved} </span>}
-        {p.changes_requested > 0 && <span style={{ color: "var(--bad)" }}>✗{p.changes_requested} </span>}
-        {p.reviewed}/{p.reviewers} {t("reviewed")}
+      {reviewed ? (
+        <span className="row" style={{ gap: 6, flexWrap: "nowrap" }}>
+          <AddressedBar value={p.addressed} width={56} />
+          <span>{p.threads > 0 ? percent(p.addressed) : t("no comments")}</span>
+        </span>
+      ) : (
+        <span className="muted">{t("no review yet")}</span>
+      )}
+      <span style={{ whiteSpace: "nowrap" }}>
+        <ApprovalLine a={p.approval} />
+        {p.changes_requested > 0 && <span style={{ color: "var(--bad)" }}> ✗{p.changes_requested}</span>}
       </span>
     </span>
   );
@@ -98,7 +131,7 @@ function Verdict({ r }: { r: Pick<ReviewerProgress, "verdict" | "at_head"> }) {
 function eventText(e: ProgressEvent, t: (s: string) => string, name: (login: string) => string): string {
   if (e.kind === "check") return `${t("checked")} ${e.threads} ${t("comments against the code")} (${e.resolved} ${t("addressed")}) ${t("at")} ${e.detail}`;
   if (e.kind === "opened") return e.commits ? `${t("opened the PR with")} ${e.commits} ${t("commits")}` : t("opened the PR");
-  if (e.kind === "role") return `${e.state === "owner" ? t("became an owner") : t("became a reviewer")} (${e.detail.startsWith("assigned by") ? `${t("assigned by")} ${name(e.detail.slice(12))}` : t("claimed")})`;
+  if (e.kind === "role") return `${e.state === "owner" ? t("became an owner") : t("became a reviewer")} (${e.detail.startsWith("assigned by") ? `${t("assigned by")} ${name(e.detail.slice(12))}` : e.detail.startsWith("asked on") ? `${t("asked on")} ${e.detail.slice(9)}` : t("claimed")})`;
   if (e.kind === "commits") return `${t("pushed")} ${e.commits} ${e.commits === 1 ? t("commit") : t("commits")}${e.detail ? `: ${e.detail}` : ""}`;
   const verdict =
     e.state === "APPROVED" ? t("approved") : e.state === "CHANGES_REQUESTED" ? t("requested changes") : e.state === "DISMISSED" ? t("had a review dismissed") : t("commented");
@@ -162,11 +195,33 @@ export function ReviewProgressPanel({ repo, number, me }: { repo: string; number
             <strong style={{ fontSize: 20 }}>
               {counted.length}
               {need ? <span className="muted" style={{ fontSize: 14 }}> / {need} {t("required")}</span> : null}
+              {d.approval?.needed ? (
+                <span className="pill status-warn" style={{ marginLeft: 8, fontSize: 12, verticalAlign: "middle" }}>
+                  {d.approval.needed} {t("more needed")}
+                </span>
+              ) : d.approval?.needed === 0 ? (
+                <span className="pill status-ok" style={{ marginLeft: 8, fontSize: 12, verticalAlign: "middle" }}>
+                  {t("approvals met")}
+                </span>
+              ) : null}
             </strong>
-            <span className="small muted">
-              {counted.length ? counted.map(name).join(", ") : t("none yet")}
-              {d.approvals?.missing ? ` · ${t("needs")} ${d.approvals.missing} ${t("more from anyone with write access")}` : ""}
-            </span>
+            <span className="small muted">{counted.length ? counted.map(name).join(", ") : t("none yet")}</span>
+            {d.approval && d.approval.owners_waiting > 0 && (
+              <span className="small check-wait">
+                {d.approval.owners_waiting} {t("code-owner parts wait for an owner")}
+              </span>
+            )}
+            {d.approval && d.approval.assigned > 0 && (
+              <span className="small">
+                {t("Assigned reviewers")}: {d.approval.assigned_approved}/{d.approval.assigned} {t("approved")}
+                {d.approval.assigned_waiting.length > 0 && (
+                  <span className="muted">
+                    {" "}
+                    · {t("waiting for")} {d.approval.assigned_waiting.map(name).join(", ")}
+                  </span>
+                )}
+              </span>
+            )}
           </div>
           <div className="stack" style={{ gap: 4 }}>
             <span className="small muted">{t("Changes requested")}</span>

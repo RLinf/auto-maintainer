@@ -102,3 +102,40 @@ def test_rules_of_another_base_branch_are_not_guessed() -> None:
     status = approval_status(pr, None, code_owner_report(RULES, pr), {"lin"})
     assert (status.required, status.missing, status.decision) == (None, None, None)
     assert status.approved_by == ["lin"]
+
+
+def test_a_rows_approvals_say_how_many_more_are_needed() -> None:
+    """The PR row and page show one summary: approvals that count against those
+    required, how many more (a waiting code owner counts), and the assigned
+    reviewers who approved."""
+    from datetime import UTC, datetime
+
+    from auto_maintainer.domain.approvals import approval_summary
+    from auto_maintainer.domain.records import PrAssignee
+    from auto_maintainer.domain.review_progress import review_progress
+
+    def assigned(login: str) -> PrAssignee:
+        return PrAssignee(
+            repo="RLinf/RLinf",
+            number=1,
+            login=login,
+            role="reviewer",
+            kind="assigned",
+            by="lin",
+            at=datetime(2026, 11, 1, tzinfo=UTC),
+        )
+
+    pr = _pr(_approve(1, "zhu"))
+    team = [assigned("zhu"), assigned("guo"), assigned("wang")]
+    status = approval_status(pr, _info(), code_owner_report(RULES, pr), None)
+    summary = approval_summary(status, review_progress(pr, team))
+    assert (summary.approved, summary.required, summary.owners_waiting) == (1, 2, 2)
+    assert summary.needed == 2, "two owner parts wait, more than the one approval short"
+    assert (summary.assigned, summary.assigned_approved) == (3, 1)
+    assert summary.assigned_waiting == ["guo", "wang"]
+
+    pr = _pr(_approve(1, "zhu"), _approve(2, "lin"))
+    status = approval_status(pr, _info(), code_owner_report(RULES, pr), None)
+    assert approval_summary(status, review_progress(pr, team)).needed == 0
+    unknown = approval_status(pr, None, code_owner_report(RULES, pr), None)
+    assert approval_summary(unknown, review_progress(pr, team)).needed is None

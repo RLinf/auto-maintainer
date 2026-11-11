@@ -232,6 +232,10 @@ class PrSnapshot(_Model):
     deletions: int = 0
     requested_reviewers: list[str] = Field(default_factory=list)
     """People asked to review it on the forge; teams are in ``requested_teams``."""
+    requested_directly: list[str] = Field(default_factory=list)
+    """Of ``requested_reviewers``, those a person asked, not the forge on its own for
+    a code owner (GitHub's ``asCodeOwner``): the poller gives them the reviewer role
+    (``engine/poller.py:sync_roles``)."""
     requested_teams: list[str] = Field(default_factory=list)
     assignees: list[str] = Field(default_factory=list)
     """People the forge lists as the PR's assignees."""

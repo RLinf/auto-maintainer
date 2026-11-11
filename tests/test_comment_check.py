@@ -145,6 +145,10 @@ async def test_a_check_reads_only_each_comment_and_its_code(demo) -> None:
         assert item["excerpt"] == "Return early on an empty batch."
         assert item["url"].endswith("#discussion_r501")
         assert progress["fixed"] == 1 and progress["addressed"] == 1.0
+        [row] = [r for r in (await maria.get("/api/prs")).json() if r["number"] == 42]
+        assert row["progress"]["fixed"] == 1, "the list counts what the page counts"
+        assert row["progress"]["addressed"] == progress["addressed"]
+        assert row["progress"]["approval"] == progress["approval"]
 
         await maria.post(f"/api/prs/{REPO}/42/comment-check", json={})
         await h.settle()

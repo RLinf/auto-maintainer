@@ -33,6 +33,7 @@ from pydantic import BaseModel, Field
 
 from .codeowners import CodeOwnerReport
 from .ids import same_commit
+from .review_progress import ReviewProgress
 from .snapshot import PrSnapshot, RepoInfo, ReviewEventState
 
 
@@ -108,4 +109,48 @@ def approval_status(
         code_owners_required=info.requires_code_owner_reviews if info else None,
         code_owners_waiting=owners.waiting,
         last_push_approval=info.requires_last_push_approval if info else None,
+    )
+
+
+class ApprovalSummary(BaseModel):
+    """Where a PR's approvals stand, as its row and its page show them: one
+    computation for both (``approval_summary``)."""
+
+    approved: int
+    """Approvals that count under the base branch's rules."""
+    required: int | None
+    """Approvals the branch requires; ``None`` when its rules are not known."""
+    needed: int | None
+    """Approvals still needed: the count the branch asks for, or one per code-owner
+    part still waiting, whichever is more; ``None`` when the rules are not known."""
+    owners_waiting: int
+    """Code-owner parts still waiting for an owner's approval, when the branch asks
+    for them."""
+    assigned: int
+    """Reviewers assigned on the dashboard."""
+    assigned_approved: int
+    """Of them, those whose latest verdict is an approval."""
+    assigned_waiting: list[str] = Field(default_factory=list)
+    """Assigned reviewers who have not approved."""
+    changes_requested: int = 0
+
+
+def approval_summary(
+    status: ApprovalStatus, progress: ReviewProgress
+) -> ApprovalSummary:
+    """``status`` (``approval_status``) and the assigned reviewers of ``progress``
+    as the few numbers a PR's row and page show."""
+    owners = len(status.code_owners_waiting) if status.code_owners_required else 0
+    known = status.required is not None or bool(status.code_owners_required)
+    assigned = [r for r in progress.reviewers if r.assigned]
+    approved = [r for r in assigned if r.verdict == ReviewEventState.APPROVED.value]
+    return ApprovalSummary(
+        approved=len(status.approved_by),
+        required=status.required,
+        needed=max(status.missing or 0, owners) if known else None,
+        owners_waiting=owners,
+        assigned=len(assigned),
+        assigned_approved=len(approved),
+        assigned_waiting=[r.login for r in assigned if r not in approved],
+        changes_requested=len(status.changes_requested_by),
     )

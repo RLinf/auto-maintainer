@@ -168,7 +168,7 @@ function RoleGroup({
             </a>
             {a.login.toLowerCase() === me.toLowerCase() && <span className="muted"> ({t("you")})</span>}
             <span className="small muted" style={{ display: "block" }}>
-              {a.kind === "assigned" ? `${t("assigned by")} ${aliasOf(a.by) ?? a.by}` : t("claimed")} · <When at={a.at} />
+              {a.kind === "assigned" ? `${t("assigned by")} ${aliasOf(a.by) ?? a.by}` : a.kind === "forge" ? `${t("asked on")} ${a.by}` : t("claimed")} · <When at={a.at} />
             </span>
           </span>
           {(canAssign || a.login.toLowerCase() === me.toLowerCase()) && (

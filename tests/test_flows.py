@@ -1071,3 +1071,54 @@ async def test_a_review_the_forge_refuses_goes_back_to_its_reviewers(
     await harness.service.pipeline.approve(proposal.id, "maria")
     await harness.settle()
     assert len(harness.forge.writes_of("create_review")) == 1
+
+
+async def test_roles_people_give_on_github_show_here(harness: Harness) -> None:
+    """A review request someone made on GitHub makes a reviewer and an assignee an
+    owner; GitHub's own requests of code owners do not. A role someone removed here
+    stays removed, and one GitHub withdraws goes unless its reviewer reviewed."""
+    from auto_maintainer.domain.snapshot import Review, ReviewEventState
+    from auto_maintainer.engine.poller import sync_roles
+
+    store = harness.store
+    pr = _pr().model_copy(
+        update={
+            "requested_reviewers": ["carol", "owen"],
+            "requested_directly": ["carol"],
+            "assignees": ["dave", "alice"],
+            "author": "alice",
+        }
+    )
+
+    def roles() -> set[tuple[str, str, str]]:
+        return {(a.login, a.role, a.kind) for a in held}
+
+    assert await sync_roles(store, pr)
+    held = await store.list_assignees(pr.repo, pr.number)
+    assert roles() == {("carol", "reviewer", "forge"), ("dave", "owner", "forge")}
+    assert {a.by for a in held} == {"GitHub"}
+    assert not await sync_roles(store, pr), "nothing new on GitHub"
+
+    await store.remove_assignee(pr.repo, pr.number, "dave", "owner")
+    assert not await sync_roles(store, pr)
+    held = await store.list_assignees(pr.repo, pr.number)
+    assert roles() == {("carol", "reviewer", "forge")}, "removed here, not given back"
+
+    reviewed = pr.model_copy(
+        update={
+            "requested_reviewers": ["erin"],
+            "requested_directly": ["erin"],
+            "assignees": [],
+            "reviews": [Review(id=1, author="carol", state=ReviewEventState.COMMENTED)],
+        }
+    )
+    assert await sync_roles(store, reviewed)
+    held = await store.list_assignees(pr.repo, pr.number)
+    assert roles() == {
+        ("carol", "reviewer", "forge"),
+        ("erin", "reviewer", "forge"),
+    }, "carol reviewed, so GitHub's request ended, not her role"
+    withdrawn = reviewed.model_copy(update={"requested_directly": []})
+    assert await sync_roles(store, withdrawn)
+    held = await store.list_assignees(pr.repo, pr.number)
+    assert roles() == {("carol", "reviewer", "forge")}, "erin was un-asked first"

@@ -69,7 +69,9 @@ def test_snapshot_mapping():
         thread.is_outdated and not thread.is_resolved and thread.comments[0].id == 8001
     )
     # People and teams apart: only people own a PR.
-    assert pr.requested_reviewers == ["carol"] and pr.requested_teams == ["core-team"]
+    assert pr.requested_reviewers == ["carol", "owen"]
+    assert pr.requested_teams == ["core-team"]
+    assert pr.requested_directly == ["carol"], "owen was asked as a code owner"
     assert pr.assignees == ["dave"]
     checks = {c.name: c for c in pr.checks}
     assert set(checks) == {"unit", "lint", "e2e", "codecov/patch"}

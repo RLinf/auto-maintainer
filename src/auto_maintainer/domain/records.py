@@ -199,9 +199,12 @@ class PrAssignee(BaseModel):
     number: int
     login: str
     role: PrRole = "reviewer"
-    kind: Literal["claimed", "assigned"] = "claimed"
+    kind: Literal["claimed", "assigned", "forge"] = "claimed"
+    """``forge``: someone asked them on the forge itself (a review request, or an
+    assignee for an owner), which the poller copies (``engine/poller.py:sync_roles``)."""
     by: str
-    """Who claimed or assigned it: the login itself for a claim."""
+    """Who claimed or assigned it: the login itself for a claim; the forge's name
+    (``GitHub``) for a role from the forge."""
     at: datetime = Field(default_factory=utc_now)
 
 

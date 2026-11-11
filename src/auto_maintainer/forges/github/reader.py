@@ -101,7 +101,7 @@ fragment PrFields on PullRequest {
   comments(last: 100) { BACKWARD nodes { COMMENT } }
   reviewThreads(last: 50) { BACKWARD nodes { THREAD } }
   reviewRequests(first: 20) {
-    nodes { requestedReviewer { ... on User { login } ... on Team { slug } ... on Bot { login } } }
+    nodes { asCodeOwner requestedReviewer { ... on User { login } ... on Team { slug } ... on Bot { login } } }
   }
   assignees(first: 20) { nodes { login } }
   headCommit: commits(last: 1) {
@@ -279,11 +279,13 @@ def snapshot_from_graphql(repo: str, node: dict[str, Any]) -> PrSnapshot:
         )
         for t in _nodes(node.get("reviewThreads"))
     ]
-    requested, teams = [], []
+    requested, teams, direct = [], [], []
     for r in _nodes(node.get("reviewRequests")):
         reviewer = r.get("requestedReviewer") or {}
         if reviewer.get("login"):
             requested.append(reviewer["login"])
+            if not r.get("asCodeOwner"):
+                direct.append(reviewer["login"])
         elif reviewer.get("slug"):
             teams.append(reviewer["slug"])
     commits = []
@@ -356,6 +358,7 @@ def snapshot_from_graphql(repo: str, node: dict[str, Any]) -> PrSnapshot:
         additions=node.get("additions") or 0,
         deletions=node.get("deletions") or 0,
         requested_reviewers=requested,
+        requested_directly=direct,
         requested_teams=teams,
         assignees=[a["login"] for a in _nodes(node.get("assignees")) if a.get("login")],
     )

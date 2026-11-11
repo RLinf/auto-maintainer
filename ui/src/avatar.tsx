@@ -45,7 +45,8 @@ export function PrPeopleLine({ people, me, t }: { people: { login: string; role:
   const aliasOf = useAliasOf();
   const groups = (["owner", "reviewer"] as const).map((role) => [role, people.filter((p) => p.role === role)] as const).filter(([, list]) => list.length > 0);
   if (!groups.length) return null;
-  const how = (p: { kind: string; by: string }) => (p.kind === "assigned" ? `${t("assigned by")} ${aliasOf(p.by) ?? p.by}` : t("claimed"));
+  const how = (p: { kind: string; by: string }) =>
+    p.kind === "assigned" ? `${t("assigned by")} ${aliasOf(p.by) ?? p.by}` : p.kind === "forge" ? `${t("asked on")} ${p.by}` : t("claimed");
   return (
     <span className="people-line">
       {groups.map(([role, list]) => (
@@ -67,7 +68,8 @@ export function PrPeopleLine({ people, me, t }: { people: { login: string; role:
  * tooltip says how. */
 export function OwnerAvatars({ owners, me, size = 20, compact, t }: { owners: { login: string; kind: string; by: string }[]; me?: string; size?: number; compact?: boolean; t: (s: string) => string }) {
   const aliasOf = useAliasOf();
-  const how = (o: { kind: string; by: string }) => (o.kind === "assigned" ? `${t("assigned by")} ${aliasOf(o.by) ?? o.by}` : t("claimed"));
+  const how = (o: { kind: string; by: string }) =>
+    o.kind === "assigned" ? `${t("assigned by")} ${aliasOf(o.by) ?? o.by}` : o.kind === "forge" ? `${t("asked on")} ${o.by}` : t("claimed");
   const label = (l: string) => (aliasOf(l) ? `${aliasOf(l)} (${l})` : l);
   return <AvatarStack logins={owners.map((o) => o.login)} me={me} size={size} max={4} compact={compact} title={owners.map((o) => `${label(o.login)}: ${how(o)}`).join("\n")} />;
 }

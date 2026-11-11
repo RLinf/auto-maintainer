@@ -323,7 +323,13 @@ def _timeline(
     if pr.created_at:
         events.append(ProgressEvent(at=pr.created_at, kind="opened", login=pr.author))
     for a in assignees:
-        how = "claimed" if a.kind == "claimed" else f"assigned by {a.by}"
+        how = (
+            "claimed"
+            if a.kind == "claimed"
+            else f"asked on {a.by}"
+            if a.kind == "forge"
+            else f"assigned by {a.by}"
+        )
         events.append(
             ProgressEvent(at=a.at, kind="role", login=a.login, state=a.role, detail=how)
         )
