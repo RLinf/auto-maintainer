@@ -6,7 +6,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
-import { ApiError, api, type AgentJob, type JobStep } from "./api";
+import { ApiError, api, type AgentJob, type JobSlot, type JobStep } from "./api";
 import { agentName } from "./agentPicker";
 import { ErrorBox, prPath, useAct, When } from "./components";
 import { useMe, useProposals, useQuestions } from "./data";
@@ -29,6 +29,8 @@ const PLAYBOOK: Record<string, { label: string; icon: IconName }> = {
   reproduce: { label: "Reproduction", icon: "server" },
   onboard: { label: "Onboarding", icon: "repo" },
   self_improve: { label: "Self-improvement", icon: "settings" },
+  merge_base: { label: "Update with base branch", icon: "merge" },
+  ci_doctor: { label: "CI diagnosis", icon: "activity" },
   evaluate: { label: "Priority evaluation", icon: "sort" },
   quality: { label: "Quality score", icon: "sparkles" },
   quick_quality: { label: "Quick quality score", icon: "sparkles" },
@@ -256,7 +258,7 @@ export function WorkRow({ job, me }: { job: AgentJob; me: string }) {
         <span className="meta">
           {agentName(job.agent) || t("Default agent")}
           {job.by ? ` · ${job.by === me ? t("you") : job.by}` : ""} · <When at={job.updated_at} />
-          {active && last ? ` · ${stepLine(last, t)}` : ""}
+          {job.status === "queued" && job.slot ? ` · ${slotLine(job.slot, !!job.by, t)}` : active && last ? ` · ${stepLine(last, t)}` : ""}
           {!active && job.error ? ` · ${job.error}` : ""}
         </span>
       </span>
@@ -278,6 +280,20 @@ function JobStatus({ job }: { job: AgentJob }) {
       {t(STATUS_LABEL[job.status] ?? job.status)}
     </span>
   );
+}
+
+/** Why a queued job has not started: the agent slots in use, and the jobs ahead of
+ * it. A person's request counts only other people's requests; the service's own
+ * work waits for every slot. */
+export function slotLine(slot: JobSlot, asked: boolean, t: (s: string) => string): string {
+  if (slot.free > 0) return t("A slot is free; starting…");
+  const used = asked ? slot.people : slot.people + slot.service;
+  const parts = [
+    `${t("Waiting for a free agent slot")}: ${Math.min(used, slot.size)}/${slot.size} ${t("in use")}`,
+    asked ? `${slot.people} ${t("by people's requests")}` : `${slot.people} ${t("by people's requests")}, ${slot.service} ${t("background")}`,
+  ];
+  if (slot.ahead) parts.push(`${slot.ahead} ${t("ahead in line")}`);
+  return parts.join(" · ");
 }
 
 function stepLine(step: JobStep, t: (s: string) => string): string {
@@ -397,6 +413,22 @@ function JobView({ id, onClose }: { id: string; onClose: () => void }) {
               </span>
               {d.wait && <span>· {d.wait}</span>}
             </div>
+            {d.status === "queued" && d.slot && (
+              <div className="notice row" style={{ gap: 8, flexWrap: "nowrap", alignItems: "flex-start" }} role="status">
+                <span style={{ flex: "none", paddingTop: 2 }}>
+                  <Icon name="clock" size={14} />
+                </span>
+                <span className="small">
+                  {slotLine(d.slot, !!d.by, t)}
+                  {d.slot.free === 0 && (
+                    <span className="muted">
+                      {" "}
+                      · {d.by ? t("It starts when one of them ends.") : t("Background work starts only in slots nobody's request needs.")}
+                    </span>
+                  )}
+                </span>
+              </div>
+            )}
             {d.note && (
               <div className="small">
                 <span className="muted">{t("Note")}:</span> {d.note}

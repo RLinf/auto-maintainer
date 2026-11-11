@@ -361,6 +361,9 @@ class SystemSettings(BaseModel):
     """Most public writes (comments, labels, reviews) across all repositories per hour."""
     max_repo_public_writes_per_hour: int | None = Field(default=None, ge=0, le=500)
     """Most public writes on one repository per hour."""
+    agent_slots: int | None = Field(default=None, ge=1, le=16)
+    """Agent jobs (reviews, fixes, diagnoses, ...) that run at once for people's
+    requests; the service's own background work takes only slots nobody uses."""
 
 
 # -- the document ------------------------------------------------------------------

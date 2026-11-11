@@ -312,7 +312,13 @@ class SqliteStore:
         )
 
     async def claim_jobs(
-        self, pool: str, limit: int, lease_seconds: int, now: datetime
+        self,
+        pool: str,
+        limit: int,
+        lease_seconds: int,
+        now: datetime,
+        *,
+        asked: bool | None = None,
     ) -> list[Job]:
         now_s = ts(now)
         async with self._write, self._engine.begin() as conn:
@@ -327,12 +333,15 @@ class SqliteStore:
                         ),
                     )
                     .order_by(m.jobs.c.created_at)
-                    .limit(limit)
                 )
             ).fetchall()
+            ready = [Job.model_validate_json(row.data) for row in rows]
+            if asked is not None:
+                ready = [j for j in ready if (j.asked_by is not None) == asked]
+            # People's requests first, each kind oldest first (the sort is stable).
+            ready.sort(key=lambda j: j.asked_by is None)
             claimed = []
-            for row in rows:
-                job = Job.model_validate_json(row.data)
+            for job in ready[:limit]:
                 job.status = JobStatus.RUNNING
                 job.attempts += 1
                 job.lease_until = now + timedelta(seconds=lease_seconds)

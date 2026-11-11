@@ -1258,6 +1258,71 @@ function MachineForm({ initial, onDone }: { initial?: LabMachine; onDone: () => 
   );
 }
 
+/** How many agent jobs run at once for people's requests, and how many run now; the
+ * owner changes it here, and it applies at once. */
+function AgentSlotsRow({ v, custom }: { v: SettingsView; custom: boolean }) {
+  const t = useT();
+  const toast = useToast();
+  const [draft, setDraft] = useState<string | null>(null);
+  const set = useAct((slots: number) => api.put<{ approved: boolean }>("/api/settings/agent-slots", { slots }), [["settings"], ["memory"], ["work"]]);
+  const size = v.system.agent_slots;
+  const use = v.system.agent_slots_in_use;
+  const value = draft ?? String(size);
+  const n = Number(value);
+  const valid = Number.isInteger(n) && n >= 1 && n <= 16;
+  return (
+    <Row
+      icon="cpu"
+      title={
+        <span className="row" style={{ gap: 6 }}>
+          {t("Agent jobs at once")} <FromSettings on={custom} />
+        </span>
+      }
+      sub={
+        <>
+          {t("Reviews, fixes, and diagnoses people ask for run in these slots; the service's own background work uses only slots nobody needs.")}{" "}
+          <strong>
+            {t("Now")}: {use.people}/{size} {t("by people's requests")}, {use.service} {t("background")}
+          </strong>
+        </>
+      }
+      value={
+        v.access.allowed ? (
+          <span className="row" style={{ gap: 6, justifyContent: "flex-end" }}>
+            <input
+              type="number"
+              min={1}
+              max={16}
+              value={value}
+              aria-label={t("Agent jobs at once")}
+              style={{ width: 64 }}
+              onChange={(e) => setDraft(e.target.value)}
+            />
+            {draft !== null && Number(draft) !== size && (
+              <button
+                className="primary sm"
+                disabled={!valid || set.isPending}
+                onClick={() =>
+                  set.mutate(n, {
+                    onSuccess: (r) => {
+                      setDraft(null);
+                      toast({ title: r.approved ? t("Saved") : t("Change proposed"), icon: r.approved ? "check" : "inbox" });
+                    },
+                  })
+                }
+              >
+                {t("Save")}
+              </button>
+            )}
+          </span>
+        ) : (
+          <strong>{size}</strong>
+        )
+      }
+    />
+  );
+}
+
 function SystemTab({ v, ask }: { v: SettingsView; ask: (p: string, send?: boolean) => void }) {
   const t = useT();
   const custom = new Set(v.system.from_settings);
@@ -1295,6 +1360,7 @@ function SystemTab({ v, ask }: { v: SettingsView; ask: (p: string, send?: boolea
             }
             value={<strong>{v.system.max_repo_public_writes_per_hour}</strong>}
           />
+          <AgentSlotsRow v={v} custom={custom.has("agent_slots")} />
         </div>
       </Section>
       <Section

@@ -196,6 +196,10 @@ async def settings_view(service: Service, user: User) -> dict[str, Any]:
             "poll_seconds": service.settings.poll_seconds,
             "max_public_writes_per_hour": service.settings.write_caps[0],
             "max_repo_public_writes_per_hour": service.settings.write_caps[1],
+            "agent_slots": service.engine.slots("agent")["size"],
+            "agent_slots_in_use": {
+                k: service.engine.slots("agent")[k] for k in ("people", "service")
+            },
             "from_settings": sorted(system.model_dump(exclude_none=True)),
         },
         "host": {
@@ -282,6 +286,27 @@ class AgentModelBody(BaseModel):
 
 class DefaultAgentBody(BaseModel):
     agent: str | None = None
+
+
+class AgentSlotsBody(BaseModel):
+    slots: int | None = Field(default=None, ge=1, le=16)
+    """``None`` keeps the host's value (``pools.agent`` in ``local.yaml``)."""
+
+
+def _with_agent_slots(text: str, slots: int | None) -> str:
+    """The settings document with ``system.agent_slots`` set, or removed when
+    ``None``; the other system values are kept."""
+    data = _settings_data(text)
+    system = dict(data.get("system") or {})
+    if slots is None:
+        system.pop("agent_slots", None)
+    else:
+        system["agent_slots"] = slots
+    if system:
+        data["system"] = system
+    else:
+        data.pop("system", None)
+    return yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
 
 
 class MachineBody(BaseModel):
@@ -636,6 +661,24 @@ def build_router() -> APIRouter:
                 title=f"settings: {body.agent} runs every task first"
                 if body.agent
                 else "settings: the agent chosen during setup runs every task first",
+            ),
+            user,
+        )
+
+    @r.put("/agent-slots")
+    async def set_agent_slots(
+        request: Request, body: AgentSlotsBody, user: User = Depends(current_user)
+    ) -> dict[str, Any]:
+        """How many agent jobs run at once for people's requests; applies at once."""
+        service = service_of(request)
+        text, _ = await service.settings_text()
+        return await save(
+            request,
+            DocumentBody(
+                yaml=_with_agent_slots(text, body.slots),
+                title=f"settings: {body.slots} agent jobs at once"
+                if body.slots
+                else "settings: the host's number of agent jobs at once",
             ),
             user,
         )

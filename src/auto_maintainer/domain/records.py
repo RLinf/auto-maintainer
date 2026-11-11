@@ -68,6 +68,16 @@ class Job(BaseModel):
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
+    @property
+    def asked_by(self) -> str | None:
+        """The person who asked for this job on the dashboard or in a conversation
+        (an event's ``by``); ``None`` for work the service started on its own."""
+        for event in self.events:
+            by = (event.get("payload") or {}).get("by")
+            if by:
+                return str(by)
+        return None
+
 
 class RepoRecord(BaseModel):
     repo: str

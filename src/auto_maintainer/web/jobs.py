@@ -89,8 +89,43 @@ async def _default_agent(service: Service, job: Job, by: str | None) -> str | No
     return await service.runs_on_for(route, by, kind)
 
 
+async def slot_view(
+    service: Service, job: Job, queued: list[Job] | None = None
+) -> dict[str, Any] | None:
+    """For a job queued to start now, the slots of its pool: how many run at once
+    (``size``), how many run now for people (``people``) and for the service itself
+    (``service``), how many are ``free`` for it, and how many queued jobs go first
+    (``ahead``). ``None`` for a job that is not waiting for a slot. ``queued`` is the
+    queue when the caller already read it."""
+    now = service.clock.now()
+    if job.status != JobStatus.QUEUED or (job.not_before and job.not_before > now):
+        return None
+    slots = service.engine.slots(job.pool)
+    if queued is None:
+        queued = await service.store.list_jobs([JobStatus.QUEUED], limit=1000)
+    mine = job.asked_by is not None
+    ahead = sum(
+        1
+        for other in queued
+        if other.pool == job.pool
+        and other.id != job.id
+        and not (other.not_before and other.not_before > now)
+        and (
+            (other.asked_by is not None, -other.created_at.timestamp())
+            > (mine, -job.created_at.timestamp())
+        )
+    )
+    free = slots["free"] if mine else max(0, slots["free"] - slots["service"])
+    return {**slots, "free": free, "ahead": ahead}
+
+
 async def job_view(
-    service: Service, job: Job, *, steps: bool = False, me: str | None = None
+    service: Service,
+    job: Job,
+    *,
+    steps: bool = False,
+    me: str | None = None,
+    queued: list[Job] | None = None,
 ) -> dict[str, Any]:
     """What the dashboard shows about ``job``."""
     payload = _payload(job)
@@ -145,6 +180,7 @@ async def job_view(
         "error": job.error,
         "result": job.result,
         "wait": job.wait.reason if job.wait else None,
+        "slot": await slot_view(service, job, queued),
         "questions": [q.id for q in questions],
         "questions_for_me": sum(
             1
@@ -410,6 +446,7 @@ def build_router() -> APIRouter:
         code_visible: bool | None = None
         since = service.clock.now() - timedelta(days=max(1, min(days, 90)))
         out = []
+        queued = await service.store.list_jobs([JobStatus.QUEUED], limit=1000)
         for job in await service.store.list_jobs(repo=repo, limit=500):
             if job.playbook not in AGENT_PLAYBOOKS:
                 continue
@@ -446,7 +483,7 @@ def build_router() -> APIRouter:
                 # Quick scores run for every open PR in the background: a finished
                 # one shows on its PR, not in lists across PRs.
                 continue
-            view = await job_view(service, job, me=user.login)
+            view = await job_view(service, job, me=user.login, queued=queued)
             if (
                 job.status not in ACTIVE
                 and (job.result or {}).get("handed_to")

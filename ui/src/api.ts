@@ -1063,6 +1063,9 @@ export interface SettingsView {
     poll_seconds: number;
     max_public_writes_per_hour: number;
     max_repo_public_writes_per_hour: number;
+    agent_slots: number;
+    /** Agent jobs running now: for people's requests, and the service's own. */
+    agent_slots_in_use: { people: number; service: number };
     from_settings: string[];
   };
   host: {
@@ -1125,6 +1128,17 @@ export interface JobStep {
   at: string;
 }
 
+/** Agent slots: ``size`` jobs run at once for people's requests (``people`` now);
+ * the service's own work (``service`` now) takes only slots nobody uses. ``free`` is
+ * how many this job could start in now, ``ahead`` the queued jobs that go first. */
+export interface JobSlot {
+  size: number;
+  people: number;
+  service: number;
+  free: number;
+  ahead: number;
+}
+
 export interface AgentJob {
   id: string;
   playbook: string;
@@ -1143,6 +1157,8 @@ export interface AgentJob {
   error: string | null;
   result: Record<string, unknown> | null;
   wait: string | null;
+  /** For a job queued to start now: its pool's slots, and how many queued jobs go first. */
+  slot: JobSlot | null;
   questions: string[];
   questions_for_me: number;
   produced: { id: string; kind: string; status: string; proposal: string | null; for: string | null }[];

@@ -651,8 +651,20 @@ class Store(Protocol):
     async def get_job(self, job_id: str) -> Job | None: ...
     async def save_job(self, job: Job) -> None: ...
     async def claim_jobs(
-        self, pool: str, limit: int, lease_seconds: int, now: datetime
-    ) -> list[Job]: ...
+        self,
+        pool: str,
+        limit: int,
+        lease_seconds: int,
+        now: datetime,
+        *,
+        asked: bool | None = None,
+    ) -> list[Job]:
+        """Mark up to ``limit`` queued jobs of ``pool`` running and return them: the
+        ones a person asked for first (``Job.asked_by``), each kind oldest first.
+        ``asked`` limits them to people's requests (``True``) or to the service's own
+        work (``False``)."""
+        ...
+
     async def list_jobs(
         self,
         statuses: list[JobStatus] | None = None,

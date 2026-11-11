@@ -71,6 +71,9 @@ class Engine:
             self.pools.setdefault(playbook.pool, 1)
         self.lease_seconds = lease_seconds
         self._wake: dict[str, asyncio.Event] = {p: asyncio.Event() for p in self.pools}
+        self._busy: dict[str, dict[bool, int]] = {}
+        """Per pool, the jobs running now: asked for by a person (``True``), or the
+        service's own (``False``)."""
         self._tasks: list[asyncio.Task[None]] = []
         self._running: set[asyncio.Task[None]] = set()
         self._job_tasks: dict[str, asyncio.Task[object]] = {}
@@ -204,30 +207,63 @@ class Engine:
                 await task
 
     async def _pool_loop(self, pool: str, size: int) -> None:
-        sem = asyncio.Semaphore(size)
+        """Start the pool's queued jobs as slots free up, claiming a job only when it
+        can start, so a job shown as running is running. ``self.pools[pool]`` slots
+        (read on every turn, so the settings change it live) hold the jobs people
+        asked for; the service's own jobs take only slots that nothing else holds. A
+        person's request thus never waits behind the service's own work, and while
+        that work finishes, more than ``size`` jobs can run."""
         wake = self._wake.setdefault(pool, asyncio.Event())
+        busy = self._busy.setdefault(pool, {True: 0, False: 0})
         while True:
-            claimed = await self.store.claim_jobs(
-                pool, size, self.lease_seconds, self.clock.now()
-            )
-            if not claimed:
-                wake.clear()
+            wake.clear()
+            size = max(1, self.pools.get(pool, size))
+            started = 0
+            for asked in (True, False):
+                free = size - busy[True] - (busy[False] if not asked else 0)
+                if free <= 0:
+                    continue
+                for job in await self.store.claim_jobs(
+                    pool, free, self.lease_seconds, self.clock.now(), asked=asked
+                ):
+                    busy[asked] += 1
+                    started += 1
+                    task = asyncio.create_task(
+                        self._guarded(job, busy, asked, wake),
+                        name=f"job:{job.playbook}",
+                    )
+                    self._running.add(task)
+                    task.add_done_callback(self._running.discard)
+            if not started:
                 with contextlib.suppress(TimeoutError):
                     await asyncio.wait_for(wake.wait(), timeout=5)
-                continue
-            for job in claimed:
-                await sem.acquire()
-                task = asyncio.create_task(
-                    self._guarded(job, sem), name=f"job:{job.playbook}"
-                )
-                self._running.add(task)
-                task.add_done_callback(self._running.discard)
 
-    async def _guarded(self, job: Job, sem: asyncio.Semaphore) -> None:
+    async def _guarded(
+        self, job: Job, busy: dict[bool, int], asked: bool, wake: asyncio.Event
+    ) -> None:
         try:
             await self.run_job(job)
         finally:
-            sem.release()
+            busy[asked] -= 1
+            wake.set()
+
+    def slots(self, pool: str) -> dict[str, int]:
+        """How many jobs of ``pool`` run at once (``size``) and what runs now: jobs
+        people asked for (``people``) and the service's own (``service``); ``free`` is
+        the slots a person's request would start in now."""
+        busy = self._busy.get(pool, {True: 0, False: 0})
+        size = max(1, self.pools.get(pool, 1))
+        return {
+            "size": size,
+            "people": busy[True],
+            "service": busy[False],
+            "free": max(0, size - busy[True]),
+        }
+
+    def resize(self, pool: str, size: int) -> None:
+        """Run ``size`` jobs of ``pool`` at once from now on; running jobs go on."""
+        self.pools[pool] = max(1, size)
+        self._wake.setdefault(pool, asyncio.Event()).set()
 
     def _changed(self, job: Job) -> None:
         if self.on_change is not None:

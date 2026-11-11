@@ -273,6 +273,7 @@ class Service:
             "poll_seconds": settings.poll_seconds,
             "write_caps": settings.write_caps,
             "default_agent": settings.default_agent,
+            "agent_slots": settings.pools.get("agent", 3),
         }
         self.service_config = ServiceConfig()
         """The settings in force, from ``config/service.yaml``."""
@@ -649,6 +650,9 @@ class Service:
         )
         self.settings.poll_seconds = poll
         self.scheduler.poll_seconds = poll
+        self.engine.resize(
+            "agent", system.agent_slots or self.host_values["agent_slots"]
+        )
         self.settings.write_caps = caps
         self.pipeline.write_caps = caps
         self.machines.clear()
