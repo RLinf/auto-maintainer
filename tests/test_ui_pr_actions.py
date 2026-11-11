@@ -115,10 +115,16 @@ assert.deepEqual(
   prMenuItems({{ isOpen: false, hasReviewFindings: false, failedCount: 2, ciState: "passed" }}),
   ["reproduce"],
 );
+// Without a review's findings, an open PR is changed as the person describes.
+assert.deepEqual(
+  prMenuItems({{ isOpen: true, hasReviewFindings: false, failedCount: 0, ciState: "none" }}),
+  ["change", "reproduce", "merge-base"],
+);
 
 // Live PR updates that invalidate an open inline form return the popover to the menu.
 const closedClean = {{ isOpen: false, hasReviewFindings: false, failedCount: 0, ciState: "none" as const }};
 assert.equal(activePrActionPanel("fix", closedClean), "menu");
+assert.equal(activePrActionPanel("change", closedClean), "menu");
 assert.equal(activePrActionPanel("fix-ci", closedClean), "menu");
 assert.equal(activePrActionPanel("merge-base", closedClean), "menu");
 assert.equal(activePrActionPanel("reproduce", closedClean), "reproduce");

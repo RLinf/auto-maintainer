@@ -1087,6 +1087,7 @@ function PrActionsMenu({
   if (active !== "menu") {
     const titles: Record<Exclude<PrActionPanel, "menu">, string> = {
       fix: t("Fix with agent"),
+      change: t("Change with agent"),
       reproduce: t("Reproduce"),
       "fix-ci": t("Fix CI"),
       "merge-base": mergeLabel,
@@ -1100,6 +1101,7 @@ function PrActionsMenu({
           <span className="small muted truncate">{titles[active]}</span>
         </div>
         {active === "fix" && latestReview && <FixForm repo={repo} number={pr.number} review={latestReview} onClose={onClose} />}
+        {active === "change" && <FixForm repo={repo} number={pr.number} onClose={onClose} />}
         {active === "reproduce" && <ReproduceForm repo={repo} number={pr.number} onClose={onClose} />}
         {active === "fix-ci" && <FixCiForm repo={repo} number={pr.number} failed={failed} canPush={canPush} onClose={onClose} />}
         {active === "merge-base" && (
@@ -1121,6 +1123,11 @@ function PrActionsMenu({
       {items.includes("fix") && (
         <MenuItem icon="sparkles" onClick={() => setPanel("fix")}>
           {t("Fix with agent")}
+        </MenuItem>
+      )}
+      {items.includes("change") && (
+        <MenuItem icon="sparkles" onClick={() => setPanel("change")}>
+          {t("Change with agent")}
         </MenuItem>
       )}
       {items.includes("reproduce") && (

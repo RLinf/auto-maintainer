@@ -1002,19 +1002,34 @@ export function FixForm({
   const toast = useToast();
   const [agent, setAgent] = useAgentChoice("fix");
   const [note, setNote] = useState("");
+  // Without a review, the note is the change itself, in the person's words.
   const fix = useAct(
-    () => api.post<{ event: string }>(`/api/prs/${repo}/${number}/fix`, { review: review ?? null, agent: agent || null, note }),
+    () =>
+      api.post<{ event: string }>(
+        `/api/prs/${repo}/${number}/fix`,
+        review ? { review, agent: agent || null, note } : { review: null, agent: agent || null, request: note },
+      ),
     [["pr"], ["prs"], ["proposals"], ["work"]],
   );
   return (
     <div className="stack" style={{ gap: 10, padding: 6, width: "min(340px, calc(100vw - 24px))", maxWidth: "100%" }}>
-      <span className="small muted">{t("An agent changes the code for the review's findings; you see the diff before a PR is opened.")}</span>
-      <textarea className="prose" rows={3} placeholder={t("Anything the agent should know (optional)")} value={note} onChange={(e) => setNote(e.target.value)} />
+      <span className="small muted">
+        {review
+          ? t("An agent changes the code for the review's findings; you see the diff before a PR is opened.")
+          : t("An agent changes the PR's code as you describe; you read the diff and push it as yourself.")}
+      </span>
+      <textarea
+        className="prose"
+        rows={review ? 3 : 5}
+        placeholder={review ? t("Anything the agent should know (optional)") : t("What should change? For example: rename the config key, and update its docs")}
+        value={note}
+        onChange={(e) => setNote(e.target.value)}
+      />
       <div className="row">
         <AgentPicker value={agent} onChange={setAgent} task="fix" />
         <button
           className="primary right"
-          disabled={fix.isPending}
+          disabled={fix.isPending || (!review && !note.trim())}
           onClick={() =>
             fix.mutate(undefined, {
               onSuccess: (out) => {

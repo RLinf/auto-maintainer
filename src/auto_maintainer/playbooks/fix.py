@@ -12,9 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""A fix for a review's findings, as a PR into the reviewed PR's branch (design 5.5).
+"""A fix for a review's findings, or a change someone asked for in their own words, as
+a PR into the PR's branch (design 5.5).
 
-A maintainer asks for it from a review (``dashboard.command`` with ``command: fix``).
+A maintainer asks for it from a review (``dashboard.command`` with ``command: fix``),
+or in their own words (``request``): on the PR page, or in a conversation
+(``thread_id``), which is told when the diff is ready.
 An agent changes a checkout of the PR's head in the repository's folder, following the
 repository's own skills, and may ask the maintainer; it never commits, pushes, or
 posts. The playbook proposes the diff as a ``pr.fix`` action drafted for that
@@ -30,20 +33,21 @@ from ..domain.actions import ActionKind, FixPrPayload, make_action
 from ..domain.agents import AgentTask, TaskKind
 from ..domain.events import Event, EventKind
 from ..domain.ids import short_sha
-from ..domain.review import ReviewResult
+from ..domain.records import ChatMessage
+from ..domain.review import Finding, ReviewResult
 from ..domain.snapshot import PrState
 from .base import Playbook, PlaybookContext, PlaybookResult, may_succeed_later
 from .prompts import pr_block, review_skill_block, schema_hint, untrusted
 
 FIX = """You are fixing a pull request for {reviewer}, a maintainer, inside an automated maintainer service. The working directory is a checkout of the PR's head commit.
-- Change the code to address the review findings below and nothing else. Keep the PR author's approach; make the smallest change that resolves each finding.
+- Change the code to {task} and nothing else. Keep the PR author's approach; make the smallest change that does it.
 - Check what you changed with the repository's static linters when it has them. Never run its tests, builds, scripts, or the PR's code on this machine: a repository's code runs only on its test machines, so say which tests a run there should cover.
 - Do not commit, push, or post, and never ask whether to: the service shows your changes to {reviewer}, who decides whether to open a PR with them.
 - When something blocks a sound fix (the intended behavior is unclear, two fixes are equally plausible), ask {reviewer} with your tool for asking the user.
 - Write any text in {public_language}: plain and specific.
-- When you are done, end with a short message: what you changed for each finding, what you left and why, the checks you ran, and what a test run should cover."""
+- When you are done, end with a short message: what you changed{each}, what you left and why, the checks you ran, and what a test run should cover."""
 
-DESCRIBE = """Describe fixes that an agent made to a pull request, for the PR that proposes them. Read the diff and the findings; do not change any file. Write in {public_language}: plain and specific."""
+DESCRIBE = """Describe changes that an agent made to a pull request, for the PR that proposes them. Read the diff and what it was asked; do not change any file. Write in {public_language}: plain and specific."""
 
 
 class FixedFinding(BaseModel):
@@ -86,23 +90,32 @@ class FixPlaybook(Playbook):
         by = str(event.payload["by"])
         ctx.requested_by = by
         ctx.agent = event.payload.get("agent") or None
+        thread = event.payload.get("thread_id")
         pr = await ctx.forge.get_pr(event.repo, event.number)
         if pr is None or pr.state != PrState.OPEN:
-            return PlaybookResult(result={"skipped": "the PR is not open"})
-        review = await ctx.store.get_action(str(event.payload.get("review") or ""))
-        if (
-            review is None
-            or review.action.kind != ActionKind.REVIEW_POST
-            or review.action.number != pr.number
-        ):
-            return PlaybookResult(result={"skipped": "no review of this PR to fix"})
-        result = ReviewResult.model_validate(review.action.payload.get("result") or {})
-        wanted = set(event.payload.get("findings") or [])
-        findings = [f for f in result.findings if not wanted or f.id in wanted]
-        if not findings:
-            return PlaybookResult(
-                result={"skipped": "the review has no findings to fix"}
+            await _tell(
+                ctx, thread, f"#{event.number} is not open, so I changed nothing."
             )
+            return PlaybookResult(result={"skipped": "the PR is not open"})
+        request = str(event.payload.get("request") or "").strip()
+        findings: list[Finding] = []
+        if not request:
+            review = await ctx.store.get_action(str(event.payload.get("review") or ""))
+            if (
+                review is None
+                or review.action.kind != ActionKind.REVIEW_POST
+                or review.action.number != pr.number
+            ):
+                return PlaybookResult(result={"skipped": "no review of this PR to fix"})
+            result = ReviewResult.model_validate(
+                review.action.payload.get("result") or {}
+            )
+            wanted = set(event.payload.get("findings") or [])
+            findings = [f for f in result.findings if not wanted or f.id in wanted]
+            if not findings:
+                return PlaybookResult(
+                    result={"skipped": "the review has no findings to fix"}
+                )
         ctx.trusted_input = await ctx.author_is_team(pr)
 
         info = await ctx.forge.get_repo(pr.repo)
@@ -118,13 +131,26 @@ class FixPlaybook(Playbook):
                 + (f"\n  Suggested: {f.suggestion}" if f.suggestion else "")
                 for f in findings
             )
+            asked = (
+                f"What {by} asked for:\n"
+                + untrusted("maintainer.request", request, 8_000)
+                if request
+                else "Review findings to fix:\n"
+                + untrusted("review.findings", listing, 20_000)
+            )
             note = str(event.payload.get("note") or "").strip()
             prompt = "\n\n".join(
                 [
-                    FIX.format(reviewer=by, public_language=profile.languages.public),
+                    FIX.format(
+                        reviewer=by,
+                        public_language=profile.languages.public,
+                        task=f"do what {by} asks below"
+                        if request
+                        else "address the review findings below",
+                        each="" if request else " for each finding",
+                    ),
                     review_skill_block(profile, ctx.service.skills_dir, workdir),
-                    "Review findings to fix:\n"
-                    + untrusted("review.findings", listing, 20_000),
+                    asked,
                     f"What {by} added: " + untrusted("maintainer.note", note, 2000)
                     if note
                     else "",
@@ -148,6 +174,11 @@ class FixPlaybook(Playbook):
             if not answer.ok:
                 if may_succeed_later(answer):
                     raise RuntimeError(f"fix agent failed: {answer.error}")
+                await _tell(
+                    ctx,
+                    thread,
+                    f"The agent could not change #{pr.number}: {answer.error}",
+                )
                 return PlaybookResult(failed=f"fix agent failed: {answer.error}")
             account = answer.text.strip()
             changes = await ctx.workspace.changes(workdir)
@@ -161,8 +192,7 @@ class FixPlaybook(Playbook):
                                 DESCRIBE.format(
                                     public_language=profile.languages.public
                                 ),
-                                "Review findings it was asked to fix:\n"
-                                + untrusted("review.findings", listing, 20_000),
+                                asked,
                                 *(
                                     [untrusted("agent.account", account[-4000:], 4000)]
                                     if account
@@ -182,6 +212,12 @@ class FixPlaybook(Playbook):
         finally:
             await ctx.workspace.release(workdir)
         if not changes.files:
+            await _tell(
+                ctx,
+                thread,
+                f"The agent changed nothing in #{pr.number}."
+                + (f" {account[-1500:]}" if account else ""),
+            )
             return PlaybookResult(
                 result={
                     "skipped": "the agent changed nothing",
@@ -192,8 +228,15 @@ class FixPlaybook(Playbook):
             fix = FixResult.model_validate(described.structured)
         else:  # the PR still names the findings and shows the diff
             fix = FixResult(
-                title=f"Fix review findings on #{pr.number}",
-                summary=account[-2000:] or "Fixes for the review's findings.",
+                title=f"Changes to #{pr.number}"
+                if request
+                else f"Fix review findings on #{pr.number}",
+                summary=account[-2000:]
+                or (
+                    "The changes asked for."
+                    if request
+                    else "Fixes for the review's findings."
+                ),
             )
         lines = [fix.summary, ""]
         lines += [f"- {f.id}: {f.change}" for f in fix.fixed]
@@ -201,12 +244,22 @@ class FixPlaybook(Playbook):
             lines += ["", "Not changed:"] + [
                 f"- {f.id}: {f.reason}" for f in fix.skipped
             ]
-        lines += ["", f"For #{pr.number}, from its review at {short_sha(pr.head_sha)}."]
+        lines += [
+            "",
+            f"For #{pr.number}, as {by} asked at {short_sha(pr.head_sha)}."
+            if request
+            else f"For #{pr.number}, from its review at {short_sha(pr.head_sha)}.",
+        ]
         action = make_action(
             ActionKind.PR_FIX,
             pr.repo,
             FixPrPayload(
-                title=fix.title.strip()[:120] or f"Fix review findings on #{pr.number}",
+                title=fix.title.strip()[:120]
+                or (
+                    f"Changes to #{pr.number}"
+                    if request
+                    else f"Fix review findings on #{pr.number}"
+                ),
                 body="\n".join(lines).strip(),
                 patch=changes.patch,
                 base_sha=pr.head_sha,
@@ -218,10 +271,28 @@ class FixPlaybook(Playbook):
             number=pr.number,
             head_sha=pr.head_sha,
             discriminator=f"req:{event.id}",
-            rationale=f"fixes for {len(fix.fixed)} review findings, asked by {by}",
+            rationale=f"changes to #{pr.number} {by} asked for"
+            if request
+            else f"fixes for {len(fix.fixed)} review findings, asked by {by}",
             draft_for=by,
+        )
+        await _tell(
+            ctx,
+            thread,
+            f"The changes to #{pr.number} are ready ({len(changes.files)} files: "
+            f"{', '.join(changes.files[:8])}). Read the diff on the PR page or under "
+            "Approvals, and approve it to push it as yourself; nothing is pushed "
+            "before you do.",
         )
         return PlaybookResult(
             actions=[action],
             result={"files": changes.files, "fixed": [f.id for f in fix.fixed]},
+        )
+
+
+async def _tell(ctx: PlaybookContext, thread_id: object, text: str) -> None:
+    """Tell the conversation that asked for the change, if one did."""
+    if thread_id:
+        await ctx.store.add_message(
+            ChatMessage(thread_id=str(thread_id), role="assistant", text=text)
         )

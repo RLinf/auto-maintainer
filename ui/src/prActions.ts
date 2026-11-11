@@ -67,8 +67,8 @@ export function describeRunCi(state: RunCiState, canPush: boolean): RunCiDisplay
   return { inline: "button", actionable: true, disabled: false };
 }
 
-export type PrMenuAction = "fix" | "reproduce" | "fix-ci" | "run-ci" | "merge-base";
-export type PrActionPanel = "menu" | "fix" | "reproduce" | "fix-ci" | "merge-base";
+export type PrMenuAction = "fix" | "change" | "reproduce" | "fix-ci" | "run-ci" | "merge-base";
+export type PrActionPanel = "menu" | "fix" | "change" | "reproduce" | "fix-ci" | "merge-base";
 
 export interface PrMenuState {
   isOpen: boolean;
@@ -82,7 +82,9 @@ export interface PrMenuState {
  * use it often. */
 export function prMenuItems(s: PrMenuState): PrMenuAction[] {
   const items: PrMenuAction[] = [];
+  // A review's findings to fix, or else a change in the person's own words.
   if (s.hasReviewFindings) items.push("fix");
+  else if (s.isOpen) items.push("change");
   items.push("reproduce");
   if (s.isOpen && s.failedCount > 0) items.push("fix-ci");
   if (describeRunCi(s.ciState, true).actionable) items.push("run-ci");
@@ -94,6 +96,7 @@ export function prMenuItems(s: PrMenuState): PrMenuAction[] {
 export function activePrActionPanel(panel: PrActionPanel, s: PrMenuState): PrActionPanel {
   if (panel === "menu") return "menu";
   if (panel === "fix" && !s.hasReviewFindings) return "menu";
+  if (panel === "change" && !s.isOpen) return "menu";
   if (panel === "fix-ci" && (!s.isOpen || s.failedCount === 0)) return "menu";
   if (panel === "merge-base" && !s.isOpen) return "menu";
   return panel;

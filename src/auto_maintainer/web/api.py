@@ -428,6 +428,40 @@ async def _progress_row(
     }
 
 
+async def start_change(
+    service: Service,
+    login: str,
+    repo: str,
+    number: int,
+    request: str,
+    *,
+    agent: str | None = None,
+    thread_id: str | None = None,
+    source: str = "dashboard",
+) -> str:
+    """Start an agent on a change to ``repo#number`` that ``login`` asked for in
+    their own words (``playbooks/fix.py``): it edits a checkout, and the diff comes
+    back as a ``pr.fix`` drafted for them, which only they push, as themselves. A
+    conversation that asked (``thread_id``) is told when the diff is ready. Returns
+    the request event's id, which the jobs API resolves to the job."""
+    text, _ = redact_secrets(request.strip())
+    event = Event(
+        kind=EventKind.DASHBOARD_COMMAND,
+        repo=repo,
+        number=number,
+        payload={
+            "command": "fix",
+            "by": login,
+            "request": text,
+            **({"agent": agent} if agent else {}),
+            **({"thread_id": thread_id} if thread_id else {}),
+        },
+        source=source,
+    )
+    await service.bus.publish(event)
+    return event.id
+
+
 async def _assignees(service: Service, repo: str, number: int) -> list[dict[str, Any]]:
     return [assignee_row(a) for a in await service.store.list_assignees(repo, number)]
 
@@ -824,6 +858,8 @@ class FixBody(BaseModel):
     """Finding ids to fix; all of them when empty."""
     agent: str | None = None
     note: str = Field(default="", max_length=2000)
+    request: str = Field(default="", max_length=8000)
+    """A change in the person's own words, instead of a review's findings."""
 
 
 def build_router() -> APIRouter:
@@ -2776,11 +2812,17 @@ def build_router() -> APIRouter:
         body: FixBody,
         user: User = Depends(current_user),
     ) -> dict[str, Any]:
-        """Have an agent fix the review's findings; the result is a diff that the
-        maintainer opens as a PR into this PR's branch, as themselves."""
+        """Have an agent fix the review's findings, or make the change ``request``
+        says; the result is a diff that the maintainer opens as a PR into this PR's
+        branch, or pushes onto it, as themselves."""
         service = service_of(request)
         repo = _repo(repo)
         await require_view(service, user, repo)
+        if body.request.strip():
+            event = await start_change(
+                service, user.login, repo, number, body.request, agent=body.agent
+            )
+            return {"repo": repo, "number": number, "event": event, "review": None}
         review = body.review
         if review is None:
             latest = await service.store.list_actions(

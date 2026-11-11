@@ -647,3 +647,74 @@ async def test_a_review_reports_the_reproduction_on_record(demo) -> None:
     record = task.prompt.split("Reproduction on record")[1]
     assert "gpu-01" in record and '"conclusion": "reproduced"' in record
     assert "Traceback" not in record, "run output stays with the job"
+
+
+async def test_a_change_in_the_persons_own_words_needs_no_review(demo) -> None:
+    """A PR the service never reviewed is changed as the person describes, on the
+    PR page or in a conversation, which is told when the diff is ready; the diff
+    waits for them to push it as themselves."""
+    h, app = demo
+    asked: list[Any] = []
+
+    def change(task: Any) -> Any:
+        if task.mode == "read_only":
+            return {"title": "docs: explain batching", "summary": "Explains it."}
+        asked.append(task)
+        (Path(task.workdir) / "BATCHING.md").write_text("Batches of one are fine.\n")
+        return AgentResult(runtime="scripted", ok=True, text="Wrote BATCHING.md.")
+
+    h.runner.on("fix", change)
+    async with _as(app, "maria") as maria:
+        none = await maria.post(f"/api/prs/{REPO}/42/fix", json={})
+        assert none.status_code == 409, "no review, and nothing asked"
+        started = await maria.post(
+            f"/api/prs/{REPO}/42/fix",
+            json={"request": "Document how batches of one behave."},
+        )
+        assert started.status_code == 200, started.text
+        await h.settle()
+        [task] = asked
+        assert "do what maria asks below" in task.prompt
+        assert "Document how batches of one behave." in task.prompt
+        assert "Review findings" not in task.prompt
+        assert task.requested_by == "maria" and task.mode == "workspace_write"
+        [draft] = [
+            p
+            for p in (await maria.get("/api/proposals")).json()
+            if p["action"]["action"]["kind"] == "pr.fix"
+        ]
+        payload = draft["action"]["action"]["payload"]
+        assert payload["files"] == ["BATCHING.md"] and payload["findings"] == []
+        assert draft["requested_by"] == "maria"
+
+        def chat(task: Any) -> dict[str, Any]:
+            return {
+                "reply": "An agent is making that change.",
+                "proposals": [
+                    {
+                        "kind": "change",
+                        "repo": REPO,
+                        "number": 42,
+                        "request": "Mention batches of one in the README.",
+                    }
+                ],
+            }
+
+        h.runner.on("chat", chat)
+        thread = (await maria.post("/api/chat/threads", json={"text": "hi"})).json()
+        sent = await maria.post(
+            f"/api/chat/threads/{thread['id']}/messages",
+            json={"text": "Mention batches of one in the README of #42."},
+        )
+        assert sent.status_code == 200, sent.text
+        assert sent.json()["jobs"], "the change starts at once"
+        await h.settle()
+        assert "Mention batches of one in the README." in asked[-1].prompt
+        said = [
+            m["text"]
+            for m in (
+                await maria.get(f"/api/chat/threads/{thread['id']}/messages")
+            ).json()
+            if m["role"] == "assistant"
+        ]
+        assert any("The changes to #42 are ready" in m for m in said)

@@ -76,6 +76,7 @@ from .api import (
     require_view,
     review_setup,
     service_of,
+    start_change,
     start_evaluations,
     visible_repos,
 )
@@ -215,6 +216,7 @@ class ProposedAction(BaseModel):
         "comment",
         "nudge",
         "review",
+        "change",
         "evaluate",
         "lesson",
         "improve",
@@ -241,6 +243,9 @@ class ProposedAction(BaseModel):
     request: str = Field(
         default="",
         description=(
+            "For kind=change: what to change in the PR's code, in the person's words, "
+            "with what you found that the agent needs (files, lines, the comment it "
+            "answers). "
             "For kind=improve: what the person asked for, in a few sentences, and what "
             "you found that the implementing agent needs (a file, an error, a record); "
             "no parts they did not ask for. For kind=governance: what to change "
@@ -525,6 +530,10 @@ def build_router() -> APIRouter:
                 "(label, comment, rerun, ...) and configuration changes wait for the maintainer to approve the card; "
                 "review and evaluate (score a PR's priority again, or every open PR's when number is empty, with "
                 "the repository's lessons as they are now) start at once; "
+                "change starts at once too: when the person asks for a change to a PR's code, propose kind=change "
+                "with the PR and, in `request`, what to change: an agent edits a checkout of the PR, the conversation "
+                "is told when its diff is ready, and the person reads it and pushes it as themselves (nothing is "
+                "pushed before); never edit the PR's code yourself; "
                 "a lesson is saved at once when this maintainer may configure the repository, and otherwise waits for one "
                 "who may; an improve request and add_repo (onboard a repository: the service reads it and drafts its "
                 "profile for its maintainers to approve) wait on a request card for a person who may approve them. Say "
@@ -639,6 +648,20 @@ def build_router() -> APIRouter:
             if p.kind == "governance":
                 if p.repo in repos:
                     jobs.append(await _governance(service, user, p))
+                continue
+            if p.kind == "change":
+                if p.repo in repos and p.number and p.request.strip():
+                    jobs.append(
+                        await start_change(
+                            service,
+                            user.login,
+                            p.repo,
+                            p.number,
+                            p.request,
+                            thread_id=thread_id,
+                            source="chat",
+                        )
+                    )
                 continue
             if p.kind == "configure":
                 change_id, problem = await _configure(service, user, p, repos)
