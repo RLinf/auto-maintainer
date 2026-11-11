@@ -29,6 +29,7 @@ from ..domain.actions import (
     ApproveRunsPayload,
     CodeMergePayload,
     CodePrPayload,
+    CodeUpdatePayload,
     CommentUpsertPayload,
     FixPrPayload,
     InlineComment,
@@ -59,7 +60,7 @@ from ..domain.memory import MemoryChange, MemoryChangeState
 from ..domain.ports import ReviewCommentSpec
 from ..domain.profile import RepoProfile
 from ..domain.records import AuditEntry, ChatMessage, ReviewRecord
-from ..domain.snapshot import PrSnapshot
+from ..domain.snapshot import Mergeable, PrSnapshot
 from .context import ExecContext
 from .memory_gate import try_merge_memory
 
@@ -787,6 +788,56 @@ async def _code_pr(
     return {"pr": ref.id, "url": ref.url, "commit": commit}
 
 
+async def _code_update(
+    x: ExecContext,
+    action: Action,
+    profile: RepoProfile | None,
+    pr: PrSnapshot | None,
+    approver: str | None,
+) -> dict[str, Any]:
+    """Bring the base branch into a self-improvement PR on ``code_repo``: through the
+    forge when clean, or by pushing the approved merge resolution onto ``am/self/*``."""
+    assert pr is not None
+    if not x.code_repo or action.repo != x.code_repo:
+        raise RuntimeError("no code repo is configured")
+    if not pr.head_ref.startswith("am/self/") or pr.head_repo not in (
+        None,
+        "",
+        x.code_repo,
+    ):
+        raise RuntimeError(
+            f"{x.code_repo}#{pr.number} is not a self-improvement PR on an am/self/* branch"
+        )
+    p = CodeUpdatePayload.model_validate(action.payload)
+    by = approver or p.approved_by or p.requested_by
+    if p.merge_sha:
+        if x.publisher is None:
+            raise RuntimeError("no branch publisher is configured")
+        if not same_commit(pr.head_sha, p.base_sha):
+            raise Stale(
+                f"the PR moved from {p.base_sha[:7]} to {pr.head_sha[:7]} since this "
+                "was drafted; ask for it again"
+            )
+        title = (
+            p.title
+            or f"chore(self): merge {p.merge_ref or pr.base_ref} into #{pr.number}"
+        )
+        body = f"\n\n{p.body.strip()}" if p.body.strip() else ""
+        trailers = f"\n\nRequested-by: {by}" if by else ""
+        sha = await x.publisher.publish(
+            x.code_repo,
+            p.base_sha,
+            "",
+            pr.head_ref,
+            f"{title}{body}{trailers}\n",
+            merge_sha=p.merge_sha,
+            resolved=p.resolved,
+        )
+        return {"pushed": f"{x.code_repo}:{pr.head_ref}", "sha": sha, "approved_by": by}
+    await x.writer.update_branch(x.code_repo, pr.number, pr.head_sha)
+    return {"from": pr.head_sha, "approved_by": by}
+
+
 async def _code_merge(
     x: ExecContext,
     action: Action,
@@ -797,6 +848,12 @@ async def _code_merge(
     if not x.code_repo:
         raise RuntimeError("no code repo is configured")
     p = CodeMergePayload.model_validate(action.payload)
+    current = pr or await x.reader.get_pr(x.code_repo, p.number)
+    if current is not None and current.mergeable == Mergeable.CONFLICTING:
+        raise NotWritten(
+            f"{x.code_repo}#{p.number} conflicts with {current.base_ref}; "
+            f"resolve conflicts with {current.base_ref} first"
+        )
     sha = await x.writer.merge_service_pr(x.code_repo, p.number, p.method)
     return {"sha": sha, "approved_by": p.approved_by}
 
@@ -895,6 +952,9 @@ HANDLERS: dict[ActionKind, HandlerSpec] = {
     ActionKind.MEMORY_CHANGE: HandlerSpec(_memory_change),
     ActionKind.PR_FIX: HandlerSpec(_pr_fix, needs_pr=True, needs_current_head=True),
     ActionKind.CODE_PR: HandlerSpec(_code_pr),
+    ActionKind.CODE_UPDATE: HandlerSpec(
+        _code_update, needs_pr=True, needs_current_head=True
+    ),
     ActionKind.CODE_MERGE: HandlerSpec(_code_merge),
     ActionKind.SERVICE_DEPLOY: HandlerSpec(_service_deploy),
     ActionKind.NOTIFY: HandlerSpec(_notify),

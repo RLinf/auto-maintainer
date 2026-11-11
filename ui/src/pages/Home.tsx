@@ -6,12 +6,12 @@
 import { useMemo, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { api, type Me, type ServiceView } from "../api";
-import { CaughtUp, ErrorBox, Tier, timeOf, useAct } from "../components";
+import { CaughtUp, ErrorBox, Status, Tier, timeOf, useAct } from "../components";
 import { useMemoryChanges, useProposals, usePrs, useQuestions, useRepos, useService } from "../data";
 import { useT } from "../i18n";
 import { RepoTabs, useRepoScope } from "../repoScope";
 import { Icon } from "../icons";
-import { ProposalCard } from "../proposal";
+import { ProposalCard, ServiceMergeBaseButton } from "../proposal";
 import { Skeleton, useRememberedView, useTab } from "../ui";
 import { ACTIVE, useWork } from "../jobs";
 import { AgentWork, GettingStarted, ReviewCard, useAutomations } from "./homeParts";
@@ -218,7 +218,7 @@ function serviceUpdates(v: ServiceView | undefined): FeedItem[] {
     out.push({ id: `deploy:${s.upstream_sha}`, kind: "update", at: null, node: <DeployCard view={v} /> });
   }
   for (const pr of (v.prs ?? []).filter((p) => p.self_improvement)) {
-    out.push({ id: `merge:${pr.number}`, kind: "update", at: null, node: <MergeCard pr={pr} repo={v.code_repo} /> });
+    out.push({ id: `merge:${pr.number}`, kind: "update", at: null, node: <MergeCard pr={pr} repo={v.code_repo} branch={v.branch} /> });
   }
   return out;
 }
@@ -257,22 +257,31 @@ function DeployCard({ view }: { view: ServiceView }) {
   );
 }
 
-function MergeCard({ pr, repo }: { pr: NonNullable<ServiceView["prs"]>[number]; repo: string }) {
+function MergeCard({ pr, repo, branch }: { pr: NonNullable<ServiceView["prs"]>[number]; repo: string; branch?: string }) {
   const t = useT();
+  const base = pr.base ?? branch ?? "main";
+  const conflicting = !!pr.conflicting;
   const merge = useAct((n: number) => api.post(`/api/service/prs/${n}/merge`), [["service"], ["audit"]]);
   return (
     <div className="stack">
-      <div className="row">
+      <div className="row" style={{ flexWrap: "wrap" }}>
         <strong>{pr.title}</strong>
         <a href={pr.url} target="_blank" rel="noreferrer" className="small">
           {repo}#{pr.number} <Icon name="external" size={12} />
         </a>
+        {conflicting && <Status value="conflict" />}
       </div>
       <span className="small muted">
         {t("A self-improvement PR on")} <code>{pr.branch}</code>. {t("Review it on GitHub; merging needs your approval here.")}
       </span>
-      <div className="row">
-        <button className="primary" disabled={merge.isPending || merge.isSuccess} onClick={() => merge.mutate(pr.number)}>
+      <div className="row" style={{ flexWrap: "wrap" }}>
+        <ServiceMergeBaseButton number={pr.number} base={base} conflicting={conflicting} />
+        <button
+          className={conflicting ? "" : "primary"}
+          disabled={merge.isPending || merge.isSuccess || conflicting}
+          title={conflicting ? `${t("conflicts with")} ${base}` : undefined}
+          onClick={() => merge.mutate(pr.number)}
+        >
           <Icon name="merge" size={14} />
           {merge.isSuccess ? t("Merged") : t("Approve and merge")}
         </button>
