@@ -27,6 +27,7 @@ come here: the dashboard updates the branch through the forge at once.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from ..domain.actions import (
@@ -54,18 +55,70 @@ MARKERS = ("<<<<<<< ", ">>>>>>> ")
 """The lines git puts around a conflict; a resolved file has none left."""
 
 
+def _git_path(raw: str, prefix: str = "") -> str | None:
+    text = raw.rstrip("\r\n\t")
+    if text == "/dev/null":
+        return None
+    if len(text) >= 2 and text.startswith('"') and text.endswith('"'):
+        text = re.sub(r'\\(["\\])', r"\1", text[1:-1])
+    return text[len(prefix) :] if prefix and text.startswith(prefix) else text
+
+
+def _block_paths(lines: list[str]) -> set[str]:
+    paths: set[str] = set()
+    head = lines[0].removeprefix("diff --git ").rstrip("\r\n")
+    if head.startswith("a/"):
+        n = len(head) - 5
+        if (
+            n >= 0
+            and n % 2 == 0
+            and head[2 + n // 2 : 5 + n // 2] == " b/"
+            and head[2 : 2 + n // 2] == head[5 + n // 2 :]
+        ):
+            paths.add(head[5 + n // 2 :])
+    elif head.startswith('"') and head.endswith('"'):
+        n = len(head) - 1
+        if n >= 0 and n % 2 == 0 and head[n // 2] == " ":
+            left = _git_path(head[: n // 2], "a/")
+            right = _git_path(head[n // 2 + 1 :], "b/")
+            if left and left == right:
+                paths.add(right)
+    for line in lines[1:]:
+        if line.startswith(("@@ ", "GIT binary patch", "Binary files ")):
+            break
+        for marker, prefix in (
+            ("--- ", "a/"),
+            ("+++ ", "b/"),
+            ("rename from ", ""),
+            ("rename to ", ""),
+            ("copy from ", ""),
+            ("copy to ", ""),
+        ):
+            if line.startswith(marker):
+                path = _git_path(line[len(marker) :], prefix)
+                if path:
+                    paths.add(path)
+        if line.startswith("+++ "):
+            break
+    if not paths and " b/" in head:
+        path = _git_path(head.split(" b/", 1)[1])
+        if path:
+            paths.add(path)
+    return paths
+
+
 def only_files(patch: str, files: set[str]) -> str:
     """The part of ``patch`` that changes ``files``: what a maintainer reads of a
     merge is its resolution, not everything the base branch brings."""
-    blocks = patch.split("diff --git ")
-    if len(blocks) == 1:
-        return patch
-    kept = [
-        "diff --git " + b
-        for b in blocks[1:]
-        if b.split("\n", 1)[0].split(" b/", 1)[-1].strip() in files
-    ]
-    return "".join(kept)
+    if not files:
+        return ""
+    blocks: list[list[str]] = []
+    for line in patch.splitlines(keepends=True):
+        if line.startswith("diff --git "):
+            blocks.append([line])
+        elif blocks:
+            blocks[-1].append(line)
+    return "".join("".join(b) for b in blocks if _block_paths(b) & files)
 
 
 def unresolved(text: str) -> bool:

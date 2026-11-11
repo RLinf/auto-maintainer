@@ -362,11 +362,12 @@ async def test_conflicting_self_pr_resolves_docs_conflict_and_pushes_after_appro
         assert started.status_code == 200, started.text
         assert started.json()["run"] == "resolve"
         await h.settle()
+        assert any(
+            j["playbook"] == "merge_base" for j in (await maria.get("/api/work")).json()
+        )
         assert h.service.a.publisher.published == []  # type: ignore[union-attr]
         [proposal] = [
-            p
-            for p in (await maria.get("/api/proposals")).json()
-            if p["repo"] == CODE
+            p for p in (await maria.get("/api/proposals")).json() if p["repo"] == CODE
         ]
         assert proposal["can_decide"] is True
         assert proposal["action"]["action"]["kind"] == "code.update"
@@ -385,9 +386,7 @@ async def test_conflicting_self_pr_resolves_docs_conflict_and_pushes_after_appro
         ).status_code == 403
 
     async with _client(app, "maria") as maria:
-        approved = await maria.post(
-            f"/api/proposals/{proposal['id']}/approve", json={}
-        )
+        approved = await maria.post(f"/api/proposals/{proposal['id']}/approve", json={})
         assert approved.status_code == 200, approved.text
         await h.settle()
         after = (await maria.get("/api/service")).json()
@@ -402,3 +401,55 @@ async def test_conflicting_self_pr_resolves_docs_conflict_and_pushes_after_appro
         row["kind"] == "code.update" and row["status"] == "executed"
         for row in after["history"]
     )
+
+
+def test_only_files_keeps_resolved_files_from_git_patches() -> None:
+    from auto_maintainer.playbooks.merge_base import only_files
+
+    docs_block = (
+        "diff --git a/docs/design.md b/docs/design.md\n"
+        "index 1111111..2222222 100644\n"
+        "--- a/docs/design.md\n"
+        "+++ b/docs/design.md\n"
+        "@@ -1,2 +1,3 @@\n"
+        " our section\n"
+        "+main's section (mentions diff --git inline)\n"
+    )
+    readme_block = (
+        "diff --git a/README.md b/README.md\n"
+        "new file mode 100644\n"
+        "index 0000000..3333333\n"
+        "--- /dev/null\n"
+        "+++ b/README.md\n"
+        "@@ -0,0 +1 @@\n"
+        "+brought by main\n"
+    )
+    spaced_block = (
+        "diff --git a/docs/part b/merge guide.md b/docs/part b/merge guide.md\n"
+        "index 4444444..5555555 100644\n"
+        "--- a/docs/part b/merge guide.md\t\n"
+        "+++ b/docs/part b/merge guide.md\t\n"
+        "@@ -1 +1,2 @@\n"
+        " kept\n"
+        "+resolved\n"
+    )
+    other_spaced_block = (
+        "diff --git a/docs/other notes.md b/docs/other notes.md\n"
+        "index 6666666..7777777 100644\n"
+        "--- a/docs/other notes.md\t\n"
+        "+++ b/docs/other notes.md\t\n"
+        "@@ -1 +1 @@\n"
+        "-old\n"
+        "+from main\n"
+    )
+    patch = readme_block + docs_block + other_spaced_block + spaced_block
+
+    assert only_files(patch, {"docs/design.md"}) == docs_block
+    assert (
+        only_files(patch, {"docs/design.md", "docs/part b/merge guide.md"})
+        == docs_block + spaced_block
+    )
+    assert only_files(patch, set()) == ""
+    assert only_files("README.md\nbrought by main\n", {"docs/design.md"}) == ""
+    assert only_files("+++ README.md\nbrought by main\n", {"docs/design.md"}) == ""
+    assert only_files("", {"docs/design.md"}) == ""

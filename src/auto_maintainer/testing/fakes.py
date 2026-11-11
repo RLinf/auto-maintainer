@@ -717,15 +717,22 @@ class FakeWorkspace:
         return base64.b64encode(f"code at {ref}".encode()).decode("ascii")
 
     async def changes(self, path: Any) -> WorkChanges:
-        """The files under ``path`` that a test wrote, as a pseudo-patch."""
+        """The files under ``path`` that a test wrote, as a git-style patch."""
         p = Path(path)
         files = sorted(
             str(f.relative_to(p))
             for f in p.rglob("*")
             if f.is_file() and ".git" not in f.parts
         )
-        patch = "".join(f"+++ {name}\n{(p / name).read_text()}" for name in files)
-        return WorkChanges(base_sha=self.base_sha, patch=patch, files=files)
+        blocks: list[str] = []
+        for name in files:
+            text = (p / name).read_text()
+            if text and not text.endswith("\n"):
+                text += "\n"
+            blocks.append(
+                f"diff --git a/{name} b/{name}\n--- a/{name}\n+++ b/{name}\n{text}"
+            )
+        return WorkChanges(base_sha=self.base_sha, patch="".join(blocks), files=files)
 
     base_sha: str = "b" * 40
 

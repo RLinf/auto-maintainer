@@ -39,7 +39,7 @@ from ..domain.profile import LabBinding
 from ..domain.records import Job, JobStatus
 from ..profiles.layers import ProfileError, parse_yaml
 from ..service import Service
-from .api import repo_param, require_view, service_of, visible_repos
+from .api import may_view, repo_param, require_view, service_of, visible_repos
 from .auth import User, current_user
 
 AGENT_PLAYBOOKS = {

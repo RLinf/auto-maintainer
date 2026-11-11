@@ -187,7 +187,7 @@ async def test_prefix_wraps_the_command_and_isolation_hides_credentials(
         read_stdin=False,
     )
     runtime = ClaudeCodeRuntime(
-        binary="claude",
+        binary=str(cli.path),
         runs_dir=tmp_path / "runs",
         allow_bypass=True,
         command_prefix=[str(cli.path), "--wrapped-in", "{workdir}", "--"],
