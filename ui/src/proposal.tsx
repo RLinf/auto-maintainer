@@ -408,8 +408,16 @@ export function ProposalCard({
               {editing ? t("Discard edits") : t("Edit")}
             </button>
           )}
-          {kind === "review.post" && action.provenance?.job_id && openedJob !== action.provenance.job_id && (
-            <button className="ghost" title={t("Talk with the agent about this review: ask why, push back, or have it change the draft")} onClick={() => openJob(action.provenance.job_id as string)}>
+          {(kind === "review.post" || kind === "pr.fix") && action.provenance?.job_id && openedJob !== action.provenance.job_id && (
+            <button
+              className="ghost"
+              title={
+                kind === "pr.fix"
+                  ? t("Talk with the agent about this change: ask why, or have it change the diff")
+                  : t("Talk with the agent about this review: ask why, push back, or have it change the draft")
+              }
+              onClick={() => openJob(action.provenance.job_id as string)}
+            >
               <Icon name="message" size={14} />
               {t("Discuss")}
             </button>

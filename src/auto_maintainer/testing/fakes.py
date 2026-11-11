@@ -685,6 +685,7 @@ class FakeWorkspace:
         """Files a merge conflicts in, with their content (conflict markers included),
         written into the worktree by ``merge``."""
         self.merged: list[str] = []
+        self.applied: list[tuple[Path, str]] = []
 
     async def prepare(
         self, repo: str, number: int | None, sha: str, default_branch: str
@@ -733,6 +734,16 @@ class FakeWorkspace:
                 f"diff --git a/{name} b/{name}\n--- a/{name}\n+++ b/{name}\n{text}"
             )
         return WorkChanges(base_sha=self.base_sha, patch="".join(blocks), files=files)
+
+    async def apply(self, path: Any, patch: str) -> None:
+        """Write the files of a patch ``changes`` made back under ``path``."""
+        p = Path(path)
+        for block in patch.split("diff --git a/")[1:]:
+            name = block.split(" ", 1)[0]
+            text = block.split("\n+++ b/", 1)[1].split("\n", 1)[1]
+            (p / name).parent.mkdir(parents=True, exist_ok=True)
+            (p / name).write_text(text)
+        self.applied.append((p, patch))
 
     base_sha: str = "b" * 40
 

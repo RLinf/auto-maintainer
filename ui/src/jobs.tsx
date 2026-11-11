@@ -224,6 +224,9 @@ function useJob(id: string | null) {
 }
 
 /** One line about a job, for lists. */
+/** Playbooks whose jobs have a conversation with their agent (``web/review_talk.py``). */
+const TALKS = new Set(["review", "followup", "fix"]);
+
 export function WorkRow({ job, me }: { job: AgentJob; me: string }) {
   const t = useT();
   const pb = PLAYBOOK[job.playbook] ?? { label: job.playbook, icon: "activity" as IconName };
@@ -262,6 +265,11 @@ export function WorkRow({ job, me }: { job: AgentJob; me: string }) {
           {!active && job.error ? ` · ${job.error}` : ""}
         </span>
       </span>
+      {!active && job.status === "done" && TALKS.has(job.playbook) && (
+        <span className="pill" title={job.playbook === "fix" ? t("Open it to talk with the agent about this change") : t("Open it to talk with the agent about this review")}>
+          <Icon name="message" size={12} /> {t("Talk")}
+        </span>
+      )}
       {waitingOnMe ? (
         <span className="pill status-warn">{job.questions_for_me ? t("asks you") : t("draft for you")}</span>
       ) : (
@@ -452,7 +460,7 @@ function JobView({ id, onClose }: { id: string; onClose: () => void }) {
                 ))}
               </section>
             )}
-            {(d.playbook === "review" || d.playbook === "followup") && <ReviewTalk job={d} me={me?.login ?? ""} active={active} />}
+            {TALKS.has(d.playbook) && <ReviewTalk job={d} me={me?.login ?? ""} active={active} />}
           </>
         ) : null}
       </div>

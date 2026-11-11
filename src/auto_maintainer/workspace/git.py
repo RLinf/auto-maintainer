@@ -382,6 +382,20 @@ class GitWorkspace:
         ).stdout
         return WorkChanges(base_sha=base, patch=patch, files=names.split())
 
+    async def apply(self, path: Any, patch: str) -> None:
+        if patch.strip():
+            await self._in(
+                Path(path),
+                "apply",
+                "--binary",
+                "--index",
+                "--whitespace=nowarn",
+                "-",
+                stdin=patch,
+                timeout=300,
+                check=True,
+            )
+
     def _repo_of(self, path: Path) -> str:
         """The repository a worktree under ``repo_dir`` belongs to."""
         owner, name = (

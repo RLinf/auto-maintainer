@@ -229,3 +229,29 @@ async def test_git_config_an_agent_points_at_never_runs_on_the_host(
         assert not ran.exists(), "the agent's fsmonitor never ran"
     await ws2.release(path)
     assert not path.exists()
+
+
+async def test_a_change_applied_to_a_new_checkout_gives_the_same_diff(
+    tmp_path: Path,
+) -> None:
+    """A conversation about a fix goes on from the change as it stands: its patch
+    applied to a new checkout of the same commit is that patch again, binary files
+    and new files included."""
+    forge, work, _ = _repo_with_pr(tmp_path)
+    head = _commit(work, "one, from the PR\n", "pr change")
+    git(work, "push", "-q", "origin", "feature:refs/pull/7/head")
+    ws = GitWorkspace(tmp_path / "data", forge_url=f"file://{forge}")
+    first = await ws.prepare("acme/widget", 7, head, "main")
+    (first / "loader.py").write_text("one, fixed\n")
+    (first / "new.bin").write_bytes(bytes(range(256)))
+    made = await ws.changes(first)
+    await ws.release(first)
+
+    again = await ws.prepare("acme/widget", 7, head, "main")
+    await ws.apply(again, made.patch)
+    assert (again / "new.bin").read_bytes() == bytes(range(256))
+    redone = await ws.changes(again)
+    assert redone.patch == made.patch and redone.files == ["loader.py", "new.bin"]
+    with pytest.raises(RuntimeError):
+        await ws.apply(again, made.patch)  # already applied: it does not apply twice
+    await ws.release(again)

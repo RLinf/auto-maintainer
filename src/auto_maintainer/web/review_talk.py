@@ -12,7 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Reviewers talking with the agent about its review (design 5.13).
+"""Reviewers talking with the agent about its review (design 5.13), and with the agent
+that changed a PR about its change (``web/fix_talk.py``), on the same endpoints.
 
 A review or follow-up job has one conversation, shared by everyone who may see its
 repository and kept on the job's live view. While the agent writes the review, a
@@ -82,18 +83,19 @@ from .chat import (
     stopped_message,
     turn_route,
 )
-from .jobs import _job, _payload
+from .fix_talk import fix_draft, fix_turn, pending
+from .jobs import ACTIVE, _job, _payload
 from .live_turns import LiveTurns, Stopped
 from .records import open_door, reading_line
 
 log = logging.getLogger(__name__)
 
-TALKS_ON = {"review", "followup"}
+TALKS_ON = {"review", "followup", "fix"}
+"""Playbooks whose jobs have a conversation."""
 
 TALK_DIFF_LIMIT = 40_000
 """The diff a turn carries; the agent reads the rest in its checkout. A turn's
 prompt stays far below what any agent CLI takes in one message."""
-"""Playbooks whose jobs have a conversation."""
 
 _turns: dict[str, asyncio.Lock] = {}
 """One turn at a time per conversation, in this process."""
@@ -191,7 +193,9 @@ def build_router() -> APIRouter:
     async def talk_job(service: Service, user: User, job_id: str) -> Job:
         job = await _job(service, user, job_id)
         if job.playbook not in TALKS_ON or not job.repo or job.number is None:
-            raise HTTPException(404, "only a review or a follow-up has a conversation")
+            raise HTTPException(
+                404, "only a review, a follow-up, or a fix has a conversation"
+            )
         return job
 
     @r.get("/{job_id}/talk")
@@ -203,6 +207,31 @@ def build_router() -> APIRouter:
         service = service_of(request)
         job = await talk_job(service, user, job_id)
         thread = await service.store.get_thread(thread_id_of(job))
+        if job.playbook == "fix":
+            record = await fix_draft(service, job)
+            return {
+                "subject": "fix",
+                "thread": thread.id if thread else None,
+                "agent": thread.agent if thread else None,
+                "runtime": (
+                    thread.runtime
+                    if thread and thread.runtime
+                    else (record.action.payload.get("runtime") if record else None)
+                ),
+                "live_run": thread.live_run if thread else None,
+                "listening": service.a.agents.listening(job.id),
+                "posted": False,
+                "revision": None,
+                "messages": [
+                    m.model_dump(mode="json")
+                    for m in (
+                        await service.store.list_messages(thread.id) if thread else []
+                    )
+                ],
+                "draft": record.action.id if record else None,
+                "draft_pending": await pending(service, record) is not None,
+                "open": job.status not in ACTIVE,
+            }
         record = await _draft(service, job)
         proposal = (
             await service.store.proposal_for_action(record.action.id)
@@ -211,6 +240,7 @@ def build_router() -> APIRouter:
         )
         revision = await _revision(service, record) if record else None
         return {
+            "subject": "review",
             "thread": thread.id if thread else None,
             "agent": thread.agent if thread else None,
             "runtime": (
@@ -300,15 +330,18 @@ def build_router() -> APIRouter:
             service, user, job.repo
         ):
             # A turn can revise the draft, so it is the asker's or a maintainer's.
+            what = "change" if job.playbook == "fix" else "review"
             raise HTTPException(
                 403,
-                f"{asker or 'the service'} asked for this review; only they and the "
+                f"{asker or 'the service'} asked for this {what}; only they and the "
                 f"maintainers of {job.repo} talk to its agent",
             )
         if body.agent:
             check_agent(service, body.agent)
         if service.a.agents.listening(job.id):
             return await _tell(service, user, job, body.text, body.agent)
+        if job.playbook == "fix":
+            return await _fix_say(request, service, user, job, body)
         record = await _draft(service, job)
         if record is None:
             raise HTTPException(
@@ -338,6 +371,58 @@ def build_router() -> APIRouter:
                 getattr(request.app.state, "records", None),
                 getattr(request.app.state, "live_turns", None),
                 agent=body.agent,
+            )
+
+    async def _fix_say(
+        request: Request, service: Service, user: User, job: Job, body: TalkBody
+    ) -> dict[str, Any]:
+        assert job.repo and job.number is not None
+        if job.status in ACTIVE:
+            raise HTTPException(
+                409,
+                "the agent cannot take a message now: it is between steps, or its CLI "
+                "cannot read one while it works. Send it once the change is drafted.",
+            )
+        profile = await service.profiles.active(job.repo)
+        pr = await service.a.forge.get_pr(job.repo, job.number)
+        if profile is None or pr is None:
+            raise HTTPException(409, f"{job.repo}#{job.number} is not available now")
+        record = await fix_draft(service, job)
+        route = _route(
+            service,
+            profile,
+            TaskKind.FIX,
+            record.action.payload.get("runtime") if record else None,
+        )
+        lock = _turns.setdefault(thread_id_of(job), asyncio.Lock())
+        if lock.locked():
+            running = await service.store.get_thread(thread_id_of(job))
+            if running is not None:
+                await request.app.state.live_turns.stop(running.live_run, user.login)
+        async with lock:
+            thread = await service.store.get_thread(thread_id_of(job)) or ChatThread(
+                id=thread_id_of(job),
+                owner=user.login,
+                title=f"{job.repo}#{job.number}",
+                repo=job.repo,
+                number=job.number,
+                job_id=job.id,
+            )
+            default_agent = await service.runs_on_for(route, user.login, "fix")
+            apply_thread_agent(service, thread, body.agent, default_agent=default_agent)
+            await service.store.save_thread(thread)
+            return await fix_turn(
+                service,
+                user,
+                job,
+                thread,
+                record,
+                profile,
+                pr,
+                body.text,
+                route,
+                getattr(request.app.state, "records", None),
+                getattr(request.app.state, "live_turns", None),
             )
 
     return r
@@ -380,7 +465,7 @@ async def _tell(
         text,
         repo=job.repo,
         number=job.number,
-        where="review discussion",
+        where="fix discussion" if job.playbook == "fix" else "review discussion",
         kind=SignalKind.REVIEW_DISCUSSION,
         message_id=message.id,
     )

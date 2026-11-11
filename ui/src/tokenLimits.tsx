@@ -53,6 +53,7 @@ const KINDS: Record<string, string> = {
   followup: "Follow-ups",
   verify: "Verification",
   review_talk: "Review discussions",
+  fix_talk: "Fix discussions",
   fix: "Fixes",
   reproduce: "Reproductions",
   comment_check: "Comment checks",
@@ -79,7 +80,7 @@ export function kindLabel(kind: string, t: T): string {
  * with a fixed color each (``--series-N``), so a group keeps its place and color
  * whoever's bar it is in. Kinds in no group go to "Other". */
 const GROUPS: { id: string; label: string; kinds: string[] }[] = [
-  { id: "talk", label: "Conversations", kinds: ["chat", "review_talk", "people_talk"] },
+  { id: "talk", label: "Conversations", kinds: ["chat", "review_talk", "fix_talk", "people_talk"] },
   { id: "review", label: "Reviews", kinds: ["review", "verify", "followup"] },
   { id: "fix", label: "Fixes", kinds: ["fix"] },
   { id: "comments", label: "Comment checks", kinds: ["comment_check"] },

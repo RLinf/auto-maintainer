@@ -6,6 +6,11 @@
 // A revision is saved on a pending draft as the edit of the reviewer who asked; for a
 // review already posted it becomes a draft that edits the posted review once whoever
 // posted it approves. Nothing is posted until someone decides.
+//
+// A change an agent made to a PR (a fix job) has the same conversation: a message
+// reaches the agent at work, and once the job ends a turn may change the files. The
+// pending draft's diff is replaced; when it was already decided, or nothing was
+// drafted, the change becomes a new draft for the person to push as themselves.
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Fragment, useState } from "react";
@@ -65,8 +70,9 @@ export function ReviewTalk({ job, me, active }: { job: AgentJob; me: string; act
   const messages = talk.data?.messages ?? [];
   const runs = new Set([...messages.map((m) => m.run_id), live.data?.run, talk.data?.live_run].filter((x): x is string => !!x));
   const waiting = (questions.data ?? []).filter((q) => q.job_id && runs.has(q.job_id));
+  const fix = job.playbook === "fix";
   const draft = talk.data?.draft ?? null;
-  const canSend = !!draft || listening;
+  const canSend = fix ? listening || !!talk.data?.open : !!draft || listening;
   const proposals = useProposals();
   const revision = talk.data?.revision ? (proposals.data ?? []).find((p) => p.action_id === talk.data?.revision) : undefined;
   // The service keeps the message as soon as the turn starts; show it once.
@@ -84,11 +90,22 @@ export function ReviewTalk({ job, me, active }: { job: AgentJob; me: string; act
   };
 
   return (
-    <section className="stack review-talk" style={{ gap: 10 }} aria-label={t("Talk with the agent about this review")}>
+    <section className="stack review-talk" style={{ gap: 10 }} aria-label={fix ? t("Talk with the agent about this change") : t("Talk with the agent about this review")}>
       <span className="kind-chip">
-        <Icon name="message" size={13} /> {t("Talk with the agent about this review")}
+        <Icon name="message" size={13} /> {fix ? t("Talk with the agent about this change") : t("Talk with the agent about this review")}
       </span>
-      {!messages.length && !pendingText && (
+      {!messages.length && !pendingText && fix && (
+        <span className="small muted">
+          {listening
+            ? t("The agent is making the change. Tell it what to do or leave out: your message reaches it at work.")
+            : !talk.data?.open
+              ? t("You can talk to the agent once it has drafted the change.")
+              : talk.data?.draft_pending
+                ? t("Ask why it changed something, or have it change the diff. The draft's diff is replaced; nothing is pushed until you push it.")
+                : t("Ask for more changes, or for a different one: they become a new draft for you to push.")}
+        </span>
+      )}
+      {!messages.length && !pendingText && !fix && (
         <span className="small muted">
           {listening
             ? t("The agent is writing the review. Tell it what to check or what to leave out: your message reaches it at work, and the review it finishes answers it.")
@@ -123,12 +140,12 @@ export function ReviewTalk({ job, me, active }: { job: AgentJob; me: string; act
           )}
           {m.role !== "user" && draft && m.proposals.includes(draft) && (
             <span className="small" style={{ color: "var(--ok)" }}>
-              <Icon name="check" size={13} /> {t("Revised the draft above")}
+              <Icon name="check" size={13} /> {fix ? t("Changed the draft's diff") : t("Revised the draft above")}
             </span>
           )}
           {m.role !== "user" && m.proposals.some((id) => id !== draft) && (
             <span className="small" style={{ color: "var(--ok)" }}>
-              <Icon name="check" size={13} /> {t("Drafted an edit of the posted review")}
+              <Icon name="check" size={13} /> {fix ? t("Drafted a new change for you to push") : t("Drafted an edit of the posted review")}
             </span>
           )}
           {(m.changes ?? []).map((id) => (
@@ -175,7 +192,7 @@ export function ReviewTalk({ job, me, active }: { job: AgentJob; me: string; act
           <ProposalCard proposal={revision} compact />
         </section>
       )}
-      {draft && !talk.data?.draft_pending && !talk.data?.posted && (
+      {!fix && draft && !talk.data?.draft_pending && !talk.data?.posted && (
         <span className="small muted">{t("This draft was already decided: the agent still answers, but its revisions are not saved.")}</span>
       )}
       <form
@@ -188,7 +205,15 @@ export function ReviewTalk({ job, me, active }: { job: AgentJob; me: string; act
         <GrowingTextarea
           value={text}
           minRows={2}
-          placeholder={listening ? t("Tell the agent what to check while it reviews…") : t("Ask about the review, or ask for a change…")}
+          placeholder={
+            fix
+              ? listening
+                ? t("Tell the agent what to do while it works…")
+                : t("Ask about the change, or ask for another…")
+              : listening
+                ? t("Tell the agent what to check while it reviews…")
+                : t("Ask about the review, or ask for a change…")
+          }
           aria-label={t("Message")}
           disabled={!canSend}
           onChange={(e) => setText(e.target.value)}
@@ -209,7 +234,7 @@ export function ReviewTalk({ job, me, active }: { job: AgentJob; me: string; act
           <span className="kbd">↵</span> {t("send")} · <span className="kbd">⇧</span>
           <span className="kbd">↵</span> {t("new line")}
         </span>
-        <AgentPicker compact purpose="answer" task="review" value={agent} onChange={setPickedAgent} disabled={listening} />
+        <AgentPicker compact purpose="answer" task={fix ? "fix" : "review"} value={agent} onChange={setPickedAgent} disabled={listening} />
       </div>
       <ErrorBox error={send.error || talk.error} />
     </section>

@@ -786,3 +786,94 @@ async def test_a_change_in_the_persons_own_words_needs_no_review(demo) -> None:
             if m["role"] == "assistant"
         ]
         assert any("The changes to #42 are ready" in m for m in said)
+
+
+async def test_a_person_talks_with_the_agent_that_changed_their_pr(demo) -> None:
+    """A fix's agent answers in its job's conversation: a change replaces the
+    pending draft's diff and its description, as the person's edit; once the draft
+    is decided, a change is a new draft for them to push. Others who do not
+    maintain the repository only read along."""
+    h, app = demo
+    turns: list[Any] = []
+
+    def change(task: Any) -> Any:
+        if task.mode == "read_only":
+            n = len(turns)
+            return {"title": f"docs: batching, take {n}", "summary": f"Take {n}."}
+        workdir = Path(task.workdir)
+        if task.activity == "fix_talk":
+            turns.append(task)
+            if "Why" in task.prompt.split("The newest message")[1]:
+                return AgentResult(
+                    runtime="scripted", ok=True, text="Because batches are lazy."
+                )
+            (workdir / f"NOTE{len(turns)}.md").write_text(f"note {len(turns)}\n")
+            return AgentResult(runtime="scripted", ok=True, text="Added a note.")
+        (workdir / "BATCHING.md").write_text("Batches of one are fine.\n")
+        return AgentResult(runtime="scripted", ok=True, text="Wrote BATCHING.md.")
+
+    h.runner.on("fix", change)
+    async with _as(app, "maria") as maria:
+        started = await maria.post(
+            f"/api/prs/{REPO}/42/fix",
+            json={"request": "Document how batches of one behave."},
+        )
+        assert started.status_code == 200, started.text
+        await h.settle()
+
+        async def drafts() -> list[dict[str, Any]]:
+            return [
+                p
+                for p in (await maria.get("/api/proposals")).json()
+                if p["action"]["action"]["kind"] == "pr.fix"
+            ]
+
+        [draft] = await drafts()
+        job = draft["action"]["action"]["provenance"]["job_id"]
+        state = (await maria.get(f"/api/jobs/{job}/talk")).json()
+        assert state["subject"] == "fix" and state["draft_pending"] and state["open"]
+
+        why = await maria.post(f"/api/jobs/{job}/talk", json={"text": "Why lazy?"})
+        assert why.status_code == 200, why.text
+        assert why.json()["text"] == "Because batches are lazy."
+        assert why.json()["proposals"] == [], "nothing changed"
+        assert "Document how batches of one behave." in turns[0].prompt
+        assert "BATCHING.md" in turns[0].prompt, "the change as it stands"
+        assert turns[0].mode == "workspace_write"
+        assert turns[0].requested_by == "maria"
+
+        more = await maria.post(
+            f"/api/jobs/{job}/talk", json={"text": "Also add a note."}
+        )
+        assert more.status_code == 200, more.text
+        [revised] = await drafts()
+        assert more.json()["proposals"] == [revised["action_id"]]
+        payload = revised["action"]["action"]["payload"]
+        assert payload["files"] == ["BATCHING.md", "NOTE2.md"]
+        assert payload["title"] == "docs: batching, take 2"
+        assert "Take 2." in payload["body"]
+        assert revised["edited"], "saved as maria's edit"
+
+    async with _as(app, "walt") as walt:
+        denied = await walt.post(f"/api/jobs/{job}/talk", json={"text": "Hi"})
+        assert denied.status_code == 403
+
+    async with _as(app, "maria") as maria:
+        rejected = await maria.post(
+            f"/api/proposals/{revised['id']}/reject", json={"reason": "not yet"}
+        )
+        assert rejected.status_code == 200, rejected.text
+        again = await maria.post(
+            f"/api/jobs/{job}/talk", json={"text": "Add one more note."}
+        )
+        assert again.status_code == 200, again.text
+        [new] = await drafts()
+        assert new["id"] != revised["id"] and again.json()["proposals"] == [
+            new["action_id"]
+        ]
+        payload = new["action"]["action"]["payload"]
+        assert payload["files"] == ["BATCHING.md", "NOTE2.md", "NOTE3.md"]
+        assert new["requested_by"] == "maria"
+        assert "already decided" in again.json()["text"]
+        state = (await maria.get(f"/api/jobs/{job}/talk")).json()
+        assert state["draft"] == new["action_id"] and state["draft_pending"]

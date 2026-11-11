@@ -1268,6 +1268,10 @@ export interface Automation {
 
 /** The conversation about a review or follow-up, kept on its job. */
 export interface ReviewTalkState {
+  /** What the conversation is about: a review (or follow-up), or a change an agent made. */
+  subject?: "review" | "fix";
+  /** For a change: whether its job ended, so a message starts a turn. */
+  open?: boolean;
   thread: string | null;
   agent?: string | null;
   runtime?: string | null;

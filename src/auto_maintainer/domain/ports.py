@@ -387,6 +387,11 @@ class Workspace(Protocol):
         """Everything changed in the worktree since its checkout, as one patch."""
         ...
 
+    async def apply(self, path: Any, patch: str) -> None:
+        """Apply ``patch`` (as ``changes`` returns it) to the worktree, so an agent
+        goes on from a change made earlier; raises when it does not apply."""
+        ...
+
     async def merge_base(self, path: Any, a: str, b: str) -> str | None:
         """The commit where ``b`` branched from ``a``, or ``None``."""
         ...
