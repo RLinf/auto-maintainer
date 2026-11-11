@@ -478,7 +478,34 @@ def test_claude_code_gets_the_endpoint_in_its_environment(tmp_path: Path) -> Non
     env = rt.provider_env()
     assert env["ANTHROPIC_BASE_URL"] == "https://gw.example/v1"
     assert env["ANTHROPIC_AUTH_TOKEN"] == KEY and env["ANTHROPIC_API_KEY"] is None
-    assert rt.model == "m-large" and env["ANTHROPIC_MODEL"] == "m-large"
+    assert env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
+    assert rt.model == "m-large"
+    for var in (
+        "ANTHROPIC_MODEL",
+        "ANTHROPIC_SMALL_FAST_MODEL",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        "CLAUDE_CODE_SUBAGENT_MODEL",
+    ):
+        assert env[var] == "m-large"
+
+    override = _task(tmp_path).model_copy(update={"model": "m-override"})
+    task_env = rt.task_env(override)
+    assert task_env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
+    for var in (
+        "ANTHROPIC_MODEL",
+        "ANTHROPIC_SMALL_FAST_MODEL",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        "CLAUDE_CODE_SUBAGENT_MODEL",
+    ):
+        assert task_env[var] == "m-override"
+
+    native = build_runtime("claude-code", RuntimeConfig(adapter="claude-code"))
+    assert native.provider_env() == {}
+    assert native.task_env(override) == {}
 
 
 def test_codex_selects_the_provider_by_flags_without_the_key(tmp_path: Path) -> None:

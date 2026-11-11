@@ -810,6 +810,8 @@ export interface ChatThread {
   title: string;
   repo: string | null;
   runtime: string | null;
+  /** The agent chosen for this conversation, or null for automatic routing. */
+  agent?: string | null;
   /** The turn whose agent answers now, if one does. */
   live_run?: string | null;
   created_at: string;
@@ -830,6 +832,8 @@ export interface ChatMessage {
   requests?: ChatRequest[];
   /** The agent run that wrote an answer; its steps stay readable. */
   run_id?: string | null;
+  /** The agent runtime that wrote an answer. */
+  runtime?: string | null;
   /** A message sent to the agent while it wrote the review. */
   while_running?: boolean;
   created_at: string;
@@ -1155,6 +1159,8 @@ export interface Automation {
 /** The conversation about a review or follow-up, kept on its job. */
 export interface ReviewTalkState {
   thread: string | null;
+  agent?: string | null;
+  runtime?: string | null;
   /** The run answering the newest message, while it runs. */
   live_run: string | null;
   messages: ChatMessage[];

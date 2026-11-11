@@ -801,12 +801,12 @@ class ExecRuntime:
             )
         env = build_env(task, self.env_allow)
         env.update(isolation_env(files.dir))
-        env.update(self.task_env(task))
         for name, value in self.provider_env().items():
             if value is None:
                 env.pop(name, None)
             else:
                 env[name] = value
+        env.update(self.task_env(task))
         if task.permissions == "bypass":
             env.update(self.bypass_env())
         if task.lab_session:

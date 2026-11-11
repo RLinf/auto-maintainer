@@ -150,11 +150,15 @@ def test_pr_page_translations_cover_every_literal_key() -> None:
     missing: list[str] = []
     for rel in (
         "pages/Pr.tsx",
+        "pages/Chat.tsx",
         "assignees.tsx",
         "proposal.tsx",
         "reproduce.tsx",
         "fixCi.tsx",
         "agentPicker.tsx",
+        "agent.tsx",
+        "reviewTalk.tsx",
+        "people.tsx",
     ):
         src = (UI_SRC / rel).read_text(encoding="utf-8")
         for m in re.finditer(r'\bt\(\s*"((?:\\.|[^"\\])*)"\s*\)', src):

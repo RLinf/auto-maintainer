@@ -9,6 +9,7 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Fragment, useState } from "react";
+import { AgentPicker, agentName } from "./agentPicker";
 import { api, type AgentJob, type ChatMessage, type JobStep, type ReviewTalkState } from "./api";
 import { ErrorBox, GrowingTextarea, StopButton } from "./components";
 import { useProposals, useQuestions } from "./data";
@@ -28,14 +29,25 @@ export function ReviewTalk({ job, me, active }: { job: AgentJob; me: string; act
   const client = useQueryClient();
   const [text, setText] = useState("");
   const [pendingText, setPendingText] = useState("");
+  const [pickedAgent, setPickedAgent] = useState<string | undefined>(undefined);
   const talk = useQuery({
     queryKey: ["job", job.id, "talk"],
     queryFn: () => api.get<ReviewTalkState>(`/api/jobs/${job.id}/talk`),
     // While the review is written, whether its agent takes messages changes step by step.
     refetchInterval: active ? 3000 : false,
   });
+  const listening = !!talk.data?.listening;
+  const agent = pickedAgent ?? talk.data?.agent ?? talk.data?.runtime ?? job.agent ?? "";
   const send = useMutation({
-    mutationFn: (said: string) => api.post<ChatMessage>(`/api/jobs/${job.id}/talk`, { text: said }),
+    mutationFn: ({ said, chosen }: { said: string; chosen: string | undefined }) =>
+      api.post<ChatMessage>(`/api/jobs/${job.id}/talk`, {
+        text: said,
+        ...(chosen !== undefined && !listening ? { agent: chosen } : {}),
+      }),
+    onSuccess: async () => {
+      await client.invalidateQueries({ queryKey: ["job", job.id, "talk"] });
+      setPickedAgent(undefined);
+    },
     onSettled: () => {
       setPendingText("");
       // A revision changes the draft; a lesson adds a memory change.
@@ -54,7 +66,6 @@ export function ReviewTalk({ job, me, active }: { job: AgentJob; me: string; act
   const runs = new Set([...messages.map((m) => m.run_id), live.data?.run, talk.data?.live_run].filter((x): x is string => !!x));
   const waiting = (questions.data ?? []).filter((q) => q.job_id && runs.has(q.job_id));
   const draft = talk.data?.draft ?? null;
-  const listening = !!talk.data?.listening;
   const canSend = !!draft || listening;
   const proposals = useProposals();
   const revision = talk.data?.revision ? (proposals.data ?? []).find((p) => p.action_id === talk.data?.revision) : undefined;
@@ -69,7 +80,7 @@ export function ReviewTalk({ job, me, active }: { job: AgentJob; me: string; act
     if (!clean || !canSend) return;
     setPendingText(clean);
     setText("");
-    send.mutate(clean);
+    send.mutate({ said: clean, chosen: pickedAgent });
   };
 
   return (
@@ -102,6 +113,11 @@ export function ReviewTalk({ job, me, active }: { job: AgentJob; me: string; act
             </div>
           ) : (
             <div className="bubble assistant">
+              {m.runtime && (
+                <span className="small muted" style={{ display: "block", marginBottom: 2 }}>
+                  {agentName(m.runtime)}
+                </span>
+              )}
               <Markdown text={m.text} className="chat-md" />
             </div>
           )}
@@ -188,6 +204,13 @@ export function ReviewTalk({ job, me, active }: { job: AgentJob; me: string; act
           <Icon name="send" size={15} />
         </button>
       </form>
+      <div className="row" style={{ justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
+        <span className="small muted">
+          <span className="kbd">↵</span> {t("send")} · <span className="kbd">⇧</span>
+          <span className="kbd">↵</span> {t("new line")}
+        </span>
+        <AgentPicker compact purpose="answer" task="review" value={agent} onChange={setPickedAgent} disabled={listening} />
+      </div>
       <ErrorBox error={send.error || talk.error} />
     </section>
   );

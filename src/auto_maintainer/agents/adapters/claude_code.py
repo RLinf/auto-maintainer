@@ -93,6 +93,16 @@ WRITE_ALLOWED = (
 )
 
 
+_PROVIDER_MODEL_VARS = (
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_SMALL_FAST_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "CLAUDE_CODE_SUBAGENT_MODEL",
+)
+
+
 class ClaudeCodeRuntime(ExecRuntime):
     """Claude Code in print mode.
 
@@ -173,10 +183,12 @@ class ClaudeCodeRuntime(ExecRuntime):
         """Point Claude Code at an Anthropic-compatible endpoint.
 
         The key goes in ``ANTHROPIC_AUTH_TOKEN`` (sent as a bearer token); an inherited
-        ``ANTHROPIC_API_KEY`` would take precedence over it, so it is removed. The
-        background model is the same one, since the endpoint may not serve Claude's.
-        A known output limit of the model caps ``CLAUDE_CODE_MAX_OUTPUT_TOKENS``, so
-        Claude Code never asks it for more than it writes.
+        ``ANTHROPIC_API_KEY`` would take precedence over it, so it is removed. Every
+        auxiliary and subagent model variable is pinned to the configured model and
+        non-essential traffic is disabled, since custom endpoints reject built-in
+        Anthropic model IDs. A known output limit of the model caps
+        ``CLAUDE_CODE_MAX_OUTPUT_TOKENS``, so Claude Code never asks it for more than
+        it writes.
         """
         p = self.provider
         if p is None:
@@ -185,12 +197,28 @@ class ClaudeCodeRuntime(ExecRuntime):
             "ANTHROPIC_BASE_URL": p.base_url,
             "ANTHROPIC_AUTH_TOKEN": p.api_key or None,
             "ANTHROPIC_API_KEY": None,
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
         }
         if self.model:
-            env["ANTHROPIC_MODEL"] = self.model
-            env["ANTHROPIC_SMALL_FAST_MODEL"] = self.model
-            env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = self.model
+            for name in _PROVIDER_MODEL_VARS:
+                env[name] = self.model
         spec = p.spec(self.model or (p.models[0] if p.models else None))
+        if spec is not None and spec.max_output:
+            env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(spec.max_output)
+        return env
+
+    def task_env(self, task: AgentTask) -> dict[str, str]:
+        """Pin auxiliary and subagent model variables to the task's effective model
+        when running on a custom provider."""
+        p = self.provider
+        if p is None:
+            return {}
+        env: dict[str, str] = {"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"}
+        model = task.model or self.model
+        if model:
+            for name in _PROVIDER_MODEL_VARS:
+                env[name] = model
+        spec = p.spec(model or (p.models[0] if p.models else None))
         if spec is not None and spec.max_output:
             env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(spec.max_output)
         return env

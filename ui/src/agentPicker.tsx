@@ -56,16 +56,21 @@ export function AgentPicker({
   onChange,
   compact,
   task = "review",
+  disabled,
+  purpose = "do",
 }: {
   value: string;
   onChange: (v: string) => void;
   compact?: boolean;
   task?: string;
+  disabled?: boolean;
+  purpose?: "do" | "answer";
 }) {
   const t = useT();
   const { primary, current, others, label } = useAgentOptions(value, task);
+  const title = purpose === "answer" ? t("Which agent answers") : t("Which agent does it");
   return (
-    <label className="row" style={{ gap: 6, flexWrap: "nowrap", minWidth: 0 }} title={t("Which agent does it")}>
+    <label className="row" style={{ gap: 6, flexWrap: "nowrap", minWidth: 0 }} title={title}>
       {!compact && (
         <span style={{ display: "inline-flex", flexShrink: 0 }}>
           <Icon name="cpu" size={14} />
@@ -73,8 +78,9 @@ export function AgentPicker({
       )}
       <select
         value={current}
+        disabled={disabled}
         onChange={(e) => onChange(e.target.value)}
-        aria-label={t("Which agent does it")}
+        aria-label={title}
         style={{ height: compact ? 28 : 34, minWidth: 0 }}
       >
         <option value="">{primary ? `${label(primary)} (${t("default")})` : t("Default agent")}</option>

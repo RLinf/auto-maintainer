@@ -1544,6 +1544,7 @@ const zh: Record<string, string> = {
   "Watch the first": "查看第一个",
   "What should be checked? (optional)": "要验证什么？（可选）",
   "What would confirm it": "怎样算证实",
+  "Which agent answers": "由哪个智能体回答",
   "Which agent does it": "由哪个智能体来做",
   "Working": "进行中",
   "Working…": "进行中…",
