@@ -26,7 +26,7 @@ import copy
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -112,6 +112,8 @@ from .profiles.service import ProfileService
 log = logging.getLogger(__name__)
 
 INSTALL_LINES = 12
+LATEST_MAX_AGE = timedelta(hours=6)
+"""How long a lookup of an agent CLI's latest version is reused."""
 """How many of an installer's last lines of output the Settings page shows."""
 SIGNED_IN_SECONDS = 60
 VIEW_CACHE_SECONDS = 300
@@ -232,6 +234,9 @@ class Service:
         self._views: dict[tuple[str, ...], tuple[datetime, Any]] = {}
         self._view_reads: dict[tuple[str, ...], asyncio.Future[Any]] = {}
         self.installs: dict[str, AgentInstall] = {}
+        self.latest: dict[str, dict[str, Any]] = {}
+        """Per agent CLI the dashboard installs: its latest version (or why it could
+        not be read) and when that was read (``latest_versions``)."""
         """The latest install of each agent CLI asked for since the service started."""
         self._install_tasks: set[asyncio.Task[None]] = set()
         self.settings = settings
@@ -791,6 +796,40 @@ class Service:
     def installable(self) -> dict[str, str]:
         """The agent CLIs this host can install from the dashboard, with their source."""
         return self.a.installer.sources() if self.a.installer is not None else {}
+
+    async def latest_versions(self, refresh: bool = False) -> dict[str, dict[str, Any]]:
+        """The latest version of each CLI this host can install, from its publisher,
+        read again when ``refresh`` or older than ``LATEST_MAX_AGE``: ``version``,
+        or ``error``, and ``checked_at``."""
+        installer = self.a.installer
+        if installer is None:
+            return {}
+        now = self.clock.now()
+        stale = [
+            name
+            for name in self.installable()
+            if refresh
+            or name not in self.latest
+            or now - self.latest[name]["at"] > LATEST_MAX_AGE
+        ]
+
+        async def look(name: str) -> None:
+            try:
+                found: dict[str, Any] = {"version": await installer.latest(name)}
+            except Exception as exc:  # shown beside the agent as it is
+                found = {"error": redact_secrets(str(exc))[0][:300]}
+            self.latest[name] = {**found, "at": now}
+
+        await asyncio.gather(*(look(n) for n in stale))
+        return {
+            name: {
+                "version": entry.get("version"),
+                "error": entry.get("error"),
+                "checked_at": entry["at"].isoformat(),
+            }
+            for name, entry in self.latest.items()
+            if name in self.installable()
+        }
 
     def start_install(self, name: str, by: str) -> AgentInstall:
         """Install agent ``name``'s CLI in the background, unless it is being

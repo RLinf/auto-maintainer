@@ -35,10 +35,13 @@ from auto_maintainer.domain.agents import AgentTask, TaskKind
 from auto_maintainer.domain.settings import ProviderBinding
 
 FAKE_NPM = """#!/bin/sh
-# A stand-in for npm: installs the named package's command into --prefix.
+# A stand-in for npm: the registry's latest version is in ./version beside it (9.9.9
+# without one); install puts the named package's command into --prefix.
+ver=$(cat "$(dirname "$0")/version" 2>/dev/null || echo 9.9.9)
+if [ "$1" = view ]; then echo "$ver"; exit 0; fi
 prefix="$3"
 mkdir -p "$prefix/node_modules/@openai/codex/bin" "$prefix/node_modules/.bin"
-printf '{"name": "@openai/codex", "version": "9.9.9"}' > "$prefix/node_modules/@openai/codex/package.json"
+printf '{"name": "@openai/codex", "version": "%s"}' "$ver" > "$prefix/node_modules/@openai/codex/package.json"
 printf '#!/bin/sh\\necho codex' > "$prefix/node_modules/@openai/codex/bin/codex.js"
 chmod +x "$prefix/node_modules/@openai/codex/bin/codex.js"
 ln -sf ../@openai/codex/bin/codex.js "$prefix/node_modules/.bin/codex"
@@ -63,15 +66,72 @@ async def test_an_npm_package_is_installed_and_linked_from_the_data_bin(
     async def on_line(line: str) -> None:
         lines.append(line)
 
+    assert await installer.latest("codex") == "9.9.9"
     done = await installer.install("codex", on_line)
     assert (done.version, done.source) == ("9.9.9", "npm @openai/codex")
     link = data / "bin" / "codex"
     assert os.path.realpath(link) == os.path.realpath(
-        data / "agents/codex/node_modules/@openai/codex/bin/codex.js"
+        data / "agents/codex/9.9.9/node_modules/@openai/codex/bin/codex.js"
     )
     assert "added 1 package" in lines
     with pytest.raises(InstallError, match="cannot be installed"):
         await installer.install("not-an-agent")
+
+
+async def test_an_upgrade_installs_beside_the_running_version_and_keeps_one_before(
+    tmp_path: Path,
+) -> None:
+    npm = tmp_path / "npm"
+    npm.write_text(FAKE_NPM)
+    npm.chmod(0o755)
+    data = tmp_path / "data"
+    agent = data / "agents" / "codex"
+    # An install from before versions had folders of their own.
+    (agent / "node_modules" / ".bin").mkdir(parents=True)
+    (agent / "package.json").write_text("{}")
+    installer = AgentInstaller(data, npm=str(npm))
+
+    def release(version: str) -> None:
+        (tmp_path / "version").write_text(version)
+
+    release("1.0.0")
+    await installer.install("codex")
+    assert (agent / "node_modules").is_dir(), "the version before stays for its runs"
+    release("1.1.0")
+    assert await installer.latest("codex") == "1.1.0"
+    running = os.path.realpath(data / "bin" / "codex")
+    await installer.install("codex")
+    assert os.path.exists(running), "a run that started on 1.0.0 keeps its files"
+    assert os.path.realpath(data / "bin" / "codex").startswith(str(agent / "1.1.0"))
+    assert (
+        not (agent / "node_modules").exists() and not (agent / "package.json").exists()
+    )
+    release("1.2.0")
+    await installer.install("codex")
+    assert sorted(p.name for p in agent.iterdir()) == ["1.1.0", "1.2.0"]
+    again = await installer.install("codex")
+    assert again.version == "1.2.0", "the same version again changes nothing"
+
+
+async def test_a_failed_npm_install_leaves_the_current_version_in_place(
+    tmp_path: Path,
+) -> None:
+    npm = tmp_path / "npm"
+    npm.write_text(
+        FAKE_NPM.replace('prefix="$3"', 'prefix="$3"; [ "$ver" = 2.0.0 ] && exit 1')
+    )
+    npm.chmod(0o755)
+    data = tmp_path / "data"
+    installer = AgentInstaller(data, npm=str(npm))
+    (tmp_path / "version").write_text("1.0.0")
+    await installer.install("codex")
+    (tmp_path / "version").write_text("2.0.0")
+    with pytest.raises(InstallError, match="npm install @openai/codex failed"):
+        await installer.install("codex")
+    assert os.path.realpath(data / "bin" / "codex").startswith(
+        str(data / "agents" / "codex" / "1.0.0")
+    )
+    assert sorted(p.name for p in (data / "agents" / "codex").iterdir()) == ["1.0.0"]
 
 
 def _release(archive: bytes, digest: str) -> httpx.MockTransport:

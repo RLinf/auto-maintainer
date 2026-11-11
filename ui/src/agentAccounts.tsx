@@ -303,7 +303,19 @@ function MyAgentRow({ agent: a, apis }: { agent: MyAgent; apis: MyProvider[] }) 
         <span className="mono" style={{ fontSize: 13.5 }}>
           {a.name}
         </span>
-        {a.can_sign_in && (a.signed_in ? <Status value="executed" label={t("You are signed in")} /> : <Status value="pending" label={t("You are not signed in")} />)}
+        {a.can_sign_in && a.signed_in && <Status value="executed" label={t("You are signed in")} />}
+        {a.isolated && !a.can_sign_in && usable.length === 0 && (
+          <span
+            className="small muted"
+            title={
+              a.protocols.length > 0
+                ? `${t("This CLI has no sign-in: it runs only on a model API. To run it on your own, add one under My model APIs that speaks")} ${a.protocols.map((p) => PROTOCOLS[p as keyof typeof PROTOCOLS] ?? p).join(` ${t("or")} `)}.`
+                : t("This CLI has no sign-in the dashboard can run and takes no custom model API, so it runs on the service's account.")
+            }
+          >
+            {a.protocols.length > 0 ? t("needs a model API of yours") : t("the service's account only")}
+          </span>
+        )}
         <span className="right row model-controls" style={{ gap: 4 }}>
           <select
             value={choice}
@@ -354,13 +366,6 @@ function MyAgentRow({ agent: a, apis }: { agent: MyAgent; apis: MyProvider[] }) 
         </span>
       </span>
       {!a.isolated && <span className="small muted">{t("Agents run on the host here, where every run could read every person's sign-in, so personal accounts are off.")}</span>}
-      {a.isolated && !a.can_sign_in && usable.length === 0 && (
-        <span className="small muted">
-          {a.protocols.length > 0
-            ? `${t("This CLI has no sign-in: it runs only on a model API. To run it on your own, add one under My model APIs that speaks")} ${a.protocols.map((p) => PROTOCOLS[p as keyof typeof PROTOCOLS] ?? p).join(` ${t("or")} `)}.`
-            : t("This CLI has no sign-in the dashboard can run and takes no custom model API, so it runs on the service's account.")}
-        </span>
-      )}
       {login && <SignInFlow login={login} onEnd={() => setLogin(null)} />}
       <ErrorBox error={save.error || signOut.error} />
     </div>

@@ -498,6 +498,18 @@ def build_router() -> APIRouter:
             raise HTTPException(404, str(e)) from e
         return state.model_dump(mode="json")
 
+    @r.get("/agents/latest")
+    async def latest_versions(
+        request: Request, refresh: bool = False, user: User = Depends(current_user)
+    ) -> dict[str, Any]:
+        """The latest version of each agent CLI this host can install, read from its
+        publisher at most every few hours; ``refresh`` reads it now, for the owner of
+        the service, who upgrades them."""
+        service = service_of(request)
+        if refresh:
+            await _require_maintainer(service, user)
+        return await service.latest_versions(refresh)
+
     @r.get("/sandbox")
     async def sandbox_view(
         request: Request, user: User = Depends(current_user)

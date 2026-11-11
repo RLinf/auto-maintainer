@@ -197,25 +197,43 @@ export function AgentsUsageSection({ mine = false }: { mine?: boolean }) {
       ) : u.agents.length === 0 ? (
         <Empty icon="cpu">{t("No agents on this host yet.")}</Empty>
       ) : (
+        <UsageRows agents={u.agents} />
+      )}
+    </Section>
+  );
+}
+
+/** The agents that ran or report their limits, each on a row; the others in one line. */
+function UsageRows({ agents }: { agents: AgentsUsage["agents"] }) {
+  const t = useT();
+  const shown = agents.filter((a) => a.runs > 0 || (a.quota?.buckets.length ?? 0) > 0);
+  const idle = agents.filter((a) => !shown.includes(a));
+  return (
+    <>
+      {shown.length === 0 ? (
+        <span className="small muted">{t("No runs in this period.")}</span>
+      ) : (
         <div className="list">
-          {u.agents.map((a) => (
+          {shown.map((a) => (
             <div key={a.name} className="list-row" style={{ alignItems: "flex-start", flexWrap: "wrap", gap: 16 }}>
               <span className="main usage-agent-main">
                 <span className="t mono">{a.name}</span>
                 <span className="meta">
-                  {tokens(a.input_tokens + a.output_tokens)} {t("tokens")} · {a.runs} {t("runs")}
+                  {tokens(a.input_tokens + a.output_tokens)} {t("tokens")} ({tokens(a.input_tokens)} {t("in")} · {tokens(a.output_tokens)} {t("out")}) · {a.runs} {t("runs")}
                   {a.cost_usd != null && ` · ${cost(a.cost_usd)}`}
                 </span>
-                <span className="meta">
-                  {tokens(a.input_tokens)} {t("in")} · {tokens(a.output_tokens)} {t("out")}
-                </span>
               </span>
-              <QuotaView quota={a.quota} />
+              {a.quota && <QuotaView quota={a.quota} />}
             </div>
           ))}
         </div>
       )}
-    </Section>
+      {idle.length > 0 && shown.length > 0 && (
+        <span className="small muted">
+          {t("No runs in this period")}: {idle.map((a) => a.name).join(", ")}
+        </span>
+      )}
+    </>
   );
 }
 

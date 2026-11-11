@@ -82,15 +82,15 @@ export function NamesCard() {
   const can = !!q.data?.can_name_others;
   return (
     <Section title={t("Display names")} hint={t("The names people go by here, shown in place of their logins")}>
-      <div className="list">
-        {rows.length === 0 && <span className="small muted">{t("Nobody has a name yet.")}</span>}
+      {rows.length === 0 && <span className="small muted">{t("Nobody has a name yet.")}</span>}
+      <div className="aliases-grid">
         {rows.map((a) => (
-          <div key={a.login} className="list-row aliases-row">
+          <div key={a.login} className="aliases-row" title={a.own ? t("chosen by them") : t("given by the owner")}>
             <Avatar login={a.login} size={20} />
-            <span className="main">
-              <strong>{a.alias}</strong> <span className="muted mono">{a.login}</span>
+            <span className="main truncate">
+              <strong>{a.alias}</strong> <span className="muted mono small">{a.login}</span>
             </span>
-            <span className="small muted">{a.own ? t("chosen by them") : t("given by the owner")}</span>
+            {a.own && <span className="small muted">{t("their own")}</span>}
             {can && !a.own && (
               <button className="ghost sm icon" aria-label={`${t("Remove")} ${a.alias}`} disabled={save.isPending} onClick={() => save.mutate({ who: a.login, name: null })}>
                 <Icon name="x" size={13} />

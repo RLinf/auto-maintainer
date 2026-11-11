@@ -169,42 +169,45 @@ export default function SettingsPage() {
   );
 }
 
+/** One line to ask the settings agent for a change; its examples show while the
+ * person is about to type. */
 function AskCard({ onAsk }: { onAsk: (prompt: string, send?: boolean) => void }) {
   const t = useT();
   const [text, setText] = useState("");
+  const [focused, setFocused] = useState(false);
+  const send = () => {
+    if (!text.trim()) return;
+    onAsk(text.trim(), true);
+    setText("");
+  };
   return (
-    <section className="card" style={{ background: "linear-gradient(135deg, var(--accent-soft), var(--surface) 70%)" }}>
-      <div className="row" style={{ marginBottom: 10 }}>
-        <span className="avatar-ai" style={{ width: 30, height: 30, borderRadius: 10, display: "grid", placeItems: "center", color: "#fff", background: "linear-gradient(135deg, var(--accent), var(--accent-2))" }}>
-          <Icon name="sparkles" size={16} />
-        </span>
-        <div className="stack" style={{ gap: 0 }}>
-          <strong>{t("Change settings by asking")}</strong>
-          <span className="small muted">{t("Say what you want. The agent drafts the change; you see the diff and apply it.")}</span>
-        </div>
-      </div>
+    <section
+      className="card ask-card"
+      onFocus={() => setFocused(true)}
+      onBlur={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setFocused(false);
+      }}
+    >
       <form
         className="composer"
         onSubmit={(e) => {
           e.preventDefault();
-          if (text.trim()) {
-            onAsk(text.trim(), true);
-            setText("");
-          }
+          send();
         }}
       >
+        <span className="ask-card-icon" aria-hidden>
+          <Icon name="sparkles" size={15} />
+        </span>
         <GrowingTextarea
           value={text}
-          placeholder={t("For example: use DeepSeek for Claude Code, and let Codex verify reviews")}
-          aria-label={t("What should change?")}
+          placeholder={t("Change settings by asking: for example, use DeepSeek for Claude Code")}
+          aria-label={t("Change settings by asking")}
+          title={t("Say what you want. The agent drafts the change; you see the diff and apply it.")}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
               e.preventDefault();
-              if (text.trim()) {
-                onAsk(text.trim(), true);
-                setText("");
-              }
+              send();
             }
           }}
         />
@@ -212,13 +215,15 @@ function AskCard({ onAsk }: { onAsk: (prompt: string, send?: boolean) => void })
           <Icon name="send" size={15} />
         </button>
       </form>
-      <div className="suggestions" style={{ marginTop: 10 }}>
-        {IDEAS.map((idea) => (
-          <button key={idea} className="suggestion" onClick={() => onAsk(t(idea))}>
-            {t(idea)}
-          </button>
-        ))}
-      </div>
+      {focused && !text && (
+        <div className="suggestions" style={{ marginTop: 8 }}>
+          {IDEAS.map((idea) => (
+            <button key={idea} type="button" className="suggestion" onClick={() => onAsk(t(idea))}>
+              {t(idea)}
+            </button>
+          ))}
+        </div>
+      )}
     </section>
   );
 }
@@ -361,81 +366,23 @@ function ModelControls({
   );
 }
 
-function AgentModeSwitch({ agent, canChange }: { agent: SettingsAgent; canChange: boolean }) {
-  const t = useT();
-  const toast = useToast();
-  const set = useAct(
-    (mode: "bypass" | null) => api.put<{ approved: boolean }>(`/api/settings/agents/${agent.name}/permissions`, { permissions: mode }),
-    [["settings"], ["memory"]],
-  );
-  const done = (r: { approved: boolean }) => toast({ title: r.approved ? t("Saved") : t("Change proposed"), icon: r.approved ? "check" : "inbox" });
-  if (agent.permissions === "bypass")
-    return (
-      <button className="ghost sm" disabled={set.isPending} onClick={() => set.mutate(null, { onSuccess: done })}>
-        {t("Check permissions again")}
-      </button>
-    );
-  return (
-    <Popover
-      align="right"
-      label={t("Skip permission checks")}
-      trigger={(open, toggle) => (
-        <button className={`ghost sm ${open ? "on" : ""}`} aria-expanded={open} onClick={toggle}>
-          <Icon name="shield" size={13} />
-          {t("Skip permission checks")}
-        </button>
-      )}
-    >
-      {(close) => (
-        <div className="stack" style={{ gap: 10, padding: 8, width: "min(380px, calc(100vw - 24px))", maxWidth: "100%" }}>
-          <strong className="small">
-            {agent.name}: {t("skip permission checks on every task")}
-          </strong>
-          <span className="small">
-            {t("It runs with")} <code>{SKIP_FLAG[agent.adapter] ?? t("its CLI's bypass mode")}</code> {t("on PRs from the repository's team, instead of asking a reviewer. PRs from outside contributors keep the normal mode.")}
-          </span>
-          <span className="small muted">
-            {t("In this mode the agent can run any command as the service's user, which can read the service's files: the GitHub sign-ins it keeps and the SSH keys for test machines. Turn it on only for an agent you trust with that.")}
-          </span>
-          <div className="row">
-            <button
-              className="primary sm"
-              disabled={set.isPending}
-              onClick={() =>
-                set.mutate("bypass", {
-                  onSuccess: (r) => {
-                    close();
-                    done(r);
-                  },
-                })
-              }
-            >
-              {canChange ? t("Turn on") : t("Propose")}
-            </button>
-            <button className="ghost sm" onClick={close}>
-              {t("Cancel")}
-            </button>
-          </div>
-          <ErrorBox error={set.error} />
-        </div>
-      )}
-    </Popover>
-  );
-}
-
-function ChangeButton({ onClick }: { onClick: () => void }) {
+function ChangeButton({ onClick, compact = false }: { onClick: () => void; compact?: boolean }) {
   const t = useT();
   return (
-    <button className="ghost sm" onClick={onClick} title={t("Ask the agent to change this")}>
+    <button className={compact ? "ghost icon row-action" : "ghost sm"} onClick={onClick} title={t("Ask the agent to change this")} aria-label={compact ? t("Change") : undefined}>
       <Icon name="sparkles" size={13} />
-      {t("Change")}
+      {!compact && t("Change")}
     </button>
   );
 }
 
-function FromSettings({ on }: { on: boolean }) {
+/** That a value comes from the settings file rather than the defaults: a word, or in
+ * a long table a dot with the word on hover. */
+function FromSettings({ on, compact = false }: { on: boolean; compact?: boolean }) {
   const t = useT();
   if (!on) return null;
+  if (compact)
+    return <span className="custom-dot" title={`${t("customized")}: ${t("Set in the settings file; otherwise the default applies")}`} aria-label={t("customized")} />;
   return (
     <span className="pill status-info" title={t("Set in the settings file; otherwise the default applies")}>
       {t("customized")}
@@ -534,7 +481,7 @@ function SandboxCard() {
 
 /** Install an agent CLI on this host (the owner of the service's repository), and
  * follow the install until it ends. */
-function InstallButton({ name, source, state, canInstall }: { name: string; source: string; state?: AgentInstall; canInstall: boolean }) {
+function InstallButton({ name, source, state, canInstall, label }: { name: string; source: string; state?: AgentInstall; canInstall: boolean; label?: string }) {
   const t = useT();
   const client = useQueryClient();
   const install = useAct(() => api.post<AgentInstall>(`/api/settings/agents/${name}/install`), [["settings"]]);
@@ -555,7 +502,7 @@ function InstallButton({ name, source, state, canInstall }: { name: string; sour
         onClick={() => install.mutate(undefined)}
       >
         <Icon name="download" size={14} />
-        {running ? t("Installing…") : t("Install")}
+        {running ? (label ?? t("Installing…")) : (label ?? t("Install"))}
       </button>
       {running && state.lines.length > 0 && <span className="small muted truncate" style={{ maxWidth: "100%" }}>{state.lines[state.lines.length - 1]}</span>}
       {state?.state === "failed" && <span className="small danger-text" style={{ whiteSpace: "normal" }}>{state.error}</span>}
@@ -564,12 +511,191 @@ function InstallButton({ name, source, state, canInstall }: { name: string; sour
   );
 }
 
+/** Whether version ``a`` is newer than ``b``: numbers compared part by part, and a
+ * release newer than its own pre-release (``0.2.2`` after ``0.2.2-rc.1``). */
+export function isNewer(a: string, b: string): boolean {
+  const parse = (v: string) => {
+    const [main, pre] = v.trim().replace(/^v/, "").split(/[-+]/, 2);
+    return { nums: main.split(".").map((n) => Number.parseInt(n, 10) || 0), pre: pre ?? "" };
+  };
+  const x = parse(a);
+  const y = parse(b);
+  for (let i = 0; i < Math.max(x.nums.length, y.nums.length); i++) {
+    const d = (x.nums[i] ?? 0) - (y.nums[i] ?? 0);
+    if (d) return d > 0;
+  }
+  if (x.pre === y.pre) return false;
+  if (!x.pre) return true;
+  if (!y.pre) return false;
+  return x.pre.localeCompare(y.pre, undefined, { numeric: true }) > 0;
+}
+
+interface LatestVersions {
+  [name: string]: { version: string | null; error: string | null; checked_at: string };
+}
+
+function useLatestVersions() {
+  return useQuery({
+    queryKey: ["agent-latest"],
+    queryFn: () => api.get<LatestVersions>("/api/settings/agents/latest"),
+    staleTime: 10 * 60_000,
+  });
+}
+
+/** An agent's installed version, and the newer one its publisher offers: the owner
+ * updates to it here, which installs it beside the current one; runs that already
+ * started keep theirs. */
+function AgentVersion({ v, name, installed }: { v: SettingsView; name: string; installed: string | null | undefined }) {
+  const t = useT();
+  const latest = useLatestVersions().data?.[name];
+  const state = v.installs[name];
+  const newer = latest?.version && installed && isNewer(latest.version, installed) ? latest.version : null;
+  return (
+    <>
+      {installed && <span className="small muted mono">v{installed}</span>}
+      {state?.state === "running" ? (
+        <InstallButton name={name} source={v.installable[name]} state={state} canInstall={v.access.allowed} label={t("Updating…")} />
+      ) : newer && v.installable[name] ? (
+        v.access.allowed ? (
+          <InstallButton name={name} source={v.installable[name]} state={state} canInstall label={`${t("Update to")} ${newer}`} />
+        ) : (
+          <span className="pill status-info">
+            {newer} {t("available")}
+          </span>
+        )
+      ) : null}
+    </>
+  );
+}
+
+/** What an agent does less often: its permission mode, looking again for a newer
+ * version, and asking the settings agent for anything else. */
+function AgentMenu({ agent, v, ask }: { agent: SettingsAgent; v: SettingsView; ask: (p: string, send?: boolean) => void }) {
+  const t = useT();
+  const toast = useToast();
+  const client = useQueryClient();
+  const [view, setView] = useState<"main" | "bypass">("main");
+  const set = useAct(
+    (mode: "bypass" | null) => api.put<{ approved: boolean }>(`/api/settings/agents/${agent.name}/permissions`, { permissions: mode }),
+    [["settings"], ["memory"]],
+  );
+  const check = useAct(() => api.get<LatestVersions>("/api/settings/agents/latest?refresh=true"), []);
+  const done = (r: { approved: boolean }) => toast({ title: r.approved ? t("Saved") : t("Change proposed"), icon: r.approved ? "check" : "inbox" });
+  return (
+    <Popover
+      align="right"
+      label={t("More")}
+      trigger={(open, toggle) => (
+        <button
+          className={`ghost icon ${open ? "on" : ""}`}
+          aria-expanded={open}
+          aria-label={`${agent.name}: ${t("More")}`}
+          title={t("More")}
+          onClick={() => {
+            setView("main");
+            toggle();
+          }}
+        >
+          <Icon name="more" size={16} />
+        </button>
+      )}
+    >
+      {(close) =>
+        view === "bypass" ? (
+          <div className="stack" style={{ gap: 10, padding: 8, width: "min(380px, calc(100vw - 24px))" }}>
+            <strong className="small">
+              {agent.name}: {t("skip permission checks on every task")}
+            </strong>
+            <span className="small">
+              {t("It runs with")} <code>{SKIP_FLAG[agent.adapter] ?? t("its CLI's bypass mode")}</code> {t("on PRs from the repository's team, instead of asking a reviewer. PRs from outside contributors keep the normal mode.")}
+            </span>
+            <span className="small muted">
+              {t("In this mode the agent can run any command as the service's user, which can read the service's files: the GitHub sign-ins it keeps and the SSH keys for test machines. Turn it on only for an agent you trust with that.")}
+            </span>
+            <div className="row">
+              <button
+                className="primary sm"
+                disabled={set.isPending}
+                onClick={() =>
+                  set.mutate("bypass", {
+                    onSuccess: (r) => {
+                      close();
+                      done(r);
+                    },
+                  })
+                }
+              >
+                {v.access.allowed ? t("Turn on") : t("Propose")}
+              </button>
+              <button className="ghost sm" onClick={() => setView("main")}>
+                {t("Cancel")}
+              </button>
+            </div>
+            <ErrorBox error={set.error} />
+          </div>
+        ) : (
+          <div role="menu" className="agent-menu">
+            {v.installable[agent.name] && v.access.allowed && (
+              <button
+                className="menu-item"
+                role="menuitem"
+                disabled={check.isPending}
+                onClick={() =>
+                  check.mutate(undefined, {
+                    onSuccess: (latest) => {
+                      client.setQueryData(["agent-latest"], latest);
+                      void client.invalidateQueries({ queryKey: ["agents"] });
+                      const found = latest[agent.name];
+                      toast({
+                        title: found?.version ? `${t("Latest version")}: ${found.version}` : t("Could not read the latest version"),
+                        body: found?.error ?? undefined,
+                        icon: found?.version ? "check" : "x",
+                      });
+                      close();
+                    },
+                  })
+                }
+              >
+                <Icon name="refresh" size={14} />
+                {check.isPending ? t("Checking…") : t("Check for a newer version")}
+              </button>
+            )}
+            {agent.can_bypass &&
+              (agent.permissions === "bypass" ? (
+                <button className="menu-item" role="menuitem" disabled={set.isPending} onClick={() => set.mutate(null, { onSuccess: (r) => (close(), done(r)) })}>
+                  <Icon name="shield" size={14} />
+                  {t("Check permissions again")}
+                </button>
+              ) : (
+                <button className="menu-item" role="menuitem" onClick={() => setView("bypass")}>
+                  <Icon name="shield" size={14} />
+                  {t("Skip permission checks")}…
+                </button>
+              ))}
+            <button
+              className="menu-item"
+              role="menuitem"
+              onClick={() => {
+                close();
+                ask(`${t("For the")} ${agent.name} ${t("agent")}, `);
+              }}
+            >
+              <Icon name="sparkles" size={14} />
+              {t("Change by asking")}
+            </button>
+          </div>
+        )
+      }
+    </Popover>
+  );
+}
+
 function AgentsTab({ v, ask }: { v: SettingsView; ask: (p: string, send?: boolean) => void }) {
   const t = useT();
   const health = useAgentsData();
   const client = useQueryClient();
-  // An agent installed (or removed) since: its status comes from a fresh probe.
-  const installed = v.agents.map((a) => `${a.name}:${a.installed}`).join(",");
+  // An agent installed, updated, or removed since: its status comes from a fresh probe.
+  const installed = [...v.agents.map((a) => `${a.name}:${a.installed}`), ...Object.values(v.installs).map((s) => `${s.name}:${s.state}:${s.finished_at}`)].join(",");
   const seen = useRef(installed);
   useEffect(() => {
     if (seen.current === installed) return;
@@ -583,7 +709,7 @@ function AgentsTab({ v, ask }: { v: SettingsView; ask: (p: string, send?: boolea
     if (!h) return health.isLoading ? <span className="small muted">…</span> : <Status value="pending" label={t("Unknown")} />;
     if (!h.available) return <Status value="failed" label={t("Not installed")} />;
     if (h.authenticated === false && !a.provider) return <Status value="pending" label={t("Not signed in")} />;
-    return <Status value="executed" label={h.version ? `${t("Ready")} · ${h.version}` : t("Ready")} />;
+    return <Status value="executed" label={t("Ready")} />;
   };
   return (
     <Section title={t("Agents")} hint={t("The coding agent CLIs the service runs on this host")} aside={<ChangeButton onClick={() => ask(t("Change the agents: "))} />}>
@@ -591,93 +717,73 @@ function AgentsTab({ v, ask }: { v: SettingsView; ask: (p: string, send?: boolea
       <div className="list">
         {v.agents.map((a) => {
           const provider = v.providers.find((p) => p.id === a.provider);
-          const choices = byName.get(a.name)?.choices;
-          const modelName = (id: string) => choices?.models.find((m) => m.id === id)?.name || id;
+          const h = byName.get(a.name);
+          const choices = h?.choices;
           const budget = [a.budget.daily_usd != null ? `$${a.budget.daily_usd}/${t("day")}` : null, a.budget.daily_runs != null ? `${a.budget.daily_runs} ${t("runs/day")}` : null]
             .filter(Boolean)
             .join(" · ");
+          const ready = a.enabled && a.installed !== false;
+          const notes = [provider ? `${t("Through")} ${provider.name || provider.id}` : null, budget ? `${t("Budget")}: ${budget}` : null].filter(Boolean);
           return (
-            <Row
-              key={a.name}
-              icon="cpu"
-              title={
-                <span className="row" style={{ gap: 8 }}>
-                  <span className="mono" style={{ fontSize: 13.5 }}>{a.name}</span>
-                  {status(a)}
-                  <FromSettings on={a.from_settings} />
-                  {a.permissions === "bypass" ? (
-                    <span className="pill status-warn" title={t("Every task skips the CLI's permission checks on PRs from the repository's team")}>
-                      {t("skips permission checks")}
-                    </span>
-                  ) : a.permissions === "restricted" ? (
-                    <span className="pill">{t("restricted")}</span>
-                  ) : a.allow_bypass ? (
-                    <span className="pill status-warn">{t("bypass allowed")}</span>
-                  ) : null}
-                  {a.confined && (
-                    <span className="pill" title={t("Runs under a command prefix, not as the service's own user")}>
-                      {t("confined")}
-                    </span>
+            <div key={a.name} className="agent-row">
+              <div className="agent-row-head">
+                <Icon name="cpu" />
+                <span className="mono agent-name">{a.name}</span>
+                {status(a)}
+                {h?.available && <AgentVersion v={v} name={a.name} installed={h.version} />}
+                <FromSettings on={a.from_settings} />
+                {a.permissions === "bypass" ? (
+                  <span className="pill status-warn" title={t("Every task skips the CLI's permission checks on PRs from the repository's team")}>
+                    {t("skips permission checks")}
+                  </span>
+                ) : a.permissions === "restricted" ? (
+                  <span className="pill">{t("restricted")}</span>
+                ) : a.allow_bypass ? (
+                  <span className="pill status-warn">{t("bypass allowed")}</span>
+                ) : null}
+                {a.confined && (
+                  <span className="pill" title={t("Runs under a command prefix, not as the service's own user")}>
+                    {t("confined")}
+                  </span>
+                )}
+                <span className="spacer" />
+                <AgentMenu agent={a} v={v} ask={ask} />
+              </div>
+              {(ready || (v.installable[a.name] && a.installed === false) || notes.length > 0 || a.approve_commands.length > 0) && (
+                <div className="agent-row-body">
+                  {ready && <ModelControls agent={a} choices={choices} providers={v.providers} canChange={v.access.allowed} />}
+                  {ready && <ServiceSignIn name={a.name} options={a.sign_in_options} canSignIn={a.can_sign_in} canChange={v.access.allowed} />}
+                  {v.installable[a.name] && a.installed === false && (
+                    <InstallButton name={a.name} source={v.installable[a.name]} state={v.installs[a.name]} canInstall={v.access.allowed} />
                   )}
-                </span>
-              }
-              sub={
-                <>
-                  {t("Model")}:{" "}
-                  <strong>
-                    {a.model
-                      ? modelName(a.model)
-                      : (provider?.models[0]?.id ?? (choices?.default_model ? `${modelName(choices.default_model)} (${t("the CLI's default")})` : t("the CLI's default")))}
-                  </strong>
-                  {(a.effort || choices?.default_effort) && (
-                    <>
-                      {" "}
-                      · {t("Thinking")}: <strong>{a.effort ?? `${choices?.default_effort} (${t("default")})`}</strong>
-                    </>
-                  )}
-                  {!a.model && provider?.models[0] ? <span className="muted"> ({t("the provider's first")})</span> : null} · {t("Through")}:{" "}
-                  <strong>{provider ? provider.name || provider.id : t("its own sign-in")}</strong>
-                  {budget ? ` · ${t("Budget")}: ${budget}` : ""}
-                  {a.providers_supported.length === 0 && <> · {t("cannot use custom providers")}</>}
+                  {notes.length > 0 && <span className="small muted">{notes.join(" · ")}</span>}
                   {a.approve_commands.length > 0 && (
-                    <div className="small" style={{ marginTop: 4 }}>
+                    <span className="small muted">
                       {t("Runs without asking")}:{" "}
                       {a.approve_commands.map((c) => (
                         <code key={c} style={{ marginRight: 6, overflowWrap: "anywhere" }}>
                           {c}
                         </code>
                       ))}
-                    </div>
+                    </span>
                   )}
-                </>
-              }
-              actions={
-                <span className="row" style={{ gap: 4 }}>
-                  {a.enabled && a.installed !== false && (
-                    <ModelControls agent={a} choices={choices} providers={v.providers} canChange={v.access.allowed} />
-                  )}
-                  {a.can_bypass && <AgentModeSwitch agent={a} canChange={v.access.allowed} />}
-                  {a.enabled && a.installed !== false && <ServiceSignIn name={a.name} options={a.sign_in_options} canSignIn={a.can_sign_in} canChange={v.access.allowed} />}
-                  {v.installable[a.name] && (a.installed === false || v.installs[a.name]?.state === "running") && (
-                    <InstallButton name={a.name} source={v.installable[a.name]} state={v.installs[a.name]} canInstall={v.access.allowed} />
-                  )}
-                  <ChangeButton onClick={() => ask(`${t("For the")} ${a.name} ${t("agent")}, `)} />
-                </span>
-              }
-            />
+                </div>
+              )}
+            </div>
           );
         })}
       </div>
-      {v.agents.some((a) => a.enabled && !a.confined) && (
-        <p className="small muted" style={{ marginBottom: 0 }}>
-          {t("Agents without a command prefix run as this host's user, so they can read its files, including the tokens reviewers signed in with. On a shared host, confine them.")}{" "}
-          <button className="link-button" style={{ color: "var(--accent)" }} onClick={() => ask(t("Confine the agents so they cannot read the service's files: "))}>
-            {t("Ask how")}
-          </button>
-        </p>
-      )}
       <p className="small muted" style={{ marginBottom: 0 }}>
         {t("Each agent runs in its CLI's auto mode; what it would ask a person goes to")} <Link to="/questions">{t("Agent questions")}</Link>. {t("Runs and costs are on")} <Link to="/agents">{t("Agents")}</Link>.
+        {v.agents.some((a) => a.enabled && !a.confined) && (
+          <>
+            {" "}
+            {t("Agents without a command prefix run as this host's user, so they can read its files, including the tokens reviewers signed in with. On a shared host, confine them.")}{" "}
+            <button className="link-button" style={{ color: "var(--accent)" }} onClick={() => ask(t("Confine the agents so they cannot read the service's files: "))}>
+              {t("Ask how")}
+            </button>
+          </>
+        )}
       </p>
     </Section>
   );
@@ -894,7 +1000,7 @@ function RoutingTab({ v, ask }: { v: SettingsView; ask: (p: string, send?: boole
                 <td>
                   <div className="row" style={{ gap: 6 }}>
                     <span className="mono">{r.task}</span>
-                    <FromSettings on={r.from_settings} />
+                    <FromSettings on={r.from_settings} compact />
                   </div>
                   <div className="small muted">{t(TASKS[r.task] ?? "")}</div>
                 </td>
@@ -913,7 +1019,7 @@ function RoutingTab({ v, ask }: { v: SettingsView; ask: (p: string, send?: boole
                 <td className="num small hide-narrow">{Math.round(r.timeout_seconds / 60)} min</td>
                 <td className="small hide-narrow">{r.permissions}</td>
                 <td>
-                  <ChangeButton onClick={() => ask(`${t("For the")} ${r.task} ${t("task")}, `)} />
+                  <ChangeButton compact onClick={() => ask(`${t("For the")} ${r.task} ${t("task")}, `)} />
                 </td>
               </tr>
             ))}
@@ -1280,10 +1386,9 @@ function AgentSlotsRow({ v, custom }: { v: SettingsView; custom: boolean }) {
       }
       sub={
         <>
-          {t("Reviews, fixes, and diagnoses people ask for run in these slots; the service's own background work uses only slots nobody needs.")}{" "}
-          <strong>
+          <span title={t("Reviews, fixes, and diagnoses people ask for run in these slots; the service's own background work uses only slots nobody needs.")}>
             {t("Now")}: {use.people}/{size} {t("by people's requests")}, {use.service} {t("background")}
-          </strong>
+          </span>
         </>
       }
       value={

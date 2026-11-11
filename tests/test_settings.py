@@ -683,6 +683,30 @@ class _Installer:
             name=name, version="9.9.9", path="/x", source="npm @openai/codex"
         )
 
+    looked = 0
+
+    async def latest(self, name):
+        type(self).looked += 1
+        return "10.0.0"
+
+
+async def test_the_latest_version_is_read_once_in_a_while_and_again_on_request(
+    demo,
+) -> None:
+    h, app = demo
+    h.service.a.installer = _Installer()
+    _Installer.looked = 0
+    async with _client(app, "walt") as walt:
+        first = (await walt.get("/api/settings/agents/latest")).json()
+        assert first["codex"]["version"] == "10.0.0"
+        await walt.get("/api/settings/agents/latest")
+        assert _Installer.looked == 1, "read again only after a while"
+        refused = await walt.get("/api/settings/agents/latest?refresh=true")
+        assert refused.status_code == 403, "only the owner makes it ask now"
+    async with _client(app, "maria") as maria:
+        await maria.get("/api/settings/agents/latest?refresh=true")
+    assert _Installer.looked == 2
+
 
 async def test_only_maintainers_of_the_service_install_agents(demo) -> None:
     h, app = demo

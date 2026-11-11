@@ -265,6 +265,26 @@ a.list-row:hover { background: var(--surface-2); text-decoration: none; }
 .list { display: flex; flex-direction: column; }
 .list-row { display: flex; align-items: center; gap: 10px; padding: 10px 4px; border-bottom: 1px solid var(--border); min-width: 0; }
 .list-row:last-child { border-bottom: none; }
+/* Asking the settings agent: one line, its examples while the person is about to type. */
+.ask-card { padding: 8px 10px; background: linear-gradient(135deg, var(--accent-soft), var(--surface) 70%); }
+.ask-card .composer { align-items: center; }
+.ask-card-icon { flex: none; width: 28px; height: 28px; border-radius: 9px; display: grid; place-items: center; color: #fff; background: linear-gradient(135deg, var(--accent), var(--accent-2)); }
+.custom-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); vertical-align: middle; }
+.row-action { opacity: 0.55; }
+tr:hover .row-action, .row-action:focus-visible { opacity: 1; }
+.aliases-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 2px 16px; }
+.aliases-row { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 5px 4px; border-radius: 8px; }
+.aliases-row:hover { background: var(--surface-2); }
+.aliases-row .main { flex: 1; min-width: 0; }
+/* An agent on Settings: what it is on one line, what to set for it on the next. */
+.agent-row { display: grid; gap: 8px; padding: 12px 4px; border-bottom: 1px solid var(--border); min-width: 0; }
+.agent-row:last-child { border-bottom: none; }
+.agent-row-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.agent-row-head .agent-name { font-size: 13.5px; font-weight: 600; }
+.agent-row-body:empty { display: none; }
+.agent-menu { min-width: min(240px, calc(100vw - 24px)); padding: 4px; }
+.agent-row-body { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding-left: 26px; min-width: 0; }
+@media (max-width: 640px) { .agent-row-body { padding-left: 0; } }
 .list-row .main { flex: 1; min-width: 0; }
 .list-row .t { font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; color: var(--text); }
 .list-row .meta { display: block; color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

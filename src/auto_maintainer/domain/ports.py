@@ -590,6 +590,10 @@ class AgentInstaller(Protocol):
         self, name: str, on_line: Callable[[str], Awaitable[None]] | None = None
     ) -> InstalledAgent: ...
 
+    async def latest(self, name: str) -> str:
+        """The latest version of ``name`` its publisher offers."""
+        ...
+
 
 class PersonalAgents(Protocol):
     """Each person's own agent accounts on the host (``store/people.py``): the home
