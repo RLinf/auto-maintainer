@@ -203,6 +203,7 @@ def create_app(
             "ok": True,
             "login": service.settings.login,
             "dev_mode": service.settings.dev_mode,
+            "standby": service.settings.standby,
         }
 
     install_authority(app, ca_cert)

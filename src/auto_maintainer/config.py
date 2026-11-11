@@ -235,6 +235,11 @@ class HostConfig(_Cfg):
     """The only repository a development instance (``am serve --dev``) serves. Its
     actions follow its profile; every other repository is refused. Without it, dev
     mode serves every repository but holds all their actions at shadow."""
+    standby: bool = False
+    """This host stands by for another that serves the same repositories (a migration
+    target running beside the host it replaces): it records the forge writes its
+    repositories' profiles would make on their own, and makes only those a person asks
+    for or approves on its dashboard. Test machines' sessions run as on any host."""
     cookie_secure: bool = False
     """Send sign-in cookies only over HTTPS, as behind a TLS reverse proxy; always so
     when the service serves HTTPS itself."""
@@ -441,6 +446,7 @@ memory:
 code_repo: your-org/auto-maintainer     # your fork: deploys come from it, self-improvements go to it
 owner: your-login                       # an admin of code_repo; hands ownership on in Settings
 # sandbox_repo: your-org/sandbox        # am serve --dev then serves only this repository
+# standby: true                         # another host serves the same repositories: act only on approval
 labs:
   gpu-host: {transport: ssh, host: gpu-host}
 host_overrides:

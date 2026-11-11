@@ -884,6 +884,7 @@ def build_router() -> APIRouter:
             "operator": user.login in service.settings.operators,
             "repos": await visible_repos(service, user),
             "dev_mode": service.settings.dev_mode,
+            "standby": service.settings.standby,
             "paused": bool(await service.store.get_state("paused")),
             "can_post_as_me": await service.can_post_as(user.login),
             "pending_questions": len(

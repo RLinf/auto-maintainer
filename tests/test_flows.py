@@ -255,6 +255,75 @@ async def test_flaky_ci_is_rerun_once_and_budget_holds(harness: Harness) -> None
     )
 
 
+async def test_a_standby_host_reruns_only_what_a_person_approves(
+    tmp_path: Path,
+) -> None:
+    from auto_maintainer.domain.actions import ActionKind, RerunPayload, make_action
+
+    h = await Harness.create(
+        tmp_path,
+        layer={"extends": ["github-actions"], "review": {"trigger": "events"}},
+        standby=True,
+    )
+    try:
+        await _auto(h, ci_rerun_failed="auto")
+        check = CheckRun(
+            id=7,
+            name="unit",
+            workflow="CI",
+            status=CheckStatus.COMPLETED,
+            conclusion=CheckConclusion.FAILURE,
+            run_id=99,
+            run_attempt=1,
+        )
+        running = check.model_copy(
+            update={"status": CheckStatus.IN_PROGRESS, "conclusion": None}
+        )
+        h.forge.put_pr(_pr(checks=[running]))
+        h.runner.on("triage", lambda t: {"summary": "s", "labels": []})
+        h.runner.on(
+            "evaluate",
+            lambda t: {
+                "scores": {"impact": 5, "urgency": 5, "strategic": 5, "readiness": 5},
+                "summary": "s",
+                "rationale": "r",
+            },
+        )
+        h.runner.on("review", lambda t: REVIEW)
+        h.runner.on("verify", lambda t: {"verdicts": []})
+        await h.poll()
+        h.forge.job_logs[7] = "step 3\nnpm ERR! network ECONNRESET while fetching\n"
+        pr = await h.forge.get_pr("acme/widget", 42)
+        h.forge.put_pr(pr.model_copy(update={"checks": [check]}))
+        await h.poll()
+        assert h.forge.writes_of("rerun_failed_jobs") == [], "the other host reruns it"
+        [shadowed] = await h.store.list_actions(
+            repo="acme/widget", kinds=[ActionKind.CI_RERUN_FAILED]
+        )
+        assert shadowed.status == ActionStatus.SHADOWED
+        assert shadowed.decision.rule == "standby records ci.rerun_failed"
+
+        pressed = make_action(
+            ActionKind.CI_RERUN_FAILED,
+            "acme/widget",
+            RerunPayload(run_id=99, workflow="CI", attempt=1),
+            number=42,
+            head_sha=pr.head_sha,
+            discriminator="run-ci:99:1",
+            draft_for="maria",
+        )
+        record = await h.service.pipeline.submit(pressed)
+        assert record.status == ActionStatus.PROPOSED
+        proposal = await h.store.proposal_for_action(pressed.id)
+        await h.service.pipeline.approve(proposal.id, "maria")
+        await h.settle()
+        assert h.forge.writes_of("rerun_failed_jobs") == [
+            {"repo": "acme/widget", "run_id": 99}
+        ]
+    finally:
+        await h.close()
+
+
 async def _failing_ci(harness: Harness, log: str) -> None:
     """Bring PR 42 through its first poll, then fail its ``unit`` job with ``log``."""
     check = CheckRun(

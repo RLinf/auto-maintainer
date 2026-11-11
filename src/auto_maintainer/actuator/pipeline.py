@@ -72,6 +72,7 @@ class ActionPipeline:
         write_caps: tuple[int, int] = (120, 40),
         sandbox_repo: str | None = None,
         service_login: str = "",
+        standby: bool = False,
     ) -> None:
         self.service_login = service_login
         """The service's own account, which posts what nobody posts as themselves:
@@ -85,6 +86,10 @@ class ActionPipeline:
         self.dev_mode = dev_mode
         self.write_caps = write_caps
         self.sandbox_repo = sandbox_repo
+        self.standby = standby
+        """This host stands by for another serving the same repositories (``local.yaml``
+        ``standby``): it records the forge writes it would make on its own and makes
+        only those a person asked for or approved."""
 
     def capped(self, repo: str) -> bool:
         """Whether dev mode holds ``repo``'s actions at shadow. A development instance
@@ -156,6 +161,7 @@ class ActionPipeline:
             dev_mode=self.capped(action.repo),
             outside_sandbox=self.outside_sandbox(action.repo),
             paused=await self.paused(action.repo),
+            standby=self.standby,
             approved_by=approved_by,
             author_is_team=action.hints.author_is_team,
             recommendation=action.hints.recommendation,
@@ -189,9 +195,11 @@ class ActionPipeline:
         else:
             # A draft for someone is theirs to post, as themselves or as the service:
             # what it counts against is known when they approve it (``_redecide``).
-            decision = decide(
-                action, profile, await self._facts(action, None, action.draft_for)
-            )
+            facts = await self._facts(action, None, action.draft_for)
+            if force_propose:
+                # Someone asked for it; a standby host proposes it to them too.
+                facts.standby = False
+            decision = decide(action, profile, facts)
         if (
             force_propose
             and decision.kind == DecisionKind.EXECUTE

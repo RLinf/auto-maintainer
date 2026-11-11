@@ -143,6 +143,7 @@ class Harness:
         approve: bool = True,
         dev_mode: bool = False,
         code_repo: str | None = None,
+        standby: bool = False,
     ) -> Harness:
         forge = FakeForge()
         forge.add_repo(
@@ -197,6 +198,7 @@ class Harness:
             pack_dirs=[data_dir("packs")],
             schedules=schedules,
             dev_mode=dev_mode,
+            standby=standby,
             code_repo=code_repo,
             owner=maintainer if code_repo else None,
             confirm_deploy_after=0.0,

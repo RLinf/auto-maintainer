@@ -313,6 +313,7 @@ async def build_service(cfg: HostConfig, dev: bool = False) -> Service:
         operators=set(cfg.operators),
         base_url=cfg.base_url,
         sandbox_repo=cfg.sandbox_repo,
+        standby=cfg.standby,
         code_branch=cfg.self_update.branch,
         owner=cfg.owner,
     )

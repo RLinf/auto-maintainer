@@ -1521,6 +1521,8 @@ function SystemTab({ v, ask }: { v: SettingsView; ask: (p: string, send?: boolea
           <dd>
             {h.dev_mode ? (
               <Status value="pending" label={h.sandbox_repo ? `${t("dev, acts only on")} ${h.sandbox_repo}` : t("dev, everything in shadow")} />
+            ) : h.standby ? (
+              <Status value="pending" label={t("standby, writes only what a person approves")} />
             ) : (
               <Status value="executed" label={t("production")} />
             )}{" "}

@@ -206,6 +206,7 @@ async def settings_view(service: Service, user: User) -> dict[str, Any]:
         },
         "host": {
             "dev_mode": service.settings.dev_mode,
+            "standby": service.settings.standby,
             "paused": await service.pipeline.paused(None),
             "code_repo": service.settings.code_repo,
             "memory_repo": service.a.memory.remote_repo(),

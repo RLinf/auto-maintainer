@@ -155,6 +155,32 @@ def test_pause_and_dev_mode() -> None:
     )
 
 
+def test_a_standby_host_records_forge_writes_nobody_approved() -> None:
+    profile = _profile(
+        **{
+            "label.apply": {"level": "auto"},
+            "comment.upsert": {"level": "propose"},
+            "lab.review": {"level": "auto"},
+            "notify": {"level": "auto"},
+        }
+    )
+    standby = PolicyFacts(standby=True)
+    label = decide(_action(), profile, standby)
+    assert label.kind == DecisionKind.SHADOW
+    assert label.rule == "standby records label.apply"
+    approved = PolicyFacts(standby=True, approved_by="maria")
+    assert decide(_action(), profile, approved).kind == DecisionKind.EXECUTE
+    comment = _action(ActionKind.COMMENT_UPSERT)
+    assert decide(comment, profile, standby).kind == DecisionKind.PROPOSE
+    assert decide(comment, profile, approved).kind == DecisionKind.EXECUTE
+    lab = _action(ActionKind.LAB_REVIEW)
+    assert decide(lab, profile, standby).kind == DecisionKind.EXECUTE, (
+        "a test machine's session writes nothing to the repository"
+    )
+    internal = Action(kind=ActionKind.NOTIFY, repo=REPO)
+    assert decide(internal, profile, standby).kind == DecisionKind.EXECUTE
+
+
 def test_leak_guard_rejects_internal_content() -> None:
     profile = RepoProfile.model_validate(
         {"repo": REPO, "confidentiality": {"internal_entities": ["Contoso Robotics"]}}

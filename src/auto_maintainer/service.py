@@ -215,6 +215,9 @@ class ServiceSettings:
     """Seconds of running before a fresh deploy counts as healthy (no rollback)."""
     sandbox_repo: str | None = None
     """In dev mode, the only repository the service serves and may act on."""
+    standby: bool = False
+    """Another host serves the same repositories: forge writes nobody approved are
+    recorded, not made (``local.yaml``)."""
     lab_socket: Path | None = None
     """Where reproductions' agents reach their sessions on test machines."""
 
@@ -353,6 +356,7 @@ class Service:
             write_caps=settings.write_caps,
             sandbox_repo=settings.sandbox_repo,
             service_login=settings.login,
+            standby=settings.standby,
         )
         self.info = ServiceInfo(
             login=settings.login,

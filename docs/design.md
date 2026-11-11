@@ -844,7 +844,7 @@ A question from a job a person asked for (a requested review or a fix) carries `
 
 ### 5.8 Policy
 
-The policy engine decides, for each action, one of `execute`, `propose`, `shadow` (record only), or `deny` (with a reason). Inputs: the action, the autonomy level for its kind in its repository, conditions on the target (author association, team membership, labels, paths), rate limits, the pause state, and freeze windows.
+The policy engine decides, for each action, one of `execute`, `propose`, `shadow` (record only), or `deny` (with a reason). Inputs: the action, the autonomy level for its kind in its repository, conditions on the target (author association, team membership, labels, paths), rate limits, the pause state, freeze windows, and whether the host stands by for another (8.1, standby hosts).
 
 Policy is a pure function of its inputs: it takes the `PolicyConfig` from the repository's approved profile, plus rate counters read from the store, and it performs no I/O itself. An approved proposal is decided again at execution time, so a pause, a hard limit, or a freeze still applies to it.
 
@@ -1265,6 +1265,8 @@ Every file has a schema version; the service refuses to load an unknown major ve
 
 
 **Development instances.** `am serve --dev` (or `AM_ENV=dev`) talks to the real forge with two guards. With `sandbox_repo` set in `local.yaml`, the instance serves only that repository: `am repo add` and the dashboard refuse others, the poller and scheduler skip them, and the policy denies their actions, while the sandbox repository's actions follow its profile, so a test repository can be exercised for real. Without `sandbox_repo`, the instance serves every repository but holds every action that touches one at shadow.
+
+**Standby hosts.** A host that runs beside another serving the same repositories from the same memory repo (a migration target before the cut-over) sets `standby: true` in `local.yaml`. Its policy then records at shadow every forge write its profiles would make on their own (`auto`, nobody approved it; `PolicyFacts.standby`, rule `standby records <kind>`), so only the other host reruns CI, labels, and comments on its own, and two hosts never race to edit the same comment. What a person asks for or approves on the standby host's dashboard or in its conversations still runs (a button's draft, a chat request, an approved proposal), and test machines' sessions run as on any host, since they write nothing to the repository. The dashboard shows a strip saying so, and Settings → System shows the mode. Dev mode, when also on, wins.
 ### 8.2 Profile schema outline
 
 ```yaml

@@ -74,6 +74,13 @@ class ActionKind(StrEnum):
         return self not in _INTERNAL_KINDS
 
     @property
+    def writes_forge(self) -> bool:
+        """Whether the action writes to the repository on its forge: every kind that
+        touches a repository except a test machine's session, which writes nothing
+        there."""
+        return self.touches_repository and self not in _LAB_KINDS
+
+    @property
     def visibility(self) -> Visibility:
         return Visibility.INTERNAL if self in _INTERNAL_KINDS else Visibility.PUBLIC
 
@@ -87,6 +94,8 @@ _INTERNAL_KINDS = {
     ActionKind.SERVICE_DEPLOY,
     ActionKind.NOTIFY,
 }
+
+_LAB_KINDS = {ActionKind.LAB_REPRODUCE, ActionKind.LAB_REVIEW, ActionKind.LAB_RUN}
 
 ON_BY_DEFAULT = frozenset({ActionKind.LAB_REVIEW})
 """The one kind that runs a repository's code and is on by default (``auto``): a

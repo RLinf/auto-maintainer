@@ -33,6 +33,9 @@ class PolicyFacts(BaseModel):
     """A development instance with a sandbox repository acts on nothing else."""
     paused: bool = False
     """The service or this repository is paused."""
+    standby: bool = False
+    """This host stands by for another that serves the same repositories: what would
+    write to a forge on its own (``auto``, nobody approved it) is recorded at shadow."""
     approved_by: str | None = None
     """Set when deciding again for a proposal a maintainer approved."""
     author_is_team: bool | None = None
@@ -41,7 +44,6 @@ class PolicyFacts(BaseModel):
     changed_paths: list[str] = Field(default_factory=list)
     executed_on_sha: int = 0
     """Executions of the same kind at this head SHA by the same posting account."""
-    """Executed actions of the same kind on the same PR and head SHA."""
     public_writes_last_hour: int = 0
     repo_public_writes_last_hour: int = 0
     max_public_writes_per_hour: int = 120
@@ -118,6 +120,14 @@ def decide(action: Action, profile: RepoProfile, facts: PolicyFacts) -> Decision
     if facts.dev_mode and public:
         level = level.cap(Autonomy.SHADOW)
         rule_name = f"dev_mode caps {kind} at shadow"
+    elif (
+        facts.standby
+        and kind.writes_forge
+        and level == Autonomy.AUTO
+        and not facts.approved_by
+    ):
+        level = Autonomy.SHADOW
+        rule_name = f"standby records {kind}"
 
     if level == Autonomy.OFF:
         return Decision(

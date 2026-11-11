@@ -83,6 +83,8 @@ export interface Me {
   operator: boolean;
   repos: string[];
   dev_mode: boolean;
+  /** Another host serves the same repositories: this one writes to a forge only what a person approves. */
+  standby?: boolean;
   paused: boolean;
   pending_questions: number;
   can_post_as_me?: boolean;
@@ -1150,6 +1152,7 @@ export interface SettingsView {
   };
   host: {
     dev_mode: boolean;
+    standby?: boolean;
     paused: boolean;
     code_repo: string | null;
     memory_repo: string | null;

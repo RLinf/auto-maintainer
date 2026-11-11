@@ -315,6 +315,12 @@ function Shell({ me }: { me: Me }) {
             <span>{t("Dev mode: repository actions stay in shadow, except on the sandbox repository.")}</span>
           </div>
         )}
+        {!me.dev_mode && me.standby && (
+          <div className="strip dev" role="status">
+            <Icon name="shield" />
+            <span>{t("Standby: another host serves these repositories. Here, nothing is written to them unless a person approves it.")}</span>
+          </div>
+        )}
         {counts.questions > 0 && location.pathname !== "/questions" && (
           <div className="strip question" role="status">
             <Icon name="question" />

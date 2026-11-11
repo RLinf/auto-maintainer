@@ -616,6 +616,8 @@ def serve(
             if defaults.sandbox_repo
             else "dev mode: every repository action is held at shadow"
         )
+    elif defaults.standby:
+        typer.echo("standby: forge writes run only when a person approves them here")
     bind, listen = host or defaults.host, port or defaults.port
     https = serves_https(listen)
     _check_port(bind, listen)
