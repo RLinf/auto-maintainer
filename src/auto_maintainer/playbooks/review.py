@@ -69,6 +69,7 @@ from .prompts import (
     skill_owns_format,
     template_block,
     untrusted,
+    without_generated,
     writing_block,
 )
 from .requests import (
@@ -181,8 +182,10 @@ class ReviewPlaybook(Playbook):
         )
         answer = None
         try:
-            diff = await ctx.workspace.diff(
-                workdir, f"origin/{info.default_branch}", pr.head_sha
+            diff = without_generated(
+                await ctx.workspace.diff(
+                    workdir, f"origin/{info.default_branch}", pr.head_sha
+                )
             )
             lessons = await ctx.knowledge.review_lessons(pr.repo, profile)
             own_format = skill_owns_format(profile, workdir)

@@ -85,6 +85,23 @@ from .records import open_door, reading_line
 
 log = logging.getLogger(__name__)
 
+QUEUE_PAGES = frozenset({"home", "queue", "repositories"})
+SETTINGS_PAGES = frozenset({"settings", "agents", "service"})
+QUEUE_WORDS = re.compile(
+    r"queue|priorit|backlog|\bP[0-3]\b|\btier|next|first|which (pr|one)|"
+    r"队列|优先|下一个|先审|哪个|排序",
+    re.IGNORECASE,
+)
+SETTINGS_WORDS = re.compile(
+    r"setting|agent|model|provider|rout|limit|token|slot|machine|\blab|key|effort|"
+    r"deploy|owner|sandbox|sign.?in|config|配置|设置|模型|智能体|限额|测试机|密钥|部署|"
+    r"登录|账号",
+    re.IGNORECASE,
+)
+"""A conversation's prompt carries the review queue and the service settings (about
+18 KB together) only from the pages that show them, or when the person's recent
+messages are about them; otherwise it says where to read them (``am-read``)."""
+
 
 def check_agent(service: Any, agent: str) -> None:
     """Refuse an unknown, disabled, or uninstalled agent choice."""
@@ -479,16 +496,29 @@ def build_router() -> APIRouter:
             ChatMessage(thread_id=thread_id, role="user", text=text)
         )
         history = await service.store.list_messages(thread_id)
-        queue = []
-        for name in repos[:10]:
-            for ev in (await service.store.list_evaluations(name))[:15]:
-                queue.append(
-                    f"{name}#{ev.number} [{ev.tier} {ev.total}] {ev.title} — {ev.summary}"
-                )
+        page = body.context.page if body.context else ""
+        recent = " ".join(m.text for m in history[-3:] if m.role == "user")
+        queue_block = settings_block = ""
+        left_out = []
+        if page in QUEUE_PAGES or QUEUE_WORDS.search(recent):
+            queue = []
+            for name in repos[:10]:
+                for ev in (await service.store.list_evaluations(name))[:15]:
+                    queue.append(
+                        f"{name}#{ev.number} [{ev.tier} {ev.total}] {ev.title} — {ev.summary}"
+                    )
+            queue_block = "Review queue (internal):\n" + ("\n".join(queue) or "(empty)")
+        else:
+            left_out.append("the review queue (`am-read /api/prs`)")
+        if page in SETTINGS_PAGES or SETTINGS_WORDS.search(recent):
+            settings_block = await _settings_block(service, user)
+        else:
+            left_out.append("the service settings (`am-read /api/settings`)")
         memory_index = await service.knowledge.memory_index(thread.repo)
         workdir, where = await _workdir(service, thread)
         prompt = "\n\n".join(
-            [
+            part
+            for part in [
                 f"You are the maintainers' assistant for {', '.join(repos) or 'no repositories yet'}. You are talking to {user.login}. "
                 "You cannot act directly: put any change you suggest in `proposals`. "
                 "Each proposal appears as a card under your answer, and they differ in what happens next: actions on a PR "
@@ -511,9 +541,14 @@ def build_router() -> APIRouter:
                 f"Your working directory is {where}.",
                 reading_line(user.login),
                 f"Memory index:\n{memory_index or '(empty)'}",
-                "Review queue (internal):\n" + ("\n".join(queue) or "(empty)"),
+                queue_block,
                 await _page_block(service, user, body.context, repos),
-                await _settings_block(service, user),
+                settings_block,
+                "Not in this message, since the question does not seem to need them: "
+                + " and ".join(left_out)
+                + "; read them when it does."
+                if left_out
+                else "",
                 untrusted(
                     "chat.history",
                     "\n".join(f"{m.role}: {m.text}" for m in history[-20:]),
@@ -521,6 +556,7 @@ def build_router() -> APIRouter:
                 ),
                 schema_hint(ChatAnswer.model_json_schema()),
             ]
+            if part
         )
         route, resume = await turn_route(service, user.login, thread, base_route)
         run = new_id("run")

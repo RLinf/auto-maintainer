@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -562,13 +563,37 @@ class QuickQuality(QualityVerdict):
     accurate one and takes its place once there is one. Internal."""
 
     sha: str = ""
-    """The head it looked at."""
+    """The head it covers."""
     at: datetime
+    lines: int | None = None
+    """The PR's changed lines when it was scored, for ``barely_moved``."""
+    paths: str | None = None
+    """A digest of the PR's changed files when it was scored."""
+    scored_sha: str | None = None
+    """The head an agent looked at, when the score was carried over to ``sha`` from
+    it (``barely_moved``)."""
 
     @computed_field  # type: ignore[prop-decorator]
     @property
     def band(self) -> QualityBand:
         return quality_band(self.score)
+
+
+def paths_digest(paths: Iterable[str]) -> str:
+    """A short digest of a set of file paths."""
+    return hashlib.sha256("\n".join(sorted(set(paths))).encode()).hexdigest()[:16]
+
+
+def barely_moved(quick: QuickQuality, lines: int, paths: Iterable[str]) -> bool:
+    """Whether a PR whose head moved past ``quick`` still changes the same files by
+    about as many lines (within ``max(10, 5%)``), so its quick score still stands: a
+    quick score orders the review queue, and an agent call for each small push cost
+    about 60,000 tokens."""
+    if quick.lines is None or quick.paths is None:
+        return False
+    if quick.paths != paths_digest(paths):
+        return False
+    return abs(lines - quick.lines) <= max(10, quick.lines // 20)
 
 
 def review_chain(records: Iterable[ActionRecord]) -> list[ActionRecord]:

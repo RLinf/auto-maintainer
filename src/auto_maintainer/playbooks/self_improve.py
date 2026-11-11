@@ -160,7 +160,13 @@ class SelfImprove(Playbook):
                 return PlaybookResult(result={"done": False})
             checks = await _run_checks(ctx, path)
             repairs = 0
+            tried: set[str] = set()
             while _failed(checks) and repairs < MAX_REPAIRS:
+                if repairs and _failures(checks) == tried:
+                    # The last turn changed nothing the checks see: another one,
+                    # which reads the whole session again, would not either.
+                    break
+                tried = _failures(checks)
                 repairs += 1
                 fixed = await ctx.ask(
                     AgentTask(
@@ -289,7 +295,10 @@ def _prompt(request: str, by: Any, context: str) -> str:
         ".`, and the tests of what you changed (`uv run pytest -q tests/<file>`), and fix "
         "what fails. After you finish, the service runs the whole suite, Ruff, and the "
         "format check, and sends you anything that fails. If the request cannot or "
-        "should not be done, change nothing and say why. " + CLOSING
+        "should not be done, change nothing and say why. If doing it well needs more "
+        "than one PR's worth of change (a module redesigned, or more than about 15 "
+        "files), change nothing either: say so, and propose how to split it into "
+        "requests that each make one PR. " + CLOSING
     )
     return "\n\n".join(parts)
 

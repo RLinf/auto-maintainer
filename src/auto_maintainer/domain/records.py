@@ -270,6 +270,9 @@ class CiObservation(BaseModel):
     rerun: bool = False
     root_cause: RootCause | None = None
     """For a failure that is not a flake: what a look at the code found."""
+    fingerprint: str | None = None
+    """The failure's identity across runs (``playbooks.ci_doctor.fingerprint``), so a
+    failure seen before is not diagnosed again."""
     id: str = Field(default_factory=lambda: new_id("ci"))
     created_at: datetime = Field(default_factory=utc_now)
 

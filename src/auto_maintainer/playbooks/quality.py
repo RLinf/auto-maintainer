@@ -47,6 +47,8 @@ from ..domain.review import (
     QualityVerdict,
     QuickQuality,
     ReviewQuality,
+    barely_moved,
+    paths_digest,
     review_chain,
     review_quality,
 )
@@ -492,6 +494,8 @@ async def score_quickly(
         checks=verdict.checks,
         sha=pr.head_sha,
         at=ctx.clock.now(),
+        lines=pr.additions + pr.deletions,
+        paths=paths_digest(pr.paths),
     )
     await ctx.store.set_state(
         QUICK_STATE.format(repo=pr.repo, number=pr.number), quick.model_dump_json()
@@ -680,6 +684,25 @@ class QuickQualityPlaybook(Playbook):
         quick = await quick_quality(ctx.store, pr.repo, pr.number)
         if not by and quick is not None and quick.sha == pr.head_sha:
             return PlaybookResult(result={"skipped": "scored at this head already"})
+        if (
+            not by
+            and quick is not None
+            and barely_moved(quick, pr.additions + pr.deletions, pr.paths)
+        ):
+            carried = quick.model_copy(
+                update={
+                    "sha": pr.head_sha,
+                    "scored_sha": quick.scored_sha or quick.sha,
+                    "lines": pr.additions + pr.deletions,
+                }
+            )
+            await ctx.store.set_state(
+                QUICK_STATE.format(repo=pr.repo, number=pr.number),
+                carried.model_dump_json(),
+            )
+            return PlaybookResult(
+                result={"carried": carried.scored_sha, **_quick_result(carried).result}
+            )
         return _quick_result(await score_quickly(ctx, pr, profile))
 
 

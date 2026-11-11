@@ -54,6 +54,44 @@ def told_block(reviewer: str, text: str) -> str:
     return TOLD.format(reviewer=reviewer, text=text.strip()[:8_000])
 
 
+GENERATED = (
+    ".lock",
+    "-lock.json",
+    "lock.yaml",
+    "go.sum",
+    ".min.js",
+    ".min.css",
+    ".map",
+    ".svg",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".pdf",
+)
+"""Files a reviewer does not read line by line: lock files, minified files, source
+maps, and images."""
+
+
+def without_generated(diff: str) -> str:
+    """``diff`` without the sections of ``GENERATED`` files, named in a note at its
+    end instead; the PR's file list (``pr_block``) keeps them, and the checkout has
+    them for an agent that needs one."""
+    blocks = diff.split("diff --git ")
+    kept = [blocks[0]] if blocks[0].strip() else []
+    left: list[str] = []
+    for block in blocks[1:]:
+        name = block.split("\n", 1)[0].split(" b/")[-1].strip()
+        if name.lower().endswith(GENERATED):
+            left.append(name)
+        else:
+            kept.append("diff --git " + block)
+    out = "".join(kept)
+    if left:
+        out += "\n[left out, generated or binary: " + ", ".join(left) + "]\n"
+    return out
+
+
 def pr_block(pr: PrSnapshot, diff: str | None = None, diff_limit: int = 120_000) -> str:
     files = "\n".join(
         f"{f.change_type.lower():9} {f.path} (+{f.additions}/-{f.deletions})"

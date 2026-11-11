@@ -483,7 +483,9 @@ class AgentRouter:
         caps = runtime.capabilities()
         if schema is not None and not caps.schema_flag:
             task = task.model_copy(
-                update={"prompt": task.prompt + schema_instructions(schema)}
+                update={
+                    "prompt": task.prompt + schema_instructions(schema, task.prompt)
+                }
             )
         task = task.model_copy(update={"output_schema": schema})
         key = await self._breaker_key(runtime, task)

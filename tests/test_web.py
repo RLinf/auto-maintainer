@@ -477,6 +477,43 @@ async def test_the_agent_knows_the_page_it_is_asked_from(demo) -> None:
     assert "Internal quality" in seen[0] and "88/100" in seen[0]
 
 
+async def test_the_queue_and_settings_go_only_into_prompts_that_need_them(
+    demo,
+) -> None:
+    """About 18 KB a message: a question on a PR page gets neither, and is told where
+    to read them; the Settings page, or a question about them, gets them."""
+    h, app = demo
+    seen: list[str] = []
+
+    def answer(task):
+        seen.append(task.prompt)
+        return {"reply": "ok", "proposals": []}
+
+    h.runner.on("chat", answer)
+    on_pr = {"page": "pr", "repo": "acme/widget", "number": 42}
+    async with _client(app, "maria") as maria:
+        for text, context in (
+            ("What blocks this PR?", on_pr),
+            ("Why so slow?", {"page": "settings"}),
+            ("Which PR should I review next?", on_pr),
+        ):
+            thread = (
+                await maria.post(
+                    "/api/chat/threads", json={"text": text, "context": context}
+                )
+            ).json()
+            sent = await maria.post(
+                f"/api/chat/threads/{thread['id']}/messages",
+                json={"text": text, "context": context},
+            )
+            assert sent.status_code == 200, sent.text
+    plain, settings, queue = seen
+    assert "Review queue (internal)" not in plain and "Service settings" not in plain
+    assert "`am-read /api/settings`" in plain and "`am-read /api/prs`" in plain
+    assert "Service settings" in settings and "Review queue (internal)" not in settings
+    assert "Review queue (internal)" in queue
+
+
 async def test_the_agent_reads_the_dashboard_as_the_person_it_talks_with(demo) -> None:
     """A conversation's agent reads what the person may see on the dashboard, through
     the records door, beyond the page they have open: a PR's record with its review

@@ -7,7 +7,7 @@ verify:       {primary: codex, fallback: [claude-code, antigravity, opencode, ge
 followup:     {primary: claude-code, fallback: [codex, antigravity, opencode, gemini], timeout_seconds: 2400}
 evaluate:     {primary: antigravity, fallback: [claude-code, codex, opencode, gemini], effort: low, timeout_seconds: 600}
 calibrate:    {primary: antigravity, fallback: [claude-code, codex, opencode, gemini], timeout_seconds: 900}
-ci_diagnose:  {primary: codex, fallback: [claude-code, antigravity, opencode, gemini], timeout_seconds: 1200}
+ci_diagnose:  {primary: codex, fallback: [claude-code, antigravity, opencode, gemini], effort: low, timeout_seconds: 1200}
 ci_root_cause: {primary: claude-code, fallback: [codex, antigravity, opencode, gemini], timeout_seconds: 1800}
 hygiene:      {primary: claude-code, fallback: [codex, antigravity, opencode, gemini], effort: low, timeout_seconds: 600}
 governance:   {primary: claude-code, fallback: [codex, antigravity, opencode, gemini], timeout_seconds: 1800}

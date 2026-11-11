@@ -56,6 +56,7 @@ from .prompts import (
     review_skill_block,
     schema_hint,
     untrusted,
+    without_generated,
     writing_block,
 )
 from .requests import FOLLOWUP_STATES, review_key, review_request, starts_review
@@ -143,13 +144,22 @@ class Followup(Playbook):
         answer = None
         try:
             testing = machine.testing(ctx.requested_by) if machine.token else None
-            incremental = (
+            incremental = without_generated(
                 await ctx.workspace.diff(workdir, previous_sha, pr.head_sha)
                 if previous_sha
                 else ""
             )
-            full = await ctx.workspace.diff(
-                workdir, f"origin/{info.default_branch}", pr.head_sha
+            # With the changes since the last review at hand, the whole diff is the
+            # agent's to read in the checkout when it needs more (its file list
+            # stays in the PR block): it was 60,000 characters a follow-up.
+            full = (
+                None
+                if incremental.strip()
+                else without_generated(
+                    await ctx.workspace.diff(
+                        workdir, f"origin/{info.default_branch}", pr.head_sha
+                    )
+                )
             )
             spot = cls.state == ReviewState.APPROVED_NEW_COMMITS
             prompt = "\n\n".join(
@@ -182,7 +192,13 @@ class Followup(Playbook):
                     untrusted(
                         "diff.since_review", incremental or "(not available)", 80_000
                     ),
-                    pr_block(pr, full, 60_000),
+                    pr_block(pr, full, 60_000)
+                    + (
+                        "\n\nThe whole PR's diff against its base: `git diff "
+                        f"origin/{info.default_branch}...HEAD` in the checkout."
+                        if full is None
+                        else ""
+                    ),
                     "`recommendation` must be one of: "
                     + ", ".join(
                         repr(v) for v in profile.review.recommendations.values()

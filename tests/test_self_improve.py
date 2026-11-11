@@ -277,7 +277,9 @@ async def test_checks_that_keep_failing_open_no_pr(h: Harness, tmp_path: Path) -
     assert h.forge.writes_of("create_service_pr") == []
     assert h.service.a.publisher.published == []  # type: ignore[union-attr]
     edits = [t for t in h.runner.tasks if t.kind == "self_improve"]
-    assert len(edits) == 1 + MAX_REPAIRS, "no summary task for a change that fails"
+    assert len(edits) == 2, (
+        "one repair, then none: it left the same failure, and no summary task"
+    )
     [told] = [m["text"] for m in messages if m["role"] == "assistant"]
     assert "I did not open a PR" in told and "lint" in told and "E501" in told
     assert "ping.py" in told

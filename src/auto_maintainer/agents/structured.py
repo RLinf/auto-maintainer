@@ -84,8 +84,17 @@ def validate(
         return None, f"the JSON object does not match the schema: {problems}"
 
 
-def schema_instructions(schema: dict[str, Any]) -> str:
-    """A prompt suffix asking for one fenced JSON object that matches ``schema``."""
+def schema_instructions(schema: dict[str, Any], prompt: str = "") -> str:
+    """A prompt suffix asking for one fenced JSON object that matches ``schema``;
+    without the schema itself when ``prompt`` holds it already (``schema_hint``), so
+    the agent does not read it twice."""
+    if prompt and json.dumps(schema, ensure_ascii=False) in prompt:
+        return (
+            "\n\n## Output format\n\n"
+            "End your answer with exactly one JSON object in a fenced ```json block. "
+            "It must validate against the JSON schema given above; put nothing after "
+            "the block.\n"
+        )
     return (
         "\n\n## Output format\n\n"
         "End your answer with exactly one JSON object in a fenced ```json block. "

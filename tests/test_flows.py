@@ -415,6 +415,141 @@ async def test_without_a_root_cause_the_first_look_still_explains(
     assert "**unit**: test_empty_batch fails on the new guard" in comment["body"]
 
 
+def _ci_kinds(harness: Harness) -> list[str]:
+    return [
+        str(t.kind)
+        for t in harness.runner.tasks
+        if str(t.kind) in ("ci_diagnose", "ci_root_cause")
+    ]
+
+
+async def test_the_same_failure_at_the_same_head_is_not_diagnosed_again(
+    harness: Harness,
+) -> None:
+    await _auto(harness, comment_upsert="auto")
+    harness.runner.on(
+        "ci_diagnose",
+        lambda t: {
+            "category": "pr_caused",
+            "confidence": 0.6,
+            "explanation": "it fails",
+        },
+    )
+    harness.runner.on(
+        "ci_root_cause",
+        lambda t: {
+            "causes": [
+                {
+                    "jobs": ["unit"],
+                    "failing": "tests/test_loader.py::test_empty_batch",
+                    "origin": "change",
+                    "cause": "The guard returns None.",
+                    "confidence": 0.8,
+                }
+            ]
+        },
+    )
+    log = (
+        "2026-11-10T03:12:44.12Z FAILED tests/test_loader.py::test_empty_batch 0.31s\n"
+    )
+    await _failing_ci(harness, log)
+    assert _ci_kinds(harness) == ["ci_diagnose", "ci_root_cause"]
+    again = CheckRun(
+        id=9,
+        name="unit",
+        workflow="CI",
+        status=CheckStatus.COMPLETED,
+        conclusion=CheckConclusion.FAILURE,
+        run_id=100,
+        run_attempt=2,
+    )
+    harness.forge.job_logs[9] = log.replace("03:12:44.12", "04:01:02.76").replace(
+        "0.31", "0.29"
+    )
+    pr = await harness.forge.get_pr("acme/widget", 42)
+    harness.forge.put_pr(pr.model_copy(update={"checks": [again]}))
+    await harness.poll()
+    assert _ci_kinds(harness) == ["ci_diagnose", "ci_root_cause"], "nothing new to ask"
+    [first, second] = [
+        o
+        for o in await harness.store.list_ci_observations("acme/widget")
+        if o.check_name == "unit"
+    ]
+    assert second.fingerprint == first.fingerprint and second.check_id == 9
+    assert second.root_cause == first.root_cause
+
+
+async def test_a_runs_failed_jobs_get_one_first_look_and_the_runner_no_root_cause(
+    harness: Harness,
+) -> None:
+    await _auto(harness, comment_upsert="auto", notify="auto")
+    harness.runner.on(
+        "ci_diagnose",
+        lambda t: {
+            "jobs": [
+                {
+                    "job": "unit",
+                    "category": "infra",
+                    "confidence": 0.9,
+                    "explanation": "the docker daemon went away",
+                },
+                {
+                    "job": "lint",
+                    "category": "infra",
+                    "confidence": 0.9,
+                    "explanation": "the docker daemon went away",
+                },
+            ]
+        },
+    )
+    harness.runner.on("ci_root_cause", lambda t: {"causes": []})
+    jobs = [
+        CheckRun(
+            id=i,
+            name=name,
+            workflow="CI",
+            status=CheckStatus.IN_PROGRESS,
+            run_id=100,
+            run_attempt=1,
+        )
+        for i, name in ((8, "unit"), (9, "lint"))
+    ]
+    harness.forge.put_pr(_pr(checks=jobs))
+    harness.runner.on("triage", lambda t: {"summary": "s", "labels": []})
+    harness.runner.on(
+        "evaluate",
+        lambda t: {
+            "scores": {"impact": 5, "urgency": 5, "strategic": 5, "readiness": 5},
+            "summary": "s",
+            "rationale": "r",
+        },
+    )
+    harness.runner.on("review", lambda t: REVIEW)
+    harness.runner.on("verify", lambda t: {"verdicts": []})
+    await harness.poll()
+    for job in jobs:
+        harness.forge.job_logs[job.id] = "Error: the docker daemon returned EOF\n"
+    failed = [
+        j.model_copy(
+            update={
+                "status": CheckStatus.COMPLETED,
+                "conclusion": CheckConclusion.FAILURE,
+            }
+        )
+        for j in jobs
+    ]
+    pr = await harness.forge.get_pr("acme/widget", 42)
+    harness.forge.put_pr(pr.model_copy(update={"checks": failed}))
+    await harness.poll()
+    assert _ci_kinds(harness) == ["ci_diagnose"], "one look at both, no root cause"
+    notes = [
+        a.action.payload["event"]
+        for a in await harness.store.list_actions(repo="acme/widget")
+        if a.action.kind == "notify"
+    ]
+    assert notes.count("ci.infra") == 2
+
+
 async def test_merge_waits_for_gate_then_merges_with_trailers(harness: Harness) -> None:
     from auto_maintainer.domain.memory import profile_path
     from auto_maintainer.profiles.layers import dump_yaml, parse_yaml

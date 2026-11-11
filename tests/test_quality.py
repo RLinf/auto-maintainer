@@ -226,12 +226,25 @@ async def test_every_open_pr_gets_a_quick_score_until_its_review_scores_it(
         assert q is not None and q.score == 61, "the review's score is the accurate one"
 
         pr = await h.forge.get_pr(REPO, 43)
-        h.forge.put_pr(pr.model_copy(update={"head_sha": "c" * 40}))
+        h.forge.put_pr(pr.model_copy(update={"head_sha": "e" * 40}))
+        await h.poll()
+        h.clock.advance(hours=7)
+        before = len(h.runner.tasks)
+        await h.emit(tick.model_copy(update={"id": "evt_small"}))
+        carried = await quick_quality(h.store, REPO, 43)
+        assert carried is not None and carried.sha == "e" * 40
+        assert carried.scored_sha == "b" * 40 and carried.score == 72
+        assert len(h.runner.tasks) == before, "the same files, as many lines: kept"
+
+        h.forge.put_pr(
+            pr.model_copy(update={"head_sha": "c" * 40, "additions": pr.additions + 80})
+        )
         await h.poll()
         h.clock.advance(hours=7)
         await h.emit(tick.model_copy(update={"id": "evt_later"}))
         rescored = await quick_quality(h.store, REPO, 43)
         assert rescored is not None and rescored.sha == "c" * 40
+        assert rescored.scored_sha is None
         last = [t for t in h.runner.tasks if t.prompt.startswith(QUICK)][-1]
         assert "#42: 61 (fair)" in last.prompt, "a reviewed PR calibrates quick scores"
         assert not [

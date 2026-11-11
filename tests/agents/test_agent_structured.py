@@ -72,6 +72,18 @@ def test_schema_instructions_and_repair_embed_the_schema() -> None:
     assert prompt.count("x") <= 4100
 
 
+def test_a_schema_the_prompt_already_holds_is_not_sent_again() -> None:
+    import json
+
+    from auto_maintainer.playbooks.prompts import schema_hint
+
+    schema = Answer.model_json_schema()
+    again = schema_instructions(schema, "Score it.\n\n" + schema_hint(schema))
+    assert '"ok"' not in again and "```json" in again and "schema given above" in again
+    assert '"ok"' in schema_instructions(schema, "Score it."), "a prompt without it"
+    assert json.dumps(schema, ensure_ascii=False) in schema_hint(schema)
+
+
 def test_strict_schema_requires_everything() -> None:
     class WithDefaultField(BaseModel):
         default: str

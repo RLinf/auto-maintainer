@@ -15,18 +15,25 @@
 """CI doctor (design 5.5): classify failed jobs, rerun flakes, and find the root cause
 of real failures.
 
-Each failed job gets a first look from its log (a flake signature, or a quick agent
-classification). Flakes are rerun within the profile's budget. The rest, and flakes
-that keep failing after their reruns, go together to a root-cause agent working in a
-read-only checkout of the PR head, which names what fails, the mechanism, where in
-the code, and the smallest fix. A cause in the change is explained to the PR author;
-one that is not (the base branch, the runner, unclear) goes to the maintainers.
+Each failed job gets a first look from its log: a flake signature, the first look at
+the same failure seen before (``fingerprint``: the same job failing with the same
+error lines, at this head of this PR, or as a flake or a runner failure anywhere in
+the repository in the last ``REUSE_DAYS``), or an agent's classification, one call
+for all of a run's new failures. Flakes are rerun within the profile's budget. The
+rest, and flakes that keep failing after their reruns, go together to a root-cause
+agent working in a read-only checkout of the PR head, which names what fails, the
+mechanism, where in the code, and the smallest fix; a runner failure does not (the
+code cannot explain it), and a failure whose cause was found at this head before
+keeps it. A cause in the change is explained to the PR author; one that is not (the
+base branch, the runner, unclear) goes to the maintainers.
 """
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 from typing import Literal
 
@@ -49,11 +56,17 @@ from ..domain.profile import FlakeSignature, RepoProfile
 from ..domain.records import CiObservation, RootCause
 from ..domain.snapshot import CheckConclusion, CheckRun, PrSnapshot
 from .base import Playbook, PlaybookContext, PlaybookResult, in_scope
-from .prompts import pr_block, schema_hint, untrusted
+from .prompts import pr_block, schema_hint, untrusted, without_generated
 
 _ERROR_RE = re.compile(
     r"(error|failed|failure|exception|traceback|assert|fatal)", re.IGNORECASE
 )
+_STAMP_RE = re.compile(r"^\d{4}-\d\d-\d\dT[\d:.]+Z\s*")
+_VOLATILE_RE = re.compile(
+    r"0x[0-9a-f]+|\b[0-9a-f]{7,40}\b|/tmp/\S+|\d+(\.\d+)?", re.IGNORECASE
+)
+REUSE_DAYS = 7
+"""How long a flake's or a runner failure's first look stands for the same failure."""
 
 
 class SuggestedSignature(BaseModel):
@@ -92,6 +105,20 @@ def excerpt(log: str, max_lines: int = 200) -> str:
     )
 
 
+def fingerprint(log: str, check: CheckRun) -> str | None:
+    """The failure's identity across runs and PRs: the job, and its first error lines
+    with what changes from run to run (times, numbers, hashes, temporary paths)
+    taken out; ``None`` when the log names no error."""
+    lines = [_STAMP_RE.sub("", line).strip() for line in log.splitlines()]
+    errors = [line for line in lines if _ERROR_RE.search(line)][:8]
+    if not errors:
+        return None
+    text = "\n".join(
+        [check.workflow or "", check.name, *(_VOLATILE_RE.sub("#", e) for e in errors)]
+    )
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:24]
+
+
 def match_signature(
     log: str, check: CheckRun, signatures: list[FlakeSignature]
 ) -> FlakeSignature | None:
@@ -106,6 +133,16 @@ def match_signature(
         except re.error:
             continue
     return None
+
+
+class JobDiagnosis(Diagnosis):
+    job: str = Field(description="The job's name, as given.")
+
+
+class Diagnoses(BaseModel):
+    """The first look at several failed jobs of one run, one entry per job."""
+
+    jobs: list[JobDiagnosis] = Field(default_factory=list)
 
 
 class RootCauseReport(BaseModel):
@@ -124,11 +161,20 @@ class _Failure:
     log: str
     reruns: int = 0
     """How many reruns it already failed after, when it was taken for a flake."""
+    fingerprint: str | None = None
+    cause: RootCause | None = None
+    """The root cause found for the same failure at this head before."""
 
     @property
     def real(self) -> bool:
         """Not a flake, or a flake that kept failing: worth finding the cause of."""
         return self.diagnosis.category != "flaky" or self.reruns > 0
+
+    @property
+    def needs_cause(self) -> bool:
+        """Real, not the runner's (the code cannot explain that), and with no cause
+        found before."""
+        return self.real and self.diagnosis.category != "infra" and self.cause is None
 
 
 MAX_CULPRITS = 5
@@ -189,6 +235,40 @@ def _rerun_requested(event: Event) -> bool:
     )
 
 
+def _seen_before(
+    seen: list[CiObservation], pr: PrSnapshot, check: CheckRun, mark: str | None
+) -> CiObservation | None:
+    """The latest first look at the same failure: at this head of this PR whatever
+    it found, or anywhere in the repository when it was a flake or the runner's.
+    Never a signature's (that is matched again) nor an agent's that found nothing."""
+    if mark is None:
+        return None
+    for obs in reversed(seen):
+        if (
+            obs.fingerprint != mark
+            or obs.check_name != check.name
+            or obs.signature
+            or obs.confidence == 0.0
+        ):
+            continue
+        here = obs.number == pr.number and same_commit(obs.sha, pr.head_sha)
+        if here or obs.category in ("flaky", "infra"):
+            return obs
+    return None
+
+
+def _same_head_cause(before: CiObservation | None, pr: PrSnapshot) -> RootCause | None:
+    """The root cause found before for the same failure at this head of this PR."""
+    if (
+        before is None
+        or before.root_cause is None
+        or before.number != pr.number
+        or not same_commit(before.sha, pr.head_sha)
+    ):
+        return None
+    return before.root_cause
+
+
 class CiDoctor(Playbook):
     name = "ci_doctor"
     triggers = (EventKind.CHECKS_COMPLETED, EventKind.PR_COMMENT)
@@ -229,23 +309,50 @@ class CiDoctor(Playbook):
         reruns: set[int] = set()
         deferred: set[int] = set()
         failures: list[_Failure] = []
+        seen = await ctx.store.list_ci_observations(
+            pr.repo, since=ctx.clock.now() - timedelta(days=REUSE_DAYS)
+        )
+        new: list[tuple[CheckRun, str, FlakeSignature | None, str | None]] = []
         for check in checks:
             log = await ctx.ci.get_job_log(pr.repo, check.id) or check.summary or ""
             sig = match_signature(log, check, signatures)
+            mark = fingerprint(log, check)
+            before = _seen_before(seen, pr, check, mark) if sig is None else None
             if sig is not None:
                 diagnosis = Diagnosis(
                     category=sig.category,
                     confidence=0.9,
                     explanation=sig.description or f"matched {sig.id}",
                 )
-            else:
-                diagnosis = await self._diagnose(
-                    ctx, pr, check, excerpt(log)
-                ) or Diagnosis(
-                    category="unknown", confidence=0.0, explanation="no diagnosis"
+            elif before is not None:
+                diagnosis = Diagnosis(
+                    category=before.category,  # type: ignore[arg-type]
+                    confidence=before.confidence,
+                    explanation=before.explanation,
                 )
-            failure = _Failure(check, sig, diagnosis, log)
-            failures.append(failure)
+            else:
+                new.append((check, log, sig, mark))
+                continue
+            failures.append(
+                _Failure(
+                    check,
+                    sig,
+                    diagnosis,
+                    log,
+                    fingerprint=mark,
+                    cause=_same_head_cause(before, pr),
+                )
+            )
+        found = await self._diagnose_all(
+            ctx, pr, [(c, excerpt(log)) for c, log, _, _ in new]
+        )
+        for check, log, sig, mark in new:
+            diagnosis = found.get(check.name) or Diagnosis(
+                category="unknown", confidence=0.0, explanation="no diagnosis"
+            )
+            failures.append(_Failure(check, sig, diagnosis, log, fingerprint=mark))
+        for failure in failures:
+            check, diagnosis, sig = failure.check, failure.diagnosis, failure.sig
             if (
                 diagnosis.category == "flaky"
                 and check.run_id
@@ -293,9 +400,15 @@ class CiDoctor(Playbook):
         real = [f for f in failures if f.real]
         causes: list[RootCause] | None = None
         base = "main"
-        if real and profile.ci.root_cause:
+        asked = [f for f in real if f.needs_cause] if profile.ci.root_cause else []
+        known = [f.cause for f in real if f.cause is not None]
+        if asked or known:
             base = (await ctx.forge.get_repo(pr.repo)).default_branch
-            causes = await self._root_cause(ctx, pr, real, base)
+        if asked:
+            causes = await self._root_cause(ctx, pr, asked, base)
+        if known:
+            unique = {c.model_dump_json(): c for c in known}
+            causes = [*(causes or []), *unique.values()]
         by_job = {job: cause for cause in causes or [] for job in cause.jobs}
         for f in failures:
             await ctx.store.add_ci_observation(
@@ -313,6 +426,7 @@ class CiDoctor(Playbook):
                     explanation=f.diagnosis.explanation,
                     rerun=f.diagnosis.category == "flaky" and not f.reruns,
                     root_cause=by_job.get(f.check.name),
+                    fingerprint=f.fingerprint,
                 )
             )
         explained: list[str] = []
@@ -465,7 +579,9 @@ class CiDoctor(Playbook):
         ``None`` when it gives no usable answer (the first look then stands)."""
         workdir = await ctx.workspace.prepare(pr.repo, pr.number, pr.head_sha, base)
         try:
-            diff = await ctx.workspace.diff(workdir, f"origin/{base}", pr.head_sha)
+            diff = without_generated(
+                await ctx.workspace.diff(workdir, f"origin/{base}", pr.head_sha)
+            )
             logs = [
                 untrusted(
                     f"ci.log {f.check.name}",
@@ -520,6 +636,56 @@ class CiDoctor(Playbook):
             return causes or None
         finally:
             await ctx.workspace.release(workdir)
+
+    async def _diagnose_all(
+        self, ctx: PlaybookContext, pr: PrSnapshot, logs: list[tuple[CheckRun, str]]
+    ) -> dict[str, Diagnosis]:
+        """The first look at each of ``logs``, by job name: one agent call for them
+        all, since most of a call's tokens go to the agent's own setup."""
+        if not logs:
+            return {}
+        if len(logs) == 1:
+            check, log = logs[0]
+            one = await self._diagnose(ctx, pr, check, log)
+            return {check.name: one} if one is not None else {}
+        each = max(8_000, 60_000 // len(logs))
+        prompt = "\n\n".join(
+            [
+                "Classify each of these failed CI jobs of one run, one entry per job "
+                "under its name. `flaky`: transient (network, timeouts, nondeterminism "
+                "unrelated to the change). `infra`: the runner or CI system failed. "
+                "`pr_caused`: the change broke a build or test. `unknown`: not enough "
+                "evidence. Suggest a regex signature only for flaky or infra failures "
+                "that will recur.",
+                *(
+                    untrusted(
+                        f"ci.log {check.name}",
+                        f"Job: {check.name} (workflow {check.workflow}, run "
+                        f"{check.run_id})\n\n{log}",
+                        each,
+                    )
+                    for check, log in logs
+                ),
+                pr_block(pr),
+                schema_hint(Diagnoses.model_json_schema()),
+            ]
+        )
+        task = AgentTask(
+            kind=TaskKind.CI_DIAGNOSE,
+            prompt=prompt,
+            workdir=ctx.scratch(),
+            output_schema=Diagnoses.model_json_schema(),
+            repo=pr.repo,
+        )
+        answer = await ctx.ask(task, Diagnoses)
+        if not answer.ok or answer.structured is None:
+            return {}
+        names = {check.name for check, _ in logs}
+        return {
+            d.job: Diagnosis.model_validate(d.model_dump(exclude={"job"}))
+            for d in Diagnoses.model_validate(answer.structured).jobs
+            if d.job in names
+        }
 
     async def _diagnose(
         self, ctx: PlaybookContext, pr: PrSnapshot, check: CheckRun, log: str

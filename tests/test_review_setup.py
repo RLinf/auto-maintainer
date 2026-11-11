@@ -190,3 +190,22 @@ async def test_onboarding_asks_how_to_review_without_a_review_skill(
         assert "no review skill" not in change.description
     finally:
         await h.close()
+
+
+def test_reviews_read_no_lock_or_minified_files_line_by_line() -> None:
+    from auto_maintainer.playbooks.prompts import without_generated
+
+    diff = (
+        "diff --git a/src/loader.py b/src/loader.py\n+    return []\n"
+        "diff --git a/uv.lock b/uv.lock\n+" + "x" * 5000 + "\n"
+        "diff --git a/ui/package-lock.json b/ui/package-lock.json\n+{}\n"
+        "diff --git a/web/app.min.js b/web/app.min.js\n+!function(){}\n"
+    )
+    kept = without_generated(diff)
+    assert (
+        "+    return []" in kept and "x" * 100 not in kept and "!function" not in kept
+    )
+    assert kept.endswith(
+        "[left out, generated or binary: uv.lock, ui/package-lock.json, web/app.min.js]\n"
+    )
+    assert without_generated("") == ""
