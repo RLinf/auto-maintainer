@@ -822,10 +822,28 @@ details.pv-section[open] > summary { margin-bottom: 6px; }
 .owner-chip { display: inline-flex; align-items: center; gap: 6px; min-width: 0; font-size: 13px; overflow-wrap: anywhere; }
 .owner-chip > a { display: inline-flex; align-items: center; gap: 4px; }
 .owner-files { margin: 4px 0 0; padding-left: 18px; max-height: 180px; overflow: auto; }
-.owner-group { display: grid; grid-template-columns: minmax(96px, max-content) 1fr; gap: 6px 12px; align-items: center; }
-.owner-chip.muted { opacity: 0.7; }
-.owner-either { padding: 2px 8px; border: 1px dashed var(--border-strong); border-radius: 8px; }
-@media (max-width: 640px) { .owner-group { grid-template-columns: 1fr; } }
+/* A PR's approvals and code owners: one column, so it fits the PR page's sidebar. */
+.appr-block { display: grid; gap: 8px; min-width: 0; }
+.appr-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.appr-title { font-size: 13px; font-weight: 600; }
+.appr-count { font-variant-numeric: tabular-nums; }
+.appr-bar { display: flex; gap: 4px; }
+.appr-bar > span { flex: 1; height: 6px; border-radius: 3px; background: var(--surface-3); }
+.appr-bar > span.on { background: var(--ok); }
+.appr-line { display: flex; align-items: flex-start; gap: 6px; font-size: 13px; line-height: 1.6; min-width: 0; }
+.appr-line > svg { flex: none; margin-top: 4px; }
+.appr-names { overflow-wrap: anywhere; }
+.appr-person { white-space: nowrap; }
+.appr-person > a, .appr-person > img { display: inline-flex; align-items: center; gap: 4px; vertical-align: middle; }
+.appr-person .small { white-space: normal; }
+.appr-owners { display: grid; gap: 4px; }
+.appr-need { display: grid; grid-template-columns: 16px minmax(0, 1fr); gap: 6px; padding: 6px 8px; border-radius: 8px; font-size: 13px; line-height: 1.6; background: var(--surface-2); }
+.appr-need > span:first-child { padding-top: 3px; }
+.appr-need.done { background: var(--ok-bg); }
+.appr-need-main { min-width: 0; overflow-wrap: anywhere; }
+.appr-files > summary { cursor: pointer; width: fit-content; }
+.appr-files > code { display: block; margin-top: 4px; }
+.appr-hint { color: var(--warn); }
 .clamp2 { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
 .score-num { font-variant-numeric: tabular-nums; font-weight: 600; }
 .score-big { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1; }

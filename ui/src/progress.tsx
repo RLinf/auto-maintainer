@@ -8,7 +8,7 @@ import { useState } from "react";
 import { api, type CommentItem, type PrProgress, type ProgressEvent, type ProgressSummary, type ReviewerProgress } from "./api";
 import { useAliasOf } from "./aliases";
 import { Avatar, Named } from "./avatar";
-import { ApprovalsBlock, OwnerGroups, useApprovalSummary, useCodeOwnerSummary } from "./codeOwners";
+import { ApprovalsBlock, OwnerGroups, useApprovalBadge } from "./codeOwners";
 import { ConnectGitHub } from "./connectGitHub";
 import { Empty, ErrorBox, Section, useAct, When } from "./components";
 import { useT } from "./i18n";
@@ -239,16 +239,14 @@ export function ReviewProgressPanel({ repo, number, me }: { repo: string; number
 function CodeOwnerApprovals({ d, repo }: { d: PrProgress; repo: string }) {
   const t = useT();
   const c = d.code_owners;
-  const approvalSummary = useApprovalSummary();
-  const ownerSummary = useCodeOwnerSummary();
-  const summary = approvalSummary(d.approvals) ?? ownerSummary(c.people, c.waiting ?? [], c.required);
+  const badge = useApprovalBadge()(d.approvals, c.waiting ?? []);
   return (
-    <Section title={t("Approvals")} aside={summary ? <span className={`pill ${summary.tone}`}>{summary.text}</span> : undefined}>
-      <div className="stack" style={{ gap: 10 }}>
+    <Section title={t("Approvals")} aside={badge ? <span className={`pill ${badge.tone}`}>{badge.text}</span> : undefined}>
+      <div className="stack" style={{ gap: 14 }}>
         {d.approvals && <ApprovalsBlock a={d.approvals} repo={repo} />}
         {c.file && (
-          <>
-            <span className="small muted" style={{ fontWeight: 600, marginTop: 4 }} title={c.required ? t("GitHub merges only with their approval") : undefined}>
+          <div className="appr-block">
+            <span className="appr-title" title={c.required ? t("GitHub merges only with their approval") : undefined}>
               {t("Code owners")}
             </span>
             {c.people.length === 0 ? (
@@ -256,7 +254,7 @@ function CodeOwnerApprovals({ d, repo }: { d: PrProgress; repo: string }) {
             ) : (
               <OwnerGroups repo={repo} people={c.people} waiting={c.waiting ?? []} />
             )}
-          </>
+          </div>
         )}
       </div>
     </Section>
