@@ -958,6 +958,8 @@ export interface SettingsAgent {
   adapter: string;
   enabled: boolean;
   model: string | null;
+  /** A faster model for quick tasks (triage, scores, CI classification, comment checks). */
+  quick_model: string | null;
   effort: string | null;
   /** Whether its CLI is on this host; ``null`` while it is turned off. */
   installed: boolean | null;

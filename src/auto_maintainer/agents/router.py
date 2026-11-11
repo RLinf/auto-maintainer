@@ -91,6 +91,20 @@ def _scrubbed(value: Any) -> Any:
     return value
 
 
+QUICK_KINDS = frozenset(
+    {"triage", "evaluate", "ci_diagnose", "comment_check", "translate", "hygiene"}
+)
+"""Task kinds that run on an agent's ``quick_model`` (the service settings), when it
+has one: short answers from what the prompt holds, where a faster model costs less
+and answers as well."""
+
+
+def is_quick(task: AgentTask) -> bool:
+    """Whether ``task`` runs on an agent's quick model (``QUICK_KINDS``, or any task
+    with a ``quick`` budget)."""
+    return task.budget == "quick" or str(task.kind) in QUICK_KINDS
+
+
 _BREAKING_KINDS = frozenset({"auth", "quota", "crash"})
 """Failures that say the runtime itself is unusable: its breaker opens for every task.
 A timeout says the task took too long, so it pauses only that kind of task there."""
@@ -277,12 +291,18 @@ class AgentRouter:
                 skipped.append(f"{name}: {reason}")
                 continue
             runtime = self.runtimes[name]
+            model = (route.model or task.model) if name == route.primary else None
+            if (
+                model is None
+                and is_quick(task)
+                and not await self._on_own_account(runtime, task)
+            ):
+                # A person's own account runs their own choice of model.
+                model = getattr(runtime, "quick_model", None)
             attempt = task.model_copy(
                 update={
                     **self._with_service_code(task),
-                    "model": (route.model or task.model)
-                    if name == route.primary
-                    else None,
+                    "model": model,
                     "resume_session": task.resume_session
                     if name == route.primary
                     else None,

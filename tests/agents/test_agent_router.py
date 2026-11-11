@@ -458,3 +458,21 @@ async def test_a_person_over_their_token_limit_gets_no_service_agent() -> None:
     assert (await router.run(_task(requested_by="maria"), route, Verdict)).ok
     assert (await router.run(_task(), route, Verdict)).ok, "nobody's own work is free"
     assert "a" not in router.breakers or not router.breakers["a"].open_until
+
+
+async def test_quick_tasks_run_on_an_agents_quick_model() -> None:
+    """The service settings' ``quick_model`` takes triage, scores, and other short
+    answers, unless the route names a model; other work keeps the agent's model."""
+    a = ScriptedAgentRuntime("a", default={"ok": True})
+    a.quick_model = "fast"  # type: ignore[attr-defined]
+    router, _ = _router(a)
+    route = Route(primary="a")
+    for task in (
+        _task(kind=TaskKind.TRIAGE),
+        _task(kind=TaskKind.REVIEW),
+        _task(kind=TaskKind.REVIEW, budget="quick"),
+        _task(kind=TaskKind.CI_DIAGNOSE),
+    ):
+        await router.run(task, route)
+    await router.run(_task(kind=TaskKind.TRIAGE), Route(primary="a", model="named"))
+    assert [t.model for t in a.tasks] == ["fast", None, "fast", "fast", "named"]

@@ -91,6 +91,7 @@ def build_runtime(
         "env_allow": config.env_allow,
         "model": config.model,
         "effort": config.effort,
+        "quick_model": config.quick_model,
         "extra_args": config.extra_args,
         "allow_bypass": config.allow_bypass,
         "permissions": config.permissions,

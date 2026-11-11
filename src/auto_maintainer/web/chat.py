@@ -897,7 +897,8 @@ async def _settings_block(service: Any, user: User) -> str:
     agent_lines = [
         f"- {name}: {a.adapter}, {'enabled' if a.enabled else 'disabled'}, "
         f"{'installed' if service.agent_ready(name) else 'NOT installed on this host'}, "
-        f"model {a.model or 'CLI default'}, effort {a.effort or 'route or CLI default'}, "
+        f"model {a.model or 'CLI default'}, quick tasks on {a.quick_model or 'the same model'}, "
+        f"effort {a.effort or 'route or CLI default'}, "
         f"provider {a.provider or 'its own sign-in'}, "
         f"permissions {a.permissions or 'per task route'}, "
         + (
@@ -948,7 +949,9 @@ async def _settings_block(service: Any, user: User) -> str:
             "schema: 1\n"
             "default_agent: <agent name> (every task tries it first, except verify, which "
             "prefers a second agent; routes below still win)\n"
-            "agents: {<name>: {enabled, model, effort (one of its reasoning levels), provider, "
+            "agents: {<name>: {enabled, model, quick_model (a faster model for triage, "
+            "scores, CI classification, comment checks, translation, and hygiene), effort "
+            "(one of its reasoning levels), provider, "
             "budget: {daily_usd, daily_runs}, "
             "permissions: auto | restricted | bypass (its mode for every task instead of "
             "the route's; bypass skips the CLI's permission checks on team PRs only, "

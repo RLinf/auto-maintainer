@@ -125,6 +125,7 @@ async def settings_view(service: Service, user: User) -> dict[str, Any]:
                         "adapter",
                         "enabled",
                         "model",
+                        "quick_model",
                         "effort",
                         "provider",
                         "budget",
@@ -280,6 +281,8 @@ def _with_agent_fields(text: str, name: str, fields: dict[str, Any]) -> str:
 class AgentModelBody(BaseModel):
     model: str | None = None
     effort: str | None = None
+    quick_model: str | None = None
+    """The model for quick tasks; left out, the agent keeps the one it has."""
     provider: str | None = None
     """The model provider the agent runs on; sent as ``null``, its CLI's own
     sign-in. Left out, the agent keeps the one it has."""
@@ -659,12 +662,17 @@ def build_router() -> APIRouter:
         }
         if "provider" in body.model_fields_set:
             fields["provider"] = body.provider or None
+            if "quick_model" not in body.model_fields_set:
+                fields["quick_model"] = None  # another provider's model
+        if "quick_model" in body.model_fields_set:
+            fields["quick_model"] = body.quick_model or None
         what = ", ".join(
             f"{k} {v}"
             for k, v in (
                 ("provider", fields.get("provider", "")),
                 ("model", body.model),
                 ("effort", body.effort),
+                ("quick tasks", body.quick_model),
             )
             if v
         )

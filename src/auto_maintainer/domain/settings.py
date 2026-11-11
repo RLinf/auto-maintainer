@@ -113,6 +113,11 @@ class RuntimeConfig(BaseModel):
     binary: str | None = None
     model: str | None = None
     """The model when a route names none; with a provider, its first model by default."""
+    quick_model: str | None = None
+    """A faster model for quick tasks on the service's account (triage, priority
+    and quick quality scores, CI classification, comment checks, translation,
+    hygiene: ``agents/router.py:QUICK_KINDS``) when the route names none; unset,
+    they run on ``model``. With a provider, one of its models."""
     effort: str | None = None
     """The reasoning level when a route names none; unset keeps the CLI's own."""
     provider: str | None = None
@@ -631,6 +636,15 @@ def check_settings(
         if agent.model is None and not provider.models:
             problems.append(
                 f"agents.{name}: name a model, or list models on provider {agent.provider!r}"
+            )
+        if (
+            agent.quick_model
+            and provider.models
+            and agent.quick_model not in provider.model_ids
+        ):
+            problems.append(
+                f"agents.{name}.quick_model: provider {agent.provider!r} has no model "
+                f"{agent.quick_model!r}"
             )
     for name, machine in config.labs.items():
         problems += [f"labs.{name}: {p}" for p in machine_problems(name, machine)]

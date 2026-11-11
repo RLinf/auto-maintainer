@@ -446,6 +446,7 @@ class ExecRuntime:
         env_allow: Iterable[str] = (),
         model: str | None = None,
         effort: str | None = None,
+        quick_model: str | None = None,
         extra_args: Iterable[str] = (),
         search_dirs: Iterable[str] = SEARCH_DIRS,
         kill_grace_seconds: float = 5.0,
@@ -469,6 +470,9 @@ class ExecRuntime:
             provider.models[0] if provider and provider.models else None
         )
         self.effort = effort
+        self.quick_model = quick_model
+        """The model for quick tasks (``router.QUICK_KINDS``) on the service's
+        account, when the route names none; ``None`` keeps ``model``."""
         self.extra_args = list(extra_args)
         self.search_dirs = tuple(search_dirs)
         self.kill_grace_seconds = kill_grace_seconds

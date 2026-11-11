@@ -283,7 +283,8 @@ function ModelControls({
   const t = useT();
   const toast = useToast();
   const set = useAct(
-    (body: { model: string | null; effort: string | null; provider?: string | null }) => api.put<{ approved: boolean }>(`/api/settings/agents/${agent.name}/model`, body),
+    (body: { model: string | null; effort: string | null; provider?: string | null; quick_model?: string | null }) =>
+      api.put<{ approved: boolean }>(`/api/settings/agents/${agent.name}/model`, body),
     [["settings"], ["memory"]],
   );
   const done = (r: { approved: boolean }) => toast({ title: r.approved ? t("Saved") : t("Change proposed"), icon: r.approved ? "check" : "inbox" });
@@ -298,6 +299,7 @@ function ModelControls({
   const cliEffort = provider ? null : choices?.default_effort;
   const disabled = !canChange || set.isPending;
   const title = canChange ? undefined : t("Only the owner of this service changes agents.");
+  const quickModels = provider ? providerModels.map((m) => ({ id: m.id, name: m.id })) : cliModels;
   return (
     <span className="row model-controls" style={{ gap: 6 }}>
       {(usable.length > 0 || agent.provider) && (
@@ -349,6 +351,27 @@ function ModelControls({
           {agent.model && !cliModels.some((m) => m.id === agent.model) && <option value={agent.model}>{agent.model}</option>}
         </select>
       ) : null}
+      {quickModels.length > 0 && (
+        <select
+          value={agent.quick_model ?? ""}
+          disabled={disabled}
+          title={title ?? t("A faster model for triage, scores, CI classification, comment checks, translation, and hygiene")}
+          aria-label={`${agent.name}: ${t("Quick tasks")}`}
+          onChange={(e) => set.mutate({ model: agent.model, effort: agent.effort, quick_model: e.target.value || null }, { onSuccess: done })}
+        >
+          <option value="">{t("Quick tasks: same model")}</option>
+          {quickModels.map((m) => (
+            <option key={m.id} value={m.id}>
+              {t("Quick tasks")}: {m.name || m.id}
+            </option>
+          ))}
+          {agent.quick_model && !quickModels.some((m) => m.id === agent.quick_model) && (
+            <option value={agent.quick_model}>
+              {t("Quick tasks")}: {agent.quick_model}
+            </option>
+          )}
+        </select>
+      )}
       {efforts.length > 0 ? (
         <select
           value={agent.effort ?? ""}
