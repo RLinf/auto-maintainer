@@ -595,6 +595,9 @@ export interface PrDetail {
   };
   assignees: Assignee[];
   review_state: { state: string; reviewed_sha: string | null; latest_review_state: string | null };
+  /** Review starts a review of the person's own: they own or review this PR here, and
+   * the reviews it has are others'. */
+  own_review?: boolean;
   evaluation: Evaluation | null;
   quality: ReviewQuality | null;
   quick_quality: QuickQuality | null;

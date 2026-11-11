@@ -352,6 +352,7 @@ class Service:
             dev_mode=settings.dev_mode,
             write_caps=settings.write_caps,
             sandbox_repo=settings.sandbox_repo,
+            service_login=settings.login,
         )
         self.info = ServiceInfo(
             login=settings.login,

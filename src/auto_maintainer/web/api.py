@@ -1696,6 +1696,10 @@ def build_router() -> APIRouter:
             "pr": pr.model_dump(mode="json"),
             "assignees": await _assignees(service, repo, number),
             "review_state": cls.model_dump(mode="json"),
+            # Review starts a review of the person's own beside others' reviews.
+            "own_review": await may_review_own(
+                service, user.login, repo, number, str(cls.state)
+            ),
             "evaluation": ev.model_dump(mode="json") if ev else None,
             "quality": quality.model_dump(mode="json") if quality else None,
             "quick_quality": quick.model_dump(mode="json")
@@ -3659,6 +3663,53 @@ async def agreement_scores(service: Service, repo: str) -> dict[str, Any]:
     }
 
 
+REVIEWED_STATES = ("UP_TO_DATE", "FOLLOWUP_REVIEW", "APPROVED_NEW_COMMITS")
+"""Review states in which the PR has a review already."""
+LIVE_REVIEWS = (
+    ActionStatus.PROPOSED,
+    ActionStatus.QUEUED,
+    ActionStatus.INTENT,
+    ActionStatus.EXECUTED,
+    ActionStatus.SHADOWED,
+)
+"""A review action that is, or may still become, a review on the PR."""
+
+
+async def has_own_review(service: Service, repo: str, number: int, login: str) -> bool:
+    """Whether ``login`` has a review of ``repo#number`` from the service: one they
+    asked for (drafted for them) or posted as themselves, posted or still a draft."""
+    me = login.lower()
+    for record in await service.store.list_actions(
+        repo=repo, number=number, kinds=[ActionKind.REVIEW_POST], limit=500
+    ):
+        if record.status not in LIVE_REVIEWS:
+            continue
+        mine = {
+            record.post_as,
+            record.action.draft_for,
+            record.action.provenance.requested_by,
+        }
+        if me in {m.lower() for m in mine if m}:
+            return True
+    return False
+
+
+async def may_review_own(
+    service: Service, login: str, repo: str, number: int, state: str
+) -> bool:
+    """Whether ``login`` starts a review of their own of a PR that others' reviews
+    cover (``state``): one of its owners or reviewers here, without a review of
+    their own from the service. Their own review covers them as anyone's does."""
+    if state not in REVIEWED_STATES:
+        return False
+    me = login.lower()
+    if not any(
+        a.login.lower() == me for a in await service.store.list_assignees(repo, number)
+    ):
+        return False
+    return not await has_own_review(service, repo, number, login)
+
+
 async def _request_review(
     service: Service, user: User, repo: str, number: int, agent: str | None = None
 ) -> dict[str, Any]:
@@ -3667,7 +3718,9 @@ async def _request_review(
     One review per PR, head commit, and agent: when the same agent is already
     reviewing this commit, or left a draft for it, the request joins that review
     instead of starting another, whoever asked first. A different agent may review
-    the same commit.
+    the same commit. A PR's owner or reviewer whose own review it lacks gets one of
+    their own, whatever others' reviews cover (``may_review_own``); it joins only
+    their own review in progress.
     """
     pr = await service.store.get_snapshot(repo, number)
     profile = await service.profiles.active(repo)
@@ -3686,10 +3739,13 @@ async def _request_review(
         include_drafts=True,
         own_actions=await service.posted_as_people(repo),
     ).state
-    if state == "UP_TO_DATE":
+    own = await may_review_own(service, user.login, repo, number, state)
+    if state == "UP_TO_DATE" and not own:
         return {**out, "run": "skip", "reason": "already reviewed at the current head"}
     run = (
-        "followup" if state in ("FOLLOWUP_REVIEW", "APPROVED_NEW_COMMITS") else "review"
+        "followup"
+        if state in ("FOLLOWUP_REVIEW", "APPROVED_NEW_COMMITS") and not own
+        else "review"
     )
     route = profile.route(run, service.settings.routing)
     default_agent = await service.runs_on_for(route, user.login, run)
@@ -3710,6 +3766,8 @@ async def _request_review(
             continue
         last = job.events[-1] if job.events else {}
         payload = last.get("payload") or {}
+        if own and str(payload.get("by") or "").lower() != user.login.lower():
+            continue
         if (last.get("sha") or "")[:12] == head and (
             payload.get("agent") or default_agent
         ) == chosen:
@@ -3728,6 +3786,7 @@ async def _request_review(
             and record.action.number == number
             and (record.action.head_sha or "")[:12] == head
             and record.action.payload.get("runtime") == chosen
+            and not own
         ):
             return {
                 **out,
@@ -3747,11 +3806,19 @@ async def _request_review(
             "by": user.login,
             "source": "dashboard",
             **({"agent": agent} if agent else {}),
+            **({"own": True} if own else {}),
         },
         source="dashboard",
     )
     await service.bus.publish(event)
-    return {**out, "run": run, "event": event.id, "state": state, "agent": chosen}
+    return {
+        **out,
+        "run": run,
+        "event": event.id,
+        "state": state,
+        "agent": chosen,
+        **({"own": True} if own else {}),
+    }
 
 
 async def review_qualities(service: Service, repo: str) -> dict[int, ReviewQuality]:

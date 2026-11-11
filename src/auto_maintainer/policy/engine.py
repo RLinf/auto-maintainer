@@ -40,6 +40,7 @@ class PolicyFacts(BaseModel):
     """``ready``, ``changes``, or ``blocked``, when the action follows a review."""
     changed_paths: list[str] = Field(default_factory=list)
     executed_on_sha: int = 0
+    """Executions of the same kind at this head SHA by the same posting account."""
     """Executed actions of the same kind on the same PR and head SHA."""
     public_writes_last_hour: int = 0
     repo_public_writes_last_hour: int = 0
@@ -48,7 +49,9 @@ class PolicyFacts(BaseModel):
 
 
 ONE_PER_SHA = {ActionKind.REVIEW_POST}
-"""Kinds limited to one execution per PR and head SHA (later changes edit in place)."""
+"""Kinds limited to one execution per PR, head SHA, and posting account (later changes
+edit in place): the service's own account posts at most one review of a commit, and
+each person posting as themselves at most one of their own."""
 
 WRITE_CAP_RULE = "limit.write_cap"
 PAUSED_RULE = "paused"

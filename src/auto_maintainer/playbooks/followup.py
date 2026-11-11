@@ -106,6 +106,13 @@ class Followup(Playbook):
                     "skipped": "this repository does not re-review updated PRs on its own"
                 }
             )
+        if request is not None and request.own:
+            return PlaybookResult(
+                result={
+                    "skipped": "a review of the person's own",
+                    "handed_to": "review",
+                }
+            )
         ctx.trusted_input = await ctx.author_is_team(pr)
         cls = classify_review_state(
             pr,

@@ -71,7 +71,11 @@ class ActionPipeline:
         dev_mode: bool = False,
         write_caps: tuple[int, int] = (120, 40),
         sandbox_repo: str | None = None,
+        service_login: str = "",
     ) -> None:
+        self.service_login = service_login
+        """The service's own account, which posts what nobody posts as themselves:
+        ``ONE_PER_SHA`` counts per posting account."""
         self.store = store
         self.profiles = profiles
         self.knowledge = knowledge
@@ -125,10 +129,13 @@ class ActionPipeline:
 
     # -- decisions -------------------------------------------------------------------
 
-    async def _facts(self, action: Action, approved_by: str | None) -> PolicyFacts:
+    async def _facts(
+        self, action: Action, approved_by: str | None, post_as: str | None = None
+    ) -> PolicyFacts:
         now = self.clock.now()
         hour = now - timedelta(hours=1)
         executed = 0
+        account = (post_as or self.service_login).lower()
         if action.number is not None and action.head_sha:
             records = await self.store.list_actions(
                 repo=action.repo,
@@ -141,6 +148,7 @@ class ActionPipeline:
                 for r in records
                 if r.action.id != action.id
                 and same_commit(r.action.head_sha, action.head_sha)
+                and (r.post_as or self.service_login).lower() == account
             )
         count = self.store.count_actions
         statuses = [ActionStatus.EXECUTED, ActionStatus.INTENT, ActionStatus.QUEUED]
@@ -179,7 +187,11 @@ class ActionPipeline:
             else:
                 decision = Decision(kind=DecisionKind.EXECUTE, rule="internal")
         else:
-            decision = decide(action, profile, await self._facts(action, None))
+            # A draft for someone is theirs to post, as themselves or as the service:
+            # what it counts against is known when they approve it (``_redecide``).
+            decision = decide(
+                action, profile, await self._facts(action, None, action.draft_for)
+            )
         if (
             force_propose
             and decision.kind == DecisionKind.EXECUTE
@@ -451,7 +463,9 @@ class ActionPipeline:
                     reason=f"approved by {login}",
                 )
         else:
-            decision = decide(action, profile, await self._facts(action, login))
+            decision = decide(
+                action, profile, await self._facts(action, login, record.post_as)
+            )
         if (
             action.draft_for
             and decision.kind == DecisionKind.SHADOW

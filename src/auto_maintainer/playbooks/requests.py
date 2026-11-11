@@ -39,6 +39,10 @@ class ReviewRequest:
     """The reviewer who asked; their drafts become proposals for them. ``None`` for scans."""
     agent: str | None = None
     """The runtime the reviewer chose; ``None`` follows the route."""
+    own: bool = False
+    """A review of the PR's own by one of its owners or reviewers, beside the reviews
+    others asked for (``web/api.py:_request_review``): it runs as a new review
+    whatever the PR's review state, and the follow-up leaves it alone."""
 
     @property
     def manual(self) -> bool:
@@ -58,7 +62,10 @@ def review_request(event: Event) -> ReviewRequest | None:
         agent = event.payload.get("agent")
         return (
             ReviewRequest(
-                source=source, by=str(by), agent=str(agent) if agent else None
+                source=source,
+                by=str(by),
+                agent=str(agent) if agent else None,
+                own=bool(event.payload.get("own")),
             )
             if by
             else None

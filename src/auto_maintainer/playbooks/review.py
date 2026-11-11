@@ -138,6 +138,10 @@ class ReviewPlaybook(Playbook):
             profile.scope.include_drafts or manual,
             own_actions=ctx.own_reviews,
         ).state
+        if request is not None and request.own and state != ReviewState.SELF_PR:
+            # One of the PR's owners or reviewers wants a review of their own,
+            # whoever else reviewed it.
+            state = ReviewState.NEW_REVIEW
         if state in FOLLOWUP_STATES:
             return PlaybookResult(
                 result={

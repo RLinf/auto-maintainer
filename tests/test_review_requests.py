@@ -197,6 +197,74 @@ async def test_a_draft_posted_as_yourself_still_counts_as_the_services_review(
     assert again["run"] == "skip"
 
 
+async def test_a_prs_reviewer_gets_a_review_of_their_own_beside_anothers(
+    demo,
+) -> None:
+    """A PR reviewed for maria: walt, one of its reviewers here, still starts a
+    review of his own, which he may post as himself though the service's account
+    posted maria's at this commit; someone without a role there, or with a review
+    of their own, is told it is reviewed."""
+    from auto_maintainer.domain.records import PrAssignee
+
+    h, app = demo
+    await _review(app, "maria", 42)
+    await h.settle()
+    async with _as(app, "maria") as maria:
+        [draft] = [
+            p
+            for p in (await maria.get("/api/proposals")).json()
+            if p["action"]["action"]["kind"] == "review.post"
+        ]
+        posted = await maria.post(f"/api/proposals/{draft['id']}/approve", json={})
+        assert posted.status_code == 200, posted.text
+        await h.settle()
+    await h.poll()
+    assert (await _review(app, "walt", 42))["run"] == "skip", "no role on #42"
+
+    await h.store.add_assignee(
+        PrAssignee(repo=REPO, number=42, login="walt", role="reviewer", by="maria")
+    )
+    async with _as(app, "walt") as walt:
+        assert (await walt.get(f"/api/prs/{REPO}/42")).json()["own_review"] is True
+    started = await _review(app, "walt", 42)
+    assert started["run"] == "review" and started.get("own") is True
+    await h.settle()
+    reviews = [t for t in h.runner.tasks if t.kind == TaskKind.REVIEW]
+    assert len(reviews) == 2 and reviews[-1].requested_by == "walt"
+    async with _as(app, "walt") as walt:
+        [mine] = [
+            p
+            for p in (await walt.get("/api/proposals")).json()
+            if p["action"]["action"]["kind"] == "review.post"
+            and p["requested_by"] == "walt"
+        ]
+        as_service = await walt.post(f"/api/proposals/{mine['id']}/approve", json={})
+        assert as_service.status_code == 200
+        await h.settle()
+        record = await h.store.get_action(mine["action"]["action"]["id"])
+        assert record is not None and record.decision is not None
+        assert record.decision.rule == "limit.one_per_sha", (
+            "the service's account posted a review of this commit already"
+        )
+    # The draft comes back to him, to post as himself.
+    await h.service.a.user_tokens.set("walt", UserToken(token="w"))
+    async with _as(app, "walt") as walt:
+        [mine] = [
+            p
+            for p in (await walt.get("/api/proposals")).json()
+            if p["action"]["action"]["kind"] == "review.post"
+            and p["requested_by"] == "walt"
+        ]
+        as_him = await walt.post(
+            f"/api/proposals/{mine['id']}/approve", json={"as_me": True}
+        )
+        assert as_him.status_code == 200, as_him.text
+        await h.settle()
+    assert [r.author for r in h.forge.prs[(REPO, 42)].reviews][-1] == "walt"
+    await h.poll()
+    assert (await _review(app, "walt", 42))["run"] == "skip", "his own covers him now"
+
+
 # -- when reviews start on their own -------------------------------------------------------
 
 

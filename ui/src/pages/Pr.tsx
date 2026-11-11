@@ -169,7 +169,9 @@ export default function PrPage({ me }: { me: Me }) {
                 title={
                   reviewing
                     ? reviewingText
-                    : agentOpts.current
+                    : d.own_review
+                      ? t("A review of your own, as one of this PR's owners or reviewers; the reviews others asked for stay as they are")
+                      : agentOpts.current
                       ? `${t("Which agent does it")}: ${agentOpts.label(agentOpts.current)}`
                       : agentOpts.primary
                         ? `${t("Which agent does it")}: ${agentOpts.label(agentOpts.primary)} (${t("default")})`
@@ -200,7 +202,7 @@ export default function PrPage({ me }: { me: Me }) {
                 }
               >
                 <Icon name="pr" size={15} />
-                {reviewing ? t("Reviewing…") : d.review_state.reviewed_sha ? t("Follow up") : t("Review")}
+                {reviewing ? t("Reviewing…") : d.review_state.reviewed_sha && !d.own_review ? t("Follow up") : t("Review")}
                 {!reviewing && agentOpts.current && <span className="agent-hint">· {agentName(agentOpts.current)}</span>}
               </button>
               <Popover
