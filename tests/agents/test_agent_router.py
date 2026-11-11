@@ -309,18 +309,24 @@ async def test_a_task_in_a_session_gets_at_least_the_sessions_time() -> None:
     )
 
 
-async def test_every_run_may_read_the_services_own_code(tmp_path: Path) -> None:
-    """Whatever the task, the agent gets the service's code read-only and is told
-    where it is; a task that works in that code already gets nothing more."""
+async def test_tasks_about_the_service_may_read_its_own_code(tmp_path: Path) -> None:
+    """A conversation, or configuring the service, gets the service's code read-only
+    and is told where it is; work on a target repository is not offered it, nor is a
+    task that works in that code already."""
     code = tmp_path / "service-code" / "abc123"
     code.mkdir(parents=True)
     a = ScriptedAgentRuntime("a", default={"ok": True})
     router, _ = _router(a, service_code=code)
-    await router.run(_task(), Route(primary="a"), Verdict)
-    await router.run(_task(workdir=code), Route(primary="a"), Verdict)
-    first, second = a.tasks
-    assert first.reference_dirs == [code] and f"is at {code}, read-only" in first.prompt
-    assert second.reference_dirs == [] and str(code) not in second.prompt
+    route = Route(primary="a")
+    await router.run(_task(kind=TaskKind.CHAT), route, Verdict)
+    await router.run(_task(kind=TaskKind.FIX, activity="fix_talk"), route, Verdict)
+    await router.run(_task(kind=TaskKind.CHAT, workdir=code), route, Verdict)
+    await router.run(_task(kind=TaskKind.CI_DIAGNOSE), route, Verdict)
+    chat, talk, inside, diagnose = a.tasks
+    assert chat.reference_dirs == [code] and f"is at {code}, read-only" in chat.prompt
+    assert talk.reference_dirs == [code]
+    assert inside.reference_dirs == [] and str(code) not in inside.prompt
+    assert diagnose.reference_dirs == [] and str(code) not in diagnose.prompt
 
 
 async def test_an_agent_signed_out_without_a_provider_is_passed_over() -> None:

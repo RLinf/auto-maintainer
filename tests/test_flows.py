@@ -19,6 +19,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from auto_maintainer.domain.actions import ActionStatus, ProposalState
+from auto_maintainer.domain.agents import AgentTask
 from auto_maintainer.domain.events import EventKind
 from auto_maintainer.domain.markers import parse_markers
 from auto_maintainer.domain.permissions import Permission
@@ -366,19 +367,23 @@ async def test_a_real_ci_failure_gets_its_root_cause_from_the_code(
     harness: Harness,
 ) -> None:
     await _auto(harness, comment_upsert="auto")
-    harness.runner.on(
-        "ci_diagnose",
-        lambda t: {
+    looks: list[AgentTask] = []
+
+    def diagnose(task: AgentTask) -> dict:
+        looks.append(task)
+        return {
             "category": "pr_caused",
             "confidence": 0.6,
             "explanation": "test_empty_batch fails",
-        },
-    )
+        }
+
+    harness.runner.on("ci_diagnose", diagnose)
     asked: list[str] = []
 
     def root_cause(task):
         asked.append(task.prompt)
         assert task.mode == "read_only"
+        assert "never other runs" in task.prompt
         return {
             "causes": [
                 {
@@ -405,6 +410,9 @@ async def test_a_real_ci_failure_gets_its_root_cause_from_the_code(
         "TypeError: 'NoneType' object is not iterable\n",
     )
     assert asked and "test_empty_batch" in asked[0]
+    [look] = looks
+    assert look.budget == "quick", "a first look is capped like other quick checks"
+    assert "do not run commands, read files, or fetch logs" in look.prompt
     [observation] = [
         o
         for o in await harness.store.list_ci_observations("acme/widget")

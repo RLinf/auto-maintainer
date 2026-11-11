@@ -69,6 +69,14 @@ REUSE_DAYS = 7
 """How long a flake's or a runner failure's first look stands for the same failure."""
 
 
+FROM_THE_LOG = (
+    "Judge only from the log and the PR given here: do not run commands, read "
+    "files, or fetch logs, runs, or code."
+)
+"""What keeps a first look at a failure to one answer: agents offered tools open the
+full log, other runs, and the code, at many times the cost (design 5.5)."""
+
+
 class SuggestedSignature(BaseModel):
     pattern: str
     workflow: str | None = None
@@ -612,7 +620,11 @@ class CiDoctor(Playbook):
                     "and test are untouched by the diff, or the log shows the base "
                     "branch fails the same way); `infra` for the runner or the CI "
                     "service; `flaky` for nondeterminism; `unclear` when the evidence "
-                    "does not settle it. Do not guess: say `unclear` and what is missing.",
+                    "does not settle it. Do not guess: say `unclear` and what is missing. "
+                    "The logs below hold what each job printed around its failure: work "
+                    "from them and the checkout. Fetch a job's log only when its excerpt "
+                    "cuts off the failure, and never other runs, workflows, or the base "
+                    "branch's history; stop reading once you can name the mechanism.",
                     *logs,
                     pr_block(pr, diff),
                     schema_hint(RootCauseReport.model_json_schema()),
@@ -656,7 +668,7 @@ class CiDoctor(Playbook):
                 "unrelated to the change). `infra`: the runner or CI system failed. "
                 "`pr_caused`: the change broke a build or test. `unknown`: not enough "
                 "evidence. Suggest a regex signature only for flaky or infra failures "
-                "that will recur.",
+                f"that will recur. {FROM_THE_LOG}",
                 *(
                     untrusted(
                         f"ci.log {check.name}",
@@ -676,6 +688,7 @@ class CiDoctor(Playbook):
             workdir=ctx.scratch(),
             output_schema=Diagnoses.model_json_schema(),
             repo=pr.repo,
+            budget="quick",
         )
         answer = await ctx.ask(task, Diagnoses)
         if not answer.ok or answer.structured is None:
@@ -695,7 +708,8 @@ class CiDoctor(Playbook):
             [
                 "Classify a failed CI job. `flaky`: transient (network, timeouts, nondeterminism unrelated to the change). "
                 "`infra`: the runner or CI system failed. `pr_caused`: the change broke a build or test. "
-                "`unknown`: not enough evidence. Suggest a regex signature only for flaky or infra failures that will recur.",
+                "`unknown`: not enough evidence. Suggest a regex signature only for flaky or infra failures that will recur. "
+                + FROM_THE_LOG,
                 f"Job: {check.name} (workflow {check.workflow}, run {check.run_id})",
                 untrusted("ci.log", log, 40_000),
                 pr_block(pr),
@@ -708,6 +722,7 @@ class CiDoctor(Playbook):
             workdir=workdir,
             output_schema=Diagnosis.model_json_schema(),
             repo=pr.repo,
+            budget="quick",
         )
         answer = await ctx.ask(task, Diagnosis)
         if not answer.ok or answer.structured is None:

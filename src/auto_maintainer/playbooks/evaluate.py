@@ -253,7 +253,8 @@ class EvaluatePlaybook(Playbook):
         prompt = "\n\n".join(
             [
                 "Score this pull request for the maintainers' private review queue. "
-                "Give each dimension a score from 0 to 10 using its rule. This evaluation is never shown publicly.",
+                "Give each dimension a score from 0 to 10 using its rule. This evaluation is never shown publicly. "
+                "Judge only from what is given here: do not run commands, read files, or fetch anything.",
                 f"Dimensions:\n{rules}",
                 *(
                     [

@@ -105,6 +105,21 @@ def is_quick(task: AgentTask) -> bool:
     return task.budget == "quick" or str(task.kind) in QUICK_KINDS
 
 
+SERVICE_CODE_KINDS = frozenset({"chat", "governance", "onboard"})
+"""Task kinds about the service itself, which read its own code to see how it does
+something: conversations and configuring it. Work on a target repository (reviews,
+CI diagnosis, scores) never needs it, and an agent offered it reads it anyway."""
+
+
+def reads_service_code(task: AgentTask) -> bool:
+    """Whether ``task`` is offered the service's own code: a kind in
+    ``SERVICE_CODE_KINDS``, or a conversation about a review or a change
+    (``activity`` ``*_talk``), where people ask why the service did something."""
+    return str(task.kind) in SERVICE_CODE_KINDS or (task.activity or "").endswith(
+        "_talk"
+    )
+
+
 _BREAKING_KINDS = frozenset({"auth", "quota", "crash"})
 """Failures that say the runtime itself is unusable: its breaker opens for every task.
 A timeout says the task took too long, so it pauses only that kind of task there."""
@@ -344,9 +359,15 @@ class AgentRouter:
 
     def _with_service_code(self, task: AgentTask) -> dict[str, Any]:
         """``task``'s folders and prompt with the service's own code among what it
-        may read; nothing when there is none or the task works in it already."""
+        may read, for a task about the service (``reads_service_code``); nothing for
+        any other, when there is none, or when the task works in it already."""
         code = self.service_code
-        if code is None or code in task.reference_dirs or task.workdir == code:
+        if (
+            code is None
+            or not reads_service_code(task)
+            or code in task.reference_dirs
+            or task.workdir == code
+        ):
             return {}
         return {
             "reference_dirs": [*task.reference_dirs, code],
