@@ -130,7 +130,7 @@ def test_a_rows_approvals_say_how_many_more_are_needed() -> None:
     status = approval_status(pr, _info(), code_owner_report(RULES, pr), None)
     summary = approval_summary(status, review_progress(pr, team))
     assert (summary.approved, summary.required, summary.owners_waiting) == (1, 2, 2)
-    assert summary.needed == 2, "two owner parts wait, more than the one approval short"
+    assert summary.needed == 1, "lin owns both waiting parts: one approval covers them"
     assert (summary.assigned, summary.assigned_approved) == (3, 1)
     assert summary.assigned_waiting == ["guo", "wang"]
 
@@ -139,3 +139,12 @@ def test_a_rows_approvals_say_how_many_more_are_needed() -> None:
     assert approval_summary(status, review_progress(pr, team)).needed == 0
     unknown = approval_status(pr, None, code_owner_report(RULES, pr), None)
     assert approval_summary(unknown, review_progress(pr, team)).needed is None
+
+
+def test_the_fewest_owners_cover_every_waiting_part() -> None:
+    from auto_maintainer.domain.approvals import fewest_owners
+
+    assert fewest_owners([]) == 0
+    assert fewest_owners([["lin"], ["guo", "lin"], ["Lin", "wang"]]) == 1
+    assert fewest_owners([["lin"], ["guo"], ["guo", "wang"]]) == 2
+    assert fewest_owners([[], ["lin"]]) == 2, "a part with no owner still waits"

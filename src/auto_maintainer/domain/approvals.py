@@ -27,6 +27,7 @@ the PR passes; this says who approved and who is still missing.
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Collection
 
 from pydantic import BaseModel, Field
@@ -121,8 +122,9 @@ class ApprovalSummary(BaseModel):
     required: int | None
     """Approvals the branch requires; ``None`` when its rules are not known."""
     needed: int | None
-    """Approvals still needed: the count the branch asks for, or one per code-owner
-    part still waiting, whichever is more; ``None`` when the rules are not known."""
+    """Approvals still needed: the count the branch asks for, or the owners whose
+    approvals would cover every code-owner part still waiting (``fewest_owners``),
+    whichever is more; ``None`` when the rules are not known."""
     owners_waiting: int
     """Code-owner parts still waiting for an owner's approval, when the branch asks
     for them."""
@@ -135,19 +137,34 @@ class ApprovalSummary(BaseModel):
     changes_requested: int = 0
 
 
+def fewest_owners(waiting: list[list[str]]) -> int:
+    """How many approvals cover every waiting code-owner part, each part needing one
+    of its owners: one owner often owns several parts. Picks the owner of the most
+    parts left until none is left, which gives approvals that do cover them all."""
+    left = [{o.lower() for o in part} for part in waiting]
+    count = sum(1 for part in left if not part)
+    left = [part for part in left if part]
+    while left:
+        best = Counter(o for part in left for o in part).most_common(1)[0][0]
+        left = [part for part in left if best not in part]
+        count += 1
+    return count
+
+
 def approval_summary(
     status: ApprovalStatus, progress: ReviewProgress
 ) -> ApprovalSummary:
     """``status`` (``approval_status``) and the assigned reviewers of ``progress``
     as the few numbers a PR's row and page show."""
-    owners = len(status.code_owners_waiting) if status.code_owners_required else 0
+    waiting = status.code_owners_waiting if status.code_owners_required else []
+    owners = len(waiting)
     known = status.required is not None or bool(status.code_owners_required)
     assigned = [r for r in progress.reviewers if r.assigned]
     approved = [r for r in assigned if r.verdict == ReviewEventState.APPROVED.value]
     return ApprovalSummary(
         approved=len(status.approved_by),
         required=status.required,
-        needed=max(status.missing or 0, owners) if known else None,
+        needed=max(status.missing or 0, fewest_owners(waiting)) if known else None,
         owners_waiting=owners,
         assigned=len(assigned),
         assigned_approved=len(approved),
