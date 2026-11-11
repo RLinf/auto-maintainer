@@ -28,11 +28,13 @@ from ..playbooks.person_notes import (
     NOTE_CHARS,
     About,
     PersonNote,
+    backfill_said,
     drafts_progress,
     learn_event,
     load_notes,
     new_signals,
     save_notes,
+    teaches,
 )
 from .api import service_of
 from .auth import User, current_user
@@ -114,5 +116,33 @@ def build_router() -> APIRouter:
         event = learn_event(user.login, notes)
         await service.bus.publish(event)
         return {"event": event.id}
+
+    @r.post("/everyone/learn")
+    async def learn_everyone(
+        request: Request, user: User = Depends(current_user)
+    ) -> dict[str, Any]:
+        """For the owner of the service: keep the conversations people had before
+        (once), then update the notes of everyone who has something new to learn
+        from and has not turned learning off, now, as their own Learn now would."""
+        service = service_of(request)
+        decision = await service.service_gate(user.login)
+        if not decision.allowed:
+            raise HTTPException(403, decision.reason)
+        backfilled = await backfill_said(service.store)
+        people = sorted(
+            {
+                s.source
+                for s in await service.store.list_signals(unconsumed=False)
+                if s.source and s.source != "service" and teaches(s)
+            },
+            key=str.lower,
+        )
+        started = []
+        for login in people:
+            notes = await load_notes(service.store, login)
+            if notes.learning and await new_signals(service.store, notes):
+                await service.bus.publish(learn_event(login, notes))
+                started.append(login)
+        return {"backfilled": backfilled, "started": started}
 
     return r

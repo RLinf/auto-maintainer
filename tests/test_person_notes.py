@@ -290,3 +290,24 @@ async def test_what_people_said_before_is_kept_once(demo) -> None:
         "Shorter answers, please.",
         "Why did CI fail?",
     ]
+
+
+async def test_the_owner_starts_learning_for_everyone_now(demo) -> None:
+    h, app = demo
+    await _signals(h, "maria")
+    await _signals(h, "walt")
+    off = await load_notes(h.store, "walt")
+    off.learning = False
+    await save_notes(h.store, off)
+    learned: list[Any] = []
+    h.runner.on(
+        "learn",
+        lambda t: (learned.append(t.requested_by), {"notes": []})[1],
+    )
+    async with _as(app, "walt") as walt:
+        assert (await walt.post("/api/me/notes/everyone/learn")).status_code == 403
+    async with _as(app, "maria") as maria:
+        out = (await maria.post("/api/me/notes/everyone/learn")).json()
+    await h.settle()
+    assert out["started"] == ["maria"], "walt turned his learning off"
+    assert learned == ["maria"]
