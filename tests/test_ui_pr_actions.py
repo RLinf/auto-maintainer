@@ -109,11 +109,11 @@ assert.deepEqual(describeRunCi("failed", false), {{ inline: "button", actionable
 // Actions menu items follow open/closed state, review findings, failed jobs, and CI state.
 assert.deepEqual(
   prMenuItems({{ isOpen: true, hasReviewFindings: true, failedCount: 2, ciState: "failed" }}),
-  ["fix", "reproduce", "fix-ci", "run-ci", "merge-base", "open-forge"],
+  ["fix", "reproduce", "fix-ci", "run-ci", "merge-base"],
 );
 assert.deepEqual(
   prMenuItems({{ isOpen: false, hasReviewFindings: false, failedCount: 2, ciState: "passed" }}),
-  ["reproduce", "open-forge"],
+  ["reproduce"],
 );
 
 // Live PR updates that invalidate an open inline form return the popover to the menu.

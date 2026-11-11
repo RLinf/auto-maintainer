@@ -67,7 +67,7 @@ export function describeRunCi(state: RunCiState, canPush: boolean): RunCiDisplay
   return { inline: "button", actionable: true, disabled: false };
 }
 
-export type PrMenuAction = "fix" | "reproduce" | "fix-ci" | "run-ci" | "merge-base" | "open-forge";
+export type PrMenuAction = "fix" | "reproduce" | "fix-ci" | "run-ci" | "merge-base";
 export type PrActionPanel = "menu" | "fix" | "reproduce" | "fix-ci" | "merge-base";
 
 export interface PrMenuState {
@@ -77,7 +77,9 @@ export interface PrMenuState {
   ciState: RunCiState;
 }
 
-/** Which items appear in the PR page's ``Actions`` menu for the current PR state. */
+/** Which items appear in the PR page's ``Actions`` menu for the current PR state.
+ * Opening the PR on its forge is a button of its own beside the menu, since people
+ * use it often. */
 export function prMenuItems(s: PrMenuState): PrMenuAction[] {
   const items: PrMenuAction[] = [];
   if (s.hasReviewFindings) items.push("fix");
@@ -85,7 +87,6 @@ export function prMenuItems(s: PrMenuState): PrMenuAction[] {
   if (s.isOpen && s.failedCount > 0) items.push("fix-ci");
   if (describeRunCi(s.ciState, true).actionable) items.push("run-ci");
   if (s.isOpen) items.push("merge-base");
-  items.push("open-forge");
   return items;
 }
 

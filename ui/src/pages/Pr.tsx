@@ -257,6 +257,10 @@ export default function PrPage({ me }: { me: Me }) {
                 canPost={canPush}
               />
             )}
+            <a className="button" href={pr.url} target="_blank" rel="noreferrer" title={openOnForge}>
+              <Icon name="external" size={14} />
+              <span className="hide-narrow">{openOnForge}</span>
+            </a>
             <PrActionsButton
               repo={full}
               pr={pr}
@@ -264,7 +268,6 @@ export default function PrPage({ me }: { me: Me }) {
               latestReview={latestReview}
               failed={failed}
               canPush={canPush}
-              openOnForge={openOnForge}
             />
             <RefreshButton base={base} />
           </>
@@ -1009,7 +1012,6 @@ function PrActionsButton({
   latestReview,
   failed,
   canPush,
-  openOnForge,
 }: {
   repo: string;
   pr: PrDetail["pr"];
@@ -1017,7 +1019,6 @@ function PrActionsButton({
   latestReview: string | null;
   failed: string[];
   canPush: boolean;
-  openOnForge: string;
 }) {
   const t = useT();
   return (
@@ -1046,7 +1047,6 @@ function PrActionsButton({
           latestReview={latestReview}
           failed={failed}
           canPush={canPush}
-          openOnForge={openOnForge}
           onClose={close}
         />
       )}
@@ -1061,7 +1061,6 @@ function PrActionsMenu({
   latestReview,
   failed,
   canPush,
-  openOnForge,
   onClose,
 }: {
   repo: string;
@@ -1070,7 +1069,6 @@ function PrActionsMenu({
   latestReview: string | null;
   failed: string[];
   canPush: boolean;
-  openOnForge: string;
   onClose: () => void;
 }) {
   const t = useT();
@@ -1150,10 +1148,6 @@ function PrActionsMenu({
           {mergeLabel}
         </MenuItem>
       )}
-      {items.length > 1 && <div className="menu-sep" />}
-      <MenuItem icon="external" href={pr.url} onClick={onClose}>
-        {openOnForge}
-      </MenuItem>
     </>
   );
 }
