@@ -338,7 +338,10 @@ def _add_usage(row: dict[str, Any], run: AgentRunRecord) -> None:
     at = run.created_at.isoformat()
     if row["last_at"] is None or at > row["last_at"]:
         row["last_at"] = at
-    for key, value in (("by_kind", run.task_kind), ("by_runtime", run.runtime)):
+    for key, value in (
+        ("by_kind", run.activity or run.task_kind),
+        ("by_runtime", run.runtime),
+    ):
         part = row[key].setdefault(value, {"runs": 0, "tokens": 0})
         part["runs"] += 1
         part["tokens"] += run.input_tokens + run.output_tokens
@@ -2522,6 +2525,79 @@ def build_router() -> APIRouter:
                 }
                 for name, quota in zip(names, quotas, strict=True)
             ],
+        }
+
+    @r.get("/people/usage")
+    async def people_usage(
+        request: Request,
+        days: int = Query(default=30, ge=1, le=365),
+        user: User = Depends(current_user),
+    ) -> dict[str, Any]:
+        """Each person's agent tokens in the last ``days``, by task kind and agent:
+        what their requests used on the service's agent accounts and model APIs
+        (``service``, which their token limit counts) apart from their own accounts
+        (``own``), with their limit and what they used of it in the last day, week,
+        and month. The owner of the service and operators see everyone and the
+        service's own work nobody asked for (``background``); others, themselves."""
+        service = service_of(request)
+        since = service.clock.now() - timedelta(days=days)
+        runs = await service.store.list_agent_runs(USAGE_RUNS, since=since)
+        gate = await service.service_gate(user.login)
+        everything = gate.allowed or user.login in service.settings.operators
+        me = user.login.lower()
+        people: dict[str, dict[str, Any]] = {}
+        background = _usage_row(None)
+        for run in runs:
+            login = run.requested_by
+            if not login:
+                if run.account:
+                    login = run.account
+                else:
+                    _add_usage(background, run)
+                    continue
+            if not everything and login.lower() != me:
+                continue
+            row = people.setdefault(
+                login.lower(),
+                {
+                    "login": login,
+                    "service": _usage_row(login),
+                    "own": _usage_row(login),
+                },
+            )
+            _add_usage(row["own" if run.account else "service"], run)
+        if me not in people:
+            people[me] = {
+                "login": user.login,
+                "service": _usage_row(user.login),
+                "own": _usage_row(user.login),
+            }
+        limits = service.service_config.token_limits
+        out = []
+        for key, row in sorted(
+            people.items(),
+            key=lambda kv: (
+                -(kv[1]["service"]["input_tokens"] + kv[1]["service"]["output_tokens"])
+            ),
+        ):
+            limit = limits.for_login(row["login"])
+            out.append(
+                {
+                    **row,
+                    "limit": limit.model_dump(mode="json"),
+                    "limit_own": any(k.lower() == key for k in limits.people),
+                    "used": await service.ledger.used(row["login"]),
+                }
+            )
+        return {
+            "days": days,
+            "since": since.isoformat(),
+            "complete": len(runs) < USAGE_RUNS,
+            "everything": everything,
+            "can_manage": gate.allowed,
+            "limits": limits.model_dump(mode="json"),
+            "people": out,
+            "background": background if everything else None,
         }
 
     @r.get("/repos/{repo:path}/assignable")

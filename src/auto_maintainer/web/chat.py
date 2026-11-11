@@ -548,6 +548,8 @@ def build_router() -> APIRouter:
                 ).model_dump(mode="json")
             result = outcome
             if not result.ok or result.structured is None:
+                if result.error_kind == "limit":
+                    raise HTTPException(429, str(result.error))
                 raise HTTPException(502, f"the chat agent failed: {result.error}")
             answer = ChatAnswer.model_validate(result.structured)
         finally:
@@ -931,6 +933,10 @@ async def _settings_block(service: Any, user: User) -> str:
             "timeout_seconds, permissions: auto | restricted}}\n"
             "system: {poll_seconds, max_public_writes_per_hour, max_repo_public_writes_per_hour, "
             "agent_slots: <agent jobs that run at once for people's requests, 1-16>}\n"
+            "token_limits: {default: {daily_tokens, weekly_tokens, monthly_tokens}, "
+            "people: {<login>: {...the same; {} is no limit}}}: tokens each person's "
+            "requests may use on the service's agents and model APIs, rolling day, 7 "
+            "and 30 days; unset is no limit; their own agent accounts never count\n"
             "labs: {<name>: {description: <its environment and rules in plain language: hardware, "
             "how to set up the environment, where data lives, what runs must not do, how long "
             "they may take>, transport: ssh | local, host: <HostName: an address, name, or SSH "

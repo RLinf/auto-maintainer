@@ -23,6 +23,7 @@ import { ApiForm, ApiSummary, modelsFor, PROTOCOLS } from "../providerForm";
 import { ForgesCard } from "../forgeSetup";
 import { OwnerCard } from "../ownerCard";
 import { NamesCard } from "../aliases";
+import { PeopleUsageTab } from "../tokenLimits";
 import { Popover, Skeleton, Tabs, useTab, useToast } from "../ui";
 
 const CONTEXT: AgentContext = { page: "settings", repo: null, number: null, label: "Settings" };
@@ -61,6 +62,7 @@ export default function SettingsPage() {
     { id: "agents", label: t("Agents"), count: view.data?.agents.filter((a) => a.enabled).length },
     { id: "providers", label: t("Model providers"), count: view.data?.providers.length },
     { id: "routing", label: t("Task routing") },
+    { id: "usage", label: t("Usage") },
     { id: "labs", label: t("Test machines"), count: view.data?.labs.length },
     { id: "system", label: t("System") },
     { id: "file", label: t("Settings file") },
@@ -155,6 +157,7 @@ export default function SettingsPage() {
         </div>
       )}
       {tab === "routing" && <RoutingTab v={v} ask={ask} />}
+      {tab === "usage" && <PeopleUsageTab />}
       {tab === "labs" && <LabsTab v={v} ask={ask} />}
       {tab === "system" && (
         <div className="stack" style={{ gap: 16 }}>

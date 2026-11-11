@@ -124,6 +124,8 @@ class AgentRunRecord(BaseModel):
     repo: str | None = None
     runtime: str
     task_kind: str
+    activity: str | None = None
+    """``AgentTask.activity``: what the person was doing, when the kind does not say."""
     ok: bool
     permissions: str = "restricted"
     error: str | None = None

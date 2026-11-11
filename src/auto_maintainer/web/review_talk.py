@@ -483,6 +483,7 @@ async def _turn(
     token, door_env = await open_door(door, user.login)
     task = AgentTask(
         kind=kind,
+        activity="review_talk",
         prompt=prompt,
         workdir=workdir,
         output_schema=model.model_json_schema(),
@@ -523,6 +524,8 @@ async def _turn(
                 runtime=result.runtime,
             )
         )
+        if result.error_kind == "limit":
+            raise HTTPException(429, str(result.error))
         raise HTTPException(502, f"the agent failed: {result.error}")
     answer = model.model_validate(result.structured)
     keep_session(thread, result)

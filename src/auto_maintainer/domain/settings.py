@@ -366,6 +366,55 @@ class SystemSettings(BaseModel):
     requests; the service's own background work takes only slots nobody uses."""
 
 
+class TokenLimit(BaseModel):
+    """The most tokens one person's requests may use on the service's own agent
+    accounts and model APIs in a rolling day, week (7 days), and month (30 days);
+    ``None`` is no limit. Their own agent accounts and model APIs never count."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    daily_tokens: int | None = Field(default=None, ge=0)
+    weekly_tokens: int | None = Field(default=None, ge=0)
+    monthly_tokens: int | None = Field(default=None, ge=0)
+
+    def windows(self) -> list[tuple[str, int]]:
+        """The limits set, as ``(window, tokens)``: ``day``, ``week``, ``month``."""
+        return [
+            (window, cap)
+            for window, cap in (
+                ("day", self.daily_tokens),
+                ("week", self.weekly_tokens),
+                ("month", self.monthly_tokens),
+            )
+            if cap is not None
+        ]
+
+
+class TokenLimits(BaseModel):
+    """Per-person token limits: ``default`` for everyone, and ``people`` by login,
+    each replacing the default whole (``{}`` is unlimited for that person). With
+    nothing set, nobody is limited."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    default: TokenLimit = Field(default_factory=TokenLimit)
+    people: dict[str, TokenLimit] = Field(default_factory=dict)
+
+    @field_validator("people")
+    @classmethod
+    def _logins(cls, people: dict[str, TokenLimit]) -> dict[str, TokenLimit]:
+        for login in people:
+            if not login.strip() or login.startswith("@") or " " in login:
+                raise ValueError(f"{login!r} is not a login")
+        return people
+
+    def for_login(self, login: str) -> TokenLimit:
+        """``login``'s limit: their own entry (logins compared without case), else
+        the default."""
+        mine = {k.lower(): v for k, v in self.people.items()}.get(login.lower())
+        return mine if mine is not None else self.default
+
+
 # -- the document ------------------------------------------------------------------
 
 
@@ -388,6 +437,8 @@ class ServiceConfig(BaseModel):
     system: SystemSettings = Field(default_factory=SystemSettings)
     labs: dict[str, LabMachine] = Field(default_factory=dict)
     """Test machines by name (design 5.10)."""
+    token_limits: TokenLimits = Field(default_factory=TokenLimits)
+    """How many tokens each person's requests may use on the service's agents."""
 
 
 class SettingsStatus(BaseModel):

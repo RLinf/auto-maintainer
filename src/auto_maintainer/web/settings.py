@@ -42,6 +42,7 @@ from ..domain.settings import (
     ModelSpec,
     Provider,
     SettingsError,
+    TokenLimits,
     agents_for,
     can_bypass,
     effective_agents,
@@ -286,6 +287,23 @@ class AgentModelBody(BaseModel):
 
 class DefaultAgentBody(BaseModel):
     agent: str | None = None
+
+
+class TokenLimitsBody(BaseModel):
+    limits: TokenLimits
+
+
+def _with_token_limits(text: str, limits: TokenLimits) -> str:
+    """The settings document with ``token_limits`` set, or removed when it limits
+    nobody."""
+    data = _settings_data(text)
+    value = limits.model_dump(mode="json", exclude_none=True)
+    if not value.get("default") and not value.get("people"):
+        data.pop("token_limits", None)
+    else:
+        # A person's ``{}`` stays: it means no limit for them.
+        data["token_limits"] = {k: v for k, v in value.items() if v}
+    return yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
 
 
 class AgentSlotsBody(BaseModel):
@@ -673,6 +691,23 @@ def build_router() -> APIRouter:
                 title=f"settings: {body.agent} runs every task first"
                 if body.agent
                 else "settings: the agent chosen during setup runs every task first",
+            ),
+            user,
+        )
+
+    @r.put("/token-limits")
+    async def set_token_limits(
+        request: Request, body: TokenLimitsBody, user: User = Depends(current_user)
+    ) -> dict[str, Any]:
+        """How many tokens each person's requests may use on the service's agents:
+        a default for everyone and overrides by login; applies to the next run."""
+        service = service_of(request)
+        text, _ = await service.settings_text()
+        return await save(
+            request,
+            DocumentBody(
+                yaml=_with_token_limits(text, body.limits),
+                title="settings: token limits per person",
             ),
             user,
         )

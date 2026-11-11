@@ -165,6 +165,10 @@ class AgentTask(BaseModel):
     """The route's agent was chosen for this task (the requester picked it), so the
     router keeps the route's order instead of putting the requester's own agents
     first."""
+    activity: str | None = None
+    """What the person was doing, where the task kind alone does not say: a
+    review's discussion (``review_talk``) runs as a ``review`` task, the People
+    conversation (``people_talk``) as ``governance``. Usage counts it apart."""
     records_token: str | None = None
     """For a conversation with a person: the token of the service's records door
     (``web/records.py``) for that person. The run gets the ``am-read`` command and the
@@ -299,8 +303,11 @@ class AgentResult(BaseModel):
     """The person whose own agent account ran it; ``None`` for the service's."""
     error: str | None = None
     error_kind: (
-        Literal["auth", "quota", "crash", "timeout", "invalid_output", "other"] | None
+        Literal["auth", "quota", "crash", "timeout", "invalid_output", "limit", "other"]
+        | None
     ) = None
+    """``limit``: the person who asked reached a token limit of theirs on the
+    service's agents (``TokenLimits``); the job ends instead of waiting."""
     transcript_path: str | None = None
     duration_seconds: float = 0.0
 

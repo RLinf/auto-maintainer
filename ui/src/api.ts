@@ -758,6 +758,43 @@ export interface UsageRow {
   by_runtime: Record<string, { runs: number; tokens: number }>;
 }
 
+/** The most tokens one person's requests may use on the service's agents in a
+ * rolling day, week, and month; null is no limit. */
+export interface TokenLimit {
+  daily_tokens?: number | null;
+  weekly_tokens?: number | null;
+  monthly_tokens?: number | null;
+}
+
+export interface TokenLimits {
+  default: TokenLimit;
+  people: Record<string, TokenLimit>;
+}
+
+export interface PersonUsage {
+  login: string;
+  /** Runs they asked for on the service's agent accounts and model APIs: what their limit counts. */
+  service: UsageRow;
+  /** Runs on their own agent accounts and model APIs. */
+  own: UsageRow;
+  limit: TokenLimit;
+  /** Whether the limit is theirs alone rather than the default. */
+  limit_own: boolean;
+  used: { day: number; week: number; month: number };
+}
+
+export interface PeopleUsage {
+  days: number;
+  since: string;
+  complete: boolean;
+  everything: boolean;
+  can_manage: boolean;
+  limits: TokenLimits;
+  people: PersonUsage[];
+  /** The service's own work nobody asked for; for the owner and operators. */
+  background: UsageRow | null;
+}
+
 export interface QuotaBucket {
   group: string;
   name: string;

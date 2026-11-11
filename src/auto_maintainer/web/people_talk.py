@@ -297,6 +297,7 @@ async def _turn(
     route, resume = await turn_route(service, user.login, thread, base_route)
     task = AgentTask(
         kind=TaskKind.GOVERNANCE,
+        activity="people_talk",
         prompt=prompt,
         workdir=workdir,
         output_schema=PeopleTurn.model_json_schema(),
@@ -337,6 +338,8 @@ async def _turn(
                 runtime=result.runtime,
             )
         )
+        if result.error_kind == "limit":
+            raise HTTPException(429, str(result.error))
         raise HTTPException(502, f"the agent failed: {result.error}")
     answer = PeopleTurn.model_validate(result.structured)
     keep_session(thread, result)

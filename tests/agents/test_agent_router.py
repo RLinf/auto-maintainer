@@ -440,3 +440,21 @@ async def test_a_persons_own_account_failing_leaves_the_services_running() -> No
     assert (await router.run(_task(requested_by="walt"), route, Verdict)).runtime == (
         "b"
     ), "the service's account of b still runs"
+
+
+async def test_a_person_over_their_token_limit_gets_no_service_agent() -> None:
+    async def limit(login: str) -> str | None:
+        return "token limit: walt used 2.0M of 2.0M tokens" if login == "walt" else None
+
+    a = ScriptedAgentRuntime("a", default={"ok": True})
+    b = ScriptedAgentRuntime("b", default={"ok": True})
+    router, records = _router(a, b)
+    router.person_limit = limit
+    route = Route(primary="a", fallback=["b"])
+    refused = await router.run(_task(requested_by="walt"), route, Verdict)
+    assert not refused.ok and refused.error_kind == "limit"
+    assert refused.error == "token limit: walt used 2.0M of 2.0M tokens", "said once"
+    assert not a.tasks and not b.tasks and not records
+    assert (await router.run(_task(requested_by="maria"), route, Verdict)).ok
+    assert (await router.run(_task(), route, Verdict)).ok, "nobody's own work is free"
+    assert "a" not in router.breakers or not router.breakers["a"].open_until

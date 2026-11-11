@@ -272,6 +272,20 @@ a.list-row:hover { background: var(--surface-2); text-decoration: none; }
 .custom-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); vertical-align: middle; }
 .row-action { opacity: 0.55; }
 tr:hover .row-action, .row-action:focus-visible { opacity: 1; }
+/* Settings → Usage: limits per person, and each person's tokens by kind of task. */
+.limit-row { display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap; padding: 8px 0; border-bottom: 1px solid var(--border); }
+.limit-row:last-of-type { border-bottom: none; }
+.limit-who { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 180px; }
+.limit-person { flex-direction: row; align-items: center; gap: 6px; }
+.limit-inputs { display: flex; gap: 8px; flex-wrap: wrap; }
+.limit-inputs input { width: 110px; }
+.limit-inputs input[aria-invalid="true"] { border-color: var(--bad); }
+.limit-meters { display: grid; gap: 4px; }
+.limit-meter-row { display: grid; grid-template-columns: 64px auto; align-items: center; gap: 8px; }
+.limit-meters .quality-meter { width: 72px; }
+.usage-people td, .usage-people th { white-space: nowrap; }
+.usage-people tr.expandable { cursor: pointer; }
+.usage-detail { display: grid; gap: 4px; padding: 4px 0 4px 22px; white-space: normal; }
 .aliases-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 2px 16px; }
 .aliases-row { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 5px 4px; border-radius: 8px; }
 .aliases-row:hover { background: var(--surface-2); }

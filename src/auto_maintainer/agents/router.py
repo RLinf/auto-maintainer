@@ -171,6 +171,11 @@ class AgentRouter:
         (``Service.signed_in``). An agent found not signed in that has no model
         provider is not used, except for the tasks of a person who runs it on their
         own account."""
+        self.person_limit: Callable[[str], Awaitable[str | None]] | None = None
+        """Why the person who asked for a task may not run it on the service's own
+        agent accounts and model APIs now, such as a token limit they reached
+        (``Service.over_limit``); ``None`` when they may. Their own accounts are
+        never limited."""
         self.signed_out: set[str] = set()
         """Agents last found not signed in and without a model provider: ``usable``
         and ``runs_on`` pass over them."""
@@ -301,6 +306,15 @@ class AgentRouter:
             last = result
         if last is not None:
             return last
+        limits = {s.split(": ", 1)[1] for s in skipped if ": token limit: " in s}
+        if limits and len(limits) == len({s.split(": ", 1)[1] for s in skipped}):
+            # Every agent was passed over for the same reason: say it once.
+            return AgentResult(
+                runtime=route.primary,
+                ok=False,
+                error=next(iter(limits)),
+                error_kind="limit",
+            )
         return AgentResult(
             runtime=route.primary,
             ok=False,
@@ -442,6 +456,10 @@ class AgentRouter:
                     return f"circuit open ({breaker.reason})"
                 breaker.open_until = None
                 breaker.invalid_streak = 0
+        if not own and task is not None and task.requested_by and self.person_limit:
+            reason = await self.person_limit(str(task.requested_by))
+            if reason:
+                return reason
         budget = None if own else self.budgets.get(name)
         if (
             budget
@@ -649,6 +667,7 @@ class AgentRouter:
                     repo=task.repo,
                     runtime=runtime.name,
                     task_kind=str(task.kind),
+                    activity=task.activity,
                     ok=result.ok,
                     permissions=task.permissions,
                     error=result.error,

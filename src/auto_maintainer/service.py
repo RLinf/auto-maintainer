@@ -87,6 +87,7 @@ from .domain.settings import (
 from .domain.snapshot import RepoInfo
 from .engine.bus import EventBus
 from .engine.engine import Engine
+from .engine.ledger import TokenLedger
 from .engine.poller import Poller
 from .engine.progress import JobProgress
 from .engine.questions import QuestionDesk
@@ -308,6 +309,10 @@ class Service:
             # An agent its account is not signed in to, without a model provider,
             # is passed over: it would only fail.
             adapters.agents.signed_in_check = self.signed_in
+        self.ledger = TokenLedger(adapters.store, adapters.clock)
+        """The tokens each person's requests used on the service's agents."""
+        if hasattr(adapters.agents, "person_limit"):
+            adapters.agents.person_limit = self.over_limit
         self.exec = ExecContext(
             store=adapters.store,
             reader=adapters.actuator_reader,
@@ -796,6 +801,13 @@ class Service:
     def installable(self) -> dict[str, str]:
         """The agent CLIs this host can install from the dashboard, with their source."""
         return self.a.installer.sources() if self.a.installer is not None else {}
+
+    async def over_limit(self, login: str) -> str | None:
+        """Why ``login``'s next request may not run on the service's own agents now:
+        a token limit of theirs reached (``token_limits`` in the settings)."""
+        return await self.ledger.over(
+            login, self.service_config.token_limits.for_login(login)
+        )
 
     async def latest_versions(self, refresh: bool = False) -> dict[str, dict[str, Any]]:
         """The latest version of each CLI this host can install, from its publisher,
