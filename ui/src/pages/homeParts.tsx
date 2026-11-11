@@ -3,7 +3,7 @@
 
 import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState, type ReactNode } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { api, type AgentJob, type Automation, type ChatThread, type Me, type PrRow, type RepoRow, type ReviewStart } from "../api";
 import { useAgent } from "../agent";
 import { agentName, AgentPicker, reviewToast, useAgentChoice } from "../agentPicker";
@@ -17,6 +17,7 @@ import { Popover, Skeleton, useToast } from "../ui";
 import { holds, Person, PrPeopleLine } from "../avatar";
 import { useAliasOf } from "../aliases";
 import { ProgressInline } from "../progress";
+import { isHomeOrder, resolveHomeOrder, writeHomeOrder, type HomeOrder } from "../viewState";
 
 // ---- getting started ---------------------------------------------------------------------------
 
@@ -178,7 +179,7 @@ const STAFFED: Record<Staffed, { label: string; keep: (p: PrRow) => boolean }> =
   "no-reviewers": { label: "No reviewers yet", keep: (p) => !p.assignees.some((a) => a.role === "reviewer") },
 };
 
-type ReviewOrder = "priority" | "newest" | "oldest" | "updated";
+type ReviewOrder = HomeOrder;
 
 /** The orders Home's PRs to review offers: the repository's priorities (the default),
  *  or time, by when a PR was opened or last updated; PRs without the time go last. */
@@ -189,42 +190,64 @@ const REVIEW_ORDERS: Record<ReviewOrder, { label: string; compare: (a: PrRow, b:
   updated: { label: "Recently updated", compare: (a, b) => (timeOf(b.updated_at) ?? -Infinity) - (timeOf(a.updated_at) ?? -Infinity) },
 };
 
-/** The order chosen for Home's PRs to review, remembered in this browser. */
-function useReviewOrder(): [ReviewOrder, (o: ReviewOrder) => void] {
-  const [order, setOrder] = useState<ReviewOrder>(() => {
-    try {
-      const saved = localStorage.getItem("am.home.order") as ReviewOrder | null;
-      return saved && saved in REVIEW_ORDERS ? saved : "priority";
-    } catch {
-      return "priority";
-    }
-  });
-  const choose = (o: ReviewOrder) => {
-    setOrder(o);
-    try {
-      localStorage.setItem("am.home.order", o);
-    } catch {
-      /* the choice lasts for this page only */
-    }
-  };
-  return [order, choose];
-}
-
 /** PRs that need a review in one repository, ranked by its priorities. A search looks
  *  through every open PR (``all``), not only those waiting for a review. */
-export function ReviewCard({ rows, all, loading, me, automations }: { rows: PrRow[]; all: PrRow[]; loading: boolean; me: Me; automations: Automation[] }) {
+export function ReviewCard({
+  rows,
+  all,
+  loading,
+  me,
+  automations,
+  searchParams,
+}: {
+  rows: PrRow[];
+  all: PrRow[];
+  loading: boolean;
+  me: Me;
+  automations: Automation[];
+  searchParams?: URLSearchParams;
+}) {
   const t = useT();
   const toast = useToast();
   const agent = useAgent();
   const navigate = useNavigate();
+  const [urlParams, setParams] = useSearchParams();
+  const params = searchParams ?? urlParams;
+  const updateParams = (changes: Record<string, string | null>) =>
+    setParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        for (const [k, v] of Object.entries(changes)) {
+          if (v === null || v === "") next.delete(k);
+          else next.set(k, v);
+        }
+        return next;
+      },
+      { replace: true },
+    );
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [who, setWho] = useAgentChoice("review");
-  const [showAll, setShowAll] = useState(false);
-  const [query, setQuery] = useState("");
-  const [only, setOnly] = useState<"owner" | "reviewer" | null>(null);
-  const [staffed, setStaffed] = useState<Staffed>("");
+  const query = params.get("rq") ?? "";
+  const rawOnly = params.get("only");
+  const only: "owner" | "reviewer" | null = rawOnly === "owner" || rawOnly === "reviewer" ? rawOnly : null;
+  const rawStaffed = params.get("staffed") ?? "";
+  const staffed: Staffed = rawStaffed in STAFFED ? (rawStaffed as Staffed) : "";
+  const order = resolveHomeOrder(params);
+  const urlOrder = params.get("rorder");
+  useEffect(() => {
+    if (isHomeOrder(urlOrder)) writeHomeOrder(urlOrder);
+  }, [urlOrder]);
+  const showAll = params.get("rall") === "1";
+  const setQuery = (v: string) => updateParams({ rq: v || null });
+  const setOnly = (v: "owner" | "reviewer" | null) => updateParams({ only: v });
+  const setStaffed = (v: Staffed) => updateParams({ staffed: v || null });
+  const setOrder = (o: ReviewOrder) => {
+    writeHomeOrder(o);
+    updateParams({ rorder: o });
+  };
+  const setShowAll = (v: boolean) => updateParams({ rall: v ? "1" : null });
+  const filtering = Boolean(query || only || staffed);
   const aliasOf = useAliasOf();
-  const [order, setOrder] = useReviewOrder();
   const words = query.toLowerCase().split(/\s+/).filter(Boolean);
   const searching = words.length > 0;
   // The PRs one owns or reviews matter whatever their review state, so these two
@@ -311,6 +334,11 @@ export function ReviewCard({ rows, all, loading, me, automations }: { rows: PrRo
             </option>
           ))}
         </select>
+        {filtering && (
+          <button type="button" className="ghost sm" onClick={() => updateParams({ rq: null, only: null, staffed: null })}>
+            {t("Reset")}
+          </button>
+        )}
         <select
           value={order}
           onChange={(e) => setOrder(e.target.value as ReviewOrder)}
@@ -351,7 +379,7 @@ export function ReviewCard({ rows, all, loading, me, automations }: { rows: PrRo
               />
               <Tier tier={p.tier} />
               <span className="main">
-                <Link to={prPath(p.repo, p.number)} className="t" style={{ color: "var(--text)" }} onClick={(e) => e.stopPropagation()}>
+                <Link to={prPath(p.repo, p.number)} state={{ from: "home" }} className="t" style={{ color: "var(--text)" }} onClick={(e) => e.stopPropagation()}>
                   {p.title}
                 </Link>
                 <span className="meta">

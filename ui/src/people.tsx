@@ -9,6 +9,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Fragment, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
+import { AgentPicker, agentName } from "./agentPicker";
 import { api, type ChatMessage, type JobStep } from "./api";
 import { ErrorBox, Section, GrowingTextarea, StopButton } from "./components";
 import { useQuestions } from "./data";
@@ -772,7 +773,14 @@ function Clamped({ text }: { text: string }) {
   );
 }
 
-type TalkState = { thread: string | null; live_run: string | null; listening: boolean; messages: ChatMessage[] };
+type TalkState = {
+  thread: string | null;
+  agent?: string | null;
+  runtime?: string | null;
+  live_run: string | null;
+  listening: boolean;
+  messages: ChatMessage[];
+};
 type TurnSteps = { run: string | null; live: boolean; steps: JobStep[] };
 
 /** The conversation with the agent that keeps the record, shared by the repository's reviewers. */
@@ -794,6 +802,7 @@ function PeopleTalk({
   const box = useRef<HTMLTextAreaElement>(null);
   const [text, setText] = useState("");
   const [pendingText, setPendingText] = useState("");
+  const [pickedAgent, setPickedAgent] = useState<string | undefined>(undefined);
   const [allMessages, setAllMessages] = useState(false);
   const [allQuestions, setAllQuestions] = useState(false);
   const log = useRef<HTMLDivElement>(null);
@@ -808,8 +817,18 @@ function PeopleTalk({
     }, 50);
   }, [seed]);
   const talk = useQuery({ queryKey: ["people", repo, "talk"], queryFn: () => api.get<TalkState>(base) });
+  const listening = !!talk.data?.listening;
+  const agent = pickedAgent ?? talk.data?.agent ?? talk.data?.runtime ?? "";
   const send = useMutation({
-    mutationFn: (said: string) => api.post<ChatMessage>(base, { text: said }),
+    mutationFn: ({ said, chosen }: { said: string; chosen: string | undefined }) =>
+      api.post<ChatMessage>(base, {
+        text: said,
+        ...(chosen !== undefined && !listening ? { agent: chosen } : {}),
+      }),
+    onSuccess: async () => {
+      await client.invalidateQueries({ queryKey: ["people", repo, "talk"] });
+      setPickedAgent(undefined);
+    },
     onSettled: () => {
       setPendingText("");
       for (const queryKey of [["people"], ["memory"]]) void client.invalidateQueries({ queryKey });
@@ -828,7 +847,6 @@ function PeopleTalk({
     enabled: running,
     refetchInterval: running ? 1500 : false,
   });
-  const listening = !!talk.data?.listening;
   const busy = running && !listening;
   const pendingQuestions = useQuestions("pending");
   const messages = talk.data?.messages ?? [];
@@ -850,7 +868,7 @@ function PeopleTalk({
     if (!clean || !hasProfile) return;
     if (!listening) setPendingText(clean);
     setText("");
-    send.mutate(clean);
+    send.mutate({ said: clean, chosen: pickedAgent });
   };
   const answer = (q: string) => {
     setText(`${q}\n→ `);
@@ -886,6 +904,11 @@ function PeopleTalk({
               </div>
             ) : (
               <div className="bubble assistant">
+                {m.runtime && (
+                  <span className="small muted" style={{ display: "block", marginBottom: 2 }}>
+                    {agentName(m.runtime)}
+                  </span>
+                )}
                 <Clamped text={m.text} />
               </div>
             )}
@@ -971,12 +994,15 @@ function PeopleTalk({
             <Icon name="send" size={15} />
           </button>
         </form>
-        <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
-          <button className="sm" disabled={busy || !established || !hasProfile} title={!established ? t("Fill in the process first; the check follows its rules.") : undefined} onClick={() => submit(t("Check who should change role under our process, from GitHub activity."))}>
-            <Icon name="refresh" size={13} />
-            {t("Check who should change role")}
-          </button>
-          <span className="small muted">{t("Nothing changes until a maintainer applies the draft.")}</span>
+        <div className="row" style={{ gap: 8, flexWrap: "wrap", justifyContent: "space-between" }}>
+          <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+            <button className="sm" disabled={busy || !established || !hasProfile} title={!established ? t("Fill in the process first; the check follows its rules.") : undefined} onClick={() => submit(t("Check who should change role under our process, from GitHub activity."))}>
+              <Icon name="refresh" size={13} />
+              {t("Check who should change role")}
+            </button>
+            <span className="small muted">{t("Nothing changes until a maintainer applies the draft.")}</span>
+          </div>
+          <AgentPicker compact purpose="answer" task="governance" value={agent} onChange={setPickedAgent} disabled={listening || !hasProfile} />
         </div>
         <ErrorBox error={send.error || talk.error} />
       </div>

@@ -290,3 +290,166 @@ async def test_a_conversation_outside_any_repository_reads_the_services_own_code
     assert (CODE, None, running) in h.service.a.workspace.prepared  # type: ignore[attr-defined]
     assert Path(task.workdir).name.startswith(CODE.replace("/", "__"))
     assert "a checkout of the service's own code" in task.prompt
+
+
+async def test_clean_self_pr_updates_its_branch_through_the_forge(
+    h: Harness, tmp_path: Path
+) -> None:
+    h.forge.put_pr(make_pr(repo=CODE, number=7, head_ref="am/self/ping-1"))
+    h.forge.put_pr(make_pr(repo=CODE, number=8, head_ref="feature/other"))
+    app = create_app(h.service, data_dir=tmp_path, allow_dev_login=True)
+    async with _client(app, "walt") as walt:
+        assert (await walt.post("/api/service/prs/7/merge-base")).status_code == 403
+    async with _client(app, "maria") as maria:
+        view = (await maria.get("/api/service")).json()
+        self_pr = next(p for p in view["prs"] if p["number"] == 7)
+        assert self_pr["conflicting"] is False and self_pr["base"] == "main"
+        assert (await maria.post("/api/service/prs/8/merge-base")).status_code == 409
+        res = await maria.post("/api/service/prs/7/merge-base")
+        assert res.status_code == 200, res.text
+        out = res.json()
+        await h.settle()
+        after = (await maria.get("/api/service")).json()
+    assert out["run"] == "update"
+    [update] = h.forge.writes_of("update_branch")
+    assert update["repo"] == CODE and update["number"] == 7
+    assert any(
+        row["kind"] == "code.update" and row["status"] == "executed"
+        for row in after["history"]
+    )
+
+
+async def test_conflicting_self_pr_resolves_docs_conflict_and_pushes_after_approval(
+    h: Harness, tmp_path: Path
+) -> None:
+    from auto_maintainer.domain.snapshot import Mergeable
+
+    h.forge.put_pr(
+        make_pr(
+            repo=CODE,
+            number=9,
+            head_ref="am/self/docs-9",
+            mergeable=Mergeable.CONFLICTING,
+        )
+    )
+    h.service.a.workspace.merge_conflicts = {  # type: ignore[attr-defined]
+        "docs/design.md": "<<<<<<< HEAD\nour section\n=======\nmain's section\n>>>>>>> main\n"
+    }
+
+    def resolve(task: AgentTask) -> AgentResult:
+        assert task.repo == CODE and "docs/design.md" in task.prompt
+        (Path(task.workdir) / "docs" / "design.md").write_text(
+            "our section\nmain's section\n"
+        )
+        (Path(task.workdir) / "README.md").write_text("brought by main\n")
+        return AgentResult(
+            runtime="codex",
+            ok=True,
+            text="Kept both sections in docs/design.md.",
+        )
+
+    h.runner.on("fix", resolve)
+    app = create_app(h.service, data_dir=tmp_path, allow_dev_login=True)
+    async with _client(app, "maria") as maria:
+        view = (await maria.get("/api/service")).json()
+        assert view["prs"][0]["conflicting"] is True
+        refused = await maria.post("/api/service/prs/9/merge")
+        assert refused.status_code == 409 and "conflicts with main" in refused.text
+        assert h.forge.writes_of("merge_service_pr") == []
+        started = await maria.post(
+            "/api/service/prs/9/merge-base", json={"agent": "codex"}
+        )
+        assert started.status_code == 200, started.text
+        assert started.json()["run"] == "resolve"
+        await h.settle()
+        assert any(
+            j["playbook"] == "merge_base" for j in (await maria.get("/api/work")).json()
+        )
+        assert h.service.a.publisher.published == []  # type: ignore[union-attr]
+        [proposal] = [
+            p for p in (await maria.get("/api/proposals")).json() if p["repo"] == CODE
+        ]
+        assert proposal["can_decide"] is True
+        assert proposal["action"]["action"]["kind"] == "code.update"
+        payload = proposal["action"]["action"]["payload"]
+        assert payload["runtime"] == "codex"
+        assert "docs/design.md" in payload["patch"]
+        assert "README.md" not in payload["patch"]
+
+    async with _client(app, "walt") as walt:
+        [seen] = [
+            p for p in (await walt.get("/api/proposals")).json() if p["repo"] == CODE
+        ]
+        assert seen["can_decide"] is False
+        assert (
+            await walt.post(f"/api/proposals/{proposal['id']}/approve", json={})
+        ).status_code == 403
+
+    async with _client(app, "maria") as maria:
+        approved = await maria.post(f"/api/proposals/{proposal['id']}/approve", json={})
+        assert approved.status_code == 200, approved.text
+        await h.settle()
+        after = (await maria.get("/api/service")).json()
+
+    [pushed] = h.service.a.publisher.published  # type: ignore[union-attr]
+    assert pushed["repo"] == CODE and pushed["branch"] == "am/self/docs-9"
+    assert pushed["merge_sha"] == "d" * 40
+    assert pushed["resolved"] == {"docs/design.md": "our section\nmain's section\n"}
+    assert "Requested-by: maria" in pushed["message"]
+    assert "Signed-off-by:" not in pushed["message"]
+    assert any(
+        row["kind"] == "code.update" and row["status"] == "executed"
+        for row in after["history"]
+    )
+
+
+def test_only_files_keeps_resolved_files_from_git_patches() -> None:
+    from auto_maintainer.playbooks.merge_base import only_files
+
+    docs_block = (
+        "diff --git a/docs/design.md b/docs/design.md\n"
+        "index 1111111..2222222 100644\n"
+        "--- a/docs/design.md\n"
+        "+++ b/docs/design.md\n"
+        "@@ -1,2 +1,3 @@\n"
+        " our section\n"
+        "+main's section (mentions diff --git inline)\n"
+    )
+    readme_block = (
+        "diff --git a/README.md b/README.md\n"
+        "new file mode 100644\n"
+        "index 0000000..3333333\n"
+        "--- /dev/null\n"
+        "+++ b/README.md\n"
+        "@@ -0,0 +1 @@\n"
+        "+brought by main\n"
+    )
+    spaced_block = (
+        "diff --git a/docs/part b/merge guide.md b/docs/part b/merge guide.md\n"
+        "index 4444444..5555555 100644\n"
+        "--- a/docs/part b/merge guide.md\t\n"
+        "+++ b/docs/part b/merge guide.md\t\n"
+        "@@ -1 +1,2 @@\n"
+        " kept\n"
+        "+resolved\n"
+    )
+    other_spaced_block = (
+        "diff --git a/docs/other notes.md b/docs/other notes.md\n"
+        "index 6666666..7777777 100644\n"
+        "--- a/docs/other notes.md\t\n"
+        "+++ b/docs/other notes.md\t\n"
+        "@@ -1 +1 @@\n"
+        "-old\n"
+        "+from main\n"
+    )
+    patch = readme_block + docs_block + other_spaced_block + spaced_block
+
+    assert only_files(patch, {"docs/design.md"}) == docs_block
+    assert (
+        only_files(patch, {"docs/design.md", "docs/part b/merge guide.md"})
+        == docs_block + spaced_block
+    )
+    assert only_files(patch, set()) == ""
+    assert only_files("README.md\nbrought by main\n", {"docs/design.md"}) == ""
+    assert only_files("+++ README.md\nbrought by main\n", {"docs/design.md"}) == ""
+    assert only_files("", {"docs/design.md"}) == ""

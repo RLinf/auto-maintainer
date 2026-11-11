@@ -1544,6 +1544,7 @@ const zh: Record<string, string> = {
   "Watch the first": "查看第一个",
   "What should be checked? (optional)": "要验证什么？（可选）",
   "What would confirm it": "怎样算证实",
+  "Which agent answers": "由哪个智能体回答",
   "Which agent does it": "由哪个智能体来做",
   "Working": "进行中",
   "Working…": "进行中…",
@@ -2018,6 +2019,15 @@ const zh: Record<string, string> = {
   "The next agent task runs this way.": "下一个智能体任务将按此运行。",
   Back: "返回",
   "Open on GitLab": "在 GitLab 打开",
+  "Update a service PR": "更新服务 PR",
+  "Push the merge": "推送合并",
+  "Commit title": "提交标题",
+  "Merge resolutions to approve": "待批准的合并解决方案",
+  "Only the owner of this service decides this.": "只有本服务的所有者能决定此项。",
+  "An agent merges the base branch into this self-improvement PR and resolves the conflicts; you read the resolution diff and approve pushing it.": "智能体把基准分支合并进这个自我改进 PR 并解决冲突；你查看解决差异后批准推送。",
+  "Updates the PR's branch with the base branch on the forge now.": "立即在代码托管平台上把基准分支合并进该 PR 分支。",
+  "The merge comes back as a draft for you to approve and push.": "合并会作为草稿交回给你批准并推送。",
+  "Updating the PR's branch on the forge.": "正在代码托管平台上更新 PR 的分支。",
 };
 
 const LangContext = createContext<{ lang: Lang; setLang: (l: Lang) => void }>({ lang: "zh", setLang: () => {} });

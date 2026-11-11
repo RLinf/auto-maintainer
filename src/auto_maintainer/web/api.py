@@ -46,6 +46,7 @@ from ..domain.actions import (
     ApproveRunsPayload,
     Autonomy,
     CodeMergePayload,
+    CodeUpdatePayload,
     LabelPayload,
     LabReproducePayload,
     MemoryChangePayload,
@@ -605,7 +606,10 @@ async def may_decide(
 ) -> bool:
     """Whether ``user`` approves, edits, or rejects ``proposal`` (design 2.3): its
     repository's maintainers decide every proposal, and a reviewer decides the ones
-    they asked for. ``maintainer`` passes a status already checked."""
+    they asked for; changes to ``code_repo`` need the service's owner."""
+    if record is not None and record.action.kind == ActionKind.CODE_UPDATE:
+        allowed, _ = await code_maintainer(service, user)
+        return allowed
     requester = proposal_requester(proposal, record)
     if requester and requester.lower() == user.login.lower():
         return True
@@ -615,8 +619,13 @@ async def may_decide(
 
 
 async def require_decide(service: Service, user: User, proposal: Proposal) -> None:
-    await require_view(service, user, proposal.repo)
     record = await service.store.get_action(proposal.action_id)
+    if record is not None and record.action.kind == ActionKind.CODE_UPDATE:
+        allowed, reason = await code_maintainer(service, user)
+        if not allowed:
+            raise HTTPException(403, reason)
+        return
+    await require_view(service, user, proposal.repo)
     if not await may_decide(service, user, proposal, record):
         raise HTTPException(
             403,
@@ -2725,22 +2734,45 @@ def build_router() -> APIRouter:
     ) -> list[dict[str, Any]]:
         service = service_of(request)
         visible = set(await visible_repos(service, user))
+        code_repo = service.settings.code_repo
+        code_visible: bool | None = None
+        code_allowed: bool | None = None
         maintains: dict[str, bool] = {}
         out = []
         for p in await service.store.list_proposals(state, repo):
+            record = None
             if p.repo not in visible:
-                continue
-            record = await service.store.get_action(p.action_id)
-            if p.repo not in maintains:
-                maintains[p.repo] = await is_maintainer(service, user, p.repo)
+                if p.repo != code_repo:
+                    continue
+                record = await service.store.get_action(p.action_id)
+                if record is None or record.action.kind != ActionKind.CODE_UPDATE:
+                    continue
+                if code_visible is None:
+                    perm = await service.a.forge.get_permission(code_repo, user.login)
+                    code_visible = (
+                        perm.at_least(Permission.READ)
+                        or user.login in service.settings.operators
+                    )
+                if not code_visible:
+                    continue
+            if record is None:
+                record = await service.store.get_action(p.action_id)
+            if record is not None and record.action.kind == ActionKind.CODE_UPDATE:
+                if code_allowed is None:
+                    code_allowed, _ = await code_maintainer(service, user)
+                can_decide = code_allowed
+            else:
+                if p.repo not in maintains:
+                    maintains[p.repo] = await is_maintainer(service, user, p.repo)
+                can_decide = await may_decide(
+                    service, user, p, record, maintainer=maintains[p.repo]
+                )
             out.append(
                 {
                     **p.model_dump(mode="json"),
                     "action": record.model_dump(mode="json") if record else None,
                     "requester": proposal_requester(p, record),
-                    "can_decide": await may_decide(
-                        service, user, p, record, maintainer=maintains[p.repo]
-                    ),
+                    "can_decide": can_decide,
                     "can_push": await _can_push(service, user, record)
                     if record is not None and record.action.kind == ActionKind.PR_FIX
                     else None,
@@ -2869,9 +2901,13 @@ def build_router() -> APIRouter:
                 "title": pr.title,
                 "author": pr.author,
                 "branch": pr.head_ref,
+                "base": pr.base_ref,
                 "url": pr.url,
                 "head_sha": pr.head_sha,
-                "self_improvement": pr.head_ref.startswith("am/self/"),
+                "mergeable": pr.mergeable,
+                "conflicting": pr.mergeable == Mergeable.CONFLICTING,
+                "self_improvement": pr.head_ref.startswith("am/self/")
+                and pr.head_repo in (None, "", repo),
             }
             for pr in await service.a.forge.list_open_prs(repo)
         ]
@@ -2879,6 +2915,7 @@ def build_router() -> APIRouter:
             repo=repo,
             kinds=[
                 ActionKind.CODE_PR,
+                ActionKind.CODE_UPDATE,
                 ActionKind.CODE_MERGE,
                 ActionKind.SERVICE_DEPLOY,
             ],
@@ -2904,6 +2941,64 @@ def build_router() -> APIRouter:
             ],
         }
 
+    @r.post("/service/prs/{number}/merge-base")
+    async def merge_service_pr_base(
+        request: Request,
+        number: int,
+        body: MergeBaseBody | None = None,
+        user: User = Depends(current_user),
+    ) -> dict[str, Any]:
+        """Bring the base branch into a self-improvement PR on ``code_repo``, approved
+        by its owner: without conflicts the forge updates the branch at once; with
+        conflicts an agent resolves them and drafts a ``code.update`` proposal."""
+        service = service_of(request)
+        allowed, reason = await code_maintainer(service, user)
+        if not allowed:
+            raise HTTPException(403, reason)
+        repo = service.settings.code_repo
+        assert repo is not None
+        pr = await service.a.forge.get_pr(repo, number)
+        if pr is None or pr.state != PrState.OPEN:
+            raise HTTPException(404, f"{repo}#{number} is not an open PR")
+        if not pr.head_ref.startswith("am/self/") or pr.head_repo not in (
+            None,
+            "",
+            repo,
+        ):
+            raise HTTPException(409, f"{repo}#{number} is not a self-improvement PR")
+        if pr.mergeable != Mergeable.CONFLICTING:
+            action = make_action(
+                ActionKind.CODE_UPDATE,
+                repo,
+                CodeUpdatePayload(base_ref=pr.base_ref, approved_by=user.login),
+                number=number,
+                head_sha=pr.head_sha,
+                discriminator=f"merge-base:{new_id('req')}",
+                rationale=f"{user.login} updated {repo}#{number} with {pr.base_ref}",
+                provenance=Provenance(requested_by=user.login),
+            )
+            record = await _run_now(service, user, action)
+            return {
+                "run": "update",
+                "status": record.status,
+                "error": record.error,
+                "action": record.action.id,
+            }
+        event = Event(
+            kind=EventKind.DASHBOARD_COMMAND,
+            repo=repo,
+            number=number,
+            payload={
+                "command": "merge_base",
+                "service_pr": True,
+                "by": user.login,
+                "agent": body.agent if body else None,
+            },
+            source="dashboard",
+        )
+        await service.bus.publish(event)
+        return {"run": "resolve", "event": event.id}
+
     @r.post("/service/prs/{number}/merge")
     async def merge_service_pr(
         request: Request, number: int, user: User = Depends(current_user)
@@ -2917,6 +3012,12 @@ def build_router() -> APIRouter:
         pr = await service.a.forge.get_pr(repo, number)
         if pr is None or pr.state != PrState.OPEN:
             raise HTTPException(404, f"{repo}#{number} is not an open PR")
+        if pr.mergeable == Mergeable.CONFLICTING:
+            raise HTTPException(
+                409,
+                f"{repo}#{number} conflicts with {pr.base_ref}; "
+                f"resolve conflicts with {pr.base_ref} first",
+            )
         action = make_action(
             ActionKind.CODE_MERGE,
             repo,

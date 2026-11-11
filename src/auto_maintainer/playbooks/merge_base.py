@@ -14,20 +14,29 @@
 
 """Merging a PR's base branch into it when they conflict, for a maintainer (design 5.5).
 
-A maintainer asks from the PR page (``dashboard.command`` with ``command:
-merge_base``). The playbook starts the merge in a checkout of the PR's head; an agent
-resolves each conflict, keeping what both sides meant, and may ask the maintainer; it
-never commits, pushes, or runs the code. The playbook proposes a ``pr.fix`` action with
-``merge_ref`` drafted for that maintainer, who reads the resolution and pushes the merge
-commit onto the PR's branch as themselves. A merge without conflicts does not come here:
-the dashboard has GitHub update the branch as the maintainer (``pr.update_branch``).
+A maintainer asks from the PR page or, for a self-improvement PR on ``code_repo``, from
+the Service page (``dashboard.command`` with ``command: merge_base``). The playbook
+starts the merge in a checkout of the PR's head; an agent resolves each conflict,
+keeping what both sides meant, and may ask the maintainer; it never commits, pushes, or
+runs the code. On a watched repository, the playbook proposes a ``pr.fix`` action with
+``merge_ref`` drafted for that maintainer, who pushes the merge commit as themselves; on
+``code_repo`` (``service_pr: true``), it proposes a ``code.update`` action for the owner
+to approve and push onto the ``am/self/*`` branch. A merge without conflicts does not
+come here: the dashboard updates the branch through the forge at once.
 """
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
-from ..domain.actions import ActionKind, FixPrPayload, make_action
+from ..domain.actions import (
+    ActionKind,
+    CodeUpdatePayload,
+    FixPrPayload,
+    Provenance,
+    make_action,
+)
 from ..domain.agents import AgentTask, TaskKind
 from ..domain.events import Event, EventKind
 from ..domain.ids import short_sha
@@ -46,18 +55,70 @@ MARKERS = ("<<<<<<< ", ">>>>>>> ")
 """The lines git puts around a conflict; a resolved file has none left."""
 
 
+def _git_path(raw: str, prefix: str = "") -> str | None:
+    text = raw.rstrip("\r\n\t")
+    if text == "/dev/null":
+        return None
+    if len(text) >= 2 and text.startswith('"') and text.endswith('"'):
+        text = re.sub(r'\\(["\\])', r"\1", text[1:-1])
+    return text[len(prefix) :] if prefix and text.startswith(prefix) else text
+
+
+def _block_paths(lines: list[str]) -> set[str]:
+    paths: set[str] = set()
+    head = lines[0].removeprefix("diff --git ").rstrip("\r\n")
+    if head.startswith("a/"):
+        n = len(head) - 5
+        if (
+            n >= 0
+            and n % 2 == 0
+            and head[2 + n // 2 : 5 + n // 2] == " b/"
+            and head[2 : 2 + n // 2] == head[5 + n // 2 :]
+        ):
+            paths.add(head[5 + n // 2 :])
+    elif head.startswith('"') and head.endswith('"'):
+        n = len(head) - 1
+        if n >= 0 and n % 2 == 0 and head[n // 2] == " ":
+            left = _git_path(head[: n // 2], "a/")
+            right = _git_path(head[n // 2 + 1 :], "b/")
+            if left and left == right:
+                paths.add(right)
+    for line in lines[1:]:
+        if line.startswith(("@@ ", "GIT binary patch", "Binary files ")):
+            break
+        for marker, prefix in (
+            ("--- ", "a/"),
+            ("+++ ", "b/"),
+            ("rename from ", ""),
+            ("rename to ", ""),
+            ("copy from ", ""),
+            ("copy to ", ""),
+        ):
+            if line.startswith(marker):
+                path = _git_path(line[len(marker) :], prefix)
+                if path:
+                    paths.add(path)
+        if line.startswith("+++ "):
+            break
+    if not paths and " b/" in head:
+        path = _git_path(head.split(" b/", 1)[1])
+        if path:
+            paths.add(path)
+    return paths
+
+
 def only_files(patch: str, files: set[str]) -> str:
     """The part of ``patch`` that changes ``files``: what a maintainer reads of a
     merge is its resolution, not everything the base branch brings."""
-    blocks = patch.split("diff --git ")
-    if len(blocks) == 1:
-        return patch
-    kept = [
-        "diff --git " + b
-        for b in blocks[1:]
-        if b.split("\n", 1)[0].split(" b/", 1)[-1].strip() in files
-    ]
-    return "".join(kept)
+    if not files:
+        return ""
+    blocks: list[list[str]] = []
+    for line in patch.splitlines(keepends=True):
+        if line.startswith("diff --git "):
+            blocks.append([line])
+        elif blocks:
+            blocks[-1].append(line)
+    return "".join("".join(b) for b in blocks if _block_paths(b) & files)
 
 
 def unresolved(text: str) -> bool:
@@ -69,27 +130,47 @@ class MergeBasePlaybook(Playbook):
     name = "merge_base"
     triggers = (EventKind.DASHBOARD_COMMAND,)
     pool = "agent"
+    needs_profile = False
 
     def accepts(self, event: Event, profile: object) -> bool:
-        return event.payload.get("command") == "merge_base"
+        if event.payload.get("command") != "merge_base":
+            return False
+        return profile is not None or bool(event.payload.get("service_pr"))
 
     def key(self, event: Event) -> str:
         return f"merge_base:{event.repo}#{event.number}:{event.id}"
 
     async def run(self, ctx: PlaybookContext, event: Event) -> PlaybookResult:
-        profile = ctx.require_profile()
+        service_pr = bool(event.payload.get("service_pr"))
+        profile = None if service_pr else ctx.require_profile()
         assert event.repo and event.number
+        if service_pr and event.repo != ctx.service.code_repo:
+            return PlaybookResult(failed="not the service's code repository")
         by = str(event.payload["by"])
         ctx.requested_by = by
         ctx.agent = event.payload.get("agent") or None
         pr = await ctx.forge.get_pr(event.repo, event.number)
         if pr is None or pr.state != PrState.OPEN:
             return PlaybookResult(result={"skipped": "the PR is not open"})
-        ctx.trusted_input = await ctx.author_is_team(pr)
-        info = await ctx.forge.get_repo(pr.repo)
-        base = pr.base_ref or info.default_branch
+        if service_pr and (
+            not pr.head_ref.startswith("am/self/")
+            or pr.head_repo not in (None, "", pr.repo)
+        ):
+            return PlaybookResult(
+                failed=f"{pr.repo}#{pr.number} is not a self-improvement PR"
+            )
+        if service_pr:
+            ctx.trusted_input = True
+            public_language = "en"
+            default_branch = ctx.service.code_branch
+        else:
+            assert profile is not None
+            ctx.trusted_input = await ctx.author_is_team(pr)
+            public_language = profile.languages.public
+            default_branch = (await ctx.forge.get_repo(pr.repo)).default_branch
+        base = pr.base_ref or default_branch
         workdir = await ctx.workspace.prepare(
-            pr.repo, pr.number, pr.head_sha, info.default_branch
+            pr.repo, pr.number, pr.head_sha, default_branch
         )
         try:
             attempt = await ctx.workspace.merge(workdir, base)
@@ -119,7 +200,7 @@ class MergeBasePlaybook(Playbook):
                                 number=pr.number,
                                 base=base,
                                 no_code=no_code_rule(pr.repo),
-                                public_language=profile.languages.public,
+                                public_language=public_language,
                             ),
                             "Files with conflicts:\n"
                             + untrusted("merge.conflicts", listing, 8_000),
@@ -156,29 +237,57 @@ class MergeBasePlaybook(Playbook):
                 result={"left": left, "summary": answer.text.strip()[-1000:]},
             )
         account = answer.text.strip()[-3000:] or f"Resolves the conflicts with {base}."
-        action = make_action(
-            ActionKind.PR_FIX,
-            pr.repo,
-            FixPrPayload(
-                title=f"Merge {base} into #{pr.number}",
-                body=account,
-                patch=shown,
-                base_sha=pr.head_sha,
-                files=sorted(resolved),
-                target="branch",
-                merge_ref=base,
-                merge_sha=attempt.merge_sha,
-                resolved=resolved,
-                runtime=answer.runtime,
-                requested_by=by,
-            ),
-            number=pr.number,
-            head_sha=pr.head_sha,
-            discriminator=f"merge:{event.id}",
-            rationale=f"merge {base} at {short_sha(attempt.merge_sha)} into "
-            f"{short_sha(pr.head_sha)}, resolving {len(resolved)} conflicted files",
-            draft_for=by,
+        rationale = (
+            f"merge {base} at {short_sha(attempt.merge_sha)} into "
+            f"{short_sha(pr.head_sha)}, resolving {len(resolved)} conflicted files"
         )
+        if service_pr:
+            action = make_action(
+                ActionKind.CODE_UPDATE,
+                pr.repo,
+                CodeUpdatePayload(
+                    base_ref=base,
+                    title=f"chore(self): merge {base} into #{pr.number}",
+                    body=account,
+                    patch=shown,
+                    base_sha=pr.head_sha,
+                    merge_ref=base,
+                    merge_sha=attempt.merge_sha,
+                    resolved=resolved,
+                    files=sorted(resolved),
+                    runtime=answer.runtime,
+                    requested_by=by,
+                ),
+                number=pr.number,
+                head_sha=pr.head_sha,
+                discriminator=f"merge:{event.id}",
+                rationale=rationale,
+                draft_for=by,
+                provenance=Provenance(requested_by=by),
+            )
+        else:
+            action = make_action(
+                ActionKind.PR_FIX,
+                pr.repo,
+                FixPrPayload(
+                    title=f"Merge {base} into #{pr.number}",
+                    body=account,
+                    patch=shown,
+                    base_sha=pr.head_sha,
+                    files=sorted(resolved),
+                    target="branch",
+                    merge_ref=base,
+                    merge_sha=attempt.merge_sha,
+                    resolved=resolved,
+                    runtime=answer.runtime,
+                    requested_by=by,
+                ),
+                number=pr.number,
+                head_sha=pr.head_sha,
+                discriminator=f"merge:{event.id}",
+                rationale=rationale,
+                draft_for=by,
+            )
         return PlaybookResult(
             actions=[action],
             result={"resolved": sorted(resolved), "merge_sha": attempt.merge_sha},

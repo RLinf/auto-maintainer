@@ -40,7 +40,7 @@ from sqlalchemy.engine import Row
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
-from ..domain.actions import Proposal, ProposalState
+from ..domain.actions import ActionKind, Proposal, ProposalState
 from ..domain.agents import AgentQuestion, QuestionState
 from ..domain.clock import as_utc
 from ..domain.memory import MemoryChange, MemoryChangeState, Signal
@@ -568,7 +568,7 @@ class SqliteStore:
         if public_only:
             stmt = stmt.where(
                 m.actions.c.kind.notin_(
-                    ["memory.commit", "memory.change", "code.pr", "notify"]
+                    [k.value for k in ActionKind if not k.touches_repository]
                 )
             )
         row = await self._one(stmt)

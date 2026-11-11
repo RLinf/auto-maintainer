@@ -3,10 +3,11 @@
 // and survives the back button.
 
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useLocation, useSearchParams } from "react-router-dom";
 import { useT } from "./i18n";
 import { Icon } from "./icons";
 import { Popover } from "./ui";
+import { saveView } from "./viewState";
 
 export interface Facet<T> {
   id: string;
@@ -41,6 +42,8 @@ export interface ListConfig<T> {
   pageSize?: number;
   /** Prefix for URL parameters when a page has several lists. */
   param?: string;
+  /** Effective URL search parameters when a page restores remembered state on first render. */
+  searchParams?: URLSearchParams;
 }
 
 function asList(v: string | string[] | null | undefined): string[] {
@@ -60,7 +63,8 @@ function compare(a: string | number | null | undefined, b: string | number | nul
 export function useList<T>(config: ListConfig<T>) {
   const { rows, key, search, facets = [], sorts = [], groups = [], pageSize = 50, param = "" } = config;
   const p = (name: string) => (param ? `${param}.${name}` : name);
-  const [params, setParams] = useSearchParams();
+  const [urlParams, setParams] = useSearchParams();
+  const params = config.searchParams ?? urlParams;
   const query = params.get(p("q")) ?? "";
   const sortParam = params.get(p("sort")) ?? config.defaultSort ?? "";
   const groupId = params.get(p("group")) ?? "";
@@ -179,6 +183,7 @@ export function useList<T>(config: ListConfig<T>) {
     groups,
     groupId: groupDef ? groupId : "",
     setGroup: (id: string) => update({ group: id || null }),
+    param,
     key,
     selection,
     isSelected: (row: T) => selection.has(key(row)),
@@ -210,14 +215,55 @@ export function ListToolbar<T>({
   children?: ReactNode;
 }) {
   const t = useT();
+  const location = useLocation();
   const ref = useRef<HTMLInputElement>(null);
   const [draft, setDraft] = useState(list.query);
-  useEffect(() => setDraft(list.query), [list.query]);
+  const dirty = useRef(false);
+  const latest = useRef({ draft, query: list.query, setQuery: list.setQuery, param: list.param, search: location.search });
+  latest.current = { draft, query: list.query, setQuery: list.setQuery, param: list.param, search: location.search };
+  const mountedPathname = useRef(location.pathname);
+  mountedPathname.current = location.pathname;
+
   useEffect(() => {
-    const timer = window.setTimeout(() => draft !== list.query && list.setQuery(draft), 180);
+    dirty.current = false;
+    setDraft(list.query);
+  }, [list.query]);
+
+  const flush = () => {
+    if (!dirty.current) return;
+    dirty.current = false;
+    if (draft !== list.query) list.setQuery(draft);
+  };
+
+  useEffect(() => {
+    if (!dirty.current || draft === list.query) return;
+    const timer = window.setTimeout(() => {
+      dirty.current = false;
+      list.setQuery(draft);
+    }, 180);
     return () => window.clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draft]);
+
+  useEffect(
+    () => () => {
+      if (!dirty.current) return;
+      dirty.current = false;
+      const cur = latest.current;
+      if (cur.draft === cur.query) return;
+      if (typeof window === "undefined" || window.location.pathname === mountedPathname.current) {
+        cur.setQuery(cur.draft);
+      } else if (mountedPathname.current === "/prs" && !cur.param) {
+        const next = new URLSearchParams(cur.search);
+        if (cur.draft) next.set("q", cur.draft);
+        else next.delete("q");
+        next.delete("page");
+        saveView("prs", next);
+      }
+    },
+    [],
+  );
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const el = e.target as HTMLElement;
@@ -237,8 +283,21 @@ export function ListToolbar<T>({
         <input
           ref={ref}
           value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => e.key === "Escape" && (setDraft(""), list.setQuery(""), ref.current?.blur())}
+          onChange={(e) => {
+            dirty.current = true;
+            setDraft(e.target.value);
+          }}
+          onBlur={flush}
+          onKeyDown={(e) => {
+            if (e.key === "Escape") {
+              dirty.current = false;
+              setDraft("");
+              list.setQuery("");
+              ref.current?.blur();
+            } else if (e.key === "Enter" && !e.nativeEvent.isComposing) {
+              flush();
+            }
+          }}
           placeholder={placeholder}
           aria-label={placeholder}
           data-list-search
@@ -284,7 +343,14 @@ export function ListToolbar<T>({
         );
       })}
       {list.filtering && (
-        <button className="ghost sm" onClick={list.clearAll}>
+        <button
+          className="ghost sm"
+          onClick={() => {
+            dirty.current = false;
+            setDraft("");
+            list.clearAll();
+          }}
+        >
           {t("Reset")}
         </button>
       )}
@@ -374,6 +440,13 @@ export function DataTable<T>({
 }) {
   const [active, setActive] = useState(-1);
   const flat = list.visible;
+  const openRow = (row: T) => {
+    if (!onOpen) return;
+    if (document.activeElement instanceof HTMLElement && document.activeElement.hasAttribute("data-list-search")) {
+      document.activeElement.blur();
+    }
+    onOpen(row);
+  };
   useEffect(() => setActive(-1), [list.query, list.page, list.sortId, list.sortDesc]);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -387,13 +460,14 @@ export function DataTable<T>({
         e.preventDefault();
         setActive((i) => Math.max(0, i - 1));
       } else if (e.key === "Enter" && active >= 0 && onOpen) {
-        onOpen(flat[active]);
+        openRow(flat[active]);
       } else if (e.key === "x" && active >= 0 && selectable?.(flat[active])) {
         list.toggle(flat[active]);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, flat, onOpen, selectable, list]);
 
   const selectableRows = selectable ? flat.filter(selectable) : [];
@@ -438,7 +512,7 @@ export function DataTable<T>({
       className={`${onOpen ? "clickable" : ""} ${index === active ? "active" : ""} ${rowClass?.(row) ?? ""}`}
       onClick={(e) => {
         const el = e.target as HTMLElement;
-        if (onOpen && !el.closest("a,button,input,select,label")) onOpen(row);
+        if (onOpen && !el.closest("a,button,input,select,label")) openRow(row);
       }}
     >
       {selectable && (

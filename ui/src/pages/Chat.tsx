@@ -4,6 +4,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
+import { agentName } from "../agentPicker";
 import { api, type ChatThread } from "../api";
 import { Conversation } from "../agent";
 import { ErrorBox, relative } from "../components";
@@ -57,7 +58,8 @@ export default function ChatPage() {
                   {th.title || t("Untitled")}
                 </div>
                 <div className="muted small">
-                  {th.repo ?? t("all repositories")} · {relative(th.created_at)}
+                  {th.repo ?? t("all repositories")}
+                  {(th.agent ?? th.runtime) ? ` · ${agentName(th.agent ?? th.runtime)}` : ""} · {relative(th.created_at)}
                 </div>
               </Link>
             ))
@@ -69,6 +71,7 @@ export default function ChatPage() {
         <Conversation
           key={threadId && threadId !== born ? threadId : `new-${fresh}`}
           threadId={threadId ?? null}
+          thread={current ?? null}
           liveRun={current?.live_run ?? null}
           context={context}
           onThread={(id) => {

@@ -86,20 +86,79 @@ from .records import open_door, reading_line
 log = logging.getLogger(__name__)
 
 
+def check_agent(service: Any, agent: str) -> None:
+    """Refuse an unknown, disabled, or uninstalled agent choice."""
+    config = getattr(service, "service_config", None)
+    agents = effective_agents(config) if config is not None else None
+    adapters = getattr(service, "a", None)
+    runner = getattr(adapters, "agents", None)
+    known = getattr(runner, "runtimes", None)
+    if known is not None:
+        if agent not in known:
+            raise HTTPException(400, f"unknown agent {agent!r}")
+    elif agents is not None and agent not in agents:
+        raise HTTPException(400, f"unknown agent {agent!r}")
+    cfg = agents.get(agent) if agents is not None else None
+    if (cfg is not None and not cfg.enabled) or agent in getattr(
+        runner, "disabled", ()
+    ):
+        raise HTTPException(409, f"{agent} is disabled")
+    if not service.agent_ready(agent):
+        raise HTTPException(409, f"{agent} is not installed on this host")
+
+
+def apply_thread_agent(
+    service: Any,
+    thread: ChatThread,
+    agent: str | None,
+    *,
+    default_agent: str | None = None,
+) -> None:
+    """Update ``thread.agent`` from a request's ``agent`` field.
+
+    ``None`` keeps the thread's current choice; ``""`` clears it back to automatic
+    routing; a non-empty name validates and pins that runtime, dropping any session
+    held by another runtime.
+    """
+    if agent is None:
+        return
+    if agent == "":
+        thread.agent = None
+        if default_agent and thread.runtime and thread.runtime != default_agent:
+            thread.session = None
+            thread.runtime = None
+        return
+    check_agent(service, agent)
+    thread.agent = agent
+    if thread.runtime != agent:
+        thread.session = None
+
+
 async def turn_route(
     service: Service, login: str, thread: ChatThread, route: Route
 ) -> tuple[Route, str | None]:
     """The route of a conversation's next turn, and the session it resumes.
 
-    A session resumes only on the agent that holds it, which then goes first. When
-    ``login`` runs agents on their own accounts and the session is on another, the
-    turn starts afresh, and the router tries their own agents first: the prompt
-    carries the conversation so far."""
+    When ``thread.agent`` is set, the turn runs on that agent alone with no fallback,
+    resuming ``thread.session`` only when ``thread.runtime`` matches and clearing it
+    when the user switched agents. Under automatic routing, an established session
+    remains sticky on ``thread.runtime`` while that runtime is ready, even if another
+    agent's circuit breaker has cooled down."""
+    del login
+    if thread.agent:
+        effective = thread.agent
+        check_agent(service, effective)
+        if effective != thread.runtime:
+            thread.session = None
+            resume = None
+        else:
+            resume = thread.session
+        model = route.model if route.primary == effective else None
+        return route.model_copy(
+            update={"primary": effective, "fallback": [], "model": model}
+        ), resume
     resume = thread.session
-    if not resume or not thread.runtime:
-        return route, None
-    own = await service.own_agents(login)
-    if (own and thread.runtime not in own) or not service.agent_ready(thread.runtime):
+    if not resume or not thread.runtime or not service.agent_ready(thread.runtime):
         return route, None
     rest = [a for a in [route.primary, *route.fallback] if a != thread.runtime]
     model = route.model if route.primary == thread.runtime else None
@@ -212,6 +271,7 @@ class MessageBody(BaseModel):
     text: str
     repo: str | None = None
     context: PageContext | None = None
+    agent: str | None = None
 
 
 def build_router() -> APIRouter:
@@ -243,8 +303,14 @@ def build_router() -> APIRouter:
             if body.context and body.context.repo == repo and repo
             else None
         )
+        if body.agent:
+            check_agent(service, body.agent)
         thread = ChatThread(
-            owner=user.login, title=body.text[:80], repo=repo, number=number
+            owner=user.login,
+            title=body.text[:80],
+            repo=repo,
+            number=number,
+            agent=body.agent or None,
         )
         await service.store.save_thread(thread)
         return thread.model_dump(mode="json")
@@ -390,12 +456,22 @@ def build_router() -> APIRouter:
         thread = await service.store.get_thread(thread_id)
         if thread is None or thread.owner != user.login:
             raise HTTPException(404, "unknown thread")
+        if body.agent:
+            check_agent(service, body.agent)
+        base_route = service.settings.routing.get("chat")
+        if base_route is None:
+            raise HTTPException(500, "no chat route is configured")
         live: LiveTurns = request.app.state.live_turns
         if live.running(thread.live_run):
             # A new message interrupts the turn still running: its agent stops, and
             # this one starts from the conversation so far.
             await live.stop(thread.live_run, user.login)
             thread = await service.store.get_thread(thread_id) or thread
+        default_agent = await service.runs_on_for(
+            base_route, user.login, str(TaskKind.CHAT)
+        )
+        apply_thread_agent(service, thread, body.agent, default_agent=default_agent)
+        await service.store.save_thread(thread)
         repos = await visible_repos(service, user)
         text, removed = redact_secrets(body.text)
         await service.store.add_message(
@@ -444,10 +520,7 @@ def build_router() -> APIRouter:
                 schema_hint(ChatAnswer.model_json_schema()),
             ]
         )
-        route = service.settings.routing.get("chat")
-        if route is None:
-            raise HTTPException(500, "no chat route is configured")
-        route, resume = await turn_route(service, user.login, thread, route)
+        route, resume = await turn_route(service, user.login, thread, base_route)
         run = new_id("run")
         door = request.app.state.records
         token, door_env = await open_door(door, user.login)
@@ -459,6 +532,7 @@ def build_router() -> APIRouter:
             resume_session=resume,
             job_id=run,
             requested_by=user.login,
+            agent_chosen=bool(thread.agent),
             records_token=token,
             env=door_env,
         )
@@ -546,6 +620,7 @@ def build_router() -> APIRouter:
             jobs=jobs,
             requests=requests,
             run_id=run,
+            runtime=result.runtime,
         )
         await service.store.add_message(message)
         return message.model_dump(mode="json")

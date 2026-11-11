@@ -2,8 +2,8 @@
 // an override), and whether it can merge. The agent opened here talks about this PR.
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { Link, useParams } from "react-router-dom";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Link, useLocation, useParams } from "react-router-dom";
 import { api, type Evaluation, type Me, type PrDetail, type QuickQuality, type ReviewQuality, type ReviewStart, type RootCause, type RunCiPlan } from "../api";
 import { agentName, useAgentChoice, useAgentOptions } from "../agentPicker";
 import {
@@ -46,6 +46,7 @@ import { activePrActionPanel, describeRunCi, prMenuItems, type PrActionPanel } f
 import { MenuItem, Popover, Skeleton, Tabs, useTab, useToast } from "../ui";
 import { TranslateReview } from "../translate";
 import { forgeOf } from "../forges";
+import { prBreadcrumbs } from "../viewState";
 
 const TIERS = ["P0", "P1", "P2", "P3"];
 type TimelineRow = PrDetail["actions"][number];
@@ -54,12 +55,21 @@ export default function PrPage({ me }: { me: Me }) {
   const t = useT();
   const { lang } = useLang();
   const toast = useToast();
+  const location = useLocation();
   // The repository's name may hold more slashes (forge:group/subgroup/project); the
   // PR's number is the last part.
   const rest = useParams()["*"] ?? "";
   const split = rest.lastIndexOf("/");
   const full = rest.slice(0, split);
   const number = rest.slice(split + 1);
+  const fromState = (location.state as { from?: unknown } | null)?.from;
+  const originRef = useRef<{ key: string; from: unknown }>({ key: rest, from: fromState });
+  if (originRef.current.key !== rest) {
+    originRef.current = { key: rest, from: fromState };
+  } else if (fromState !== undefined) {
+    originRef.current.from = fromState;
+  }
+  const crumbs = prBreadcrumbs(full, originRef.current.from, { home: t("Home"), prs: t("Pull requests") });
   const base = `/api/prs/${full}/${number}`;
   const detail = useQuery({ queryKey: ["pr", full, number], queryFn: () => api.get<PrDetail>(base) });
   const rows = usePrs();
@@ -126,10 +136,7 @@ export default function PrPage({ me }: { me: Me }) {
   return (
     <>
       <PageHead
-        crumbs={[
-          { to: "/prs", label: t("Pull requests") },
-          { to: `/prs?repo=${encodeURIComponent(full)}`, label: full },
-        ]}
+        crumbs={crumbs}
         title={
           <>
             {pr.title}{" "}

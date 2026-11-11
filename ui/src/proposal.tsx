@@ -20,7 +20,7 @@ import { MenuItem, Popover, useToast } from "./ui";
 import { TranslateReview } from "./translate";
 import { ConnectGitHub } from "./connectGitHub";
 
-export const PROPOSAL_KEYS = [["proposals"], ["pr"], ["prs"], ["repos"], ["audit"], ["work"], ["job"]];
+export const PROPOSAL_KEYS = [["proposals"], ["service"], ["pr"], ["prs"], ["repos"], ["audit"], ["work"], ["job"]];
 
 /** Kinds a maintainer may approve as themselves, with their own GitHub account. */
 const AS_ME = new Set(["review.post", "pr.fix"]);
@@ -37,6 +37,7 @@ const POSTED_BODY = new Set([
   "issue.comment",
   "pr.merge",
   "pr.fix",
+  "code.update",
 ]);
 
 export interface InlineComment {
@@ -77,6 +78,7 @@ const KIND_LABELS: Record<string, string> = {
   "memory.commit": "Commit to memory",
   "memory.change": "Change memory",
   "code.pr": "Open a service PR",
+  "code.update": "Update a service PR",
   "code.merge": "Merge a service PR",
   "service.deploy": "Deploy the service",
   notify: "Send a notification",
@@ -171,7 +173,7 @@ export function ProposalCard({
     ...payload,
     ...(typeof payload.body === "string" ? { body } : {}),
     ...(Array.isArray(payload.comments) ? { comments } : {}),
-    ...(isFix ? { title, target } : {}),
+    ...(isFix ? { title, target } : kind === "code.update" ? { title } : {}),
     ...(dropped.length ? { labels: list(payload.labels).filter((l) => !dropped.includes(l)) } : {}),
     ...(kind === "lab.reproduce"
       ? str(payload.script)
@@ -213,19 +215,21 @@ export function ProposalCard({
         ? t("Push the merge as me")
         : t("Push to the PR as me")
       : t("Open the PR as me")
-    : kind === "lab.reproduce"
-      ? `${t("Run on")} ${str(payload.lab)}`
-      : kind === "review.post"
-        ? postAsMe
-          ? t("Post as me")
-          : t("Post")
-        : kind === "review.update" && payload.revises
-          ? reviewAuthor
-            ? t("Update the review as me")
-            : t("Update the posted review")
-          : POSTED_BODY.has(kind)
-          ? t("Post")
-          : t("Approve");
+    : kind === "code.update"
+      ? t("Push the merge")
+      : kind === "lab.reproduce"
+        ? `${t("Run on")} ${str(payload.lab)}`
+        : kind === "review.post"
+          ? postAsMe
+            ? t("Post as me")
+            : t("Post")
+          : kind === "review.update" && payload.revises
+            ? reviewAuthor
+              ? t("Update the review as me")
+              : t("Update the posted review")
+            : POSTED_BODY.has(kind)
+              ? t("Post")
+              : t("Approve");
 
   const toggleDrop =
     kind === "label.apply" && !done && decides
@@ -262,7 +266,7 @@ export function ProposalCard({
         {onSelect && !done && decides && <input type="checkbox" aria-label={`Select ${kindLabel(kind)}`} checked={!!selected} onChange={onSelect} />}
         <strong>{t(kindLabel(kind))}</strong>
         {action.number != null && (
-          <Link to={prPath(action.repo, action.number)} className="small">
+          <Link to={kind === "code.update" ? "/service" : prPath(action.repo, action.number)} className="small">
             {action.repo}#{action.number}
           </Link>
         )}
@@ -305,9 +309,11 @@ export function ProposalCard({
       )}
       {!done && !decides && (
         <span className="small muted">
-          {requester
-            ? `${t("A maintainer of the repository, or the person who asked for it, decides this:")} @${requester}.`
-            : t("A maintainer of the repository decides this.")}
+          {kind === "code.update"
+            ? t("Only the owner of this service decides this.")
+            : requester
+              ? `${t("A maintainer of the repository, or the person who asked for it, decides this:")} @${requester}.`
+              : t("A maintainer of the repository decides this.")}
         </span>
       )}
       {!done && decides && (
@@ -501,6 +507,25 @@ function KindBody({
       editing ? <input key="title" value={title} onChange={(e) => setTitle(e.target.value)} aria-label={t("PR title")} /> : <strong key="title">{str(payload.title)}</strong>,
     );
   }
+  if (kind === "code.update") {
+    const changed = list(payload.files);
+    const merge = str(payload.merge_ref || payload.base_ref);
+    parts.push(
+      <div key="code-update" className="small muted">
+        {merge && str(payload.merge_sha)
+          ? `${t("Merges")} ${merge} (${str(payload.merge_sha).slice(0, 7)}) ${t("into the PR's branch")} · ${changed.length} ${t("conflicted files resolved")}`
+          : `${t("Merges")} ${merge} ${t("into the PR's branch")}`}
+        {str(payload.runtime) ? ` · ${str(payload.runtime)}` : ""}
+      </div>,
+      str(payload.title) ? (
+        editing ? (
+          <input key="title" value={title} onChange={(e) => setTitle(e.target.value)} aria-label={t("Commit title")} />
+        ) : (
+          <strong key="title">{str(payload.title)}</strong>
+        )
+      ) : null,
+    );
+  }
   if (kind === "pr.merge") {
     parts.push(
       <div key="merge" className="small">
@@ -563,7 +588,9 @@ function KindBody({
       </div>,
     );
   }
-  if (kind === "pr.fix" && typeof payload.patch === "string") parts.push(<Diff key="patch" text={payload.patch} />);
+  if ((kind === "pr.fix" || kind === "code.update") && typeof payload.patch === "string" && payload.patch) {
+    parts.push(<Diff key="patch" text={payload.patch} />);
+  }
   if (kind === "lab.reproduce") {
     const planned = list(payload.steps);
     const oneScript = !!str(payload.script);
@@ -777,6 +804,89 @@ export function MergeBaseButton({
       )}
     >
       {(close) => <MergeBaseForm repo={repo} number={number} base={base} conflicting={conflicting} canPush={canPush} onClose={close} />}
+    </Popover>
+  );
+}
+
+/** Bring the base branch into a self-improvement PR on ``code_repo``: clean merges
+ *  update the branch on the forge at once; conflicting ones start the conflict-resolving
+ *  agent and draft a ``code.update`` proposal for the owner to approve. */
+export function ServiceMergeBaseButton({
+  number,
+  base,
+  conflicting,
+  size,
+}: {
+  number: number;
+  base: string;
+  conflicting: boolean;
+  size?: "sm";
+}) {
+  const t = useT();
+  const toast = useToast();
+  const [agent, setAgent] = useAgentChoice("fix");
+  const label = conflicting ? `${t("Resolve conflicts with")} ${base}` : `${t("Merge")} ${base}`;
+  const tone = conflicting ? "primary" : "";
+  const merge = useAct(
+    () =>
+      api.post<{ run: "update" | "resolve"; status?: string; error?: string | null; event?: string; action?: string }>(
+        `/api/service/prs/${number}/merge-base`,
+        { agent: agent || null },
+      ),
+    [["service"], ["proposals"], ["work"], ["audit"]],
+  );
+  return (
+    <Popover
+      align="right"
+      label={label}
+      trigger={(open, toggle) => (
+        <button className={[tone, size, open ? "on" : ""].filter(Boolean).join(" ")} onClick={toggle} aria-expanded={open}>
+          <Icon name="merge" size={14} />
+          {label}
+        </button>
+      )}
+    >
+      {(close) => (
+        <div className="stack" style={{ gap: 10, padding: 6, width: 340, maxWidth: "calc(100vw - 48px)" }}>
+          <span className="small muted">
+            {conflicting
+              ? t("An agent merges the base branch into this self-improvement PR and resolves the conflicts; you read the resolution diff and approve pushing it.")
+              : t("Updates the PR's branch with the base branch on the forge now.")}
+          </span>
+          <div className="row">
+            {conflicting && <AgentPicker value={agent} onChange={setAgent} task="fix" />}
+            <button
+              className="primary right"
+              disabled={merge.isPending}
+              onClick={() =>
+                merge.mutate(undefined, {
+                  onSuccess: (out) => {
+                    close();
+                    if (out.run === "resolve") {
+                      toast({
+                        title: t("Resolving the conflicts"),
+                        body: t("The merge comes back as a draft for you to approve and push."),
+                        icon: "sparkles",
+                        action: out.event ? { label: t("Watch"), onClick: () => openJob(out.event as string) } : undefined,
+                      });
+                    } else if (out.status === "executed") {
+                      toast({ title: `${t("Merged")} ${base}`, body: t("Updating the PR's branch on the forge."), icon: "check" });
+                    } else if (out.status === "queued" || out.status === "intent") {
+                      if (out.action) watchAction(out.action, actionTitle("code.update", number, t));
+                      toast({ title: `${t("Merge")} ${base}`, body: t("Updating the PR's branch on the forge."), icon: "clock" });
+                    } else {
+                      toast({ title: t("The branch was not updated"), body: out.error ?? out.status, icon: "x" });
+                    }
+                  },
+                })
+              }
+            >
+              {merge.isPending ? t("Starting…") : conflicting ? t("Start resolving") : `${t("Merge")} ${base}`}
+            </button>
+          </div>
+          <ErrorBox error={merge.error} />
+        </div>
+      )}
     </Popover>
   );
 }

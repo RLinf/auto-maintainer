@@ -7,10 +7,11 @@ import { Link } from "react-router-dom";
 import { api, type ServiceView } from "../api";
 import { useAgent } from "../agent";
 import { Empty, ErrorBox, PageHead, Section, Status, timeOf, useAct, When } from "../components";
-import { useService } from "../data";
+import { useProposals, useService } from "../data";
 import { useT } from "../i18n";
 import { Icon } from "../icons";
 import { DataTable, useList, type Column } from "../list";
+import { ProposalCard, ServiceMergeBaseButton } from "../proposal";
 import { Skeleton, useToast } from "../ui";
 
 const KEYS = [["service"], ["audit"]];
@@ -21,6 +22,7 @@ export default function ServicePage() {
   const toast = useToast();
   const agent = useAgent();
   const view = useService();
+  const proposals = useProposals();
   const merge = useAct((n: number) => api.post(`/api/service/prs/${n}/merge`), KEYS);
   const deploy = useAct((sha: string) => api.post("/api/service/deploy", { sha }), KEYS);
   const history = useList<HistoryRow>({
@@ -54,6 +56,7 @@ export default function ServicePage() {
   }
   const s = v.status;
   const prs = (v.prs ?? []).filter((p) => p.self_improvement);
+  const drafts = (proposals.data ?? []).filter((p) => p.action?.action.kind === "code.update");
   const columns: Column<HistoryRow>[] = [
     { id: "at", header: t("When"), sort: "at", cell: (h) => <When at={h.at} />, width: 100 },
     { id: "kind", header: t("Kind"), cell: (h) => <span className="mono">{h.kind}</span> },
@@ -162,26 +165,51 @@ export default function ServicePage() {
             <span className="small muted">{t("No open self-improvement PRs.")}</span>
           ) : (
             <div className="list">
-              {prs.map((p) => (
-                <div key={p.number} className="list-row">
-                  <Icon name="merge" />
-                  <span className="main">
-                    <a className="t" href={p.url} target="_blank" rel="noreferrer">
-                      #{p.number} {p.title}
-                    </a>
-                    <span className="meta">{p.branch}</span>
-                  </span>
-                  {v.can_approve && (
-                    <button className="sm primary" disabled={merge.isPending} onClick={() => merge.mutate(p.number, { onSuccess: () => toast({ title: `#${p.number} ${t("merged")}`, icon: "merge" }) })}>
-                      {t("Approve and merge")}
-                    </button>
-                  )}
-                </div>
-              ))}
+              {prs.map((p) => {
+                const base = p.base ?? v.branch ?? "main";
+                const conflicting = !!p.conflicting;
+                return (
+                  <div key={p.number} className="list-row" style={{ flexWrap: "wrap" }}>
+                    <Icon name="merge" />
+                    <span className="main">
+                      <a className="t" href={p.url} target="_blank" rel="noreferrer">
+                        #{p.number} {p.title}
+                      </a>
+                      <span className="meta">
+                        {p.branch}
+                        {conflicting ? ` · ${t("conflicts with")} ${base}` : ""}
+                      </span>
+                    </span>
+                    {conflicting && <Status value="conflict" />}
+                    {v.can_approve && (
+                      <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+                        <ServiceMergeBaseButton number={p.number} base={base} conflicting={conflicting} size="sm" />
+                        <button
+                          className={conflicting ? "sm" : "sm primary"}
+                          disabled={merge.isPending || conflicting}
+                          title={conflicting ? `${t("conflicts with")} ${base}` : undefined}
+                          onClick={() => merge.mutate(p.number, { onSuccess: () => toast({ title: `#${p.number} ${t("merged")}`, icon: "merge" }) })}
+                        >
+                          {t("Approve and merge")}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
         </Section>
       </div>
+      {drafts.length > 0 && (
+        <Section title={t("Merge resolutions to approve")}>
+          <div className="stack" style={{ gap: 10 }}>
+            {drafts.map((d) => (
+              <ProposalCard key={d.id} proposal={d} />
+            ))}
+          </div>
+        </Section>
+      )}
       <h2>{t("History")}</h2>
       <DataTable list={history} columns={columns} empty={t("Nothing yet.")} />
       {v.can_approve && <LogsSection />}

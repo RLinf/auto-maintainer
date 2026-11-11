@@ -39,7 +39,7 @@ from ..domain.profile import LabBinding
 from ..domain.records import Job, JobStatus
 from ..profiles.layers import ProfileError, parse_yaml
 from ..service import Service
-from .api import repo_param, require_view, service_of, visible_repos
+from .api import may_view, repo_param, require_view, service_of, visible_repos
 from .auth import User, current_user
 
 AGENT_PLAYBOOKS = {
@@ -406,11 +406,20 @@ def build_router() -> APIRouter:
             visible = {repo}
         else:
             visible = set(await visible_repos(service, user))
+        code_repo = service.settings.code_repo if repo is None else None
+        code_visible: bool | None = None
         since = service.clock.now() - timedelta(days=max(1, min(days, 90)))
         out = []
         for job in await service.store.list_jobs(repo=repo, limit=500):
-            if job.playbook not in AGENT_PLAYBOOKS or job.repo not in visible:
+            if job.playbook not in AGENT_PLAYBOOKS:
                 continue
+            if job.repo not in visible:
+                if job.repo != code_repo:
+                    continue
+                if code_visible is None:
+                    code_visible = await may_view(service, user, code_repo)
+                if not code_visible:
+                    continue
             if playbook is not None and job.playbook != playbook:
                 continue
             if number is not None and job.number != number:

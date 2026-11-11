@@ -268,6 +268,8 @@ class ChatThread(BaseModel):
     works in for the whole conversation, so its session can resume there."""
     session: str | None = None
     runtime: str | None = None
+    agent: str | None = None
+    """The agent chosen for this conversation, or ``None`` for automatic routing."""
     live_run: str | None = None
     """The run answering the newest message, while it runs; its steps are live."""
     job_id: str | None = None
@@ -317,6 +319,8 @@ class ChatMessage(BaseModel):
     """What this message asks to do once a person approves it."""
     run_id: str | None = None
     """For an answer: the agent run that wrote it, whose steps stay readable."""
+    runtime: str | None = None
+    """For an answer: the agent runtime that wrote it."""
     while_running: bool = False
     """A ``user`` message sent to the agent while it wrote the review; the review
     answers it."""
