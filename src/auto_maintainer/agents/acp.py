@@ -155,7 +155,11 @@ class AcpRuntime(ExecRuntime):
                 else:
                     env[name] = value
             env.update(self.task_env(task))
-            session = await _open_session(argv, env, root)
+            run = self.contained(argv, env, root, home=self.account_home)
+            try:
+                session = await _open_session(run.argv, run.env, run.cwd)
+            finally:
+                await run.end()
         found = choices_from_session(session) if session is not None else None
         # A CLI that did not answer (still starting, not signed in) is asked again
         # within a minute instead of an hour.

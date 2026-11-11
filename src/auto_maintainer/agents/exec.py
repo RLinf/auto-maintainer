@@ -50,7 +50,14 @@ import signal
 import tempfile
 import time
 import uuid
-from collections.abc import AsyncIterator, Iterable, Iterator
+from collections.abc import (
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Iterable,
+    Iterator,
+    Sequence,
+)
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar
@@ -205,6 +212,21 @@ def write_private(path: Path, text: str) -> None:
     """Write ``text`` to ``path`` in a run folder (``open_private``)."""
     with open_private(path) as out:
         out.write(text)
+
+
+async def _nothing() -> None:
+    return None
+
+
+@dataclass
+class Contained:
+    """A command the host starts for a CLI (``ExecRuntime.contained``): what to run,
+    its environment, the folder to run it in, and what ends it."""
+
+    argv: list[str]
+    env: dict[str, str]
+    cwd: Path
+    end: Callable[[], Awaitable[None]] = _nothing
 
 
 @dataclass
@@ -570,10 +592,26 @@ class ExecRuntime:
         )
         env["HOME"] = str(home)
         marker = home / self.login_marker if self.login_marker else None
-        process = LoginProcess(
-            self.login_command(binary, option), self.login_env(env), state, marker
+        command = self.login_command(binary, option)
+        if self.container_sandbox is not None:
+            # Only folders that exist are mounted: the sign-in must land in them.
+            for rel in self.home_paths:
+                path = home / rel
+                if not path.exists():
+                    if path.suffix == ".json":
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        path.write_text("{}\n", encoding="utf-8")
+                    else:
+                        path.mkdir(parents=True)
+        run = self.contained(
+            command,
+            self.login_env(env),
+            home,
+            home=home,
+            ro=[Path(a) for a in command[1:] if os.path.isabs(a) and Path(a).exists()],
         )
-        process.start(home)
+        process = LoginProcess(run.argv, run.env, state, marker, end=run.end)
+        process.start(run.cwd)
         return process
 
     async def signed_in(self, home: Path | None = None) -> bool | None:
@@ -684,6 +722,49 @@ class ExecRuntime:
         shows; ``None`` for a CLI that cannot report them without running a task."""
         return None
 
+    def contained(
+        self,
+        argv: Sequence[str],
+        env: dict[str, str],
+        cwd: Path,
+        *,
+        home: Path | None = None,
+        ro: Sequence[Path] = (),
+    ) -> Contained:
+        """``argv`` (whose first word is the binary) as the host may start it.
+
+        Where agents run in containers, the CLI's home folders are theirs to write
+        (sign-ins, sessions, and also settings, hooks, and the programs the CLI
+        runs), so the host never runs the CLI with them itself: a sign-in check, a
+        usage reading, a model probe, or a sign-in runs in a container of its own
+        too, with the account's home paths (``home``, else the host's) and ``ro``
+        read-only; it runs in a folder of its own, not ``cwd``. Without containers
+        it runs as it is, in ``cwd``, as agents then do."""
+        box = self.container_sandbox
+        if box is None:
+            return Contained(list(argv), env, cwd)
+        root = self.runs_dir / f"run_cli_{uuid.uuid4().hex[:12]}"
+        work = root / "work"
+        work.mkdir(parents=True)
+        prepared = box.prepare(
+            root.name,
+            work,
+            root,
+            argv[0],
+            list(argv),
+            env,
+            ro=list(ro),
+            home_paths=self.home_paths,
+            home_source=home,
+        )
+
+        async def end() -> None:
+            with contextlib.suppress(Exception):
+                await box.stop(prepared.name)
+            shutil.rmtree(root, ignore_errors=True)
+
+        return Contained(prepared.argv, prepared.env, work, end)
+
     async def cli_output(
         self,
         *args: str,
@@ -706,20 +787,21 @@ class ExecRuntime:
                 AgentTask(kind="probe", prompt="", workdir=Path(folder)),
                 self.env_allow,
             )
-            if (home or self.account_home) is not None:
-                env["HOME"] = str(home or self.account_home)
+            account = home or self.account_home
+            if account is not None:
+                env["HOME"] = str(account)
+            run = self.contained([binary, *args], env, Path(folder), home=account)
             proc: asyncio.subprocess.Process | None = None
             try:
                 proc = await asyncio.create_subprocess_exec(
-                    binary,
-                    *args,
-                    cwd=folder,
+                    *run.argv,
+                    cwd=run.cwd,
                     stdin=asyncio.subprocess.DEVNULL,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.STDOUT
                     if stderr
                     else asyncio.subprocess.DEVNULL,
-                    env=env,
+                    env=run.env,
                     start_new_session=True,
                 )
                 out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
@@ -730,6 +812,8 @@ class ExecRuntime:
                         await proc.wait()
                 log.warning("%s %s failed: %r", self.name, " ".join(args), exc)
                 return None
+            finally:
+                await run.end()
         if check and proc.returncode != 0:
             return None
         return out.decode("utf-8", "replace")
@@ -748,26 +832,34 @@ class ExecRuntime:
             )
         start = time.monotonic()
         proc: asyncio.subprocess.Process | None = None
+        run = self.contained(
+            [binary, "--version"],
+            build_env(
+                AgentTask(kind="probe", prompt="", workdir=Path.cwd()),
+                self.env_allow,
+            ),
+            Path.cwd(),
+            home=self.account_home,
+        )
         try:
             proc = await asyncio.create_subprocess_exec(
-                binary,
-                "--version",
+                *run.argv,
+                cwd=run.cwd,
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
-                env=build_env(
-                    AgentTask(kind="probe", prompt="", workdir=Path.cwd()),
-                    self.env_allow,
-                ),
+                env=run.env,
                 start_new_session=True,
             )
-            out, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
         except (TimeoutError, OSError) as exc:
             if proc is not None:
                 _kill_group(proc.pid, signal.SIGKILL)
             return RuntimeHealth(
                 name=self.name, available=False, detail=f"--version failed: {exc!r}"
             )
+        finally:
+            await run.end()
         text = out.decode("utf-8", "replace").strip()
         version_match = re.search(r"\d+\.\d+(?:\.\d+)?(?:[-+.\w]*)?", text)
         latency = round(time.monotonic() - start, 3)

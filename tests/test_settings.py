@@ -737,6 +737,20 @@ async def test_only_maintainers_of_the_service_install_agents(demo) -> None:
     assert "service.changed" in told, "open Settings pages show it installed"
 
 
+class _Box:
+    """A container sandbox that runs the command on the host as it is."""
+
+    github_socket = None
+
+    def prepare(self, run_id, workdir, run_dir, binary, argv, env, **kw):  # noqa: ANN001, ANN003, ANN201
+        from auto_maintainer.agents.container import Prepared
+
+        return Prepared(argv=list(argv), env=dict(env), name=f"am-{run_id}")
+
+    async def stop(self, name: str) -> None:
+        pass
+
+
 async def test_people_run_agents_on_their_own_accounts_and_nobody_elses(
     demo, tmp_path: Path
 ) -> None:
@@ -770,7 +784,7 @@ async def test_people_run_agents_on_their_own_accounts_and_nobody_elses(
         )
         refused = await walt.put("/api/me/agents/claude-code", json=own)
         assert refused.status_code == 409 and "on the host" in refused.json()["detail"]
-        runtime.container_sandbox = object()
+        runtime.container_sandbox = _Box()
         local = {"protocol": "openai", "base_url": "http://127.0.0.1:8080/v1"}
         probe = await walt.post("/api/me/providers/query", json=local)
         assert probe.status_code == 422 and "this host" in probe.json()["detail"], (

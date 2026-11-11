@@ -30,7 +30,7 @@ import contextlib
 import os
 import re
 import signal
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
 
 from ..domain.agents import AgentLogin
@@ -55,6 +55,7 @@ class LoginProcess:
         marker: The file the CLI writes when the sign-in succeeds. Once it is new,
             the sign-in is done and the CLI is stopped, since one may stay running
             after it (Antigravity's ``acp --login`` serves ACP next).
+        end: Called once the sign-in is over, to remove its container.
     """
 
     def __init__(
@@ -63,7 +64,9 @@ class LoginProcess:
         env: Mapping[str, str],
         state: AgentLogin,
         marker: Path | None = None,
+        end: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
+        self._end = end
         self.argv = list(argv)
         self.env = dict(env)
         self.state = state
@@ -99,6 +102,14 @@ class LoginProcess:
         self.state.state = "cancelled"
 
     async def _run(self, cwd: Path) -> None:
+        try:
+            await self._sign_in(cwd)
+        finally:
+            if self._end is not None:
+                with contextlib.suppress(Exception):
+                    await self._end()
+
+    async def _sign_in(self, cwd: Path) -> None:
         try:
             self._proc = await asyncio.create_subprocess_exec(
                 *self.argv,

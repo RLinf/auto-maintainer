@@ -399,3 +399,37 @@ async def test_an_agents_code_runs_in_a_container_and_the_rest_on_the_host(
     Starter.ready = False
     assert (await sandbox.run(tests, cwd=tmp_path, untrusted=True)).stdout == "on-host"
     assert host.ran == [script, tests], "no container on this host: as its agents do"
+
+
+async def test_the_host_runs_an_agents_cli_only_in_a_container_too(
+    tmp_path: Path,
+) -> None:
+    """An agent can write its CLI's home folders (settings, hooks, the programs the
+    CLI runs), so a sign-in check, a version or model probe, and a sign-in run in a
+    container too, never on the host with those folders."""
+    from datetime import UTC, datetime
+
+    from auto_maintainer.agents.adapters.claude_code import ClaudeCodeRuntime
+    from auto_maintainer.domain.agents import AgentLogin
+
+    cli = tmp_path / "claude"
+    cli.write_text("#!/bin/sh\necho '{\"loggedIn\": true}'\n")
+    cli.chmod(0o755)
+    box = FakeBox()
+    runtime = ClaudeCodeRuntime(binary=str(cli), runs_dir=tmp_path / "runs")
+    runtime.container_sandbox = box  # type: ignore[assignment]
+    assert await runtime.signed_in() is True
+    assert (await runtime.probe()).available
+    person = tmp_path / "people" / "walt" / "home"
+    state = AgentLogin(agent="claude-code", by="walt", started_at=datetime.now(UTC))
+    await runtime.start_login(person, state).wait()
+    asked = [(p["argv"][1:], p.get("home_source")) for p in box.prepared]
+    assert asked == [
+        (["auth", "status"], None),
+        (["--version"], None),
+        (["auth", "login"], person),
+    ]
+    assert all(p["home_paths"] == (".claude", ".claude.json") for p in box.prepared)
+    assert (person / ".claude").is_dir() and (person / ".claude.json").read_text()
+    assert len(box.stopped) == 3, "each container goes when it is done"
+    assert not list((tmp_path / "runs").glob("run_cli_*")), "and its folder"
