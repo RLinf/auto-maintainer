@@ -12,7 +12,7 @@ import { useT } from "../i18n";
 import { RepoTabs, useRepoScope } from "../repoScope";
 import { Icon } from "../icons";
 import { ProposalCard } from "../proposal";
-import { Skeleton, useTab } from "../ui";
+import { Skeleton, useRememberedView, useTab } from "../ui";
 import { ACTIVE, useWork } from "../jobs";
 import { AgentWork, GettingStarted, ReviewCard, useAutomations } from "./homeParts";
 import { ChangeCard } from "./Memory";
@@ -56,6 +56,7 @@ export default function HomePage({ me }: { me: Me }) {
   const repoRows = repos.data ?? [];
   const names = repoRows.map((r) => r.repo).sort((a, b) => a.localeCompare(b));
   const [scope, setScope] = useRepoScope(names);
+  const viewParams = useRememberedView("home", scope);
   const inScope = (repo: string | null | undefined) => !scope || !repo || repo === scope;
   const allRows = prs.data ?? [];
   const rows = allRows.filter((p) => !scope || p.repo === scope);
@@ -86,13 +87,14 @@ export default function HomePage({ me }: { me: Me }) {
     { id: "memory", label: t("Memory"), count: counts.memory },
     { id: "update", label: t("Updates"), count: counts.update },
   ];
-  const [show, setShow] = useTab(tabs, "show");
+  const [show, setShow] = useTab(tabs, "show", viewParams);
   const [order, setOrder] = useTab(
     [
       { id: "new", label: t("Newest first") },
       { id: "old", label: t("Oldest first") },
     ],
     "order",
+    viewParams,
   );
   // Questions block a running agent, so they lead; then by time.
   const feed = items
@@ -154,7 +156,7 @@ export default function HomePage({ me }: { me: Me }) {
       <RepoTabs names={names} scope={scope} onPick={setScope} count={(repo) => allRows.filter((p) => p.repo === repo && NEEDS_REVIEW.has(p.review_state)).length} />
       <GettingStarted repos={repoRows} prs={rows} automations={automations} />
       <AgentWork me={me} />
-      <ReviewCard rows={needs} all={rows} loading={prs.isLoading} me={me} automations={automations} />
+      <ReviewCard rows={needs} all={rows} loading={prs.isLoading} me={me} automations={automations} searchParams={viewParams} />
 
       <section id="decisions" className="stack" style={{ gap: 12, minWidth: 0 }}>
         <div className="row">

@@ -34,6 +34,7 @@ import { MenuItem, Popover, Skeleton, ToastProvider, useHotkey, useTheme, useToa
 import { useForgesLoader } from "./forges";
 import { OwnAliasForm, useAliasOf } from "./aliases";
 import { ConnectGitHub } from "./connectGitHub";
+import { homeHref, navHref } from "./viewState";
 
 export { useMe } from "./data";
 
@@ -94,7 +95,7 @@ function Shell({ me }: { me: Me }) {
 
   useHotkey("mod+k", () => setPalette((o) => !o));
   useHotkey("?", () => setHelp(true));
-  useGoKeys((to) => navigate(to));
+  useGoKeys((to) => navigate(navHref(to, location)));
   useEffect(() => {
     const onAsk = (e: Event) =>
       toast({
@@ -165,7 +166,7 @@ function Shell({ me }: { me: Me }) {
     <>
       <header className="header">
         <div className="header-inner">
-          <Link to="/" className="logo" aria-label="auto-maintainer home">
+          <Link to={navHref("/", location)} className="logo" aria-label="auto-maintainer home">
             <Logo size={28} />
             <span className="name">auto-maintainer</span>
           </Link>
@@ -195,7 +196,7 @@ function Shell({ me }: { me: Me }) {
           >
             {(close) => {
               const go = (to: string) => () => {
-                navigate(to);
+                navigate(navHref(to, location));
                 close();
               };
               return (
@@ -348,7 +349,7 @@ function Shell({ me }: { me: Me }) {
             path="*"
             element={
               <Empty icon="search">
-                {t("Page not found.")} <Link to="/">{t("Go home")}</Link>
+                {t("Page not found.")} <Link to={homeHref()}>{t("Go home")}</Link>
               </Empty>
             }
           />
@@ -370,6 +371,8 @@ function Shell({ me }: { me: Me }) {
 
 /** ``g`` then a letter goes to a page (``g h`` home, ``g p`` pull requests, …). */
 function useGoKeys(go: (to: string) => void) {
+  const saved = useRef(go);
+  saved.current = go;
   const armed = useRef(0);
   useEffect(() => {
     const targets = Object.fromEntries(NAV.filter((n) => n.keys).map((n) => [n.keys!.split(" ")[1], n.to]));
@@ -379,14 +382,14 @@ function useGoKeys(go: (to: string) => void) {
       if (Date.now() - armed.current < 1200 && targets[e.key]) {
         e.preventDefault();
         armed.current = 0;
-        go(targets[e.key]);
+        saved.current(targets[e.key]);
       } else if (e.key === "g") {
         armed.current = Date.now();
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [go]);
+  }, []);
 }
 
 function ShortcutsDialog({ onClose }: { onClose: () => void }) {
@@ -498,7 +501,7 @@ function TopNav({ waiting, counts }: { waiting: number; counts: { questions: num
     <div className="nav-wrap" ref={wrap}>
       <nav className="tabs-nav" aria-label={t("Main")}>
         {shown.map((n) => (
-          <NavLink key={n.to} to={n.to} end={n.to === "/"} title={t(n.label)}>
+          <NavLink key={n.to} to={navHref(n.to, location)} end={n.to === "/"} title={t(n.label)}>
             {tab(n)}
           </NavLink>
         ))}
@@ -528,7 +531,7 @@ function TopNav({ waiting, counts }: { waiting: number; counts: { questions: num
                     className="menu-item"
                     style={{ height: "auto", padding: "8px 10px", alignItems: "flex-start" }}
                     onClick={() => {
-                      navigate(n.to);
+                      navigate(navHref(n.to, location));
                       close();
                     }}
                   >

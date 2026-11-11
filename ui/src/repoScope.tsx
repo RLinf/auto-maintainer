@@ -5,33 +5,21 @@
 import { useSearchParams } from "react-router-dom";
 import { useT } from "./i18n";
 import { Icon } from "./icons";
-
-const KEY = "am.repo";
-
-function remembered(): string {
-  try {
-    return localStorage.getItem(KEY) ?? "";
-  } catch {
-    return "";
-  }
-}
+import { readRememberedRepo, rememberRepo } from "./viewState";
 
 /** The repository a page shows, among ``names``: the one in the URL, else the one chosen
  * last in this browser, else the first. Empty only when there is no repository. */
 export function useRepoScope(names: string[]): [string, (repo: string) => void] {
   const [params, setParams] = useSearchParams();
   const fromUrl = params.get("repo") ?? "";
-  const last = remembered();
+  const last = readRememberedRepo();
   const scope = names.includes(fromUrl) ? fromUrl : names.includes(last) ? last : (names[0] ?? "");
   const choose = (repo: string) => {
-    try {
-      localStorage.setItem(KEY, repo);
-    } catch {
-      // the choice still holds in the URL
-    }
+    rememberRepo(repo);
     setParams(
       (prev) => {
         const next = new URLSearchParams(prev);
+        if (repo !== scope) next.delete("page");
         next.set("repo", repo);
         return next;
       },
