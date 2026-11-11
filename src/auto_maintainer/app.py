@@ -24,7 +24,13 @@ from typing import Any
 
 import yaml
 
-from .agents.container import ContainerSandbox, SandboxStarter, host_tools, image_tag
+from .agents.container import (
+    ContainedSandbox,
+    ContainerSandbox,
+    SandboxStarter,
+    host_tools,
+    image_tag,
+)
 from .agents.install import AgentInstaller, installs_dir
 from .agents.registry import budgets_of, build_runtimes, merge_configs
 from .agents.router import AgentRouter
@@ -135,6 +141,9 @@ async def build_service(cfg: HostConfig, dev: bool = False) -> Service:
             tools=host_tools(),
             mounts=[Path(os.path.expanduser(m)) for m in cfg.sandbox.mounts],
             installs=installs_dir(data),
+            # Every checkout an agent works in is a worktree of a mirror here
+            # (``GitWorkspace.mirror``).
+            git_roots=[data / "mirrors"],
         ),
         lambda: router.runtimes,
         enabled=cfg.sandbox.enabled,
@@ -265,7 +274,7 @@ async def build_service(cfg: HostConfig, dev: bool = False) -> Service:
         store=store,
         agents=router,
         workspace=workspace,
-        sandbox=LocalSandbox(),
+        sandbox=ContainedSandbox(starter, LocalSandbox(), data / "sandbox"),
         notifier=WebhookNotifier(channels),
         clock=clock,
         labs=labs,

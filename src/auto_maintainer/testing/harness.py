@@ -81,6 +81,7 @@ DEFAULT_LABELS = [
 class FakeSandbox:
     def __init__(self) -> None:
         self.runs: list[list[str]] = []
+        self.untrusted: list[bool] = []
         self.results: list[CommandResult] = []
 
     async def run(
@@ -90,8 +91,10 @@ class FakeSandbox:
         cwd: Any,
         env: dict[str, str] | None = None,
         timeout: float = 120,
+        untrusted: bool = False,
     ) -> CommandResult:
         self.runs.append(argv)
+        self.untrusted.append(untrusted)
         return self.results.pop(0) if self.results else CommandResult(exit_code=0)
 
 

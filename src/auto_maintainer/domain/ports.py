@@ -509,7 +509,10 @@ class GpuStatus(BaseModel):
 
 @runtime_checkable
 class Sandbox(Protocol):
-    """Runs a repository's own check scripts with no credentials and a timeout."""
+    """Runs a repository's own check scripts with no credentials and a timeout.
+    ``untrusted``: the code it runs is an agent's work (the tests of a change the
+    service made to itself), so it runs where agents do, in a container of its own,
+    when the host has one."""
 
     async def run(
         self,
@@ -518,6 +521,7 @@ class Sandbox(Protocol):
         cwd: Any,
         env: dict[str, str] | None = None,
         timeout: float = 120,
+        untrusted: bool = False,
     ) -> CommandResult: ...
 
 

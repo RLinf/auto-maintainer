@@ -35,6 +35,10 @@ TokenFn = Callable[[str], Awaitable[str | None]]
 
 _HELPER = "!f() { echo username=$AM_GIT_USER; echo password=$AM_GIT_TOKEN; }; f"
 
+SAFE = ("-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null")
+"""Every git command in a checkout runs without hooks or a file-system monitor: both
+run commands that a configuration names."""
+
 RemoteFn = Callable[[str], tuple[str, str]]
 """A repository's clone address and the user name git presents with its token."""
 
@@ -98,6 +102,82 @@ class GitWorkspace:
         self._steering: dict[Path, str] = {}
         """Each prepared checkout's default branch ref, whose instruction files it
         holds (``_restore_instructions``)."""
+        self._admins: dict[Path, tuple[Path, Path]] = {}
+        """Each checkout's git metadata folder and repository (``_admin``)."""
+
+    def _admin(self, path: Path) -> tuple[Path, Path]:
+        """Checkout ``path``'s git metadata folder in its mirror, and the mirror.
+
+        An agent writes the checkout, including its ``.git`` file, and its metadata
+        folder (both are mounted in its container), so neither says where git's
+        configuration is: a ``.git`` or ``commondir`` naming a folder with a
+        ``core.fsmonitor`` would run a command here. The mirror is the service's, and
+        the metadata folder is the one in it that points back at the checkout.
+
+        Raises:
+            RuntimeError: ``path`` is not a checkout of a mirror here.
+        """
+        path = Path(path)
+        known = self._admins.get(path)
+        if known is not None:
+            return known
+        try:
+            mirror = self.mirror(self._repo_of(path))
+        except ValueError as exc:
+            raise RuntimeError(f"{path} is not a checkout the service made") from exc
+        own = mirror / "worktrees" / path.name
+        for admin in [own, *sorted((mirror / "worktrees").glob(f"{path.name}*"))]:
+            try:
+                back = (admin / "gitdir").read_text(encoding="utf-8").strip()
+            except OSError:
+                continue
+            if os.path.realpath(back) == os.path.realpath(path / ".git"):
+                self._admins[path] = (admin, mirror)
+                return admin, mirror
+        raise RuntimeError(f"{path} is not a checkout the service made")
+
+    def _pinned(self, path: Path, env: dict[str, str] | None = None) -> dict[str, str]:
+        """``env`` (else this process's) with git told where checkout ``path``'s
+        metadata and repository are (``_admin``), not left to find them there. The
+        files that name them are written back first: git still reads ``commondir``
+        from the metadata folder. No agent runs in the checkout meanwhile: its
+        container ends before the host works there."""
+        admin, mirror = self._admin(path)
+        dot = path / ".git"
+        if dot.is_dir() and not dot.is_symlink():
+            shutil.rmtree(dot)
+        for file, text in (
+            (dot, f"gitdir: {admin}\n"),
+            (admin / "commondir", f"{os.path.relpath(mirror, admin)}\n"),
+            (admin / "gitdir", f"{dot}\n"),
+        ):
+            if file.is_symlink() or file.exists():
+                file.unlink()
+            fd = os.open(
+                file, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644
+            )
+            with os.fdopen(fd, "w", encoding="utf-8") as out:
+                out.write(text)
+        return {
+            **(env if env is not None else dict(os.environ)),
+            "GIT_DIR": str(admin),
+            "GIT_COMMON_DIR": str(mirror),
+            "GIT_WORK_TREE": str(path),
+        }
+
+    async def _in(
+        self, path: Path, *args: str, repo: str | None = None, **kw: Any
+    ) -> Any:
+        """Run ``git args`` in checkout ``path`` (``_pinned``, ``SAFE``); with
+        ``repo``, signed in to its forge for a fetch or a push."""
+        argv = ["git", *SAFE]
+        env = None
+        if repo is not None:
+            argv += ["-c", f"credential.helper={_HELPER}", "-c", "core.quotepath=off"]
+            env = await self._env(repo)
+        return await run(
+            [*argv, *args], cwd=path, env=self._pinned(Path(path), env), **kw
+        )
 
     def remote_url(self, repo: str) -> str:
         """Where ``repo`` is cloned from and pushed to."""
@@ -208,47 +288,42 @@ class GitWorkspace:
     ) -> None:
         head_files = set(
             (
-                await self._git(repo, "ls-tree", "-r", "--name-only", sha, cwd=path)
-            ).splitlines()
+                await self._in(path, "ls-tree", "-r", "--name-only", sha, check=True)
+            ).stdout.splitlines()
         )
         base_files = set(
             (
-                await self._git(
-                    repo,
-                    "ls-tree",
-                    "-r",
-                    "--name-only",
-                    default_ref,
-                    cwd=path,
-                    check=False,
-                )
-            ).splitlines()
+                await self._in(path, "ls-tree", "-r", "--name-only", default_ref)
+            ).stdout.splitlines()
         )
         restore = sorted(p for p in base_files if is_instruction_path(p))
         remove = sorted(p for p in head_files - base_files if is_instruction_path(p))
         for rel in remove:
             (path / rel).unlink(missing_ok=True)
         for i in range(0, len(restore), 200):
-            await self._git(
-                repo, "checkout", default_ref, "--", *restore[i : i + 200], cwd=path
+            await self._in(
+                path, "checkout", default_ref, "--", *restore[i : i + 200], check=True
             )
 
     async def diff(
         self, path: Any, base: str, head: str, max_bytes: int = 200_000
     ) -> str:
-        repo_hint = ""
-        result = await run(
-            ["git", "diff", "--no-color", f"{base}...{head}"], cwd=path, timeout=300
+        path = Path(path)
+        result = await self._in(
+            path, "diff", "--no-color", f"{base}...{head}", timeout=300
         )
         if not result.ok and base and len(base) >= 7:
-            await run(
-                ["git", "fetch", "-q", "origin", base],
-                cwd=path,
-                env=await self._env(repo_hint),
+            await self._in(
+                path,
+                "fetch",
+                "-q",
+                "origin",
+                base,
+                repo=self._repo_of(path),
                 timeout=300,
             )
-            result = await run(
-                ["git", "diff", "--no-color", f"{base}...{head}"], cwd=path, timeout=300
+            result = await self._in(
+                path, "diff", "--no-color", f"{base}...{head}", timeout=300
             )
         text = result.stdout if result.ok else ""
         return text[:max_bytes] + (
@@ -258,15 +333,18 @@ class GitWorkspace:
     async def release(self, path: Any) -> None:
         p = Path(path)
         self._steering.pop(p, None)
-        common = (
-            await run(["git", "rev-parse", "--git-common-dir"], cwd=p)
-            if p.exists()
-            else None
-        )
-        if common and common.ok:
-            mirror = (p / common.stdout.strip()).resolve()
-            await run(["git", "worktree", "remove", "--force", str(p)], cwd=mirror)
+        try:
+            _, mirror = self._admin(p)
+        except RuntimeError:
+            mirror = None
+        self._admins.pop(p, None)
+        if mirror is not None:
+            await run(
+                ["git", *SAFE, "worktree", "remove", "--force", str(p)], cwd=mirror
+            )
         shutil.rmtree(p, ignore_errors=True)
+        if mirror is not None:
+            await run(["git", "worktree", "prune"], cwd=mirror)
 
     async def changes(self, path: Any) -> WorkChanges:
         """What changed in the checkout since its commit: the agent's work. The
@@ -274,35 +352,33 @@ class GitWorkspace:
         are left out, so a fix never carries them onto a PR, nor drops the PR's own;
         in a checkout of the default branch itself they are the agent's to change."""
         p = Path(path)
-        await run(["git", "add", "-A"], cwd=p, timeout=300, check=True)
+        await self._in(p, "add", "-A", timeout=300, check=True)
         steering = self._steering.get(p)
         if steering is not None:
-            differ = await run(
-                ["git", "diff", "--name-only", "-z", "HEAD", steering, "--"],
-                cwd=p,
+            differ = await self._in(
+                p,
+                "diff",
+                "--name-only",
+                "-z",
+                "HEAD",
+                steering,
+                "--",
                 timeout=300,
                 check=True,
             )
             swapped = [f for f in differ.stdout.split("\0") if is_instruction_path(f)]
             for i in range(0, len(swapped), 200):
-                await run(
-                    ["git", "reset", "-q", "HEAD", "--", *swapped[i : i + 200]],
-                    cwd=p,
-                    timeout=300,
+                await self._in(
+                    p, "reset", "-q", "HEAD", "--", *swapped[i : i + 200], timeout=300
                 )
-        base = (
-            await run(["git", "rev-parse", "HEAD"], cwd=p, check=True)
-        ).stdout.strip()
+        base = (await self._in(p, "rev-parse", "HEAD", check=True)).stdout.strip()
         patch = (
-            await run(
-                ["git", "diff", "--cached", "--binary", "--no-color"],
-                cwd=p,
-                timeout=300,
-                check=True,
+            await self._in(
+                p, "diff", "--cached", "--binary", "--no-color", timeout=300, check=True
             )
         ).stdout
         names = (
-            await run(["git", "diff", "--cached", "--name-only"], cwd=p, check=True)
+            await self._in(p, "diff", "--cached", "--name-only", check=True)
         ).stdout
         return WorkChanges(base_sha=base, patch=patch, files=names.split())
 
@@ -317,16 +393,21 @@ class GitWorkspace:
         path = Path(path)
         repo = self._repo_of(path)
         ref = f"refs/remotes/origin/{branch}"
-        await self._git(
-            repo, "fetch", "-q", "origin", f"+refs/heads/{branch}:{ref}", cwd=path
+        await self._in(
+            path,
+            "fetch",
+            "-q",
+            "origin",
+            f"+refs/heads/{branch}:{ref}",
+            repo=repo,
+            timeout=900,
+            check=True,
         )
-        merge_sha = (
-            await run(["git", "rev-parse", ref], cwd=path, check=True)
-        ).stdout.strip()
+        merge_sha = (await self._in(path, "rev-parse", ref, check=True)).stdout.strip()
         steering_ref = self._steering.get(path)
         # The checkout holds the default branch's instruction files, which git
         # would refuse to merge over: merge the PR's own commit as it is.
-        await run(["git", "reset", "-q", "--hard", "HEAD"], cwd=path, check=True)
+        await self._in(path, "reset", "-q", "--hard", "HEAD", check=True)
         conflicts = await self._merge(path, merge_sha)
         steering = [c for c in conflicts if is_instruction_path(c)]
         if steering_ref is not None:
@@ -344,25 +425,20 @@ class GitWorkspace:
                 (an empty list would read as a clean merge).
         """
         name, email = self.author
-        merged = await run(
-            [
-                "git",
-                "-c",
-                f"user.name={name}",
-                "-c",
-                f"user.email={email}",
-                "merge",
-                "--no-ff",
-                "--no-commit",
-                sha,
-            ],
-            cwd=path,
+        merged = await self._in(
+            path,
+            "-c",
+            f"user.name={name}",
+            "-c",
+            f"user.email={email}",
+            "merge",
+            "--no-ff",
+            "--no-commit",
+            sha,
             timeout=600,
         )
-        listed = await run(
-            ["git", "diff", "--name-only", "-z", "--diff-filter=U"],
-            cwd=path,
-            check=True,
+        listed = await self._in(
+            path, "diff", "--name-only", "-z", "--diff-filter=U", check=True
         )
         conflicts = [p for p in listed.stdout.split("\0") if p]
         if not merged.ok and not conflicts:
@@ -371,7 +447,7 @@ class GitWorkspace:
         return conflicts
 
     async def merge_base(self, path: Any, a: str, b: str) -> str | None:
-        result = await run(["git", "merge-base", a, b], cwd=Path(path), timeout=120)
+        result = await self._in(Path(path), "merge-base", a, b, timeout=120)
         if not result.ok:
             return None
         return result.stdout.strip() or None
@@ -379,9 +455,13 @@ class GitWorkspace:
     async def archive(self, path: Any, ref: str, max_bytes: int = 200_000_000) -> str:
         with tempfile.TemporaryDirectory(prefix="am-archive-") as tmp:
             out = Path(tmp) / "code.tar.gz"
-            await run(
-                ["git", "archive", "--format=tar.gz", "-o", str(out), ref],
-                cwd=Path(path),
+            await self._in(
+                Path(path),
+                "archive",
+                "--format=tar.gz",
+                "-o",
+                str(out),
+                ref,
                 timeout=600,
                 check=True,
             )
@@ -433,11 +513,18 @@ class GitWorkspace:
             )
         try:
             if merge_sha:
-                have = await run(
-                    ["git", "cat-file", "-e", f"{merge_sha}^{{commit}}"], cwd=path
-                )
+                have = await self._in(path, "cat-file", "-e", f"{merge_sha}^{{commit}}")
                 if not have.ok:
-                    await self._git(repo, "fetch", "-q", "origin", merge_sha, cwd=path)
+                    await self._in(
+                        path,
+                        "fetch",
+                        "-q",
+                        "origin",
+                        merge_sha,
+                        repo=repo,
+                        timeout=900,
+                        check=True,
+                    )
                 conflicts = await self._merge(path, merge_sha)
                 missing = [c for c in conflicts if c not in (resolved or {})]
                 if missing:
@@ -450,40 +537,46 @@ class GitWorkspace:
                     (path / conflict).write_text(
                         (resolved or {})[conflict], encoding="utf-8"
                     )
-                    await run(["git", "add", "--", conflict], cwd=path, check=True)
+                    await self._in(path, "add", "--", conflict, check=True)
             elif patch:
-                await run(
-                    ["git", "apply", "--index", "--binary", "--whitespace=nowarn", "-"],
-                    cwd=path,
+                await self._in(
+                    path,
+                    "apply",
+                    "--index",
+                    "--binary",
+                    "--whitespace=nowarn",
+                    "-",
                     stdin=patch,
                     timeout=300,
                     check=True,
                 )
             name, email = author or self.author
-            await run(
-                [
-                    "git",
-                    "-c",
-                    f"user.name={name}",
-                    "-c",
-                    f"user.email={email}",
-                    "commit",
-                    "-q",
-                    "-F",
-                    "-",
-                ],
-                cwd=path,
+            await self._in(
+                path,
+                "-c",
+                f"user.name={name}",
+                "-c",
+                f"user.email={email}",
+                "commit",
+                "-q",
+                "-F",
+                "-",
                 stdin=message,
                 check=True,
             )
-            sha = (
-                await run(["git", "rev-parse", "HEAD"], cwd=path, check=True)
-            ).stdout.strip()
+            sha = (await self._in(path, "rev-parse", "HEAD", check=True)).stdout.strip()
             remote = (
                 self.remote_url(push_to) if push_to and push_to != repo else "origin"
             )
-            await self._git(
-                repo, "push", "-q", remote, f"HEAD:refs/heads/{branch}", cwd=path
+            await self._in(
+                path,
+                "push",
+                "-q",
+                remote,
+                f"HEAD:refs/heads/{branch}",
+                repo=repo,
+                timeout=900,
+                check=True,
             )
             return sha
         finally:
@@ -504,7 +597,10 @@ class LocalSandbox:
         cwd: Any,
         env: dict[str, str] | None = None,
         timeout: float = 120,
+        untrusted: bool = False,
     ) -> CommandResult:
+        """Run ``argv`` here; ``untrusted`` code runs here too only where agents also
+        run on the host (``agents.container.ContainedSandbox`` runs it elsewhere)."""
         home = tempfile.mkdtemp(prefix="am-sandbox-")
         try:
             base = {

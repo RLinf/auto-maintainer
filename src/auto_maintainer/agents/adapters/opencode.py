@@ -27,6 +27,8 @@ the account had no quota left, so the permission flow follows the ACP specificat
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
 from typing import Any
 
 from ...domain.agents import AgentTask
@@ -42,6 +44,17 @@ def _model_entry(model: str, spec: ModelSpec | None) -> dict[str, Any]:
     if spec is not None and spec.context_window and spec.max_output:
         entry["limit"] = {"context": spec.context_window, "output": spec.max_output}
     return entry
+
+
+OPENCODE_KEYS = (
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "GEMINI_API_KEY",
+    "OPENROUTER_API_KEY",
+)
+"""Provider keys OpenCode reads from its environment (``default_env_allow``)."""
+FREE_MODELS = "opencode/"
+"""OpenCode Zen's models, some of them free and usable without an account."""
 
 
 class OpenCodeRuntime(AcpRuntime):
@@ -60,6 +73,36 @@ class OpenCodeRuntime(AcpRuntime):
 
     def acp_argv(self, task: AgentTask, files: RunFiles, binary: str) -> list[str]:
         return [binary, "acp"]
+
+    async def signed_in(self, home: Path | None = None) -> bool | None:
+        """Whether OpenCode has a model the service was given to run it on (checked
+        against 1.19.5): credentials it stored (``~/.local/share/opencode/auth.json``),
+        a provider's key in the service's environment, or one of OpenCode Zen's
+        ``opencode/...`` models chosen as its model. Without any of them it still
+        runs, on a free OpenCode Zen model nobody chose to send the work to, so it
+        counts as not signed in. ``None`` when its own config may name providers."""
+        if (self.model or "").startswith(FREE_MODELS):
+            return True
+        if any(os.environ.get(k) for k in OPENCODE_KEYS):
+            return True
+        root = home or self.account_home or Path.home()
+        try:
+            auth = json.loads(
+                (root / ".local/share/opencode/auth.json").read_text(encoding="utf-8")
+            )
+        except FileNotFoundError:
+            auth = {}
+        except (OSError, ValueError):
+            return None
+        if isinstance(auth, dict) and auth:
+            return True
+        config = root / ".config/opencode"
+        if any(
+            (config / name).is_file()
+            for name in ("opencode.json", "opencode.jsonc", "config.json")
+        ):
+            return None
+        return False
 
     def task_env(self, task: AgentTask) -> dict[str, str]:
         if task.permissions == "bypass":

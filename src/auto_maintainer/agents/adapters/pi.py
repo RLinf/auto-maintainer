@@ -51,7 +51,7 @@ from typing import Any
 
 from ...domain.agents import AgentEvent, AgentEventType, AgentTask, Capabilities
 from ...domain.settings import ModelSpec
-from ..exec import ExecRuntime, Invocation, RunFiles
+from ..exec import ExecRuntime, Invocation, RunFiles, write_private
 from . import partial, short
 
 READ_TOOLS = "read,grep,find,ls"
@@ -190,7 +190,8 @@ class PiRuntime(ExecRuntime):
         if p is not None and p.base_url and model and p.protocol in _API:
             agent_dir = files.dir / "pi-agent"
             agent_dir.mkdir(parents=True, exist_ok=True)
-            (agent_dir / "models.json").write_text(
+            write_private(
+                agent_dir / "models.json",
                 json.dumps(
                     {
                         "providers": {
@@ -203,7 +204,6 @@ class PiRuntime(ExecRuntime):
                         }
                     }
                 ),
-                encoding="utf-8",
             )
             self._agent_dirs[task.id] = str(agent_dir)
             argv += ["--provider", PROVIDER, "--model", model]

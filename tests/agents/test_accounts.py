@@ -23,6 +23,8 @@ import stat
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+
 from auto_maintainer.agents.adapters.claude_code import ClaudeCodeRuntime
 from auto_maintainer.agents.container import ContainerSandbox
 from auto_maintainer.agents.router import AgentRouter
@@ -262,6 +264,56 @@ async def test_antigravity_without_its_token_is_not_signed_in_at_once(
     hangs.chmod(0o755)
     runtime = AntigravityRuntime(binary=str(hangs))
     assert await asyncio.wait_for(runtime.signed_in(tmp_path / "home"), 2) is False
+
+
+async def test_gemini_without_a_key_or_google_sign_in_is_not_signed_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Routes then pass over it, instead of trying a run that ends at once with
+    "Gemini API key is missing or not configured"."""
+    from auto_maintainer.agents.adapters.gemini import GEMINI_KEYS, GeminiRuntime
+
+    for key in (*GEMINI_KEYS, "GOOGLE_GENAI_USE_VERTEXAI"):
+        monkeypatch.delenv(key, raising=False)
+    home = tmp_path / "home"
+    (home / ".gemini/antigravity-cli").mkdir(parents=True)  # Antigravity's, not its
+    runtime = GeminiRuntime()
+    assert await runtime.signed_in(home) is False
+    (home / ".gemini/settings.json").write_text(
+        '{"security": {"auth": {"selectedType": "vertex-ai"}}}'
+    )
+    assert await runtime.signed_in(home) is None, "Vertex AI leaves no file to see"
+    (home / ".gemini/oauth_creds.json").write_text("{}")
+    assert await runtime.signed_in(home) is True
+    (home / ".gemini/oauth_creds.json").unlink()
+    (home / ".gemini/settings.json").unlink()
+    monkeypatch.setenv("GEMINI_API_KEY", "k")
+    assert await runtime.signed_in(home) is True
+
+
+async def test_opencode_runs_only_on_a_model_it_was_given(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without credentials OpenCode still answers, on a free OpenCode Zen model that
+    nobody chose to send the work to."""
+    from auto_maintainer.agents.adapters.opencode import OPENCODE_KEYS, OpenCodeRuntime
+
+    for key in OPENCODE_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    home = tmp_path / "home"
+    (home / ".config/opencode").mkdir(parents=True)
+    (home / ".config/opencode/.gitignore").write_text("node_modules\n")
+    runtime = OpenCodeRuntime()
+    assert await runtime.signed_in(home) is False
+    runtime.model = "opencode/big-pickle"
+    assert await runtime.signed_in(home) is True, "the owner chose a free model"
+    runtime.model = None
+    auth = home / ".local/share/opencode/auth.json"
+    auth.parent.mkdir(parents=True)
+    auth.write_text("{}")
+    assert await runtime.signed_in(home) is False
+    auth.write_text('{"anthropic": {"type": "api", "key": "k"}}')
+    assert await runtime.signed_in(home) is True
 
 
 async def test_a_cli_that_stays_up_after_signing_in_is_stopped_and_done(

@@ -244,11 +244,15 @@ async def test_failing_checks_go_back_to_the_same_agent_session(h: Harness) -> N
     first, repair = edits
     assert first.resume_session is None
     assert repair.resume_session == "sess-1", "the agent goes on in its own session"
+    assert {t.requested_by for t in edits} == {"walt"}, (
+        "walt's tokens, not the service's"
+    )
     assert "FAILED tests/test_ping.py::test_ping" in repair.prompt
     assert "Add a ping endpoint." in repair.prompt
     route = h.runner.routes[h.runner.tasks.index(repair)]
     assert route.primary == "codex" and "codex" not in route.fallback
     assert h.sandbox.runs.count(TESTS) == 2 and FORMAT in h.sandbox.runs
+    assert all(h.sandbox.untrusted), "the agent's code runs only where agents run"
     [pr] = h.forge.writes_of("create_service_pr")
     assert "tests: `" in pr["body"] and "failed" not in pr["body"].split("## Checks")[1]
 

@@ -329,9 +329,29 @@ async def _run_checks(
     ctx: PlaybookContext, path: Any
 ) -> list[tuple[str, list[str], CommandResult]]:
     return [
-        (name, argv, await ctx.sandbox.run(argv, cwd=path, timeout=timeout))
+        (
+            name,
+            argv,
+            await ctx.sandbox.run(argv, cwd=path, timeout=timeout, untrusted=True),
+        )
         for name, argv, timeout in CHECKS
     ]
+
+
+_DIGITS = re.compile(r"\d+(\.\d+)?")
+
+
+def _failures(checks: list[tuple[str, list[str], CommandResult]]) -> set[str]:
+    """What the failing checks report, without their timings: the same set after a
+    repair turn means the turn fixed nothing."""
+    return {
+        f"{name}: {_DIGITS.sub('#', line.strip())}"
+        for name, _, result in checks
+        if result.exit_code != 0
+        for line in (result.stdout + result.stderr).splitlines()
+        if line.startswith(("FAILED", "ERROR", "E ", "error", "Would reformat"))
+        or (": " in line and line.split(":", 1)[0].endswith(".py"))
+    }
 
 
 def _failed(checks: list[tuple[str, list[str], CommandResult]]) -> list[str]:

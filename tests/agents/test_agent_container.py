@@ -17,6 +17,7 @@ removal when the run ends."""
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -55,6 +56,7 @@ def test_a_container_holds_the_run_and_nothing_of_the_service(tmp_path: Path) ->
     (gitdir / "commondir").write_text("../..\n")
     work.mkdir()
     (work / ".git").write_text(f"gitdir: {gitdir}\n")
+    (gitdir / "gitdir").write_text(f"{work / '.git'}\n")
     run_dir, skills, home = tmp_path / "run", tmp_path / "skills", tmp_path / "home"
     run_dir.mkdir()
     skills.mkdir()
@@ -103,6 +105,69 @@ def test_a_container_holds_the_run_and_nothing_of_the_service(tmp_path: Path) ->
     assert f"HOME={home}" in argv and any(
         a.startswith("PATH=/opt/am/bin") for a in argv
     )
+
+
+def test_git_metadata_is_mounted_only_for_the_checkouts_own_worktree(
+    tmp_path: Path,
+) -> None:
+    """An earlier agent can rewrite the checkout's ``.git`` file; the folder it names
+    is mounted only when it is this checkout's worktree of a mirror the service
+    keeps, never another folder of the host."""
+    from auto_maintainer.agents.container import git_dirs
+
+    mirrors = tmp_path / "mirrors"
+    repo = mirrors / "acme__widget.git"
+    admin = repo / "worktrees" / "work"
+    admin.mkdir(parents=True)
+    work = tmp_path / "work"
+    work.mkdir()
+    (admin / "gitdir").write_text(f"{work / '.git'}\n")
+    (work / ".git").write_text(f"gitdir: {admin}\n")
+    assert git_dirs(work, [mirrors]) == (admin, repo)
+    secrets = tmp_path / "config" / "worktrees" / "x"
+    secrets.mkdir(parents=True)
+    (secrets / "gitdir").write_text(f"{work / '.git'}\n")
+    for named in (secrets, tmp_path / "config", repo / "worktrees" / "other"):
+        (work / ".git").write_text(f"gitdir: {named}\n")
+        assert git_dirs(work, [mirrors]) == (None, None), named
+    other = repo / "worktrees" / "other"
+    other.mkdir()
+    (other / "gitdir").write_text(f"{tmp_path / 'elsewhere' / '.git'}\n")
+    (work / ".git").write_text(f"gitdir: {other}\n")
+    assert git_dirs(work, [mirrors]) == (None, None), "another checkout's"
+
+
+def test_mount_points_in_the_runs_home_belong_to_the_service_user(
+    tmp_path: Path,
+) -> None:
+    """``docker`` would create them, and the folders above them, as root: OpenCode
+    then could not make ``~/.local/state`` beside a mounted
+    ``~/.local/share/opencode``. A link an earlier attempt left is not followed."""
+    home, run_dir = tmp_path / "home", tmp_path / "run"
+    (home / ".local/share/opencode").mkdir(parents=True)
+    (home / ".config/opencode").mkdir(parents=True)
+    (home / ".claude.json").write_text("{}")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (run_dir / "home").mkdir(parents=True)
+    (run_dir / "home/.config").symlink_to(elsewhere)
+    binary = tmp_path / "opencode"
+    binary.write_text("")
+    box = ContainerSandbox("agent:1", home=home)
+    box.prepare(
+        "run_1",
+        tmp_path,
+        run_dir,
+        str(binary),
+        [str(binary), "acp"],
+        {},
+        home_paths=[".local/share/opencode", ".config/opencode", ".claude.json"],
+    )
+    inside = run_dir / "home"
+    assert (inside / ".local/share/opencode").is_dir()
+    assert (inside / ".claude.json").is_file()
+    assert (inside / ".local").stat().st_uid == os.getuid()
+    assert not (elsewhere / "opencode").exists(), "the link was not followed"
 
 
 def test_only_a_reproductions_agent_gets_the_lab_socket(tmp_path: Path) -> None:
@@ -189,7 +254,8 @@ async def test_a_runtime_runs_each_task_in_its_container(
     assert asked["home_paths"] == (".gemini",) and asked["ro"] == [tmp_path / "skills"]
     assert "--dangerously-skip-permissions" in asked["argv"], "everything is permitted"
     assert box.stopped == [f"am-{task.id}"], "the container goes when the run ends"
-    config = tmp_path / "runs" / task.id / "gh-config" / "config.yml"
+    [run_dir] = (tmp_path / "runs").glob(f"{task.id}-*")
+    config = run_dir / "gh-config" / "config.yml"
     assert f"http_unix_socket: {SOCKET}" in config.read_text()
 
 
@@ -285,3 +351,51 @@ def test_only_a_conversations_agent_gets_the_records_door(tmp_path: Path) -> Non
     )
     assert RECORDS_SOCKET not in _mounts(other.argv)
     assert "AM_RECORDS_SOCKET" not in other.env, "no token, no door"
+
+
+async def test_an_agents_code_runs_in_a_container_and_the_rest_on_the_host(
+    tmp_path: Path,
+) -> None:
+    from auto_maintainer.agents.container import ContainedSandbox
+    from auto_maintainer.domain.ports import CommandResult
+
+    class Box:
+        def __init__(self) -> None:
+            self.prepared: list[dict[str, Any]] = []
+            self.stopped: list[str] = []
+
+        def prepare(self, name, workdir, run_dir, binary, argv, env, **kw):  # noqa: ANN001, ANN003
+            self.prepared.append({"argv": argv, "env": env, "rw": kw.get("rw")})
+            return Prepared(argv=["sh", "-c", "echo in-box"], env={}, name=f"am-{name}")
+
+        async def stop(self, name: str) -> None:
+            self.stopped.append(name)
+
+    class Host:
+        def __init__(self) -> None:
+            self.ran: list[list[str]] = []
+
+        async def run(self, argv, **kw):  # noqa: ANN001, ANN003
+            self.ran.append(argv)
+            return CommandResult(exit_code=0, stdout="on-host")
+
+    class Starter:
+        ready = enabled = True
+        sandbox = Box()
+
+    host = Host()
+    sandbox = ContainedSandbox(Starter(), host, tmp_path / "sandbox")  # type: ignore[arg-type]
+    tests = ["uv", "run", "pytest"]
+    boxed = await sandbox.run(tests, cwd=tmp_path, untrusted=True)
+    assert boxed.stdout.strip() == "in-box" and host.ran == []
+    [prepared] = Starter.sandbox.prepared
+    assert prepared["argv"] == tests
+    assert prepared["env"]["UV_CACHE_DIR"] == str(tmp_path / "sandbox" / "uv-cache")
+    assert Starter.sandbox.stopped and not list(
+        (tmp_path / "sandbox" / "runs").iterdir()
+    )
+    script = ["scripts/check.sh"]
+    assert (await sandbox.run(script, cwd=tmp_path)).stdout == "on-host"
+    Starter.ready = False
+    assert (await sandbox.run(tests, cwd=tmp_path, untrusted=True)).stdout == "on-host"
+    assert host.ran == [script, tests], "no container on this host: as its agents do"

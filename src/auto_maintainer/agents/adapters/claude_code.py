@@ -283,11 +283,29 @@ class ClaudeCodeRuntime(ExecRuntime):
             return super().parse_line(line)
         kind = data.get("type")
         if kind == "system":
-            return (
-                [partial(session=data.get("session_id"))]
-                if data.get("subtype") == "init"
-                else []
-            )
+            subtype = data.get("subtype")
+            if subtype == "init":
+                return [partial(session=data.get("session_id"))]
+            if subtype == "model_refusal_fallback":
+                # The model's safeguards stopped the request and Claude Code went on
+                # with another model; when that one fails too (an account's model
+                # API that does not offer it answers 403), the run fails for the
+                # refusal, not for its sign-in, so no breaker opens on the account.
+                original = data.get("originalModel") or "the model"
+                fallback = data.get("fallbackModel") or "another model"
+                why = data.get("apiRefusalCategory")
+                return [
+                    partial(
+                        refusal=f"{original}'s safeguards stopped this request"
+                        + (f" ({why})" if why else "")
+                        + f", so Claude Code went on with {fallback}.",
+                        error_kind="other",
+                    )
+                ]
+            content = str(data.get("content") or "")
+            if subtype == "informational" and "safeguards" in content:
+                return [partial(refusal=content.split(" · ")[0] + ".")]
+            return []
         if kind == "assistant":
             events: list[AgentEvent] = []
             for block in (data.get("message") or {}).get("content") or []:

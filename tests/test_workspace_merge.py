@@ -194,3 +194,38 @@ async def test_an_agents_changes_leave_out_the_instructions_the_checkout_swapped
     assert changes.files == ["loader.py"]
     assert "AGENTS.md" not in changes.patch and "CLAUDE.md" not in changes.patch
     await ws.release(path)
+
+
+async def test_git_config_an_agent_points_at_never_runs_on_the_host(
+    tmp_path: Path,
+) -> None:
+    """An agent writes its checkout and its git metadata folder: a ``.git`` file or a
+    ``commondir`` naming a folder whose config sets ``core.fsmonitor`` must not make
+    the host's own git commands there run it."""
+    forge = tmp_path / "forge"
+    upstream = forge / "acme" / "widget.git"
+    git(tmp_path, "init", "-q", "--bare", "-b", "main", str(upstream))
+    work = tmp_path / "work"
+    git(tmp_path, "clone", "-q", str(upstream), str(work))
+    head = _commit(work, "one\n", "seed")
+    git(work, "push", "-q", "origin", "HEAD:main")
+
+    ws = GitWorkspace(tmp_path / "data", forge_url=f"file://{forge}")
+    path = await ws.prepare("acme/widget", None, head, "main")
+    admin = Path((path / ".git").read_text().split(":", 1)[1].strip())
+    ran = tmp_path / "ran"
+    evil = path / "evil"
+    git(tmp_path, "init", "-q", "--bare", str(evil))
+    with (evil / "config").open("a") as config:
+        config.write(f"[core]\n\tfsmonitor = touch {ran}\n\thooksPath = {evil}\n")
+    (path / ".git").write_text(f"gitdir: {evil}\n")
+    (admin / "commondir").write_text(f"{evil}\n")
+    (path / "loader.py").write_text("two\n")
+
+    ws2 = GitWorkspace(tmp_path / "data", forge_url=f"file://{forge}")  # a restart
+    for workspace in (ws, ws2):
+        changes = await workspace.changes(path)
+        assert "loader.py" in changes.files and changes.base_sha == head
+        assert not ran.exists(), "the agent's fsmonitor never ran"
+    await ws2.release(path)
+    assert not path.exists()

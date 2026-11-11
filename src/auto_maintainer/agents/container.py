@@ -33,11 +33,14 @@ import hashlib
 import logging
 import os
 import shutil
+import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
+from typing import Any
 
+from ..domain.ports import CommandResult
 from ..subproc import run
 
 log = logging.getLogger(__name__)
@@ -83,23 +86,59 @@ def host_tools(names: Sequence[str] = HOST_TOOLS) -> dict[str, Path]:
     return found
 
 
-def git_dirs(workdir: Path) -> tuple[Path | None, Path | None]:
+def git_dirs(
+    workdir: Path, roots: Sequence[Path] = ()
+) -> tuple[Path | None, Path | None]:
     """A git worktree's own metadata folder and the repository it belongs to, so git
-    works inside the container; ``(None, None)`` for a plain folder."""
+    works inside the container; ``(None, None)`` for a plain folder.
+
+    The checkout's ``.git`` file and its metadata folder are an earlier agent's to
+    write, so neither is believed on its own: the metadata folder must be
+    ``<repository>/worktrees/<name>`` of a repository under ``roots`` (the service's
+    mirrors) and point back at this checkout. Otherwise git gets nothing mounted,
+    instead of whatever folder the file names."""
     dot = workdir / ".git"
-    if not dot.is_file():
+    if dot.is_symlink() or not dot.is_file():
         return None, None
     text = dot.read_text(encoding="utf-8", errors="replace").strip()
     if not text.startswith("gitdir:"):
         return None, None
-    gitdir = Path(text.split(":", 1)[1].strip())
-    if not gitdir.is_absolute():
-        gitdir = (workdir / gitdir).resolve()
-    common = gitdir / "commondir"
-    commondir = (
-        (gitdir / common.read_text().strip()).resolve() if common.is_file() else None
-    )
-    return gitdir, commondir
+    named = Path(text.split(":", 1)[1].strip())
+    gitdir = Path(os.path.realpath(named if named.is_absolute() else workdir / named))
+    common = gitdir.parent.parent
+    if gitdir.parent.name != "worktrees" or not common.is_dir():
+        return None, None
+    if roots and not any(
+        common.is_relative_to(os.path.realpath(root)) for root in roots
+    ):
+        return None, None
+    try:
+        back = (gitdir / "gitdir").read_text(encoding="utf-8").strip()
+    except OSError:
+        return None, None
+    if os.path.realpath(back) != os.path.realpath(dot):
+        return None, None
+    return gitdir, common
+
+
+def make_inside(root: Path, rel: Path, *, folder: bool) -> None:
+    """Create ``root / rel`` (a folder, or an empty file when not ``folder``) and the
+    folders above it as the service's user. ``docker`` creates a mount point that is
+    missing as root, and the folders above it too, so a CLI running as the service's
+    user could not then make its own folders beside them (``~/.local/state`` beside a
+    mounted ``~/.local/share/opencode``). A link on the way stops it: an agent of an
+    earlier attempt could have left one, and nothing here follows it out of ``root``."""
+    current = root
+    for i, part in enumerate(rel.parts):
+        current = current / part
+        if current.is_symlink():
+            return
+        if current.exists():
+            continue
+        if folder or i < len(rel.parts) - 1:
+            current.mkdir()
+        else:
+            current.touch()
 
 
 @dataclass(frozen=True)
@@ -127,6 +166,8 @@ class ContainerSandbox:
         mounts: More host paths to mount read-only at the same place.
         installs: Where the dashboard installs agent CLIs (``agents/install.py``).
         home: The home folder path agents see; the host's own by default.
+        git_roots: Where the repositories of the checkouts agents work in are (the
+            workspace's mirrors): a checkout's git metadata is mounted only from there.
     """
 
     def __init__(
@@ -143,8 +184,10 @@ class ContainerSandbox:
         mounts: Sequence[Path] = (),
         installs: Path | None = None,
         home: Path | None = None,
+        git_roots: Sequence[Path] = (),
     ) -> None:
         self.image = image
+        self.git_roots = list(git_roots)
         self.docker = docker
         self.cpus = cpus
         self.memory = memory
@@ -213,9 +256,11 @@ class ContainerSandbox:
         host's home when it is set; inside, they are where the CLI looks."""
         name = f"am-{run_id}"
         home_dir = run_dir / "home"
+        if home_dir.is_symlink():
+            home_dir.unlink()
         home_dir.mkdir(parents=True, exist_ok=True)
         binds: list[tuple[Path, str, bool]] = [(workdir, str(workdir), False)]
-        gitdir, commondir = git_dirs(workdir)
+        gitdir, commondir = git_dirs(workdir, self.git_roots)
         if commondir is not None:
             binds.append((commondir, str(commondir), True))
         if gitdir is not None:
@@ -296,6 +341,13 @@ class ContainerSandbox:
             if target in seen:
                 continue
             seen.add(target)
+            inside_home = Path(target)
+            if inside_home != self.home and inside_home.is_relative_to(self.home):
+                make_inside(
+                    home_dir,
+                    inside_home.relative_to(self.home),
+                    folder=source.is_dir(),
+                )
             spec = f"type=bind,src={source},dst={target}"
             cmd += ["--mount", spec + (",readonly" if readonly else "")]
         for key, value in plain.items():
@@ -427,3 +479,61 @@ class SandboxStarter:
         for runtime in runtimes.values():
             if hasattr(runtime, "home_paths"):
                 runtime.container_sandbox = self.sandbox  # type: ignore[attr-defined]
+
+
+class ContainedSandbox:
+    """The ``Sandbox`` port: a command whose code an agent wrote (``untrusted``), such
+    as the tests of a change the service made to itself, runs in a fresh container of
+    the agents' image, holding its checkout and nothing of the service, as the agent
+    did; every other command, and every command while the host has no container for
+    agents (where agents run on the host too), goes to ``fallback``.
+
+    Args:
+        starter: The agents' sandbox, once ready.
+        fallback: Where the rest runs (``workspace.git.LocalSandbox``).
+        root: A folder for each command's home, and the package caches commands
+            share (``uv``), so a second run of the tests does not download again.
+    """
+
+    def __init__(self, starter: SandboxStarter, fallback: Any, root: Path) -> None:
+        self.starter = starter
+        self.fallback = fallback
+        self.root = root
+
+    async def run(
+        self,
+        argv: list[str],
+        *,
+        cwd: Any,
+        env: dict[str, str] | None = None,
+        timeout: float = 120,
+        untrusted: bool = False,
+    ) -> CommandResult:
+        if not (untrusted and self.starter.ready and self.starter.enabled):
+            return await self.fallback.run(
+                argv, cwd=cwd, env=env, timeout=timeout, untrusted=untrusted
+            )
+        binary = shutil.which(argv[0]) or argv[0]
+        name = f"check_{uuid.uuid4().hex[:12]}"
+        run_dir = self.root / "runs" / name
+        run_dir.mkdir(parents=True)
+        cache = self.root / "uv-cache"
+        cache.mkdir(parents=True, exist_ok=True)
+        inner = {"LANG": "C.UTF-8", "UV_CACHE_DIR": str(cache), **(env or {})}
+        box = self.starter.sandbox
+        prepared = box.prepare(
+            name, Path(cwd), run_dir, binary, argv, inner, rw=[cache]
+        )
+        try:
+            result = await run(prepared.argv, env=prepared.env, timeout=timeout)
+        finally:
+            with contextlib.suppress(Exception):
+                await box.stop(prepared.name)
+            shutil.rmtree(run_dir, ignore_errors=True)
+        return CommandResult(
+            exit_code=result.exit_code,
+            stdout=result.stdout[-20_000:],
+            stderr=result.stderr[-20_000:],
+            duration_seconds=result.duration_seconds,
+            timed_out=result.timed_out,
+        )

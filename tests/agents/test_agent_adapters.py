@@ -303,6 +303,44 @@ async def test_claude_error_result_is_a_failure(tmp_path: Path, talking_cli) -> 
     )
 
 
+async def test_a_refused_request_is_not_a_sign_in_failure(
+    tmp_path: Path, talking_cli
+) -> None:
+    """Opus 5.5's safeguards stop a request and Claude Code goes on with Opus 5, which
+    a person's own model API does not offer (seen 2026-11-11): the run fails for the
+    refusal, and no breaker opens on the account as for a bad sign-in."""
+    lines = [
+        {
+            "type": "system",
+            "subtype": "informational",
+            "content": "Opus 5.5's safeguards stopped the response above · continuing once with that noted",
+        },
+        {
+            "type": "system",
+            "subtype": "model_refusal_fallback",
+            "originalModel": "claude-opus-5-5",
+            "fallbackModel": "claude-opus-5",
+            "apiRefusalCategory": "frontier_llm",
+        },
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": True,
+            "result": "Failed to authenticate. API Error: 403 no access to this model",
+            "api_error_status": 403,
+            "session_id": "s",
+        },
+    ]
+    cli = talking_cli([{"wait": '"type": "user"', "emit": lines}], exit=1)
+    rt = ClaudeCodeRuntime(binary=str(cli.path), runs_dir=tmp_path / "runs")
+    _, result = await _run(rt, _task(tmp_path))
+    assert not result.ok and result.error_kind == "other"
+    assert (result.error or "").startswith(
+        "claude-opus-5-5's safeguards stopped this request (frontier_llm), so Claude "
+        "Code went on with claude-opus-5. Then: Failed to authenticate."
+    )
+
+
 async def test_generic_json_with_final_path(tmp_path: Path, fake_cli) -> None:
     cli = fake_cli(stdout=json.dumps({"result": {"text": '{"ok": true}'}}))
     rt = GenericRuntime(

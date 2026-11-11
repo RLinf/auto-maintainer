@@ -126,7 +126,7 @@ async def test_transcript_and_files_are_scrubbed(tmp_path: Path, fake_cli) -> No
     )
     task = _task(tmp_path)
     result = await _result(_rt(cli.path, tmp_path), task)
-    run_dir = tmp_path / "runs" / task.id
+    [run_dir] = (tmp_path / "runs").glob(f"{task.id}-*")  # a folder per attempt
     for name in ("transcript.jsonl", "stderr.txt", "result.json"):
         assert secret not in (run_dir / name).read_text(), name
     assert (run_dir / "prompt.md").read_text() == "go"
@@ -155,3 +155,26 @@ async def test_workdir_is_the_cwd_and_prompt_goes_to_stdin(
     result = await _result(_rt(cli.path, tmp_path), _task(work, prompt="hello agent"))
     assert result.ok and cli.stdin() == "hello agent"
     assert (cli.record_dir / "cwd.txt").read_text() == str(work)
+
+
+async def test_links_an_agent_leaves_in_its_run_folder_are_not_written_through(
+    tmp_path: Path,
+) -> None:
+    """An agent can write its run folder; the files the host writes there after it
+    ran replace any link it left instead of writing where the link points."""
+    target = tmp_path / "host-file"
+    target.write_text("keep")
+    cli = tmp_path / "plants"
+    cli.write_text(
+        "#!/bin/sh\n"
+        'run="$(dirname "$GH_CONFIG_DIR")"\n'
+        f'for f in result.json stderr.txt transcript.jsonl; do rm -f "$run/$f"; ln -s {target} "$run/$f"; done\n'
+        "echo done\n"
+    )
+    cli.chmod(0o755)
+    result = await _result(_rt(cli, tmp_path), _task(tmp_path))
+    assert result.ok, result.error
+    assert target.read_text() == "keep"
+    run_dir = Path(str(result.transcript_path)).parent
+    assert not (run_dir / "result.json").is_symlink()
+    assert '"ok": true' in (run_dir / "result.json").read_text()

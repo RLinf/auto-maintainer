@@ -49,6 +49,7 @@ import shutil
 import signal
 import tempfile
 import time
+import uuid
 from collections.abc import AsyncIterator, Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -188,6 +189,24 @@ class RunFiles:
         )
 
 
+def open_private(path: Path) -> Any:
+    """``path`` in a run folder, opened to write text, replacing a link there instead
+    of writing through it. An agent's container can write its run folder, so the
+    agent can leave a link in place of a file the host writes (``transcript.jsonl``,
+    ``stderr.txt``, ``result.json``); followed, it would point the host's write
+    anywhere."""
+    if path.is_symlink():
+        path.unlink()
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
+    return os.fdopen(fd, "w", encoding="utf-8")
+
+
+def write_private(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` in a run folder (``open_private``)."""
+    with open_private(path) as out:
+        out.write(text)
+
+
 @dataclass
 class Invocation:
     """A command line and what to feed its standard input (``None`` closes it)."""
@@ -209,6 +228,9 @@ class RunState:
     is_error: bool = False
     error: str | None = None
     error_kind: str | None = None
+    refusal: str | None = None
+    """What the model's provider refused along the way, when the CLI says so; a
+    failure that follows is reported with it (``_final``)."""
 
     def merge(self, data: dict[str, Any]) -> None:
         if data.get("text") is not None:
@@ -226,12 +248,16 @@ class RunState:
             self.error = str(data["error"])
         if data.get("error_kind"):
             self.error_kind = str(data["error_kind"])
+        if data.get("refusal"):
+            self.refusal = str(data["refusal"])
 
     def add_usage(self, data: dict[str, Any]) -> None:
         if self.usage_final:
             return
         self.usage = Usage(
             input_tokens=self.usage.input_tokens + int(data.get("input_tokens") or 0),
+            cached_input_tokens=self.usage.cached_input_tokens
+            + int(data.get("cached_input_tokens") or 0),
             output_tokens=self.usage.output_tokens
             + int(data.get("output_tokens") or 0),
             cost_usd=(
@@ -334,8 +360,8 @@ def _gh_through_proxy(config_dir: Path) -> None:
     from .container import SOCKET
 
     config_dir.mkdir(parents=True, exist_ok=True)
-    (config_dir / "config.yml").write_text(
-        f"http_unix_socket: {SOCKET}\nprompt: disabled\n", encoding="utf-8"
+    write_private(
+        config_dir / "config.yml", f"http_unix_socket: {SOCKET}\nprompt: disabled\n"
     )
 
 
@@ -349,8 +375,8 @@ def isolation_env(run_dir: Path) -> dict[str, str]:
     gh = run_dir / "gh-config"
     gh.mkdir(parents=True, exist_ok=True)
     gitconfig = run_dir / "gitconfig"
-    if not gitconfig.exists():
-        gitconfig.write_text("[safe]\n\tdirectory = *\n", encoding="utf-8")
+    if gitconfig.is_symlink() or not gitconfig.exists():
+        write_private(gitconfig, "[safe]\n\tdirectory = *\n")
     return {
         "GH_CONFIG_DIR": str(gh),
         "GIT_CONFIG_GLOBAL": str(gitconfig),
@@ -614,7 +640,7 @@ class ExecRuntime:
         data = schema if schema is not None else task.output_schema
         if data is None:
             return None
-        files.schema.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        write_private(files.schema, json.dumps(data, indent=2))
         return files.schema
 
     def fitted_prompt(self, text: str, files: RunFiles) -> str:
@@ -626,7 +652,7 @@ class ExecRuntime:
         if limit is None or len(raw) <= limit:
             return text
         whole = files.dir / "task.md"
-        whole.write_text(text, encoding="utf-8")
+        write_private(whole, text)
         head = raw[: max(0, limit - 1_000)].decode("utf-8", "ignore")
         cut = head.rfind("\n")
         head = head[:cut] if cut > len(head) // 2 else head
@@ -765,8 +791,10 @@ class ExecRuntime:
     async def run(self, task: AgentTask) -> AsyncIterator[AgentEvent]:
         """Run ``task`` and stream its events; the last event carries the result."""
         start = time.monotonic()
-        files = RunFiles.create(self.runs_dir, task.id)
-        files.prompt.write_text(task.prompt, encoding="utf-8")
+        # A folder of its own for each attempt: a fallback or a later turn of the same
+        # task never runs where an earlier agent's container could leave anything.
+        files = RunFiles.create(self.runs_dir, f"{task.id}-{uuid.uuid4().hex[:6]}")
+        write_private(files.prompt, task.prompt)
         state = RunState()
         binary = resolve_binary(self.binary, self.search_dirs)
         if binary is None:
@@ -814,7 +842,7 @@ class ExecRuntime:
             bin_dir = files.dir / "bin"
             bin_dir.mkdir(exist_ok=True)
             lab = bin_dir / "lab"
-            lab.write_text(LAB_CLI.read_text(encoding="utf-8"), encoding="utf-8")
+            write_private(lab, LAB_CLI.read_text(encoding="utf-8"))
             lab.chmod(0o755)
             env["AM_LAB_SESSION"] = task.lab_session
             env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
@@ -826,7 +854,7 @@ class ExecRuntime:
             bin_dir = files.dir / "bin"
             bin_dir.mkdir(exist_ok=True)
             reader = bin_dir / "am-read"
-            reader.write_text(RECORDS_CLI.read_text(encoding="utf-8"), encoding="utf-8")
+            write_private(reader, RECORDS_CLI.read_text(encoding="utf-8"))
             reader.chmod(0o755)
             env["AM_RECORDS_TOKEN"] = task.records_token
             if str(bin_dir) not in env.get("PATH", "").split(os.pathsep):
@@ -907,7 +935,7 @@ class ExecRuntime:
         waiting: asyncio.Future[Told] | None = None
         try:
             with (
-                files.transcript.open("w", encoding="utf-8") as transcript,
+                open_private(files.transcript) as transcript,
                 box_context as box,
             ):
                 while True:
@@ -1046,7 +1074,8 @@ class ExecRuntime:
                 await asyncio.wait_for(stderr_task, 5)
 
         stderr = stderr_buf.decode("utf-8", "replace")
-        files.stderr.write_text(scrub(stderr), encoding="utf-8")
+        with contextlib.suppress(OSError):
+            write_private(files.stderr, scrub(stderr))
         self.finish(task, files, state, stderr)
 
         if timed_out:
@@ -1147,6 +1176,8 @@ class ExecRuntime:
             else (state.messages[-1] if state.messages else "")
         )
         structured = state.structured
+        if not ok and state.refusal and error:
+            error = f"{state.refusal} Then: {error}"
         if ok and task.output_schema is not None and structured is None:
             structured = extract_json(text)
             if structured is None:
@@ -1169,9 +1200,7 @@ class ExecRuntime:
             duration_seconds=round(time.monotonic() - start, 3),
         )
         with contextlib.suppress(OSError):
-            files.result.write_text(
-                scrub(result.model_dump_json(indent=2)), encoding="utf-8"
-            )
+            write_private(files.result, scrub(result.model_dump_json(indent=2)))
         return AgentEvent(type=AgentEventType.FINAL, text=text, result=result)
 
     async def _terminate(self, proc: asyncio.subprocess.Process) -> None:
