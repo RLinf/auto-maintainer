@@ -13,7 +13,7 @@ import { ConnectGitHub } from "./connectGitHub";
 import { Empty, ErrorBox, Section, useAct, When } from "./components";
 import { useT } from "./i18n";
 import { Icon } from "./icons";
-import { Skeleton, useToast } from "./ui";
+import { Popover, Skeleton, useToast } from "./ui";
 
 function percent(x: number | null): string {
   return x === null ? "—" : `${Math.round(x * 100)}%`;
@@ -141,15 +141,7 @@ export function ReviewProgressPanel({ repo, number, me }: { repo: string; number
         hint={t("for the PR's owners")}
         aside={
           d.threads > 0 ? (
-            <button
-              className="sm"
-              disabled={check.isPending}
-              onClick={() => startCheck([])}
-              title={d.comment_checks === "scan" ? t("Also checked on the repository's schedule; this checks now") : t("This repository checks comments only when asked")}
-            >
-              <Icon name="search" size={13} />
-              {t("Check comments")}
-            </button>
+            <CommentBulkActions d={d} me={me} repo={repo} number={number} checking={check.isPending} onCheck={startCheck} />
           ) : undefined
         }
       >
@@ -258,6 +250,95 @@ function CodeOwnerApprovals({ d, repo }: { d: PrProgress; repo: string }) {
         )}
       </div>
     </Section>
+  );
+}
+
+/** Check every open comment against the code again, or resolve them on GitHub as
+ * oneself: those the check found fixed, or all the person may resolve. */
+function CommentBulkActions({
+  d,
+  me,
+  repo,
+  number,
+  checking,
+  onCheck,
+}: {
+  d: PrProgress;
+  me: string;
+  repo: string;
+  number: number;
+  checking: boolean;
+  onCheck: (ids: string[]) => void;
+}) {
+  const t = useT();
+  const toast = useToast();
+  const open = d.reviewers.flatMap((r) => r.comments.filter((c) => !c.resolved).map((c) => ({ c, mine: d.can_resolve || r.login.toLowerCase() === me.toLowerCase() })));
+  const resolvable = open.filter((o) => o.mine).map((o) => o.c);
+  const fixed = resolvable.filter((c) => c.check?.status === "addressed");
+  const resolve = useAct(
+    (ids: string[]) => api.post<{ resolved: number; skipped: { thread_id: string; reason: string }[] }>(`/api/prs/${repo}/${number}/threads/resolve`, { thread_ids: ids }),
+    [["pr", repo, String(number), "progress"]],
+  );
+  const run = (ids: string[], close: () => void) =>
+    resolve.mutate(ids, {
+      onSuccess: (r) => {
+        close();
+        toast({
+          title: `${r.resolved} ${r.resolved === 1 ? t("comment resolved") : t("comments resolved")}`,
+          body: r.skipped.length ? `${r.skipped.length} ${t("left as they were")}: ${[...new Set(r.skipped.map((s) => s.reason))].join("; ")}` : undefined,
+          icon: r.resolved ? "check" : "x",
+        });
+      },
+    });
+  return (
+    <span className="row" style={{ gap: 6 }}>
+      <button
+        className="sm"
+        disabled={checking || open.length === 0}
+        onClick={() => onCheck(open.map((o) => o.c.thread_id))}
+        title={`${t("Check every open comment against the code now, again")}${d.comment_checks === "scan" ? ` (${t("also checked on the repository's schedule")})` : ""}`}
+      >
+        <Icon name="search" size={13} />
+        {t("Check all")}
+        {open.length > 0 && <span className="muted"> {open.length}</span>}
+      </button>
+      {resolvable.length > 0 && (
+        <Popover
+          align="right"
+          label={t("Resolve all")}
+          trigger={(isOpen, toggle) => (
+            <button
+              className={`sm ${isOpen ? "on" : ""}`}
+              aria-expanded={isOpen}
+              disabled={!d.signed_in || resolve.isPending}
+              title={d.signed_in ? t("Resolve comments on GitHub, as you") : t("Sign in with GitHub to resolve comments as yourself")}
+              onClick={toggle}
+            >
+              <Icon name="check" size={13} />
+              {resolve.isPending ? t("Resolving…") : t("Resolve all")}
+            </button>
+          )}
+        >
+          {(close) => (
+            <div className="stack" style={{ gap: 8, padding: 8, width: "min(320px, calc(100vw - 24px))" }}>
+              <strong className="small">{t("Resolve on GitHub, as you")}</strong>
+              <button className="primary sm" disabled={fixed.length === 0 || resolve.isPending} onClick={() => run(fixed.map((c) => c.thread_id), close)}>
+                {t("The ones fixed in the code")} ({fixed.length})
+              </button>
+              <button className="sm" disabled={resolve.isPending} onClick={() => run(resolvable.map((c) => c.thread_id), close)}>
+                {t("Every open comment")} ({resolvable.length})
+              </button>
+              <span className="small muted">
+                {resolvable.length < open.length
+                  ? `${open.length - resolvable.length} ${t("others are not yours to resolve: their reviewers, the PR's owners, or a maintainer resolve them.")}`
+                  : t("Only the latest check says which are fixed; check all first for a fresh answer.")}
+              </span>
+              <ErrorBox error={resolve.error} />
+            </div>
+          )}
+        </Popover>
+      )}
+    </span>
   );
 }
 

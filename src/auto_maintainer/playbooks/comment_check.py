@@ -30,6 +30,7 @@ that did not change costs nothing.
 from __future__ import annotations
 
 import re
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
@@ -38,6 +39,7 @@ from pydantic import BaseModel, Field
 
 from ..domain.agents import AgentTask, TaskKind
 from ..domain.events import Event, EventKind
+from ..domain.profile import RepoProfile
 from ..domain.review_progress import CommentCheck, checks_key, load_checks
 from ..domain.scoring import priority_key
 from ..domain.snapshot import PrSnapshot, PrState, ReviewThread
@@ -134,7 +136,11 @@ class CommentCheckPlaybook(Playbook):
                 for t in threads
                 if t.id not in known or known[t.id].head_sha != pr.head_sha
             ]
-        threads = threads[: profile.review.comments.max_comments]
+        batch = profile.review.comments.max_comments
+        if not wanted:
+            # The comments a person named are all checked, ``batch`` at a time; on
+            # its own the check reads at most ``batch`` per run.
+            threads = threads[:batch]
         if not threads:
             return PlaybookResult(result={"skipped": "no open comment to check"})
 
@@ -144,6 +150,9 @@ class CommentCheckPlaybook(Playbook):
                 pr.repo, pr.number, pr.head_sha, info.default_branch
             )
         )
+        checked = dict(known)
+        found: list[CommentCheck] = []
+        live = {t.id for t in pr.threads}
         try:
             diffs: dict[str, dict[str, str]] = {}
 
@@ -172,92 +181,109 @@ class CommentCheckPlaybook(Playbook):
                         result={"skipped": "no commented file changed since its check"}
                     )
 
-            blocks = []
-            ids: dict[str, ReviewThread] = {}
-            for i, t in enumerate(threads, 1):
-                cid = f"c{i}"
-                ids[cid] = t
-                since = t.comments[0].commit_sha or f"origin/{info.default_branch}"
-                change = (await sections(since)).get(t.path or "", "")
-                talk = "\n\n".join(f"{c.author}: {c.body}" for c in t.comments)
-                blocks.append(
-                    "\n".join(
-                        [
-                            f"### Item {cid}: {t.path or '(no file)'}"
-                            f"{f':{t.line}' if t.line else ' (lines changed since)'}",
-                            untrusted(f"{cid}.comments", talk, 3000),
-                            untrusted(
-                                f"{cid}.changes_since_comment",
-                                change
-                                or "(this file did not change since the comment)",
-                                6000,
-                            ),
-                            untrusted(
-                                f"{cid}.code_now",
-                                _around(workdir, t.path, t.line) or "(not shown)",
-                                4000,
-                            ),
-                        ]
-                    )
+            for start in range(0, len(threads), batch):
+                part = threads[start : start + batch]
+                ids = {f"c{i}": t for i, t in enumerate(part, 1)}
+                answer = await ctx.ask(
+                    AgentTask(
+                        kind=TaskKind.COMMENT_CHECK,
+                        prompt=await _prompt(
+                            ids, sections, workdir, info.default_branch, pr, profile
+                        ),
+                        workdir=workdir,
+                        output_schema=CommentCheckResult.model_json_schema(),
+                        repo=pr.repo,
+                        pr=pr.number,
+                        budget="quick",
+                    ),
+                    CommentCheckResult,
                 )
-            prompt = "\n\n".join(
-                [
-                    "Reviewers left these comments on a pull request. For each item, say "
-                    "in one line (at most 100 characters) what the comment asks, then "
-                    "whether the code as it is now does it: `addressed` (it does, or the "
-                    "concern no longer applies), `partly`, `open` (not yet), or "
-                    "`unclear` (a question or discussion the code cannot settle, or "
-                    "what you were given does not show). Give a one-line reason, and "
-                    "for `addressed` the commit that did it when the changes show it. "
-                    "Judge only from what is given here; do not run anything.",
-                    f"Write the summaries and reasons in {profile.languages.internal}.",
-                    f"Head: {pr.head_sha}.",
-                    *blocks,
-                    schema_hint(CommentCheckResult.model_json_schema()),
-                ]
-            )
-            task = AgentTask(
-                kind=TaskKind.COMMENT_CHECK,
-                prompt=prompt,
-                workdir=workdir,
-                output_schema=CommentCheckResult.model_json_schema(),
-                repo=pr.repo,
-                pr=pr.number,
-                budget="quick",
-            )
-            answer = await ctx.ask(task, CommentCheckResult)
+                if not answer.ok or answer.structured is None:
+                    raise RuntimeError(f"the comment check failed: {answer.error}")
+                result = CommentCheckResult.model_validate(answer.structured)
+                now: datetime = ctx.clock.now()
+                for item in result.items:
+                    thread = ids.get(item.id)
+                    if thread is None:
+                        continue
+                    checked[thread.id] = CommentCheck(
+                        thread_id=thread.id,
+                        status=item.status,
+                        summary=" ".join(item.summary.split())[:200],
+                        reason=" ".join(item.reason.split())[:400],
+                        fixed_in=item.fixed_in,
+                        head_sha=pr.head_sha,
+                        checked_at=now,
+                    )
+                    found.append(checked[thread.id])
+                # Each batch shows on the dashboard as soon as it is done.
+                await ctx.store.set_state(
+                    key,
+                    {
+                        k: v.model_dump(mode="json")
+                        for k, v in checked.items()
+                        if k in live
+                    },
+                )
         finally:
             await ctx.workspace.release(workdir)
-        if not answer.ok or answer.structured is None:
-            raise RuntimeError(f"the comment check failed: {answer.error}")
-        result = CommentCheckResult.model_validate(answer.structured)
-        now: datetime = ctx.clock.now()
-        checked = dict(known)
-        for item in result.items:
-            thread = ids.get(item.id)
-            if thread is None:
-                continue
-            checked[thread.id] = CommentCheck(
-                thread_id=thread.id,
-                status=item.status,
-                summary=" ".join(item.summary.split())[:200],
-                reason=" ".join(item.reason.split())[:400],
-                fixed_in=item.fixed_in,
-                head_sha=pr.head_sha,
-                checked_at=now,
-            )
-        live = {t.id for t in pr.threads}
-        await ctx.store.set_state(
-            key,
-            {k: v.model_dump(mode="json") for k, v in checked.items() if k in live},
-        )
-        found = [checked[t.id] for t in ids.values() if t.id in checked]
         return PlaybookResult(
             result={
                 "checked": len(found),
                 "addressed": sum(1 for c in found if c.status == "addressed"),
             }
         )
+
+
+async def _prompt(
+    ids: dict[str, ReviewThread],
+    sections: Callable[[str], Awaitable[dict[str, str]]],
+    workdir: Path,
+    default_branch: str,
+    pr: PrSnapshot,
+    profile: RepoProfile,
+) -> str:
+    """What the agent reads to check the comments ``ids`` against the code now."""
+    blocks = []
+    for cid, t in ids.items():
+        since = t.comments[0].commit_sha or f"origin/{default_branch}"
+        change = (await sections(since)).get(t.path or "", "")
+        talk = "\n\n".join(f"{c.author}: {c.body}" for c in t.comments)
+        blocks.append(
+            "\n".join(
+                [
+                    f"### Item {cid}: {t.path or '(no file)'}"
+                    f"{f':{t.line}' if t.line else ' (lines changed since)'}",
+                    untrusted(f"{cid}.comments", talk, 3000),
+                    untrusted(
+                        f"{cid}.changes_since_comment",
+                        change or "(this file did not change since the comment)",
+                        6000,
+                    ),
+                    untrusted(
+                        f"{cid}.code_now",
+                        _around(workdir, t.path, t.line) or "(not shown)",
+                        4000,
+                    ),
+                ]
+            )
+        )
+    return "\n\n".join(
+        [
+            "Reviewers left these comments on a pull request. For each item, say "
+            "in one line (at most 100 characters) what the comment asks, then "
+            "whether the code as it is now does it: `addressed` (it does, or the "
+            "concern no longer applies), `partly`, `open` (not yet), or "
+            "`unclear` (a question or discussion the code cannot settle, or "
+            "what you were given does not show). Give a one-line reason, and "
+            "for `addressed` the commit that did it when the changes show it. "
+            "Judge only from what is given here; do not run anything.",
+            f"Write the summaries and reasons in {profile.languages.internal}.",
+            f"Head: {pr.head_sha}.",
+            *blocks,
+            schema_hint(CommentCheckResult.model_json_schema()),
+        ]
+    )
 
 
 class CommentScan(Playbook):

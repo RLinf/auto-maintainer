@@ -568,8 +568,13 @@ class ClaimBody(BaseModel):
 
 
 class CommentCheckBody(BaseModel):
-    thread_ids: list[str] = Field(default_factory=list, max_length=100)
-    """Only these review threads; empty: every open one not checked at the head."""
+    thread_ids: list[str] = Field(default_factory=list, max_length=500)
+    """Only these review threads, checked again even at the same head; empty: every
+    open one not checked at the head."""
+
+
+class ResolveThreadsBody(BaseModel):
+    thread_ids: list[str] = Field(min_length=1, max_length=500)
 
 
 class AnswerBody(BaseModel):
@@ -1718,33 +1723,25 @@ def build_router() -> APIRouter:
         await service.bus.publish(event)
         return {"event": event.id}
 
-    @r.post("/prs/{repo:path}/{number:int}/threads/{thread_id}/resolve")
-    async def resolve_thread(
-        request: Request,
-        repo: str,
-        number: int,
-        thread_id: str,
-        user: User = Depends(current_user),
+    async def resolve_as(
+        service: Any, user: User, repo: str, pr: Any, thread: Any
     ) -> dict[str, Any]:
-        """Resolve one review thread on the forge, as the person who pressed the
-        button and with their own sign-in: maintainers of the repository and the PR's
-        owners resolve any thread, a reviewer their own. The service's account never
-        resolves one."""
-        service = service_of(request)
-        repo = _repo(repo)
-        await require_view(service, user, repo)
-        pr = await service.store.get_snapshot(repo, number)
-        thread = (
-            next((t for t in pr.threads if t.id == thread_id), None) if pr else None
-        )
-        if pr is None or thread is None:
-            raise HTTPException(404, "no such review thread on this PR")
+        """Resolve ``thread`` on the forge as ``user``, with their own sign-in:
+        maintainers of the repository and the PR's owners resolve any thread, a
+        reviewer their own. The service's account never resolves one.
+
+        Raises:
+            HTTPException: 403 when ``user`` may not resolve it, or has no sign-in
+                of their own to resolve it with.
+        """
         opener = thread.comments[0].author if thread.comments else ""
         if not (
             opener.lower() == user.login.lower()
             or await is_maintainer(service, user, repo)
             or holds(
-                await service.store.list_assignees(repo, number), user.login, "owner"
+                await service.store.list_assignees(repo, pr.number),
+                user.login,
+                "owner",
             )
         ):
             raise HTTPException(
@@ -1761,10 +1758,10 @@ def build_router() -> APIRouter:
             make_action(
                 ActionKind.THREAD_RESOLVE,
                 repo,
-                ThreadResolvePayload(thread_id=thread_id, path=thread.path),
-                number=number,
+                ThreadResolvePayload(thread_id=thread.id, path=thread.path),
+                number=pr.number,
                 head_sha=pr.head_sha,
-                discriminator=thread_id,
+                discriminator=thread.id,
                 rationale=f"{user.login} resolved a review comment",
                 draft_for=user.login,
                 provenance=Provenance(requested_by=user.login),
@@ -1776,6 +1773,79 @@ def build_router() -> APIRouter:
             "error": record.error,
             "reason": record.decision.reason if record.decision else None,
         }
+
+    @r.post("/prs/{repo:path}/{number:int}/threads/{thread_id}/resolve")
+    async def resolve_thread(
+        request: Request,
+        repo: str,
+        number: int,
+        thread_id: str,
+        user: User = Depends(current_user),
+    ) -> dict[str, Any]:
+        """Resolve one review thread on the forge, as the person who pressed the
+        button (``resolve_as``)."""
+        service = service_of(request)
+        repo = _repo(repo)
+        await require_view(service, user, repo)
+        pr = await service.store.get_snapshot(repo, number)
+        thread = (
+            next((t for t in pr.threads if t.id == thread_id), None) if pr else None
+        )
+        if pr is None or thread is None:
+            raise HTTPException(404, "no such review thread on this PR")
+        return await resolve_as(service, user, repo, pr, thread)
+
+    @r.post("/prs/{repo:path}/{number:int}/threads/resolve")
+    async def resolve_threads(
+        request: Request,
+        repo: str,
+        number: int,
+        body: ResolveThreadsBody,
+        user: User = Depends(current_user),
+    ) -> dict[str, Any]:
+        """Resolve several review threads at once, each as for one (``resolve_as``):
+        those already resolved, gone, or not the person's to resolve are left and
+        named in ``skipped`` with why; ``resolved`` counts the rest that went out."""
+        service = service_of(request)
+        repo = _repo(repo)
+        await require_view(service, user, repo)
+        pr = await service.store.get_snapshot(repo, number)
+        if pr is None:
+            raise HTTPException(404, f"{repo}#{number} is not known yet")
+        if not await service.can_post_as(user.login):
+            raise HTTPException(
+                403, "sign in with GitHub, so the comments are resolved by you"
+            )
+        threads = {t.id: t for t in pr.threads}
+        resolved = 0
+        skipped: list[dict[str, str]] = []
+        for thread_id in dict.fromkeys(body.thread_ids):
+            thread = threads.get(thread_id)
+            if thread is None or thread.is_resolved:
+                skipped.append(
+                    {
+                        "thread_id": thread_id,
+                        "reason": "already resolved"
+                        if thread is not None
+                        else "no such review thread on this PR",
+                    }
+                )
+                continue
+            try:
+                out = await resolve_as(service, user, repo, pr, thread)
+            except HTTPException as e:
+                skipped.append({"thread_id": thread_id, "reason": str(e.detail)})
+                continue
+            if out["status"] in ("queued", "intent", "executed"):
+                resolved += 1
+            else:
+                skipped.append(
+                    {
+                        "thread_id": thread_id,
+                        "reason": out["error"] or out["reason"] or out["status"],
+                    }
+                )
+        return {"resolved": resolved, "skipped": skipped}
 
     @r.get("/prs/{repo:path}/{number:int}/code-owners")
     async def pr_code_owners(

@@ -198,3 +198,55 @@ async def test_a_comment_is_resolved_by_the_person_who_presses_resolve(demo) -> 
         if r.action.kind == "thread.resolve"
     )
     assert record.post_as == "maria", "never as the service's account"
+
+
+async def test_check_all_reads_every_named_comment_a_batch_at_a_time(demo) -> None:
+    h, app, asked = demo
+    pr = await h.forge.get_pr(REPO, 42)
+    many = [
+        ReviewThread(
+            id=f"T_{i}",
+            path="src/loader.py",
+            line=1,
+            comments=[ThreadComment(id=600 + i, author="bob", body=f"Point {i}")],
+        )
+        for i in range(25)
+    ]
+    pr = pr.model_copy(update={"threads": many})
+    h.forge.put_pr(pr)
+    await h.store.save_snapshot(pr)
+    async with _as(app, "maria") as maria:
+        await maria.post(
+            f"/api/prs/{REPO}/42/comment-check",
+            json={"thread_ids": [t.id for t in many]},
+        )
+        await h.settle()
+    assert len(asked) == 2, "20 at a time, the profile's max_comments"
+    assert "Point 19" in asked[0].prompt and "Point 20" not in asked[0].prompt
+    assert "Point 24" in asked[1].prompt
+
+
+async def test_resolve_all_resolves_what_the_person_may_and_names_the_rest(
+    demo,
+) -> None:
+    h, app, _ = demo
+    url = f"/api/prs/{REPO}/42/threads/resolve"
+    ids = ["T_open", "T_done", "T_self", "T_gone"]
+    await h.service.a.user_tokens.set("walt", UserToken(token="w"))
+    async with _as(app, "walt") as walt:
+        theirs = (await walt.post(url, json={"thread_ids": ["T_open"]})).json()
+    assert theirs["resolved"] == 0
+    assert "only maintainers" in theirs["skipped"][0]["reason"], "not walt's comment"
+    async with _as(app, "maria") as maria:
+        unsigned = await maria.post(url, json={"thread_ids": ids})
+        assert unsigned.status_code == 403 and "sign in" in unsigned.json()["detail"]
+        await h.service.a.user_tokens.set("maria", UserToken(token="t"))
+        done = (await maria.post(url, json={"thread_ids": ids})).json()
+    assert done["resolved"] == 2
+    assert {s["thread_id"]: s["reason"] for s in done["skipped"]} == {
+        "T_done": "already resolved",
+        "T_gone": "no such review thread on this PR",
+    }
+    await h.settle()
+    resolved = {w["thread_id"] for w in h.forge.writes_of("resolve_review_thread")}
+    assert resolved == {"T_open", "T_self"}
