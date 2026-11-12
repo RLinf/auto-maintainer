@@ -627,3 +627,32 @@ async def test_am_read_reads_through_the_door_socket(demo, monkeypatch, capsys) 
     door.revoke(token)
     assert await asyncio.to_thread(records_cli.main, ["/api/prs"]) == 1
     await door.stop()
+
+
+def test_the_build_a_tab_compares_with_is_the_served_main_script(tmp_path) -> None:
+    from auto_maintainer.web.dashboard import build_id
+
+    assert build_id(tmp_path) is None
+    (tmp_path / "index.html").write_text(
+        '<script type="module" crossorigin src="/assets/index-5CeVfSDV.js"></script>'
+    )
+    assert build_id(tmp_path) == "index-5CeVfSDV.js"
+
+
+async def test_the_served_build_is_public(tmp_path) -> None:
+    """An open tab asks which build the server serves, signed in or not."""
+    import httpx
+
+    from auto_maintainer.testing.demo import build_demo
+    from auto_maintainer.web.app import create_app
+
+    h = await build_demo(tmp_path)
+    try:
+        app = create_app(h.service, data_dir=tmp_path, allow_dev_login=True)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            got = await client.get("/api/version")
+        assert got.status_code == 200 and set(got.json()) == {"build"}
+    finally:
+        await h.close()

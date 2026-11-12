@@ -145,7 +145,7 @@ export function ReviewTalk({ job, me, active }: { job: AgentJob; me: string; act
           )}
           {m.role !== "user" && m.proposals.some((id) => id !== draft) && (
             <span className="small" style={{ color: "var(--ok)" }}>
-              <Icon name="check" size={13} /> {fix ? t("Drafted a new change for you to push") : t("Drafted an edit of the posted review")}
+              <Icon name="check" size={13} /> {fix ? t("Drafted for you; it waits for your decision") : t("Drafted an edit of the posted review")}
             </span>
           )}
           {(m.changes ?? []).map((id) => (

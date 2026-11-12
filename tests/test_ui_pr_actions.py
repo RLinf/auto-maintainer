@@ -109,13 +109,13 @@ assert.deepEqual(describeRunCi("failed", false), {{ inline: "button", actionable
 // Actions menu items follow open/closed state, review findings, failed jobs, and CI state.
 assert.deepEqual(
   prMenuItems({{ isOpen: true, hasReviewFindings: true, failedCount: 2, ciState: "failed" }}),
-  ["fix", "reproduce", "fix-ci", "run-ci", "merge-base"],
+  ["fix", "change", "reproduce", "fix-ci", "run-ci", "merge-base"],
 );
 assert.deepEqual(
   prMenuItems({{ isOpen: false, hasReviewFindings: false, failedCount: 2, ciState: "passed" }}),
   ["reproduce"],
 );
-// Without a review's findings, an open PR is changed as the person describes.
+// An open PR is changed as the person describes, beside fixing a review's findings.
 assert.deepEqual(
   prMenuItems({{ isOpen: true, hasReviewFindings: false, failedCount: 0, ciState: "none" }}),
   ["change", "reproduce", "merge-base"],

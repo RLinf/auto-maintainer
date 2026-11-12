@@ -26,6 +26,29 @@ export function useMe() {
   });
 }
 
+/** The script this tab loaded, by name (``/assets/index-<hash>.js``); none under the
+ * dev server, which has no build. */
+const OWN_BUILD =
+  typeof document === "undefined"
+    ? null
+    : (Array.from(document.querySelectorAll<HTMLScriptElement>("script[src]"))
+        .map((s) => s.src.match(/\/assets\/(index-[\w-]+\.js)/)?.[1])
+        .find(Boolean) ?? null);
+
+/** Whether the server serves a newer dashboard than this tab runs (a deploy since
+ * it loaded): checked when the tab regains focus and every few minutes. */
+export function useNewBuild(): boolean {
+  const served = useQuery({
+    queryKey: ["version"],
+    queryFn: () => api.get<{ build: string | null }>("/api/version"),
+    enabled: !!OWN_BUILD,
+    refetchInterval: 3 * 60_000,
+    refetchOnWindowFocus: true,
+  });
+  const build = served.data?.build;
+  return !!OWN_BUILD && !!build && build !== OWN_BUILD;
+}
+
 export function useProposals(enabled = true) {
   return useQuery({
     queryKey: ["proposals", "pending"],

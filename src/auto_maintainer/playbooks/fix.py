@@ -29,7 +29,14 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
-from ..domain.actions import ActionKind, FixPrPayload, make_action
+from ..domain.actions import (
+    Action,
+    ActionKind,
+    FixPrPayload,
+    PrEditPayload,
+    Provenance,
+    make_action,
+)
 from ..domain.agents import AgentTask, TaskKind
 from ..domain.events import Event, EventKind
 from ..domain.ids import short_sha
@@ -43,13 +50,100 @@ FIX = """You are fixing a pull request for {reviewer}, a maintainer, inside an a
 - Change the code to {task} and nothing else. Keep the PR author's approach; make the smallest change that does it.
 - Check what you changed with the repository's static linters when it has them. Never run its tests, builds, scripts, or the PR's code on this machine: a repository's code runs only on its test machines, so say which tests a run there should cover.
 - Do not commit, push, or post, and never ask whether to: the service shows your changes to {reviewer}, who decides whether to open a PR with them.
-- When {reviewer} also asks to change the PR's title or description, do not write them in any file: give the new ones in your final message, and the service proposes them with your changes.
+- When {reviewer} also asks to change the PR's title or description, do not write them in any file: give the new ones in your final message, and the service proposes them with your changes. When that is all they ask for, change no file.
 - When something blocks a sound fix (the intended behavior is unclear, two fixes are equally plausible), ask {reviewer} with your tool for asking the user.
 - Write any text in {public_language}: plain and specific.
 - When you are done, end with a short message: what you changed{each}, what you left and why, the checks you ran, and what a test run should cover."""
 
 DESCRIBE = """Describe changes that an agent made to a pull request, for the PR that proposes them. Read the diff and what it was asked; do not change any file. Write in {public_language}: plain and specific.
 Only when what was asked includes changing the pull request's own title or description, give the new ones in `pr_title` and `pr_body` (the whole description, starting from the current one below); otherwise leave both out."""
+
+
+PR_TEXT = """Read what a maintainer asked an agent to do to a pull request, and the agent's answer. Only when what was asked includes changing the pull request's own title or description, give the new ones in `pr_title` and `pr_body`: as the agent's answer gives them, else written from the request, in {public_language}; `pr_body` is the whole description, starting from the current one below. Leave out either one that should stay as it is, and both when nothing about them was asked. Judge only from what is given here: do not run commands, read files, or fetch anything."""
+
+
+class PrText(BaseModel):
+    """A new title or description for the pull request itself, when one was asked for."""
+
+    pr_title: str | None = Field(
+        default=None, description="The new title, only when asked for."
+    )
+    pr_body: str | None = Field(
+        default=None, description="The whole new description, only when asked for."
+    )
+
+    def pr_edit(self) -> dict[str, str]:
+        """``pr_title`` and ``pr_body``, those set and not blank."""
+        out = {}
+        if self.pr_title and self.pr_title.strip():
+            out["pr_title"] = self.pr_title.strip()[:256]
+        if self.pr_body and self.pr_body.strip():
+            out["pr_body"] = self.pr_body.strip()[:65_536]
+        return out
+
+
+def pr_text_task(
+    public_language: str,
+    pr: PrSnapshot,
+    asked: list[str],
+    account: str,
+    workdir: object,
+    requested_by: str | None = None,
+) -> AgentTask:
+    """The short task that reads whether an agent's change was asked to give the PR a
+    new title or description (``PrText``), for a change that touched no file."""
+    return AgentTask(
+        kind=TaskKind.FIX,
+        prompt="\n\n".join(
+            [
+                PR_TEXT.format(public_language=public_language),
+                *asked,
+                current_pr_text(pr),
+                untrusted("agent.account", account[-4000:], 4000)
+                if account
+                else "The agent gave no answer.",
+                schema_hint(PrText.model_json_schema()),
+            ]
+        ),
+        workdir=workdir,
+        mode="read_only",
+        budget="quick",
+        repo=pr.repo,
+        pr=pr.number,
+        requested_by=requested_by,
+        untrusted_input=True,
+        output_schema=PrText.model_json_schema(),
+    )
+
+
+def pr_edit_action(
+    pr: PrSnapshot,
+    edit: dict[str, str],
+    by: str,
+    *,
+    discriminator: str,
+    rationale: str,
+    job_id: str | None = None,
+) -> Action:
+    """A ``pr.edit`` drafted for ``by``: the PR's new title and description from
+    ``edit`` (``pr_title``, ``pr_body``), the current ones where it has none. Only
+    ``by`` or a maintainer approves it, and it runs only as whoever approves it."""
+    return make_action(
+        ActionKind.PR_EDIT,
+        pr.repo,
+        PrEditPayload(
+            title=edit.get("pr_title") or pr.title,
+            body=edit.get("pr_body", pr.body or ""),
+        ),
+        number=pr.number,
+        head_sha=pr.head_sha,
+        discriminator=discriminator,
+        rationale=rationale,
+        draft_for=by,
+        provenance=Provenance(job_id=job_id, playbook="fix", requested_by=by)
+        if job_id
+        else Provenance(requested_by=by),
+    )
 
 
 def current_pr_text(pr: PrSnapshot) -> str:
@@ -239,8 +333,44 @@ class FixPlaybook(Playbook):
                     ),
                     FixResult,
                 )
+            edit: dict[str, str] = {}
+            if not changes.files:
+                # Asked only for the PR's own title or description: no file changes.
+                text = await ctx.ask(
+                    pr_text_task(
+                        profile.languages.public,
+                        pr,
+                        [asked],
+                        account,
+                        workdir,
+                        requested_by=by,
+                    ),
+                    PrText,
+                )
+                if text.ok and text.structured is not None:
+                    edit = PrText.model_validate(text.structured).pr_edit()
         finally:
             await ctx.workspace.release(workdir)
+        if not changes.files and edit:
+            await _tell(
+                ctx,
+                thread,
+                f"The new {_what(edit)} for #{pr.number} are ready. Read them on the "
+                "PR page or under Approvals, and approve them to set them as "
+                "yourself; nothing changes before you do.",
+            )
+            return PlaybookResult(
+                actions=[
+                    pr_edit_action(
+                        pr,
+                        edit,
+                        by,
+                        discriminator=f"req:{event.id}",
+                        rationale=f"a new {_what(edit)} for #{pr.number}, as {by} asked",
+                    )
+                ],
+                result={"pr_edit": sorted(edit)},
+            )
         if not changes.files:
             await _tell(
                 ctx,
@@ -319,6 +449,15 @@ class FixPlaybook(Playbook):
             actions=[action],
             result={"files": changes.files, "fixed": [f.id for f in fix.fixed]},
         )
+
+
+def _what(edit: dict[str, str]) -> str:
+    """``title``, ``description``, or both, for what ``edit`` changes."""
+    return " and ".join(
+        name
+        for key, name in (("pr_title", "title"), ("pr_body", "description"))
+        if key in edit
+    )
 
 
 async def _tell(ctx: PlaybookContext, thread_id: object, text: str) -> None:

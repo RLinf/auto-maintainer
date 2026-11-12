@@ -138,6 +138,7 @@ const PATHS: Record<string, ReactElement> = {
       <path d="m10.8 12.2 9.2-9.2M17 6l3 3M14.5 8.5l2 2" />
     </>
   ),
+  pencil: <path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16v4zM13.5 6.5l4 4" />,
 };
 
 export type IconName = keyof typeof PATHS;

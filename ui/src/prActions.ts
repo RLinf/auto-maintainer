@@ -82,9 +82,9 @@ export interface PrMenuState {
  * use it often. */
 export function prMenuItems(s: PrMenuState): PrMenuAction[] {
   const items: PrMenuAction[] = [];
-  // A review's findings to fix, or else a change in the person's own words.
+  // A review's findings to fix, and always a change in the person's own words.
   if (s.hasReviewFindings) items.push("fix");
-  else if (s.isOpen) items.push("change");
+  if (s.isOpen) items.push("change");
   items.push("reproduce");
   if (s.isOpen && s.failedCount > 0) items.push("fix-ci");
   if (describeRunCi(s.ciState, true).actionable) items.push("run-ci");

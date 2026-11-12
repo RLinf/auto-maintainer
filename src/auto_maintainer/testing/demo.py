@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -631,6 +632,23 @@ def _answer(task: AgentTask) -> dict[str, Any]:
             "proposals": [],
         }
     if kind == "fix":
+        props = (task.output_schema or {}).get("properties", {})
+        if "pr_title" in props and "summary" not in props:
+            # Asked whether the request was for the PR's own title or description.
+            return {
+                "pr_title": "fix(loader): handle empty batches and batches of one",
+                "pr_body": "### Description\nThe loader returns an empty list for an "
+                "empty batch and keeps a batch of one item.\n\n### Checklist\n"
+                "- [x] tests",
+            }
+        request = task.prompt.split("What ", 1)[-1][:600]
+        if task.mode == "workspace_write" and re.search(
+            r"(?i)only\b.{0,60}\btitle", request
+        ):
+            return {
+                "title": "Rename the PR",
+                "summary": "Gave the PR a new title and description; changed no file.",
+            }
         test = Path(task.workdir) / "tests" / "test_loader_one.py"
         test.parent.mkdir(parents=True, exist_ok=True)
         test.write_text(

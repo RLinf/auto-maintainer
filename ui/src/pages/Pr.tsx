@@ -34,8 +34,9 @@ import { Icon } from "../icons";
 import { Markdown } from "../markdown";
 import { CommentOnDiff, parseDiff, usePrDiff } from "../diffview";
 import { DataTable, ListToolbar, useList, type Column } from "../list";
-import { ApproveButton, EditPrButton, FixForm, MergeBaseButton, MergeBaseForm, MergeNowButton, type InlineComment, type MergeOptions } from "../proposal";
+import { ApproveButton, FixForm, MergeBaseButton, MergeBaseForm, MergeNowButton, type InlineComment, type MergeOptions } from "../proposal";
 import { ReproduceForm } from "../reproduce";
+import { DescriptionSection, EditableTitle } from "../prEdit";
 import { failedChecks, FixCiButton, FixCiForm } from "../fixCi";
 import { PrPeopleCards } from "../assignees";
 import { CodeOwnersCard } from "../codeOwners";
@@ -143,13 +144,20 @@ export default function PrPage({ me }: { me: Me }) {
       <PageHead
         crumbs={crumbs}
         title={
-          <>
-            {pr.title}{" "}
-            <a className="pr-number" href={pr.url} target="_blank" rel="noreferrer" title={openOnForge}>
-              #{pr.number}
-              <Icon name="external" size={15} />
-            </a>
-          </>
+          <EditableTitle
+            repo={full}
+            number={pr.number}
+            title={pr.title}
+            body={pr.body}
+            editable={pr.state === "OPEN"}
+            canPush={canPush}
+            after={
+              <a className="pr-number" href={pr.url} target="_blank" rel="noreferrer" title={openOnForge}>
+                #{pr.number}
+                <Icon name="external" size={15} />
+              </a>
+            }
+          />
         }
         sub={
           <span className="stack" style={{ gap: 6 }}>
@@ -264,7 +272,6 @@ export default function PrPage({ me }: { me: Me }) {
                 canPost={canPush}
               />
             )}
-            {pr.state === "OPEN" && <EditPrButton repo={full} number={pr.number} title={pr.title} body={pr.body} canPush={canPush} />}
             <a className="button" href={pr.url} target="_blank" rel="noreferrer" title={openOnForge}>
               <Icon name="external" size={14} />
               <span className="hide-narrow">{openOnForge}</span>
@@ -287,7 +294,7 @@ export default function PrPage({ me }: { me: Me }) {
         <div className="stack" style={{ gap: 16, minWidth: 0 }}>
           <PrWork repo={full} number={pr.number} me={me.login} />
           <Tabs tabs={tabs} active={tab} onChange={setTab} />
-          {tab === "overview" && <Overview d={d} ciActions={ciControls} />}
+          {tab === "overview" && <Overview d={d} ciActions={ciControls} repo={full} canPush={canPush} />}
           {tab === "progress" && <ReviewProgressPanel repo={full} number={pr.number} me={me.login} />}
           {tab === "files" && <Files d={d} />}
           {tab === "timeline" && <Timeline d={d} />}
@@ -513,7 +520,7 @@ function ReviewsTab({ d, repo, number }: { d: PrDetail; repo: string; number: nu
   );
 }
 
-function Overview({ d, ciActions }: { d: PrDetail; ciActions?: ReactNode }) {
+function Overview({ d, ciActions, repo, canPush }: { d: PrDetail; ciActions?: ReactNode; repo: string; canPush: boolean }) {
   const t = useT();
   const ev = d.evaluation;
   return (
@@ -526,13 +533,14 @@ function Overview({ d, ciActions }: { d: PrDetail; ciActions?: ReactNode }) {
           </div>
         </Section>
       )}
-      <Section title={t("Description")}>
-        {d.pr.body?.trim() ? (
-          <Markdown text={d.pr.body} className="pr-body" />
-        ) : (
-          <span className="muted small">{t("No description.")}</span>
-        )}
-      </Section>
+      <DescriptionSection
+        repo={repo}
+        number={d.pr.number}
+        title={d.pr.title}
+        body={d.pr.body ?? ""}
+        editable={d.pr.state === "OPEN"}
+        canPush={canPush}
+      />
       <Section title={t("Checks")} aside={ciActions}>
         {d.pr.checks.length ? (
           <div className="list">

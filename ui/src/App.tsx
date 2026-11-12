@@ -8,7 +8,7 @@ import { Link, NavLink, Route, Routes, useLocation, useNavigate } from "react-ro
 import { api, ApiError, type Me } from "./api";
 import { AgentProvider, useAgent } from "./agent";
 import { Empty, ErrorBox } from "./components";
-import { useMe, useMemoryChanges, useProposals } from "./data";
+import { useMe, useMemoryChanges, useNewBuild, useProposals } from "./data";
 import { ACTION_EVENT, QUESTION_EVENT, useLiveEvents, type ActionOutcome } from "./events";
 import { JobDrawer } from "./jobs";
 import { useLang, useT } from "./i18n";
@@ -77,6 +77,7 @@ function Shell({ me }: { me: Me }) {
   const toast = useToast();
   const client = useQueryClient();
   useLiveEvents(true, me.login);
+  const newBuild = useNewBuild();
   const proposals = useProposals();
   const memory = useMemoryChanges();
   const [palette, setPalette] = useState(false);
@@ -313,6 +314,15 @@ function Shell({ me }: { me: Me }) {
           <div className="strip dev" role="status">
             <Icon name="shield" />
             <span>{t("Dev mode: repository actions stay in shadow, except on the sandbox repository.")}</span>
+          </div>
+        )}
+        {newBuild && (
+          <div className="strip dev" role="status">
+            <Icon name="refresh" />
+            <span>{t("A newer version of the dashboard is ready.")}</span>
+            <button className="sm right" onClick={() => window.location.reload()}>
+              {t("Reload")}
+            </button>
           </div>
         )}
         {!me.dev_mode && me.standby && (

@@ -37,6 +37,7 @@ const POSTED_BODY = new Set([
   "issue.comment",
   "pr.merge",
   "pr.fix",
+  "pr.edit",
   "code.update",
 ]);
 
@@ -153,6 +154,8 @@ export function ProposalCard({
     setComments(Array.isArray(payload.comments) ? (payload.comments as InlineComment[]) : []);
   }, [payload.body, payload.comments, editing]);
   const isFix = kind === "pr.fix";
+  // A PR's new title and description are set only by a person, as themselves.
+  const isEdit = kind === "pr.edit";
   // A fix, or a merge of the base branch, goes onto the PR's branch or as a PR into
   // it; one who cannot push to the branch (a fork that does not let them) opens a PR.
   const isMerge = isFix && !!str(payload.merge_ref);
@@ -165,7 +168,7 @@ export function ProposalCard({
   const reviewAuthor = kind === "review.update" ? str(payload.author) : "";
   const notTheAuthor = !!reviewAuthor && me?.login !== reviewAuthor;
   // A fix is pushed only by a person; the service's own account never pushes to a repository.
-  const postAsMe = isFix || !!reviewAuthor || (canAsMe && asMe);
+  const postAsMe = isFix || isEdit || !!reviewAuthor || (canAsMe && asMe);
   const hasComments = Array.isArray(payload.comments) && (payload.comments as unknown[]).length > 0;
   const diff = usePrDiff(action?.repo ?? "", action?.number, expanded && hasComments);
   const files = useMemo(() => (diff.data ? parseDiff(diff.data.diff) : null), [diff.data]);
@@ -174,7 +177,7 @@ export function ProposalCard({
     ...payload,
     ...(typeof payload.body === "string" ? { body } : {}),
     ...(Array.isArray(payload.comments) ? { comments } : {}),
-    ...(isFix ? { title, target } : kind === "code.update" ? { title } : {}),
+    ...(isFix ? { title, target } : kind === "code.update" || isEdit ? { title } : {}),
     ...(dropped.length ? { labels: list(payload.labels).filter((l) => !dropped.includes(l)) } : {}),
     ...(kind === "lab.reproduce"
       ? str(payload.script)
@@ -210,7 +213,9 @@ export function ProposalCard({
   const requester = proposal.requester ?? proposal.requested_by;
   const editable = typeof payload.body === "string" || kind === "lab.reproduce" || (Array.isArray(payload.comments) && comments.length > 0);
   const findings = ((payload.result as { findings?: unknown[] } | undefined)?.findings ?? []).length;
-  const approveLabel = isFix
+  const approveLabel = isEdit
+    ? t("Set on the PR as me")
+    : isFix
     ? target === "branch"
       ? isMerge
         ? t("Push the merge as me")
@@ -322,12 +327,14 @@ export function ProposalCard({
           <div className="split-button">
             <button
               className="primary"
-              disabled={approve.isPending || ((isFix || !!reviewAuthor) && !me?.can_post_as_me) || notTheAuthor}
+              disabled={approve.isPending || ((isFix || isEdit || !!reviewAuthor) && !me?.can_post_as_me) || notTheAuthor}
               title={
                 notTheAuthor
                   ? `${t("Only the reviewer who posted it can change it:")} @${reviewAuthor}`
                   : isFix && !me?.can_post_as_me
                     ? t("Sign in with GitHub to open it as yourself.")
+                    : isEdit && !me?.can_post_as_me
+                      ? t("Sign in with GitHub to do it as yourself.")
                     : reviewAuthor && !me?.can_post_as_me
                       ? t("Sign in with GitHub to do it as yourself.")
                       : undefined
@@ -409,11 +416,11 @@ export function ProposalCard({
               {editing ? t("Discard edits") : t("Edit")}
             </button>
           )}
-          {(kind === "review.post" || kind === "pr.fix") && action.provenance?.job_id && openedJob !== action.provenance.job_id && (
+          {(kind === "review.post" || kind === "pr.fix" || kind === "pr.edit") && action.provenance?.job_id && openedJob !== action.provenance.job_id && (
             <button
               className="ghost"
               title={
-                kind === "pr.fix"
+                kind === "pr.fix" || kind === "pr.edit"
                   ? t("Talk with the agent about this change: ask why, or have it change the diff")
                   : t("Talk with the agent about this review: ask why, push back, or have it change the draft")
               }
@@ -503,6 +510,14 @@ function KindBody({
       <Markdown key="md" text={text} className="posted" />
     );
 
+  if (kind === "pr.edit") {
+    parts.push(
+      <div key="pr-edit" className="stack" style={{ gap: 6 }}>
+        <span className="small muted">{t("Sets the PR's title and description, as you:")}</span>
+        {editing ? <input key="title" value={title} onChange={(e) => setTitle(e.target.value)} aria-label={t("PR title")} /> : <strong>{str(payload.title)}</strong>}
+      </div>,
+    );
+  }
   if (kind === "pr.fix") {
     const changed = list(payload.files);
     const merge = str(payload.merge_ref);
@@ -1238,81 +1253,6 @@ export function MergeNowButton({
           </div>
           {!canPush && <ConnectGitHub why={t("Sign in with GitHub, so the merge comes from you.")} />}
           <ErrorBox error={merge.error} />
-        </div>
-      )}
-    </Popover>
-  );
-}
-
-/** Change the PR's title and description on GitHub, as the person who saves them. */
-export function EditPrButton({
-  repo,
-  number,
-  title,
-  body,
-  canPush,
-}: {
-  repo: string;
-  number: number;
-  title: string;
-  body: string;
-  canPush: boolean;
-}) {
-  const t = useT();
-  const toast = useToast();
-  const [draft, setDraft] = useState({ title, body });
-  const save = useAct(
-    () => api.post<{ status: string; error: string | null; reason: string | null }>(`/api/prs/${repo}/${number}/edit`, draft),
-    [["pr"], ["prs"]],
-  );
-  return (
-    <Popover
-      align="right"
-      label={t("Edit title and description")}
-      trigger={(open, toggle) => (
-        <button
-          className={open ? "on" : ""}
-          onClick={() => {
-            if (!open) setDraft({ title, body });
-            toggle();
-          }}
-          aria-expanded={open}
-          title={t("Edit title and description")}
-        >
-          {t("Edit")}
-        </button>
-      )}
-    >
-      {(close) => (
-        <div className="stack" style={{ gap: 10, padding: 6, width: "min(560px, calc(100vw - 24px))", maxWidth: "100%" }}>
-          <span className="small muted">{t("Saves the PR's title and description on GitHub as you.")}</span>
-          <input value={draft.title} onChange={(e) => setDraft({ ...draft, title: e.target.value })} aria-label={t("Title")} placeholder={t("Title")} />
-          <textarea rows={12} value={draft.body} onChange={(e) => setDraft({ ...draft, body: e.target.value })} aria-label={t("Description")} placeholder={t("Description")} />
-          <div className="row">
-            <button
-              className="primary right"
-              disabled={save.isPending || !canPush || !draft.title.trim() || (draft.title === title && draft.body === body)}
-              title={canPush ? undefined : t("Sign in with GitHub, so the edit comes from you.")}
-              onClick={() =>
-                save.mutate(undefined, {
-                  onSuccess: (out) => {
-                    close();
-                    if (out.status === "executed") {
-                      toast({ title: t("Saved"), body: t("GitHub has the new title and description."), icon: "check" });
-                    } else if (out.status === "queued" || out.status === "intent") {
-                      toast({ title: t("Saving…"), body: t("The new title and description go to GitHub in a moment."), icon: "clock" });
-                    } else {
-                      toast({ title: t("Not saved"), body: out.error || out.reason || out.status, icon: "x" });
-                    }
-                  },
-                })
-              }
-            >
-              {save.isPending ? t("Saving…") : t("Save as me")}
-            </button>
-          </div>
-          {!canPush && <ConnectGitHub why={t("Sign in with GitHub, so the edit comes from you.")} />}
-          <ErrorBox error={save.error} />
         </div>
       )}
     </Popover>

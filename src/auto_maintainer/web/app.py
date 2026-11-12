@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import json
 import os
@@ -53,7 +54,7 @@ from . import (
     setup,
     translate,
 )
-from .dashboard import STATIC, missing_page
+from .dashboard import STATIC, build_id, missing_page
 from .live_turns import LiveTurns
 from .records import RecordsDoor
 from .records import build_router as records_router
@@ -205,6 +206,12 @@ def create_app(
             "dev_mode": service.settings.dev_mode,
             "standby": service.settings.standby,
         }
+
+    @app.get("/api/version")
+    async def version() -> dict[str, Any]:
+        """The dashboard build the server serves (``dashboard.build_id``): what an
+        open tab compares with its own to offer a reload after a deploy."""
+        return {"build": await asyncio.to_thread(build_id)}
 
     install_authority(app, ca_cert)
 

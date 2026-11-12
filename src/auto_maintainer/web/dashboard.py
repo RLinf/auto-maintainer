@@ -23,6 +23,7 @@ instead of answering 404.
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 from collections.abc import Callable
@@ -47,6 +48,20 @@ SOURCES = (
 
 def is_built(static: Path = STATIC) -> bool:
     return (static / "index.html").is_file()
+
+
+_BUILD_SCRIPT = re.compile(r"/assets/(index-[\w-]+\.js)")
+
+
+def build_id(static: Path = STATIC) -> str | None:
+    """The build the server serves now: the name of its main script, which changes
+    with every build of different code. An open tab compares it with the script it
+    loaded to tell a person a newer dashboard is there; ``None`` without a build."""
+    try:
+        found = _BUILD_SCRIPT.search((static / "index.html").read_text("utf-8"))
+    except OSError:
+        return None
+    return found.group(1) if found else None
 
 
 def _newest(paths: list[Path]) -> float:

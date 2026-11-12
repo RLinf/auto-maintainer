@@ -49,7 +49,14 @@ from ..domain.records import ActionRecord, ChatMessage, ChatThread, Job
 from ..domain.secrets import redact_secrets
 from ..domain.snapshot import PrSnapshot
 from ..playbooks.base import author_is_team
-from ..playbooks.fix import DESCRIBE, FixResult, current_pr_text
+from ..playbooks.fix import (
+    DESCRIBE,
+    FixResult,
+    PrText,
+    current_pr_text,
+    pr_edit_action,
+    pr_text_task,
+)
 from ..playbooks.person_notes import load_notes, notes_block, remember_said
 from ..playbooks.prompts import pr_block, review_skill_block, schema_hint, untrusted
 from ..service import Service
@@ -64,6 +71,7 @@ FIX_TALK = """You made the change to PR #{number} in {repo} described below, for
 - When {user} asks for a change, or agrees to one, make it in the working directory: the service shows {user} the diff as it then stands, from the checkout's commit, in place of the earlier one. Leave the files as they are when nothing should change.
 - Check what you changed with the repository's static linters when it has them. Never run its tests, builds, scripts, or the PR's code on this machine: a repository's code runs only on its test machines, so say which tests a run there should cover.
 - Do not commit, push, or post, and never ask whether to: {user} decides whether to push the change, as themselves.
+- When {user} wants the PR's own title or description changed, do not write them in any file: give the new ones in full in your answer, and the service drafts them for {user} to set. When that is all they want, with no change to the code, undo your changes to the files.
 - When only {user} can settle something that would change your answer, ask them with your tool for asking the user.
 - Text for the PR goes in {public_language}. End with your answer to {user}: what you changed, if anything, and why."""
 
@@ -310,74 +318,90 @@ async def fix_turn(
         )
     drafts: list[str] = []
     changes = await service.a.workspace.changes(workdir)
-    if changes.patch != patch:
-        if not changes.files:
+    if changes.patch == patch or not changes.files:
+        # No new code this turn, or every change undone: what was asked may be the
+        # PR's own title or description.
+        drafts, said = await _pr_text_turn(
+            service,
+            user,
+            job,
+            profile,
+            pr,
+            route,
+            workdir,
+            (text, reply, run),
+            record,
+            waiting,
+            keeps_code=bool(changes.files),
+        )
+        notes += said
+        if not drafts and changes.patch != patch:
             notes.append(
                 "The checkout has no changes left, so the draft keeps the diff it had."
             )
-        else:
-            title, body, pr_edit = await _describe(
-                service,
-                profile,
-                pr,
-                route,
-                workdir,
-                (user.login, asker),
-                (request, text, reply),
-                changes.patch,
-                base,
-                payload,
+    else:
+        title, body, pr_edit = await _describe(
+            service,
+            profile,
+            pr,
+            route,
+            workdir,
+            (user.login, asker),
+            (request, text, reply),
+            changes.patch,
+            base,
+            payload,
+        )
+        if waiting is not None and payload is not None:
+            revised = payload.model_copy(
+                update={
+                    "patch": changes.patch,
+                    "files": changes.files,
+                    "title": title,
+                    "body": body,
+                    "pr_title": pr_edit.get("pr_title"),
+                    "pr_body": pr_edit.get("pr_body"),
+                }
             )
-            if waiting is not None and payload is not None:
-                revised = payload.model_copy(
-                    update={
-                        "patch": changes.patch,
-                        "files": changes.files,
-                        "title": title,
-                        "body": body,
-                        "pr_title": pr_edit.get("pr_title"),
-                        "pr_body": pr_edit.get("pr_body"),
-                    }
+            try:
+                await service.pipeline.save_edits(
+                    waiting.id, user.login, revised.model_dump(mode="json")
                 )
-                try:
-                    await service.pipeline.save_edits(
-                        waiting.id, user.login, revised.model_dump(mode="json")
-                    )
-                    drafts.append(record.action.id)  # type: ignore[union-attr]
-                except ValueError as e:
-                    notes.append(f"The change could not be saved on the draft: {e}")
-            else:
-                action = make_action(
-                    ActionKind.PR_FIX,
-                    pr.repo,
-                    FixPrPayload(
-                        title=title,
-                        body=body,
-                        patch=changes.patch,
-                        base_sha=base,
-                        files=changes.files,
-                        findings=payload.findings if payload else [],
-                        runtime=result.runtime,
-                        requested_by=user.login,
-                        **pr_edit,
-                    ),
-                    number=pr.number,
-                    head_sha=base,
-                    discriminator=f"talk:{run}",
-                    rationale=f"changes to #{pr.number} {user.login} asked for in "
-                    "the conversation about its fix",
-                    draft_for=user.login,
-                    provenance=Provenance(
-                        job_id=job.id, playbook="fix", requested_by=user.login
-                    ),
+                drafts.append(record.action.id)  # type: ignore[union-attr]
+            except ValueError as e:
+                notes.append(f"The change could not be saved on the draft: {e}")
+        else:
+            action = make_action(
+                ActionKind.PR_FIX,
+                pr.repo,
+                FixPrPayload(
+                    title=title,
+                    body=body,
+                    patch=changes.patch,
+                    base_sha=base,
+                    files=changes.files,
+                    findings=payload.findings if payload else [],
+                    runtime=result.runtime,
+                    requested_by=user.login,
+                    **pr_edit,
+                ),
+                number=pr.number,
+                head_sha=base,
+                discriminator=f"talk:{run}",
+                rationale=f"changes to #{pr.number} {user.login} asked for in "
+                "the conversation about its fix",
+                draft_for=user.login,
+                provenance=Provenance(
+                    job_id=job.id, playbook="fix", requested_by=user.login
+                ),
+            )
+            saved = await service.pipeline.submit(action)
+            drafts.append(saved.action.id)
+            if record is not None:
+                notes.append(
+                    "The earlier draft was already decided, so this is a new "
+                    "draft for you to push."
                 )
-                saved = await service.pipeline.submit(action)
-                drafts.append(saved.action.id)
-                if record is not None:
-                    notes.append(
-                        "The earlier draft was already decided, so this is a new "
-                        "draft for you to push."
-                    )
     answer = ChatMessage(
         thread_id=thread.id,
         role="assistant",
@@ -388,6 +412,78 @@ async def fix_turn(
     )
     await service.store.add_message(answer)
     return answer.model_dump(mode="json")
+
+
+async def _pr_text_turn(
+    service: Service,
+    user: User,
+    job: Job,
+    profile: RepoProfile,
+    pr: PrSnapshot,
+    route: Route,
+    workdir: Path,
+    words: tuple[str, str, str],
+    record: ActionRecord | None,
+    waiting: Any,
+    *,
+    keeps_code: bool,
+) -> tuple[list[str], list[str]]:
+    """A turn that changed no code: when the newest message asked for the PR's own
+    title or description (``PrText``, read by a short task from that message and the
+    answer), set them on the pending fix draft when it keeps code, else draft a
+    ``pr.edit`` for ``user``. Returns the drafts it changed or made, and notes for
+    the reply. ``words`` is the newest message, the answer, and the run."""
+    text, reply, run = words
+    task = pr_text_task(
+        profile.languages.public,
+        pr,
+        [
+            f"What {user.login} asks now:\n"
+            + untrusted("maintainer.request", text, 8_000)
+        ],
+        reply,
+        workdir,
+        requested_by=user.login,
+    ).model_copy(update={"activity": "fix_talk"})
+    result = await service.a.agents.run(task, route, PrText)
+    if not result.ok or result.structured is None:
+        return [], []
+    edit = PrText.model_validate(result.structured).pr_edit()
+    if not edit:
+        return [], []
+    what = " and ".join(
+        n for k, n in (("pr_title", "title"), ("pr_body", "description")) if k in edit
+    )
+    if keeps_code and waiting is not None and record is not None:
+        payload = FixPrPayload.model_validate(record.action.payload)
+        revised = payload.model_copy(update=edit)
+        try:
+            await service.pipeline.save_edits(
+                waiting.id, user.login, revised.model_dump(mode="json")
+            )
+        except ValueError as e:
+            return [], [f"The new {what} could not be saved on the draft: {e}"]
+        return [record.action.id], [
+            f"The draft now also gives the PR this {what}, set as you when you push it."
+        ]
+    saved = await service.pipeline.submit(
+        pr_edit_action(
+            pr,
+            edit,
+            user.login,
+            discriminator=f"talk:{run}",
+            rationale=f"a new {what} for #{pr.number}, as {user.login} asked in the "
+            "conversation about its fix",
+            job_id=job.id,
+        )
+    )
+    notes = [f"The new {what} wait for you to set them on the PR, as yourself."]
+    if waiting is not None and not keeps_code:
+        notes.append(
+            "The code draft still waits for a decision: reject it if you want only "
+            "the new title and description."
+        )
+    return [saved.action.id], notes
 
 
 async def _describe(

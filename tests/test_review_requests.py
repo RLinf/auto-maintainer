@@ -1032,3 +1032,129 @@ async def test_talking_about_a_change_carries_or_drops_the_prs_new_title(
             json={"text": "Another note, and keep the PR's title after all."},
         )
         assert (await payload())["payload"]["pr_title"] is None
+
+
+def _asks_pr_text(task: Any) -> bool:
+    """The short task that reads whether a PR title or description was asked for."""
+    props = (task.output_schema or {}).get("properties", {})
+    return "pr_title" in props and "summary" not in props
+
+
+async def test_a_request_for_only_the_prs_title_drafts_an_edit_of_the_pr(
+    demo,
+) -> None:
+    """Asked only for the PR's own title and description, the agent changes no file;
+    the draft is an edit of the PR, set only as whoever approves it."""
+    h, app = demo
+
+    def change(task: Any) -> Any:
+        if _asks_pr_text(task):
+            assert "Only rename the PR" in task.prompt
+            assert task.budget == "quick" and task.mode == "read_only"
+            return {
+                "pr_title": "feat(loader): batches of one",
+                "pr_body": "Handles one.",
+            }
+        assert "When that is all they ask for, change no file." in task.prompt
+        return AgentResult(
+            runtime="scripted", ok=True, text="Title: feat(loader): batches of one"
+        )
+
+    h.runner.on("fix", change)
+    await h.service.a.user_tokens.set("maria", UserToken(token="t"))
+    async with _as(app, "maria") as maria:
+        started = await maria.post(
+            f"/api/prs/{REPO}/42/fix",
+            json={"request": "Only rename the PR to say it handles batches of one."},
+        )
+        assert started.status_code == 200, started.text
+        await h.settle()
+        drafts = (await maria.get("/api/proposals")).json()
+        assert not [p for p in drafts if p["action"]["action"]["kind"] == "pr.fix"]
+        [edit] = [p for p in drafts if p["action"]["action"]["kind"] == "pr.edit"]
+        assert edit["requested_by"] == "maria"
+        assert edit["action"]["action"]["provenance"]["job_id"], "talked about there"
+        assert edit["action"]["action"]["payload"] == {
+            "title": "feat(loader): batches of one",
+            "body": "Handles one.",
+        }
+        ok = await maria.post(
+            f"/api/proposals/{edit['id']}/approve", json={"as_me": True}
+        )
+        assert ok.status_code == 200, ok.text
+        await h.settle()
+    [edited] = h.forge.writes_of("update_pr")
+    assert (
+        edited["author"] == "maria"
+        and edited["title"] == "feat(loader): batches of one"
+    )
+    publisher = h.service.a.publisher
+    assert publisher is None or publisher.published == [], "nothing is pushed"
+
+
+async def test_in_the_conversation_a_new_title_rides_the_code_or_stands_alone(
+    demo,
+) -> None:
+    """A turn that changes no code but asks for the PR's title sets it on the pending
+    fix draft; once the person wants only the title, the agent undoes the code and
+    the title becomes an edit of the PR alone, the code draft left for them to
+    reject. A question asks for nothing."""
+    h, app = demo
+    texts = iter(
+        [
+            {},
+            {"pr_title": "feat(loader): batches of one"},
+            {"pr_title": "feat: batches of one"},
+        ]
+    )
+
+    def change(task: Any) -> Any:
+        if _asks_pr_text(task):
+            return next(texts)
+        if task.mode == "read_only":
+            return {"title": "docs: explain batching", "summary": "Explains it."}
+        workdir = Path(task.workdir)
+        if task.activity == "fix_talk":
+            if "only the title" in task.prompt.split("The newest message")[1]:
+                (workdir / "BATCHING.md").unlink()
+            return AgentResult(runtime="scripted", ok=True, text="Done.")
+        (workdir / "BATCHING.md").write_text("Batches of one are fine.\n")
+        return AgentResult(runtime="scripted", ok=True, text="Wrote BATCHING.md.")
+
+    h.runner.on("fix", change)
+    async with _as(app, "maria") as maria:
+        await maria.post(
+            f"/api/prs/{REPO}/42/fix", json={"request": "Document batches of one."}
+        )
+        await h.settle()
+
+        async def drafts(kind: str) -> list[dict[str, Any]]:
+            return [
+                p
+                for p in (await maria.get("/api/proposals")).json()
+                if p["action"]["action"]["kind"] == kind
+            ]
+
+        [fix] = await drafts("pr.fix")
+        job = fix["action"]["action"]["provenance"]["job_id"]
+        asked = await maria.post(f"/api/jobs/{job}/talk", json={"text": "Why?"})
+        assert asked.json()["proposals"] == [] and await drafts("pr.edit") == []
+
+        titled = await maria.post(
+            f"/api/jobs/{job}/talk", json={"text": "Rename the PR too."}
+        )
+        assert titled.json()["proposals"] == [fix["action_id"]]
+        [fix] = await drafts("pr.fix")
+        assert fix["action"]["action"]["payload"]["pr_title"] == (
+            "feat(loader): batches of one"
+        )
+        assert fix["action"]["action"]["payload"]["files"] == ["BATCHING.md"]
+
+        alone = await maria.post(
+            f"/api/jobs/{job}/talk", json={"text": "I want only the title changed."}
+        )
+        [edit] = await drafts("pr.edit")
+        assert alone.json()["proposals"] == [edit["action_id"]]
+        assert edit["action"]["action"]["payload"]["title"] == "feat: batches of one"
+        assert "reject it" in alone.json()["text"]
+        assert [p["id"] for p in await drafts("pr.fix")] == [fix["id"]], "still waits"
