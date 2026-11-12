@@ -515,6 +515,25 @@ function KindBody({
       </div>,
       editing ? <input key="title" value={title} onChange={(e) => setTitle(e.target.value)} aria-label={t("PR title")} /> : <strong key="title">{str(payload.title)}</strong>,
     );
+    if (str(payload.pr_title) || str(payload.pr_body)) {
+      parts.push(
+        <div key="pr-edit" className="stack" style={{ gap: 6 }}>
+          <span className="small muted">{t("Also sets this on the PR itself, as you:")}</span>
+          {str(payload.pr_title) && (
+            <div>
+              <span className="small muted">{t("PR title")}: </span>
+              <strong>{str(payload.pr_title)}</strong>
+            </div>
+          )}
+          {str(payload.pr_body) && (
+            <>
+              <span className="small muted">{t("Description")}</span>
+              {posted(str(payload.pr_body))}
+            </>
+          )}
+        </div>,
+      );
+    }
   }
   if (kind === "code.update") {
     const changed = list(payload.files);

@@ -453,6 +453,7 @@ const zh: Record<string, string> = {
   "Choose agents and model providers on the Settings page later.": "之后可以在设置页面选择智能体和模型服务商。",
   "Close the PR": "关闭 PR",
   "Edit the PR": "编辑 PR",
+  "Also sets this on the PR itself, as you:": "同时以你的身份修改 PR 本身：",
   "Merge now": "立即合并",
   "Merges the PR into": "将此 PR 合并到",
   "on GitHub as you, at": "，以你的身份在 GitHub 上操作，提交为",

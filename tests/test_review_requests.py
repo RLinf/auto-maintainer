@@ -877,3 +877,148 @@ async def test_a_person_talks_with_the_agent_that_changed_their_pr(demo) -> None
         assert "already decided" in again.json()["text"]
         state = (await maria.get(f"/api/jobs/{job}/talk")).json()
         assert state["draft"] == new["action_id"] and state["draft_pending"]
+
+
+async def _fix_with_pr_text(h: Any, app: Any, pr_text: dict[str, str]) -> Any:
+    """A change asked in the person's own words whose description also gives the PR
+    a new title or description; the draft, once it waits for maria."""
+
+    def change(task: Any) -> Any:
+        if task.mode == "read_only":
+            assert "Rename the PR" in task.prompt
+            assert h.forge.prs[(REPO, 42)].title in task.prompt, "the title it has"
+            return {"title": "docs: explain batching", "summary": "Explains it."} | (
+                pr_text
+            )
+        assert "give the new ones in your final message" in task.prompt
+        (Path(task.workdir) / "BATCHING.md").write_text("Batches of one are fine.\n")
+        return AgentResult(runtime="scripted", ok=True, text="Wrote BATCHING.md.")
+
+    h.runner.on("fix", change)
+    await h.service.a.user_tokens.set("maria", UserToken(token="t"))
+    async with _as(app, "maria") as maria:
+        started = await maria.post(
+            f"/api/prs/{REPO}/42/fix",
+            json={"request": "Document batches of one. Rename the PR to match."},
+        )
+        assert started.status_code == 200, started.text
+        await h.settle()
+        [draft] = [
+            p
+            for p in (await maria.get("/api/proposals")).json()
+            if p["action"]["action"]["kind"] == "pr.fix"
+        ]
+    return draft
+
+
+@pytest.mark.parametrize("target", ["pr", "branch"])
+async def test_a_change_gives_the_pr_itself_a_new_title_and_description(
+    demo, target: str
+) -> None:
+    """The new title and description go onto the PR that was changed, as the
+    approver, whether the change is a PR into it or a commit on its branch."""
+    h, app = demo
+    old_body = h.forge.prs[(REPO, 42)].body
+    draft = await _fix_with_pr_text(
+        h, app, {"pr_title": "feat(loader): batches of one", "pr_body": "Handles one."}
+    )
+    payload = draft["action"]["action"]["payload"]
+    assert payload["pr_title"] == "feat(loader): batches of one"
+    assert payload["pr_body"] == "Handles one."
+    async with _as(app, "maria") as maria:
+        ok = await maria.post(
+            f"/api/proposals/{draft['id']}/approve",
+            json={"as_me": True, "payload": {**payload, "target": target}},
+        )
+        assert ok.status_code == 200, ok.text
+        await h.settle()
+    publisher = h.service.a.publisher
+    assert publisher is not None and len(publisher.published) == 1
+    assert len(h.forge.writes_of("create_pr")) == (target == "pr")
+    [edited] = h.forge.writes_of("update_pr")
+    assert edited["number"] == 42 and edited["author"] == "maria"
+    assert edited["title"] == "feat(loader): batches of one"
+    assert edited["body"] == "Handles one." != old_body
+    record = await h.store.get_action(draft["action_id"])
+    assert record is not None and record.status == "executed"
+
+
+async def test_a_new_pr_description_that_the_leak_guard_blocks_pushes_nothing(
+    demo,
+) -> None:
+    h, app = demo
+    draft = await _fix_with_pr_text(h, app, {"pr_body": "Handles one. @carol"})
+    async with _as(app, "maria") as maria:
+        ok = await maria.post(
+            f"/api/proposals/{draft['id']}/approve", json={"as_me": True}
+        )
+        assert ok.status_code == 200, ok.text
+        await h.settle()
+    publisher = h.service.a.publisher
+    assert publisher is not None and publisher.published == []
+    assert not h.forge.writes_of("update_pr")
+    record = await h.store.get_action(draft["action_id"])
+    assert record is not None and record.status != "executed"
+    assert "carol" in str(record.error)
+
+
+async def test_a_refused_pr_edit_after_the_push_does_not_push_again(demo) -> None:
+    h, app = demo
+    draft = await _fix_with_pr_text(h, app, {"pr_title": "feat: batches of one"})
+    h.forge.fail_next["update_pr"] = RuntimeError("403 Forbidden")
+    async with _as(app, "maria") as maria:
+        await maria.post(f"/api/proposals/{draft['id']}/approve", json={"as_me": True})
+        await h.settle()
+    publisher = h.service.a.publisher
+    assert publisher is not None and len(publisher.published) == 1
+    record = await h.store.get_action(draft["action_id"])
+    assert record is not None and record.status == "executed"
+    assert "403" in str(record.external_ref.get("edit_error"))
+
+
+async def test_talking_about_a_change_carries_or_drops_the_prs_new_title(
+    demo,
+) -> None:
+    """A turn that changes the diff describes it again, told of the title the
+    draft gives the PR: the new description decides whether it stays."""
+    h, app = demo
+    described: list[str] = []
+    keep = {"pr_title": "feat(loader): batches of one"}
+
+    def change(task: Any) -> Any:
+        if task.mode == "read_only":
+            described.append(task.prompt)
+            return {"title": "docs: explain batching", "summary": "Explains it."} | keep
+        if task.activity == "fix_talk":
+            (Path(task.workdir) / f"NOTE{len(described)}.md").write_text("note\n")
+            return AgentResult(runtime="scripted", ok=True, text="Added a note.")
+        (Path(task.workdir) / "BATCHING.md").write_text("Batches of one are fine.\n")
+        return AgentResult(runtime="scripted", ok=True, text="Wrote BATCHING.md.")
+
+    h.runner.on("fix", change)
+    async with _as(app, "maria") as maria:
+        await maria.post(
+            f"/api/prs/{REPO}/42/fix",
+            json={"request": "Document batches of one. Rename the PR to match."},
+        )
+        await h.settle()
+
+        async def payload() -> dict[str, Any]:
+            [draft] = [
+                p
+                for p in (await maria.get("/api/proposals")).json()
+                if p["action"]["action"]["kind"] == "pr.fix"
+            ]
+            return draft["action"]["action"]
+
+        job = (await payload())["provenance"]["job_id"]
+        assert (await payload())["payload"]["pr_title"] == keep["pr_title"]
+        await maria.post(f"/api/jobs/{job}/talk", json={"text": "Add a note."})
+        assert "feat(loader): batches of one" in described[-1]
+        assert (await payload())["payload"]["pr_title"] == keep["pr_title"]
+        keep = {}
+        await maria.post(
+            f"/api/jobs/{job}/talk",
+            json={"text": "Another note, and keep the PR's title after all."},
+        )
+        assert (await payload())["payload"]["pr_title"] is None

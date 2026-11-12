@@ -418,6 +418,11 @@ class FixPrPayload(_Payload):
     """The review findings this addresses, by id."""
     runtime: str | None = None
     requested_by: str | None = None
+    pr_title: str | None = Field(default=None, max_length=256)
+    pr_body: str | None = Field(default=None, max_length=65_536)
+    """A new title and description for the PR this changes (not the fix PR), set
+    only when the request asked for them. Either ``target`` applies them, as the
+    approver, the way ``pr.edit`` does."""
 
 
 class LabReproducePayload(_Payload):
@@ -547,7 +552,7 @@ PUBLIC_TEXT_FIELDS: dict[ActionKind, tuple[str, ...]] = {
     ActionKind.PR_CLOSE: ("body",),
     ActionKind.PR_EDIT: ("title", "body"),
     ActionKind.ISSUE_COMMENT: ("body",),
-    ActionKind.PR_FIX: ("title", "body"),
+    ActionKind.PR_FIX: ("title", "body", "pr_title", "pr_body"),
     ActionKind.PR_APPROVE: ("body",),
 }
 """Payload fields that become public text and must pass the leak guard."""
