@@ -250,10 +250,19 @@ async def test_get_repo_with_unreadable_protection(client, router):
     assert info.requires_last_push_approval is True
     assert info.dismisses_stale_reviews is False
     assert info.labels == ["bug"]
+    assert info.merge_methods is None, "GitHub shows them only to who may push"
 
 
 async def test_get_repo_unprotected_branch(client, router):
-    router.get("/repos/acme/widget").respond(200, json={"default_branch": "dev"})
+    router.get("/repos/acme/widget").respond(
+        200,
+        json={
+            "default_branch": "dev",
+            "allow_squash_merge": True,
+            "allow_merge_commit": False,
+            "allow_rebase_merge": False,
+        },
+    )
     router.get("/repos/acme/widget/branches/dev").respond(
         200, json={"commit": {"sha": "s"}, "protected": False}
     )
@@ -266,6 +275,17 @@ async def test_get_repo_unprotected_branch(client, router):
         info.required_approvals,
         info.requires_code_owner_reviews,
     ) == ([], False, 0, False)
+    assert info.merge_methods == ["squash"], "only the methods the repository allows"
+
+
+async def test_behind_by_compares_the_head_with_its_base(client, router):
+    router.get("/repos/acme/widget/compare/main...abc").respond(
+        200, json={"behind_by": 3, "ahead_by": 1}
+    )
+    router.get("/repos/acme/widget/compare/main...gone").respond(404, json={})
+    reader = GitHubReader(client)
+    assert await reader.behind_by("acme/widget", "main", "abc") == 3
+    assert await reader.behind_by("acme/widget", "main", "gone") is None
 
 
 async def test_permission_mapping(client, router):

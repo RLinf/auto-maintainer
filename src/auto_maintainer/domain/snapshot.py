@@ -25,6 +25,7 @@ import json
 import re
 from datetime import datetime
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -55,6 +56,9 @@ class RepoInfo(_Model):
     """GitHub dismisses approvals when new commits change the diff."""
     """Whether the default branch waits for a code owner's approval of the files
     they own; ``None`` when unreadable."""
+    merge_methods: list[Literal["squash", "merge", "rebase"]] | None = None
+    """The ways the repository lets a PR merge, in GitHub's terms; ``None`` when
+    unreadable."""
 
 
 class PrFile(_Model):

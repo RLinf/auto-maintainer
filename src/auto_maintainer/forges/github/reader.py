@@ -181,6 +181,21 @@ _CHECK_STATUS = {
 _BEHIND = {"BEHIND": True, "CLEAN": False, "UNSTABLE": False, "HAS_HOOKS": False}
 
 
+_MERGE_SETTINGS = (
+    ("squash", "allow_squash_merge"),
+    ("merge", "allow_merge_commit"),
+    ("rebase", "allow_rebase_merge"),
+)
+
+
+def _merge_methods(data: dict[str, Any]) -> list[str] | None:
+    """The merge methods a repository allows; GitHub shows its settings only to
+    accounts that may push, so ``None`` for the others."""
+    if not any(key in data for _, key in _MERGE_SETTINGS):
+        return None
+    return [method for method, key in _MERGE_SETTINGS if data.get(key)]
+
+
 def map_check_status(value: str | None) -> CheckStatus:
     """Map a GitHub check status (any case) to the domain enum."""
     return _CHECK_STATUS.get((value or "").upper(), CheckStatus.QUEUED)
@@ -507,7 +522,18 @@ class GitHubReader:
             requires_code_owner_reviews=owners_review,
             requires_last_push_approval=last_push,
             dismisses_stale_reviews=stale,
+            merge_methods=_merge_methods(data),
         )
+
+    async def behind_by(self, repo: str, base: str, head: str) -> int | None:
+        data = await self._client.get(
+            f"/repos/{repo}/compare/{quote(base, safe='')}...{quote(head, safe='')}",
+            repo=repo,
+            params={"per_page": 1},
+            allow=(403, 404, 422),
+        )
+        behind = (data or {}).get("behind_by")
+        return int(behind) if isinstance(behind, int) else None
 
     async def default_branch_sha(self, repo: str) -> str:
         data = await self._client.get(f"/repos/{repo}", repo=repo)

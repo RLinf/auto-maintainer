@@ -52,6 +52,8 @@ class ActionKind(StrEnum):
     PR_NUDGE = "pr.nudge"
     PR_CONVERT_TO_DRAFT = "pr.convert_to_draft"
     PR_CLOSE = "pr.close"
+    PR_EDIT = "pr.edit"
+    """Change a PR's title and description, as the person who saved them."""
     PR_FIX = "pr.fix"
     LAB_REPRODUCE = "lab.reproduce"
     LAB_REVIEW = "lab.review"
@@ -344,6 +346,14 @@ class MergePayload(_Payload):
     armed_by: str | None = None
 
 
+class PrEditPayload(_Payload):
+    """A PR's new title and description. It runs only with the sign-in of the person
+    who saved them (``ActionRecord.post_as``)."""
+
+    title: str = Field(min_length=1, max_length=256)
+    body: str = Field(default="", max_length=65_536)
+
+
 class NudgePayload(_Payload):
     body: str
     audience: Literal["reviewers", "author"] = "reviewers"
@@ -510,6 +520,7 @@ PAYLOADS: dict[ActionKind, type[BaseModel]] = {
     ActionKind.PR_NUDGE: NudgePayload,
     ActionKind.PR_CONVERT_TO_DRAFT: PrStatePayload,
     ActionKind.PR_CLOSE: PrStatePayload,
+    ActionKind.PR_EDIT: PrEditPayload,
     ActionKind.ISSUE_LABEL: IssueLabelPayload,
     ActionKind.ISSUE_COMMENT: IssueCommentPayload,
     ActionKind.LAB_RUN: LabRunPayload,
@@ -534,6 +545,7 @@ PUBLIC_TEXT_FIELDS: dict[ActionKind, tuple[str, ...]] = {
     ActionKind.PR_NUDGE: ("body",),
     ActionKind.PR_CONVERT_TO_DRAFT: ("body",),
     ActionKind.PR_CLOSE: ("body",),
+    ActionKind.PR_EDIT: ("title", "body"),
     ActionKind.ISSUE_COMMENT: ("body",),
     ActionKind.PR_FIX: ("title", "body"),
     ActionKind.PR_APPROVE: ("body",),

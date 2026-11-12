@@ -329,19 +329,23 @@ class ActionPipeline:
                 ActionKind.PR_FIX,
                 ActionKind.PR_UPDATE_BRANCH,
                 ActionKind.PR_APPROVE,
+                ActionKind.PR_MERGE,
+                ActionKind.PR_EDIT,
                 ActionKind.CI_APPROVE_RUN,
                 ActionKind.THREAD_RESOLVE,
             ):
                 raise ApprovalError(
                     "only a review draft, a review's revision, a fix, a branch "
-                    "update, an approval of the PR, or resolving a review thread "
-                    "can be done as its approver"
+                    "update, an approval, a merge, or an edit of the PR, or "
+                    "resolving a review thread can be done as its approver"
                 )
             record.post_as = post_as
         elif action.kind == ActionKind.PR_FIX:
             raise ApprovalError("a fix PR is opened as the maintainer who approves it")
         elif action.kind == ActionKind.PR_APPROVE:
             raise ApprovalError("a PR is approved only by a person, as themselves")
+        elif action.kind == ActionKind.PR_EDIT:
+            raise ApprovalError("a PR is edited only by a person, as themselves")
         elif action.kind == ActionKind.THREAD_RESOLVE:
             raise ApprovalError(
                 "a review thread is resolved only by a person, as themselves"

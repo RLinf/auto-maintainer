@@ -234,6 +234,18 @@ class GitHubWriter:
             )
         return data["sha"]
 
+    async def update_pr(
+        self, repo: str, number: int, title: PublicText, body: PublicText
+    ) -> None:
+        await self._client.patch(
+            f"/repos/{repo}/pulls/{number}",
+            repo=repo,
+            json={
+                "title": _public(title, repo, "title"),
+                "body": _public(body, repo, "body"),
+            },
+        )
+
     async def convert_to_draft(self, repo: str, number: int) -> None:
         owner, _, name = repo.partition("/")
         data = await self._client.graphql(

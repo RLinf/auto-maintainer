@@ -50,6 +50,8 @@ from ..domain.actions import (
     LabelPayload,
     LabReproducePayload,
     MemoryChangePayload,
+    MergePayload,
+    PrEditPayload,
     Proposal,
     ProposalState,
     Provenance,
@@ -83,7 +85,7 @@ from ..domain.memory import (
     repo_dir,
     repos_of_path,
 )
-from ..domain.merge_gate import MergeArm, evaluate_merge_gate
+from ..domain.merge_gate import MergeArm, evaluate_merge_gate, squash_message
 from ..domain.permissions import Permission
 from ..domain.profile import Conditions, RepoProfile, Review
 from ..domain.records import (
@@ -835,6 +837,19 @@ class QualityBody(EvaluationsBody):
 class RefreshBody(BaseModel):
     repos: list[str] = Field(default_factory=list)
     """Repositories to read now; empty means every one the user sees."""
+
+
+class MergePrBody(BaseModel):
+    method: Literal["squash", "merge", "rebase"]
+    subject: str = Field(default="", max_length=256)
+    body: str = Field(default="", max_length=65_536)
+    head: str = Field(min_length=7, max_length=64)
+    """The head the person looked at; a newer one refuses the merge."""
+
+
+class EditPrBody(BaseModel):
+    title: str = Field(min_length=1, max_length=256)
+    body: str = Field(default="", max_length=65_536)
 
 
 class MergeBaseBody(BaseModel):
@@ -2121,6 +2136,164 @@ def build_router() -> APIRouter:
         )
         await service.bus.publish(event)
         return {"run": "resolve", "event": event.id}
+
+    @r.get("/prs/{repo:path}/{number:int}/merge-now")
+    async def merge_options(
+        request: Request,
+        repo: str,
+        number: int,
+        user: User = Depends(current_user),
+    ) -> dict[str, Any]:
+        """What merging the PR from its page offers: the methods the repository
+        allows (``null`` when the forge does not say), the one to choose first (the
+        profile's ``merge.method`` when allowed), the commit title and message the
+        profile's merge settings make, and how many commits of its base the branch
+        lacks (``behind``, ``null`` when unknown), so the page offers to merge the
+        base only into a branch behind it."""
+        service = service_of(request)
+        repo = _repo(repo)
+        await require_view(service, user, repo)
+        pr = await service.store.get_snapshot(repo, number)
+        if pr is None:
+            raise HTTPException(404, f"{repo}#{number} is not known yet")
+        profile = await service.profiles.active(repo)
+        info = await service.view_repo(repo)
+        methods = info.merge_methods
+        wanted = profile.merge.method if profile else "squash"
+        method = wanted if methods is None or wanted in methods else methods[0]
+        if profile is not None:
+            subject, message = squash_message(pr, profile)
+        else:
+            subject, message = f"{pr.title} (#{pr.number})", ""
+        behind = (
+            await service.view_behind(repo, pr.base_ref, pr.head_sha)
+            if pr.state == PrState.OPEN
+            else None
+        )
+        return {
+            "methods": methods,
+            "method": method if methods != [] else None,
+            "subject": subject,
+            "body": message,
+            "behind": behind,
+        }
+
+    @r.post("/prs/{repo:path}/{number:int}/merge-now")
+    async def merge_pr(
+        request: Request,
+        repo: str,
+        number: int,
+        body: MergePrBody,
+        user: User = Depends(current_user),
+    ) -> dict[str, Any]:
+        """Merge the PR into its base now, as the person who pressed Merge, with
+        their own sign-in. The press is the approval: it runs whatever the
+        repository's ``pr.merge`` level, except ``off``, and without the service's
+        merge gate; GitHub decides whether it may merge (mergeable, branch rules,
+        the person's access). A head newer than the one they saw refuses it."""
+        service = service_of(request)
+        repo = _repo(repo)
+        await require_view(service, user, repo)
+        if not await service.can_post_as(user.login):
+            raise HTTPException(403, "sign in with GitHub, so the merge comes from you")
+        pr = await service.a.forge.get_pr(repo, number)
+        if pr is None or pr.state != PrState.OPEN:
+            raise HTTPException(409, f"{repo}#{number} is not open")
+        if not same_commit(pr.head_sha, body.head):
+            raise HTTPException(
+                409,
+                f"the PR moved to {pr.head_sha[:7]} since you looked; read the new "
+                "commits, then merge",
+            )
+        if pr.is_draft:
+            raise HTTPException(409, "a draft PR does not merge; mark it ready first")
+        if pr.mergeable != Mergeable.MERGEABLE:
+            raise HTTPException(
+                409,
+                f"it conflicts with {pr.base_ref}; resolve the conflicts first"
+                if pr.mergeable == Mergeable.CONFLICTING
+                else "GitHub has not worked out yet whether it merges cleanly; "
+                "try again in a moment",
+            )
+        methods = (await service.a.forge.get_repo(repo)).merge_methods
+        if methods is not None and body.method not in methods:
+            raise HTTPException(
+                409,
+                f"{repo} does not allow {body.method} merges; it allows "
+                + (", ".join(methods) or "none"),
+            )
+        if body.method != "rebase" and not body.subject.strip():
+            raise HTTPException(422, "the commit needs a title")
+        record = await _run_now(
+            service,
+            user,
+            make_action(
+                ActionKind.PR_MERGE,
+                repo,
+                MergePayload(
+                    method=body.method,
+                    subject=body.subject.strip() or pr.title,
+                    body=body.body,
+                ),
+                number=number,
+                head_sha=pr.head_sha,
+                discriminator=f"merge:{user.login.lower()}:{new_id('req')}",
+                rationale=f"{user.login} pressed Merge",
+                draft_for=user.login,
+                provenance=Provenance(requested_by=user.login),
+            ),
+            as_them=True,
+        )
+        return {
+            "status": record.status,
+            "error": record.error,
+            "reason": record.decision.reason if record.decision else None,
+            "rule": record.decision.rule if record.decision else None,
+            "action": record.action.id,
+        }
+
+    @r.post("/prs/{repo:path}/{number:int}/edit")
+    async def edit_pr(
+        request: Request,
+        repo: str,
+        number: int,
+        body: EditPrBody,
+        user: User = Depends(current_user),
+    ) -> dict[str, Any]:
+        """Set the PR's title and description, as the person who saved them, with
+        their own sign-in; saving is the approval, under the repository's
+        ``pr.edit`` rule. GitHub decides whether they may (the author, or someone
+        with write access)."""
+        service = service_of(request)
+        repo = _repo(repo)
+        await require_view(service, user, repo)
+        if not await service.can_post_as(user.login):
+            raise HTTPException(403, "sign in with GitHub, so the edit comes from you")
+        pr = await service.a.forge.get_pr(repo, number)
+        if pr is None or pr.state != PrState.OPEN:
+            raise HTTPException(409, f"{repo}#{number} is not open")
+        record = await _run_now(
+            service,
+            user,
+            make_action(
+                ActionKind.PR_EDIT,
+                repo,
+                PrEditPayload(title=body.title.strip(), body=body.body),
+                number=number,
+                head_sha=pr.head_sha,
+                discriminator=f"edit:{user.login.lower()}:{new_id('req')}",
+                rationale=f"{user.login} edited the title and description",
+                draft_for=user.login,
+                provenance=Provenance(requested_by=user.login),
+            ),
+            as_them=True,
+        )
+        return {
+            "status": record.status,
+            "error": record.error,
+            "reason": record.decision.reason if record.decision else None,
+            "action": record.action.id,
+        }
 
     @r.post("/prs/{repo:path}/{number:int}/ci")
     async def run_ci(

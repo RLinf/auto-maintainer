@@ -1081,6 +1081,14 @@ class Service:
             ("repo", repo), lambda: self.a.forge.get_repo(repo)
         )
 
+    async def view_behind(self, repo: str, base: str, head: str) -> int | None:
+        """How many commits of branch ``base`` the commit ``head`` lacks, for the
+        dashboard's views, kept like ``view_repo``."""
+        return await self._view_cached(
+            ("behind", repo, base, head),
+            lambda: self.a.forge.behind_by(repo, base, head),
+        )
+
     async def view_file(self, repo: str, path: str, ref: str | None) -> str | None:
         """A file of ``repo`` at ``ref`` for the dashboard's views (CODEOWNERS), kept
         like ``view_repo``."""
