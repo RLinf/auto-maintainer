@@ -62,6 +62,7 @@ from ..domain.ports import ReviewCommentSpec
 from ..domain.profile import RepoProfile
 from ..domain.records import AuditEntry, ChatMessage, ReviewRecord
 from ..domain.snapshot import Mergeable, PrSnapshot
+from ..domain.visibility import PublicText
 from ..policy.leak_guard import mentioned
 from .context import ExecContext
 from .memory_gate import try_merge_memory
@@ -479,23 +480,47 @@ async def _pr_edit(
     had may stay; a new one passes the leak guard like any public text."""
     assert profile is not None and pr is not None
     p = PrEditPayload.model_validate(action.payload)
-    if p.title == pr.title and p.body == pr.body:
+    edit = await _pr_text(x, action, profile, pr, p.title, p.body)
+    if edit is None:
         raise Noop("the title and description are already these")
-    had = mentioned(f"{pr.title}\n{pr.body}")
-    title = await x.public(
-        action, profile, p.title, marker_kind="edit", pr=pr, bare=True, also_mention=had
-    )
-    body = await x.public(
-        action,
-        profile,
-        p.body or " ",
-        marker_kind="edit",
-        pr=pr,
-        bare=True,
-        also_mention=had,
-    )
-    await x.writer.update_pr(action.repo, pr.number, title, body)
+    await x.writer.update_pr(action.repo, pr.number, *edit)
     return {"title": p.title}
+
+
+async def _pr_text(
+    x: ExecContext,
+    action: Action,
+    profile: RepoProfile,
+    pr: PrSnapshot,
+    title: str,
+    body: str,
+) -> tuple[PublicText, PublicText] | None:
+    """A PR's new title and description through the leak guard, or None when they
+    are the PR's already. Mentions the PR's title and description already had may
+    stay."""
+    if title == pr.title and body == pr.body:
+        return None
+    had = mentioned(f"{pr.title}\n{pr.body}")
+    return (
+        await x.public(
+            action,
+            profile,
+            title,
+            marker_kind="edit",
+            pr=pr,
+            bare=True,
+            also_mention=had,
+        ),
+        await x.public(
+            action,
+            profile,
+            body or " ",
+            marker_kind="edit",
+            pr=pr,
+            bare=True,
+            also_mention=had,
+        ),
+    )
 
 
 async def _nudge(
@@ -721,11 +746,25 @@ async def _pr_fix(
     their writer and publisher; the service's own account never runs it): straight
     onto the PR's branch, or to a new branch with a PR into the PR's branch, which
     the PR's author merges. A merge of the base branch goes either way too, for an
-    approver who cannot push to the PR's branch (a fork that does not let them)."""
+    approver who cannot push to the PR's branch (a fork that does not let them).
+
+    A new title or description for the PR (``pr_title``, ``pr_body``) goes onto the
+    PR itself either way, after the push, as the approver: they pass the leak guard
+    before anything is pushed."""
     assert profile is not None and pr is not None and approver
     p = FixPrPayload.model_validate(action.payload)
     if x.publisher is None:
         raise RuntimeError("this service cannot push branches")
+    edit = None
+    if p.pr_title is not None or p.pr_body is not None:
+        edit = await _pr_text(
+            x,
+            action,
+            profile,
+            pr,
+            (p.pr_title or "").strip() or pr.title,
+            pr.body if p.pr_body is None else p.pr_body,
+        )
     owner = action.repo.split("/", 1)[0]
     email = f"{approver}@users.noreply.github.com"
     message = (
@@ -751,7 +790,11 @@ async def _pr_fix(
             resolved=p.resolved,
             push_to=head_repo,
         )
-        return {"pushed": f"{head_repo}:{pr.head_ref}", "sha": sha}
+        return {
+            "pushed": f"{head_repo}:{pr.head_ref}",
+            "sha": sha,
+            **await _edit_after_push(x, action, pr, edit),
+        }
     branch = f"am/{'merge' if p.merge_ref else 'fix'}-{pr.number}-{action.id[-6:]}"
     sha = await x.publisher.publish(
         action.repo,
@@ -777,7 +820,31 @@ async def _pr_fix(
         title,
         body,
     )
-    return {"branch": branch, "sha": sha, "pr": ref.id, "url": ref.url}
+    return {
+        "branch": branch,
+        "sha": sha,
+        "pr": ref.id,
+        "url": ref.url,
+        **await _edit_after_push(x, action, pr, edit),
+    }
+
+
+async def _edit_after_push(
+    x: ExecContext,
+    action: Action,
+    pr: PrSnapshot,
+    edit: tuple[PublicText, PublicText] | None,
+) -> dict[str, Any]:
+    """Set the PR's title and description once its fix is pushed. A refusal is
+    recorded, not raised: the push is done, and a retry must not push again."""
+    if edit is None:
+        return {}
+    try:
+        await x.writer.update_pr(action.repo, pr.number, *edit)
+    except Exception as e:
+        log.warning("could not edit %s#%s after its fix: %s", action.repo, pr.number, e)
+        return {"edit_error": str(e)[:500]}
+    return {"edited": True}
 
 
 async def _code_pr(

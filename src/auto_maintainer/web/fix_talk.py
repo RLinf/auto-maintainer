@@ -49,7 +49,7 @@ from ..domain.records import ActionRecord, ChatMessage, ChatThread, Job
 from ..domain.secrets import redact_secrets
 from ..domain.snapshot import PrSnapshot
 from ..playbooks.base import author_is_team
-from ..playbooks.fix import DESCRIBE, FixResult
+from ..playbooks.fix import DESCRIBE, FixResult, current_pr_text
 from ..playbooks.person_notes import load_notes, notes_block, remember_said
 from ..playbooks.prompts import pr_block, review_skill_block, schema_hint, untrusted
 from ..service import Service
@@ -316,7 +316,7 @@ async def fix_turn(
                 "The checkout has no changes left, so the draft keeps the diff it had."
             )
         else:
-            title, body = await _describe(
+            title, body, pr_edit = await _describe(
                 service,
                 profile,
                 pr,
@@ -335,6 +335,8 @@ async def fix_turn(
                         "files": changes.files,
                         "title": title,
                         "body": body,
+                        "pr_title": pr_edit.get("pr_title"),
+                        "pr_body": pr_edit.get("pr_body"),
                     }
                 )
                 try:
@@ -357,6 +359,7 @@ async def fix_turn(
                         findings=payload.findings if payload else [],
                         runtime=result.runtime,
                         requested_by=user.login,
+                        **pr_edit,
                     ),
                     number=pr.number,
                     head_sha=base,
@@ -398,13 +401,23 @@ async def _describe(
     patch: str,
     base: str,
     earlier: FixPrPayload | None,
-) -> tuple[str, str]:
+) -> tuple[str, str, dict[str, str]]:
     """The PR title and description of the change as it now stands, written again
-    by a short read-only task as the fix playbook writes them; the earlier ones, or
-    plain ones, when that fails. ``people`` is who talks and who first asked;
-    ``words`` the first request, the newest message, and the agent's answer."""
+    by a short read-only task as the fix playbook writes them, with the new title
+    and description it proposes for the PR itself (``FixResult.pr_edit``); the
+    earlier ones, or plain ones, when that fails. ``people`` is who talks and who
+    first asked; ``words`` the first request, the newest message, and the agent's
+    answer."""
     login, asker = people
     request, text, reply = words
+    kept = {
+        k: v
+        for k, v in {
+            "pr_title": earlier.pr_title if earlier else None,
+            "pr_body": earlier.pr_body if earlier else None,
+        }.items()
+        if v
+    }
     result = await service.a.agents.run(
         AgentTask(
             kind=TaskKind.FIX,
@@ -419,6 +432,16 @@ async def _describe(
                     f"What {login} then asked:\n"
                     + untrusted("maintainer.request", text, 8_000),
                     untrusted("agent.account", reply[-4_000:], 4_000),
+                    current_pr_text(pr),
+                    "The draft so far also gives the pull request this new title or "
+                    "description; keep them unless what was asked since says otherwise:\n"
+                    + untrusted(
+                        "fix.pr_edit",
+                        "\n\n".join(f"{k}: {v}" for k, v in kept.items()),
+                        14_000,
+                    )
+                    if kept
+                    else "",
                     untrusted("fix.diff", patch, 60_000),
                     schema_hint(FixResult.model_json_schema()),
                 ]
@@ -446,7 +469,7 @@ async def _describe(
             ]
         title = fix.title.strip()[:120]
         if title:
-            return title, "\n".join([*lines, "", tail]).strip()
+            return title, "\n".join([*lines, "", tail]).strip(), fix.pr_edit()
     if earlier is not None:
-        return earlier.title, earlier.body
-    return f"Changes to #{pr.number}", tail
+        return earlier.title, earlier.body, kept
+    return f"Changes to #{pr.number}", tail, {}

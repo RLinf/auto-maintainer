@@ -35,7 +35,7 @@ from ..domain.events import Event, EventKind
 from ..domain.ids import short_sha
 from ..domain.records import ChatMessage
 from ..domain.review import Finding, ReviewResult
-from ..domain.snapshot import PrState
+from ..domain.snapshot import PrSnapshot, PrState
 from .base import Playbook, PlaybookContext, PlaybookResult, may_succeed_later
 from .prompts import pr_block, review_skill_block, schema_hint, untrusted
 
@@ -43,11 +43,22 @@ FIX = """You are fixing a pull request for {reviewer}, a maintainer, inside an a
 - Change the code to {task} and nothing else. Keep the PR author's approach; make the smallest change that does it.
 - Check what you changed with the repository's static linters when it has them. Never run its tests, builds, scripts, or the PR's code on this machine: a repository's code runs only on its test machines, so say which tests a run there should cover.
 - Do not commit, push, or post, and never ask whether to: the service shows your changes to {reviewer}, who decides whether to open a PR with them.
+- When {reviewer} also asks to change the PR's title or description, do not write them in any file: give the new ones in your final message, and the service proposes them with your changes.
 - When something blocks a sound fix (the intended behavior is unclear, two fixes are equally plausible), ask {reviewer} with your tool for asking the user.
 - Write any text in {public_language}: plain and specific.
 - When you are done, end with a short message: what you changed{each}, what you left and why, the checks you ran, and what a test run should cover."""
 
-DESCRIBE = """Describe changes that an agent made to a pull request, for the PR that proposes them. Read the diff and what it was asked; do not change any file. Write in {public_language}: plain and specific."""
+DESCRIBE = """Describe changes that an agent made to a pull request, for the PR that proposes them. Read the diff and what it was asked; do not change any file. Write in {public_language}: plain and specific.
+Only when what was asked includes changing the pull request's own title or description, give the new ones in `pr_title` and `pr_body` (the whole description, starting from the current one below); otherwise leave both out."""
+
+
+def current_pr_text(pr: PrSnapshot) -> str:
+    """The PR's title and description as it has them, for ``DESCRIBE``."""
+    return (
+        untrusted("pr.title", pr.title, 500)
+        + "\n\n"
+        + untrusted("pr.body", pr.body or "(empty)", 12_000)
+    )
 
 
 class FixedFinding(BaseModel):
@@ -67,6 +78,24 @@ class FixResult(BaseModel):
     summary: str = Field(description="One paragraph on what the fixes do.")
     fixed: list[FixedFinding] = Field(default_factory=list)
     skipped: list[SkippedFinding] = Field(default_factory=list)
+    pr_title: str | None = Field(
+        default=None,
+        description="A new title for the pull request itself, only when asked for.",
+    )
+    pr_body: str | None = Field(
+        default=None,
+        description="A new description for the pull request itself, only when asked "
+        "for: the whole text.",
+    )
+
+    def pr_edit(self) -> dict[str, str]:
+        """``FixPrPayload``'s ``pr_title`` and ``pr_body``, those set and not blank."""
+        out = {}
+        if self.pr_title and self.pr_title.strip():
+            out["pr_title"] = self.pr_title.strip()[:256]
+        if self.pr_body and self.pr_body.strip():
+            out["pr_body"] = self.pr_body.strip()[:65_536]
+        return out
 
 
 class FixPlaybook(Playbook):
@@ -193,6 +222,7 @@ class FixPlaybook(Playbook):
                                     public_language=profile.languages.public
                                 ),
                                 asked,
+                                current_pr_text(pr),
                                 *(
                                     [untrusted("agent.account", account[-4000:], 4000)]
                                     if account
@@ -267,6 +297,7 @@ class FixPlaybook(Playbook):
                 findings=[f.id for f in fix.fixed] or [f.id for f in findings],
                 runtime=answer.runtime,
                 requested_by=by,
+                **fix.pr_edit(),
             ),
             number=pr.number,
             head_sha=pr.head_sha,
