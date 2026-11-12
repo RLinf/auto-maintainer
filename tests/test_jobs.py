@@ -37,7 +37,7 @@ from auto_maintainer.domain.agents import (
 )
 from auto_maintainer.domain.permissions import Permission
 from auto_maintainer.domain.profile import Route
-from auto_maintainer.domain.progress import step_from_event
+from auto_maintainer.domain.progress import FINAL_OUTPUT_LIMIT, step_from_event
 from auto_maintainer.domain.records import JobStatus
 from auto_maintainer.testing.demo import build_demo
 from auto_maintainer.web.app import create_app
@@ -89,6 +89,24 @@ def test_a_step_says_what_the_agent_did_without_credentials() -> None:
         step_from_event(AgentEvent(type=AgentEventType.USAGE), "codex", "review")
         is None
     )
+
+
+def test_a_final_message_is_kept_apart_from_the_error() -> None:
+    secret = "ghp_" + "d" * 36
+    step = step_from_event(
+        AgentEvent(
+            type=AgentEventType.FINAL,
+            text="The null check is wrong. " + secret + " " + "x" * 9000,
+            result=AgentResult(runtime="codex", ok=False, error="stopped early"),
+        ),
+        "codex",
+        "review",
+    )
+    assert step is not None and step.kind == "done"
+    assert step.text == "stopped early"
+    assert step.output.startswith("The null check is wrong.")
+    assert secret not in step.output
+    assert len(step.output) <= FINAL_OUTPUT_LIMIT
 
 
 async def test_the_router_reports_each_attempt_and_survives_its_observer() -> None:
@@ -155,6 +173,10 @@ async def test_the_requester_follows_their_review_step_by_step(demo) -> None:
         )
         assert "tool" in kinds[start:] and kinds[-1] == "done"
         assert any("pytest" in s["detail"] for s in job["steps"])
+        # What the agent said when it finished shows with the job, and on the job
+        # alone: the review card reads it from there rather than the step list.
+        assert mine["final"] == job["final"]
+        assert "steps" not in mine and job["final"]
     async with _as(app, "walt") as walt:
         assert (await walt.get("/api/work")).json() == []
         everyone = (await walt.get("/api/work?everyone=true")).json()

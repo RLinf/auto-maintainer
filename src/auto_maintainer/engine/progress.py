@@ -32,7 +32,12 @@ from ..domain.clock import Clock
 from ..domain.events import Event, EventKind
 from ..domain.labs import LabProgress
 from ..domain.ports import Store
-from ..domain.progress import JobStep, agent_session_key, step_from_event
+from ..domain.progress import (
+    FINAL_OUTPUT_LIMIT,
+    JobStep,
+    agent_session_key,
+    step_from_event,
+)
 from ..domain.secrets import redact_secrets
 
 MAX_STEPS = 300
@@ -109,6 +114,8 @@ class JobProgress:
             last.text = _joined(last.text, step.text)
         else:
             step.text = _joined("", step.text)
+            # The final message is redacted again here: a credential can span chunks.
+            step.output = _joined("", step.output, FINAL_OUTPUT_LIMIT)
             steps.append(step)
         if len(steps) > MAX_STEPS:
             del steps[10 : len(steps) - (MAX_STEPS - 10)]

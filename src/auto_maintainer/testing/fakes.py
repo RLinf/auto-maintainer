@@ -616,7 +616,7 @@ class ScriptedRunner:
             await self.progress(
                 task,
                 result.runtime,
-                AgentEvent(type=AgentEventType.FINAL, result=result),
+                AgentEvent(type=AgentEventType.FINAL, text=result.text, result=result),
             )
         return result
 

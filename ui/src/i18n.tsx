@@ -1734,6 +1734,7 @@ const zh: Record<string, string> = {
   "Which agent does it": "由哪个智能体来做",
   "Working": "进行中",
   "Working…": "进行中…",
+  "The agent's final output": "智能体的最终输出",
   "a command failed": "有命令失败了",
   "agent working": "个智能体在工作",
   "agents working": "个智能体在工作",

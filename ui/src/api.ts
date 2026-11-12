@@ -1209,6 +1209,8 @@ export interface JobStep {
   kind: "start" | "message" | "thinking" | "tool" | "result" | "question" | "error" | "done" | "output";
   text: string;
   detail: string;
+  /** For ``done``: what the agent said when it finished; ``text`` holds the error. */
+  output: string;
   runtime: string;
   task_kind: string;
   ok: boolean | null;
@@ -1250,6 +1252,8 @@ export interface AgentJob {
   questions_for_me: number;
   produced: { id: string; kind: string; status: string; proposal: string | null; for: string | null }[];
   last_step: JobStep | null;
+  /** What the agent said when it finished: its reasoning and the problems it found. */
+  final: string | null;
   steps?: JobStep[];
 }
 

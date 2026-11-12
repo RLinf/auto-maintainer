@@ -8,7 +8,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { ApiError, api, type AgentJob, type JobSlot, type JobStep } from "./api";
 import { agentName } from "./agentPicker";
-import { ErrorBox, prPath, useAct, When } from "./components";
+import { ErrorBox, FinalText, prPath, useAct, When } from "./components";
 import { useMe, useProposals, useQuestions } from "./data";
 import { useT } from "./i18n";
 import { Icon, type IconName } from "./icons";
@@ -623,9 +623,12 @@ function Step({ step, result }: { step: JobStep; result: JobStep | null }) {
       return (
         <li className="step">
           <span className={`sdot ${step.ok ? "ok" : "bad"}`} />
-          <span className="small">
-            {agentName(step.runtime)} {step.ok ? t("finished") : `${t("failed")}: ${step.text}`}
-          </span>
+          <div className="stack" style={{ gap: 6, minWidth: 0 }}>
+            <span className="small">
+              {agentName(step.runtime)} {step.ok ? t("finished") : `${t("failed")}: ${step.text}`}
+            </span>
+            {step.output.trim() && <FinalText text={step.output} />}
+          </div>
         </li>
       );
     default:

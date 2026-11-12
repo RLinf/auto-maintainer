@@ -8,6 +8,7 @@ import { api, ApiError, type QualityBand, type QuickQuality, type ReviewQuality 
 import { REVIEW_STATES } from "./data";
 import { currentLang, useLang, useT, type Lang } from "./i18n";
 import { Icon, type IconName } from "./icons";
+import { Markdown } from "./markdown";
 import { Skeleton } from "./ui";
 
 export function PageHead({
@@ -516,4 +517,11 @@ export function StopButton({ url, onStopped }: { url: string; onStopped?: () => 
       <Icon name="stop" size={15} />
     </button>
   );
+}
+
+/** What an agent said when it finished a job, drawn in a box of its own: a bounded
+ * height with its own scroll, so a long message never stretches the page it sits on
+ * (design 5.13). ``className`` cannot be given here: the box is always ``final-body``. */
+export function FinalText({ text }: { text: string }) {
+  return <Markdown text={text} className="posted final-body" />;
 }

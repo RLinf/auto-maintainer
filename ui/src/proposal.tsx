@@ -4,12 +4,13 @@
 // says what approving does. Used by the inbox, the home feed, the agent panel, and the
 // job view.
 
+import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { unwatchAction, watchAction } from "./events";
-import { api, type ProposalWithAction } from "./api";
+import { api, type AgentJob, type ProposalWithAction } from "./api";
 import { AgentPicker, useAgentChoice } from "./agentPicker";
-import { Diff, ErrorBox, prPath, RejectButton, Status, useAct, When } from "./components";
+import { Diff, ErrorBox, FinalText, prPath, RejectButton, Status, useAct, When } from "./components";
 import { useMe } from "./data";
 import { CommentOnDiff, parseDiff, usePrDiff } from "./diffview";
 import { useT } from "./i18n";
@@ -310,6 +311,9 @@ export function ProposalCard({
               actionId={action.id}
               places={Array.isArray(payload.comments) ? (payload.comments as InlineComment[]).map((c) => `${c.path}:${c.line}`) : []}
             />
+          )}
+          {(kind === "review.post" || kind === "review.update") && typeof payload.body === "string" && !editing && (
+            <FinalOutput jobId={action.provenance?.job_id} />
           )}
         </>
       )}
@@ -1256,5 +1260,31 @@ export function MergeNowButton({
         </div>
       )}
     </Popover>
+  );
+}
+
+/** What the agent said when it finished the job that drafted this review: its
+ * reasoning and the problems it found. Collapsed by default, drawn in a box of its own
+ * with a bounded height, so the review above stays the text that gets posted and the
+ * card never turns into one long text area (design 5.13). */
+export function FinalOutput({ jobId }: { jobId: string | null | undefined }) {
+  const t = useT();
+  const [open, setOpen] = useState(false);
+  const job = useQuery({
+    queryKey: ["job", jobId],
+    queryFn: () => api.get<AgentJob>(`/api/jobs/${jobId}`),
+    enabled: !!jobId,
+    staleTime: 60_000,
+  });
+  const text = job.data?.final?.trim();
+  if (!text) return null;
+  return (
+    <div className="stack" style={{ gap: 6 }}>
+      <button className="ghost sm" style={{ alignSelf: "flex-start" }} aria-expanded={open} onClick={() => setOpen(!open)}>
+        <Icon name={open ? "chevronDown" : "chevronRight"} size={14} />
+        {t("The agent's final output")}
+      </button>
+      {open && <FinalText text={text} />}
+    </div>
   );
 }
