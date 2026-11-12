@@ -127,6 +127,15 @@ QUOTA_FRESH_SECONDS = 30
 and again does not run the CLI every time."""
 
 
+CI_SETTLE_SECONDS = (10.0, 30.0, 90.0)
+"""Seconds after a CI action at which the service reads the PR again."""
+
+CI_ACTIONS = frozenset(
+    {ActionKind.CI_APPROVE_RUN, ActionKind.CI_RERUN_FAILED, ActionKind.LABEL_CI_GATE}
+)
+"""Actions whose effect on a PR's CI shows on the forge only some seconds later."""
+
+
 @dataclass
 class Adapters:
     forge: ForgeReader
@@ -243,6 +252,9 @@ class Service:
         not be read) and when that was read (``latest_versions``)."""
         """The latest install of each agent CLI asked for since the service started."""
         self._install_tasks: set[asyncio.Task[None]] = set()
+        self.ci_settle_seconds: tuple[float, ...] = CI_SETTLE_SECONDS
+        """When to read a PR again after the service approved, reran, or gated its CI:
+        the forge changes the runs' status a little after the call returns."""
         self.settings = settings
         self.store = adapters.store
         self.clock = adapters.clock
@@ -795,6 +807,15 @@ class Service:
                 later(work, f"refresh-{event.repo}#{event.number}")
             else:
                 await work
+            if event.payload.get("kind") in CI_ACTIONS and self.ci_settle_seconds:
+                # The forge starts the runs a moment later: read them again then,
+                # apart from the bus, which never waits for these.
+                task = asyncio.create_task(
+                    self._refresh_after(event.repo, event.number),
+                    name=f"ci-settle-{event.repo}#{event.number}",
+                )
+                self._install_tasks.add(task)
+                task.add_done_callback(self._install_tasks.discard)
             return
         if event.kind != EventKind.MEMORY_CHANGED:
             return
@@ -803,6 +824,15 @@ class Service:
             await self.reload_settings()
         if event.repo and lock_path(event.repo) in paths:
             self.poll_now(event.repo)
+
+    async def _refresh_after(self, repo: str, number: int) -> None:
+        """Read ``repo#number`` again at each of ``ci_settle_seconds`` after a CI
+        action, while the forge moves its runs from waiting to running."""
+        waited = 0.0
+        for at in self.ci_settle_seconds:
+            await asyncio.sleep(max(0.0, at - waited))
+            waited = at
+            await self._refresh_pr(repo, number)
 
     async def _refresh_pr(self, repo: str, number: int) -> None:
         try:

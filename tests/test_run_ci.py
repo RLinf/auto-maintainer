@@ -212,3 +212,29 @@ async def test_ci_held_for_approval_is_approved_and_run_as_the_person(demo) -> N
     assert approved["run_id"] == 7 and approved["by"] == "walt", (
         "as walt, not the service"
     )
+
+
+async def test_after_a_ci_action_the_pr_is_read_again_as_its_runs_start(
+    demo,
+) -> None:
+    """The forge moves runs from waiting to running a little after a rerun or an
+    approval: the PR is read again on a schedule, besides at once, so its page
+    shows the runs going without waiting for the next poll."""
+    import asyncio
+
+    h, app = demo
+    reads: list[int] = []
+    refresh = h.service._refresh_pr
+
+    async def counted(repo: str, number: int) -> None:
+        reads.append(number)
+        await refresh(repo, number)
+
+    h.service._refresh_pr = counted
+    h.service.ci_settle_seconds = (0.01, 0.03)
+    async with _as(app, "walt") as walt:
+        await walt.post(f"/api/prs/{REPO}/43/ci")  # adds the CI gate label
+        await h.settle()
+        assert reads.count(43) == 1, "at once"
+        await asyncio.sleep(0.1)
+    assert reads.count(43) == 3, "and twice more while the runs start"
