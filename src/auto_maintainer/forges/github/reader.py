@@ -44,6 +44,7 @@ reports ``BEHIND`` only when the base branch requires branches to be up to date.
 from __future__ import annotations
 
 import base64
+import hashlib
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -107,6 +108,7 @@ fragment PrFields on PullRequest {
   headCommit: commits(last: 1) {
     nodes {
       commit {
+        status { contexts { context state targetUrl createdAt } }
         checkSuites(first: 50) {
           nodes {
             id status conclusion
@@ -147,7 +149,7 @@ query($owner: String!, $name: String!, $cursor: String) {
       nodes {
         number updatedAt headRefOid reviewDecision
         reviewThreads(last: 100) { totalCount nodes { isResolved } }
-        commits(last: 1) { nodes { commit { checkSuites(first: 20) { totalCount nodes { updatedAt status } } } } }
+        commits(last: 1) { nodes { commit { status { state } checkSuites(first: 20) { totalCount nodes { updatedAt status } } } } }
       }
     }
   }
@@ -229,6 +231,21 @@ def _split(repo: str) -> tuple[str, str]:
     return owner, name
 
 
+_STATUS_CONCLUSION = {
+    "SUCCESS": CheckConclusion.SUCCESS,
+    "FAILURE": CheckConclusion.FAILURE,
+    "ERROR": CheckConclusion.FAILURE,
+}
+"""A commit status's state as a check's conclusion; ``PENDING`` and ``EXPECTED`` have
+none yet."""
+
+
+def status_id(context: str) -> int:
+    """A stable id for a commit status, which GitHub gives none; negative, so it
+    never meets a check run's."""
+    return -int(hashlib.sha256(context.encode()).hexdigest()[:12], 16)
+
+
 def snapshot_from_graphql(repo: str, node: dict[str, Any]) -> PrSnapshot:
     """Build a ``PrSnapshot`` from a ``PrFields`` GraphQL node."""
     head = _nodes(node.get("headCommit"))
@@ -275,6 +292,28 @@ def snapshot_from_graphql(repo: str, node: dict[str, Any]) -> PrSnapshot:
                     summary=cr.get("summary"),
                 )
             )
+    # Commit statuses (an outside service's, such as Read the Docs) beside the check
+    # runs: a branch rule may require them as it requires checks.
+    status = (head[0]["commit"].get("status") or {}) if head else {}
+    for ctx in (status.get("contexts") or []) if isinstance(status, dict) else []:
+        name = ctx.get("context") or ""
+        state = (ctx.get("state") or "").upper()
+        done = state in _STATUS_CONCLUSION
+        checks.append(
+            CheckRun(
+                id=status_id(name),
+                name=name,
+                status=CheckStatus.COMPLETED
+                if done
+                else CheckStatus.IN_PROGRESS
+                if state == "PENDING"
+                else CheckStatus.QUEUED,
+                conclusion=_STATUS_CONCLUSION.get(state),
+                details_url=ctx.get("targetUrl"),
+                started_at=_dt(ctx.get("createdAt")),
+                completed_at=_dt(ctx.get("createdAt")) if done else None,
+            )
+        )
     threads = [
         ReviewThread(
             id=t["id"],
@@ -396,6 +435,11 @@ def _light_fingerprint(node: dict[str, Any]) -> str:
             *stamps,
             str(node.get("reviewDecision") or ""),
             f"{resolved}/{threads.get('totalCount', 0)}",
+            # A commit status (Read the Docs) changes neither the time nor a suite.
+            str(
+                ((head[0]["commit"].get("status") or {}) if head else {}).get("state")
+                or ""
+            ),
         ]
     )
 

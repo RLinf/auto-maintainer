@@ -1437,3 +1437,26 @@ async def test_a_draft_from_an_older_version_shows_and_saves_only_what_it_named(
     assert profile.ci.start.how == "CI starts on run-ci."
     assert profile.ci.rerun.max_per_sha == 3, "what the draft did not name stays"
     assert profile.ci.diagnose == "patterns" and profile.ci.root_cause is False
+
+
+async def test_a_pr_whose_ci_ran_again_and_passed_leaves_the_failure_lane(
+    harness: Harness,
+) -> None:
+    h = harness
+    h.runner.on(
+        "ci_diagnose",
+        lambda t: {"category": "pr_caused", "confidence": 0.9, "explanation": "breaks"},
+    )
+    h.runner.on("ci_root_cause", lambda t: {"causes": []})
+    h.forge.job_logs[420] = "FAILED tests/test_m.py::test_x\n"
+    h.forge.put_pr(_ready(42, "a" * 40, _ci(42, "failure")))
+    await _schedule(h, 42)
+    await h.settle()
+    assert (await _phase(h, 42)).phase == "failed"
+    # Someone reran it on GitHub, at the same commit, and it passed.
+    pr = await h.forge.get_pr(REPO, 42)
+    passed = _job(421, "unit", "success", 4200, workflow="CI", attempt=2)
+    h.forge.put_pr(pr.model_copy(update={"checks": [passed]}))
+    await h.emit(Event(kind=EventKind.CHECKS_COMPLETED, repo=REPO, number=42))
+    await h.settle()
+    assert [w["number"] for w in h.forge.writes_of("merge")] == [42]

@@ -585,3 +585,30 @@ async def test_a_ruleset_narrows_the_merge_methods(client, router):
     ).respond(404)
     info = await GitHubReader(client).get_repo("acme/widget")
     assert info.merge_methods == ["squash"]
+
+
+def test_commit_statuses_count_as_checks():
+    """An outside service such as Read the Docs reports a commit status, not a check
+    run; a branch rule may require it all the same."""
+    node = load_fixture("pr_node.json")
+    commit = node["headCommit"]["nodes"][0]["commit"]
+    commit["status"] = {
+        "contexts": [
+            {
+                "context": "docs/readthedocs.org:rlinf",
+                "state": "SUCCESS",
+                "targetUrl": "https://rlinf--42.org.readthedocs.build/en/42/",
+                "createdAt": "2026-11-12T09:27:48Z",
+            },
+            {"context": "deploy/preview", "state": "PENDING", "targetUrl": None},
+        ]
+    }
+    pr = snapshot_from_graphql("acme/widget", node)
+    docs = next(c for c in pr.checks if c.name == "docs/readthedocs.org:rlinf")
+    assert docs.conclusion == CheckConclusion.SUCCESS
+    assert docs.status == CheckStatus.COMPLETED and docs.id < 0
+    assert docs.details_url and docs.workflow is None and not docs.awaiting_approval
+    preview = next(c for c in pr.checks if c.name == "deploy/preview")
+    assert preview.conclusion is None and preview.status == CheckStatus.IN_PROGRESS
+    again = snapshot_from_graphql("acme/widget", node)
+    assert [c.id for c in again.checks] == [c.id for c in pr.checks], "stable ids"

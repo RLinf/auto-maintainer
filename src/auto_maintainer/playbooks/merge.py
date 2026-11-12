@@ -216,10 +216,15 @@ class MergePlaybook(Playbook):
         gate = await gate_for(ctx, profile, info, pr, arm)
         wait = Wait(kinds=WAIT_KINDS, seconds=WAIT_SECONDS, reason="merge schedule")
         if state.phase == "failed" and same_commit(state.sha, pr.head_sha):
-            return PlaybookResult(
-                wait=wait.model_copy(update={"reason": "in the failure lane"}),
-                result={"phase": "failed"},
-            )
+            ran = ci_view(pr, profile.label_for("ci_gate"), profile.ci.start).state
+            if ran not in ("running", "passed") or state.retry:
+                return PlaybookResult(
+                    wait=wait.model_copy(update={"reason": "in the failure lane"}),
+                    result={"phase": "failed"},
+                )
+            # Someone ran its CI again (on the forge): it takes a turn again.
+            state.phase = "queued"
+            state.detail = "its CI ran again"
         conflict = next(
             (i for i in gate.items if i.name == "no_conflict" and not i.ok), None
         )
@@ -946,6 +951,8 @@ class MergePlaybook(Playbook):
         was_active = state.phase in ACTIVE
         if state.phase != phase or not same_commit(state.sha, pr.head_sha):
             state.since = ctx.clock.now()
+            # What an agent found about a stall belongs to the phase it stalled in.
+            state.finding = ""
         state.phase = phase  # type: ignore[assignment]
         state.sha = pr.head_sha
         state.detail = detail
