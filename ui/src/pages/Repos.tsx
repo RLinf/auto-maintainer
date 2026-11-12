@@ -2,7 +2,7 @@
 // settings layer, and agreement between the service and maintainers. Changing a
 // repository's configuration needs its maintainers (the configuration gate).
 
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { api, type Agreement, type GateDecision, type MemoryChange, type ProfileResponse, type RepoRow, type ReviewGuides } from "../api";
@@ -525,6 +525,15 @@ function ReviewGuidesSection({ repo }: { repo: string }) {
   const agent = useAgent();
   const url = `/api/repos/${repo}/review-guides`;
   const view = useReviewGuides(repo);
+  const client = useQueryClient();
+  // The server keeps a repository's skills for a while; this reads them from GitHub now.
+  const reread = useMutation({
+    mutationFn: () => api.get<ReviewGuides>(`${url}?refresh=true`),
+    onSuccess: (fresh) => {
+      client.setQueryData(["profile", repo, "review-guides"], fresh);
+      toast({ title: t("Skills read again"), body: t("The list shows the repository's skills on its default branch now."), icon: "refresh" });
+    },
+  });
   const d = view.data;
   const [skill, setSkill] = useState("");
   const [instructions, setInstructions] = useState("");
@@ -575,7 +584,7 @@ function ReviewGuidesSection({ repo }: { repo: string }) {
               </span>
             </div>
           )}
-          <SkillPicker view={d} value={skill} onChange={setSkill} onRefresh={() => view.refetch()} />
+          <SkillPicker view={d} value={skill} onChange={setSkill} onRefresh={() => reread.mutate()} refreshing={reread.isPending} />
           <label className="stack" style={{ gap: 6 }}>
             <span className="row" style={{ gap: 8 }}>
               <strong>{t("Review instructions")}</strong>
@@ -656,7 +665,7 @@ function ReviewGuidesSection({ repo }: { repo: string }) {
 
 /** Which skill reviews follow: automatic (the repository's review skill, else the
  *  service's), one of the repository's own skills, or the service's built-in one. */
-function SkillPicker({ view, value, onChange, onRefresh }: { view: ReviewGuides; value: string; onChange: (v: string) => void; onRefresh: () => void }) {
+function SkillPicker({ view, value, onChange, onRefresh, refreshing }: { view: ReviewGuides; value: string; onChange: (v: string) => void; onRefresh: () => void; refreshing?: boolean }) {
   const t = useT();
   const own = view.repo_skills.find((s) => s.reviews);
   const options: { value: string; title: string; detail: string }[] = [
@@ -683,8 +692,9 @@ function SkillPicker({ view, value, onChange, onRefresh }: { view: ReviewGuides;
               : `${t("Reviews follow the built-in")} ${view.in_use.name}`}
         </span>
         <span className="spacer" />
-        <button type="button" className="ghost sm" onClick={onRefresh} title={t("Read the repository's skills from GitHub again")}>
+        <button type="button" className="ghost sm" disabled={refreshing} onClick={onRefresh} title={t("Read the repository's skills from GitHub again")}>
           <Icon name="refresh" size={13} />
+          {refreshing ? t("Reading…") : t("Read again")}
         </button>
       </span>
       <div className="skill-options" role="radiogroup" aria-label={t("Review skill")}>
