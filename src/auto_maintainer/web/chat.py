@@ -241,7 +241,13 @@ class ProposedAction(BaseModel):
     )
     number: int | None = Field(
         default=None,
-        description="The PR; for kind=evaluate, empty means every open PR of the repository.",
+        description="The PR; for kind=evaluate, empty means every open PR of the "
+        "repository; for kind=change, empty opens a new PR against the repository's "
+        "default branch.",
+    )
+    draft: bool = Field(
+        default=False,
+        description="For kind=change: open the PR as a draft PR when asked.",
     )
     labels: list[str] = Field(default_factory=list)
     run_id: int | None = None
@@ -265,9 +271,10 @@ class ProposedAction(BaseModel):
     request: str = Field(
         default="",
         description=(
-            "For kind=change: what to change in the PR's code, in the person's words, "
-            "with what you found that the agent needs (files, lines, the comment it "
-            "answers). "
+            "For kind=change: what to change or add in the PR's code (or on the "
+            "repository's default branch when number is empty), in the person's words, "
+            "with what you found or prepared earlier in this conversation that the "
+            "editing agent needs (files, lines, content, the comment it answers). "
             "For kind=improve: what the person asked for, in a few sentences, and what "
             "you found that the implementing agent needs (a file, an error, a record); "
             "no parts they did not ask for. For kind=governance: what to change "
@@ -560,10 +567,15 @@ def build_router() -> APIRouter:
                 "(label, comment, rerun, close with an optional comment, ...) and configuration changes wait for the maintainer to approve the card; "
                 "review and evaluate (score a PR's priority again, or every open PR's when number is empty, with "
                 "the repository's lessons as they are now) start at once; "
-                "change starts at once too: when the person asks for a change to a PR's code, propose kind=change "
-                "with the PR and, in `request`, what to change: an agent edits a checkout of the PR, the conversation "
-                "is told when its diff is ready, and the person reads it and pushes it as themselves (nothing is "
-                "pushed before); never edit the PR's code yourself; "
+                "change starts at once too: when the person asks for a change to a PR's code, "
+                "or to open a new PR or draft PR on a managed repository, propose kind=change "
+                "with the repository, `number` when changing an open PR (leave `number` empty "
+                "for a new PR against the repository's default branch, and set `draft: true` "
+                "when they asked for a draft PR), and, in `request`, what to change or add "
+                "(including any content worked out earlier in this conversation): an agent "
+                "edits a checkout, the conversation is told when its diff is ready, and the "
+                "person reads it and opens or pushes it as themselves (nothing is pushed "
+                "before); never edit the repository's code yourself; "
                 "a lesson is saved at once when this maintainer may configure the repository, and otherwise waits for one "
                 "who may; a preference (what this person wants from the agents for themselves, about their reviews or how "
                 "you talk with them, not a rule for everyone) is saved to their own notes at once; an improve request and add_repo (onboard a repository: the service reads it and drafts its "
@@ -692,18 +704,24 @@ def build_router() -> APIRouter:
                     jobs.append(await _governance(service, user, p))
                 continue
             if p.kind == "change":
-                if p.repo in repos and p.number and p.request.strip():
-                    jobs.append(
-                        await start_change(
-                            service,
-                            user.login,
-                            p.repo,
-                            p.number,
-                            p.request,
-                            thread_id=thread_id,
-                            source="chat",
+                repo_by_lower = {r.lower(): r for r in repos}
+                matched = repo_by_lower.get(p.repo.strip().lower())
+                if matched and p.request.strip():
+                    if await service.profiles.active(matched) is None:
+                        notes.append(f"{matched} has no approved profile yet.")
+                    else:
+                        jobs.append(
+                            await start_change(
+                                service,
+                                user.login,
+                                matched,
+                                p.number or None,
+                                p.request,
+                                draft=p.draft,
+                                thread_id=thread_id,
+                                source="chat",
+                            )
                         )
-                    )
                 continue
             if p.kind == "configure":
                 change_id, problem = await _configure(service, user, p, repos)

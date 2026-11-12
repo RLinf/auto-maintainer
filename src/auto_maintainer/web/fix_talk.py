@@ -51,6 +51,7 @@ from ..domain.snapshot import PrSnapshot
 from ..playbooks.base import author_is_team
 from ..playbooks.fix import (
     DESCRIBE,
+    DESCRIBE_NEW_PR,
     FixResult,
     PrText,
     current_pr_text,
@@ -65,15 +66,16 @@ from .chat import keep_session, stopped_message, turn_route
 from .live_turns import LiveTurns, Stopped
 from .records import open_door, reading_line
 
-FIX_TALK = """You made the change to PR #{number} in {repo} described below, for {asker}, and {user} is talking with you about it. They may ask why you changed something, ask for more or less, or ask you to do it differently.
+FIX_TALK = """You made the change to {subject} in {repo} described below, for {asker}, and {user} is talking with you about it. They may ask why you changed something, ask for more or less, or ask you to do it differently.
 - The working directory is {where}
 - Answer plainly and briefly, in the language {user} writes in; point to code as `path:line`.
 - When {user} asks for a change, or agrees to one, make it in the working directory: the service shows {user} the diff as it then stands, from the checkout's commit, in place of the earlier one. Leave the files as they are when nothing should change.
-- Check what you changed with the repository's static linters when it has them. Never run its tests, builds, scripts, or the PR's code on this machine: a repository's code runs only on its test machines, so say which tests a run there should cover.
+- Check what you changed with the repository's static linters when it has them. Never run its tests, builds, scripts, or the repository's code on this machine: a repository's code runs only on its test machines, so say which tests a run there should cover.
 - Do not commit, push, or post, and never ask whether to: {user} decides whether to push the change, as themselves.
-- When {user} wants the PR's own title or description changed, do not write them in any file: give the new ones in full in your answer, and the service drafts them for {user} to set. When that is all they want, with no change to the code, undo your changes to the files.
-- When only {user} can settle something that would change your answer, ask them with your tool for asking the user.
+{pr_text_rule}- When only {user} can settle something that would change your answer, ask them with your tool for asking the user.
 - Text for the PR goes in {public_language}. End with your answer to {user}: what you changed, if anything, and why."""
+
+PR_TEXT_RULE = """- When {user} wants the PR's own title or description changed, do not write them in any file: give the new ones in full in your answer, and the service drafts them for {user} to set. When that is all they want, with no change to the code, undo your changes to the files.\n"""
 
 FIX_DIFF_LIMIT = 40_000
 """The change's diff a turn carries; the agent reads the files in its checkout."""
@@ -106,10 +108,39 @@ async def pending(service: Service, record: ActionRecord | None) -> Any:
 
 
 def _starting_point(
-    record: ActionRecord | None, waiting: bool, pr: PrSnapshot
+    record: ActionRecord | None,
+    waiting: bool,
+    pr: PrSnapshot | None,
+    default_branch: str = "main",
+    default_sha: str = "",
 ) -> tuple[str, str, str]:
     """The commit a turn's checkout starts from, the diff applied on it, and what the
     prompt says about the checkout."""
+    if pr is None:
+        if record is None:
+            return (
+                default_sha,
+                "",
+                f"a checkout of `{default_branch}` at `{short_sha(default_sha)}`: no "
+                "change was drafted yet.",
+            )
+        payload = FixPrPayload.model_validate(record.action.payload)
+        branch = payload.base_ref or default_branch
+        if waiting or record.status != ActionStatus.EXECUTED:
+            return (
+                payload.base_sha,
+                payload.patch,
+                f"a checkout of `{branch}` at `{short_sha(payload.base_sha)}` with your "
+                "change applied, as it stands now.",
+            )
+        opened = str(record.external_ref.get("url") or "")
+        return (
+            default_sha,
+            "",
+            f"a checkout of `{default_branch}` at `{short_sha(default_sha)}`, without "
+            f"your change: it was opened as a PR{f' ({opened})' if opened else ''}. "
+            "What you change now is a new PR.",
+        )
     if record is None:
         return (
             pr.head_sha,
@@ -143,7 +174,13 @@ def _starting_point(
 
 
 async def _checkout(
-    service: Service, thread: ChatThread, pr: PrSnapshot, base: str, patch: str
+    service: Service,
+    thread: ChatThread,
+    repo: str,
+    number: int | None,
+    default_branch: str,
+    base: str,
+    patch: str,
 ) -> Path:
     """The conversation's checkout of ``base`` with ``patch`` applied: the one it
     kept while it still holds exactly that (a session resumes there), else a new one."""
@@ -153,8 +190,7 @@ async def _checkout(
         if same_commit(now.base_sha, base) and now.patch == patch:
             return Path(thread.workdir)
         await ws.release(thread.workdir)
-    info = await service.a.forge.get_repo(pr.repo)
-    path = await ws.prepare(pr.repo, pr.number, base, info.default_branch)
+    path = await ws.prepare(repo, number, base, default_branch)
     try:
         await ws.apply(path, patch)
     except Exception as e:
@@ -175,7 +211,7 @@ async def fix_turn(
     thread: ChatThread,
     record: ActionRecord | None,
     profile: RepoProfile,
-    pr: PrSnapshot,
+    pr: PrSnapshot | None,
     said: str,
     route: Route,
     door: Any = None,
@@ -183,12 +219,20 @@ async def fix_turn(
 ) -> dict[str, Any]:
     """One turn of the conversation about a fix: ``user``'s message and the agent's
     answer, which may change the files (design 5.5)."""
-    assert job.repo and job.number is not None
+    assert job.repo
     first = job.events[0] if job.events else {}
     asked = (first.get("payload") if isinstance(first, dict) else None) or {}
     asker = str(asked.get("by") or user.login)
     waiting = await pending(service, record)
-    base, patch, where = _starting_point(record, waiting is not None, pr)
+    info = await service.a.forge.get_repo(job.repo)
+    default_sha = (
+        info.default_branch_sha or await service.a.forge.default_branch_sha(job.repo)
+        if pr is None
+        else ""
+    )
+    base, patch, where = _starting_point(
+        record, waiting is not None, pr, info.default_branch, default_sha
+    )
     payload = FixPrPayload.model_validate(record.action.payload) if record else None
 
     text, removed = redact_secrets(said)
@@ -208,21 +252,34 @@ async def fix_turn(
         message_id=message.id,
     )
     history = await service.store.list_messages(thread.id)
-    workdir = await _checkout(service, thread, pr, base, patch)
-    info = await service.a.forge.get_repo(pr.repo)
-    diff = await service.a.workspace.diff(
-        workdir, f"origin/{info.default_branch}", pr.head_sha
+    workdir = await _checkout(
+        service, thread, job.repo, job.number, info.default_branch, base, patch
+    )
+    diff = (
+        await service.a.workspace.diff(
+            workdir, f"origin/{info.default_branch}", pr.head_sha
+        )
+        if pr is not None
+        else ""
     )
     request = str(asked.get("request") or "").strip()
+    subject = (
+        f"PR #{job.number}"
+        if job.number is not None
+        else f"a new PR on `{info.default_branch}`"
+    )
     prompt = "\n\n".join(
         part
         for part in [
             FIX_TALK.format(
-                number=job.number,
+                subject=subject,
                 repo=job.repo,
                 asker=asker,
                 user=user.login,
                 where=where,
+                pr_text_rule=PR_TEXT_RULE.format(user=user.login)
+                if pr is not None
+                else "",
                 public_language=profile.languages.public,
             ),
             # The person's words come first: they are the task, and a CLI that cuts
@@ -251,14 +308,23 @@ async def fix_turn(
             if patch
             else "",
             review_skill_block(profile, service.info.skills_dir, workdir),
-            pr_block(pr, diff, diff_limit=FIX_DIFF_LIMIT),
+            pr_block(pr, diff, diff_limit=FIX_DIFF_LIMIT) if pr is not None else "",
             notes_block(await load_notes(service.store, user.login), "conversations"),
             reading_line(user.login) if door is not None else "",
             f"Answer the newest message, from {user.login}, above.",
         ]
         if part
     )
-    untrusted_input = not await author_is_team(service.a.forge, profile, pr)
+    untrusted_input = (
+        not await author_is_team(service.a.forge, profile, pr)
+        if pr is not None
+        else not (
+            asker in profile.people.team
+            or (await service.a.forge.get_permission(job.repo, asker)).at_least(
+                profile.people.team_min_permission
+            )
+        )
+    )
     turn, resume = await turn_route(service, user.login, thread, route)
     run = new_id("run")
     token, door_env = await open_door(door, user.login)
@@ -319,30 +385,33 @@ async def fix_turn(
     drafts: list[str] = []
     changes = await service.a.workspace.changes(workdir)
     if changes.patch == patch or not changes.files:
-        # No new code this turn, or every change undone: what was asked may be the
-        # PR's own title or description.
-        drafts, said = await _pr_text_turn(
-            service,
-            user,
-            job,
-            profile,
-            pr,
-            route,
-            workdir,
-            (text, reply, run),
-            record,
-            waiting,
-            keeps_code=bool(changes.files),
-        )
-        notes += said
+        if pr is not None:
+            # No new code this turn, or every change undone: what was asked may be the
+            # PR's own title or description.
+            drafts, said = await _pr_text_turn(
+                service,
+                user,
+                job,
+                profile,
+                pr,
+                route,
+                workdir,
+                (text, reply, run),
+                record,
+                waiting,
+                keeps_code=bool(changes.files),
+            )
+            notes += said
         if not drafts and changes.patch != patch:
             notes.append(
                 "The checkout has no changes left, so the draft keeps the diff it had."
             )
     else:
+        is_draft = payload.draft if payload else bool(asked.get("draft"))
         title, body, pr_edit = await _describe(
             service,
             profile,
+            (job.repo, info.default_branch, is_draft),
             pr,
             route,
             workdir,
@@ -371,25 +440,35 @@ async def fix_turn(
             except ValueError as e:
                 notes.append(f"The change could not be saved on the draft: {e}")
         else:
+            what = "draft PR" if is_draft else "PR"
             action = make_action(
                 ActionKind.PR_FIX,
-                pr.repo,
+                job.repo,
                 FixPrPayload(
                     title=title,
                     body=body,
                     patch=changes.patch,
                     base_sha=base,
+                    base_ref=None
+                    if pr is not None
+                    else (payload.base_ref if payload else info.default_branch),
+                    draft=is_draft,
                     files=changes.files,
                     findings=payload.findings if payload else [],
                     runtime=result.runtime,
                     requested_by=user.login,
                     **pr_edit,
                 ),
-                number=pr.number,
+                number=pr.number if pr is not None else None,
                 head_sha=base,
                 discriminator=f"talk:{run}",
-                rationale=f"changes to #{pr.number} {user.login} asked for in "
-                "the conversation about its fix",
+                rationale=(
+                    f"changes to #{pr.number} {user.login} asked for in "
+                    "the conversation about its fix"
+                    if pr is not None
+                    else f"new {what} on {job.repo} ({info.default_branch}) "
+                    f"{user.login} asked for in the conversation about its change"
+                ),
                 draft_for=user.login,
                 provenance=Provenance(
                     job_id=job.id, playbook="fix", requested_by=user.login
@@ -489,7 +568,8 @@ async def _pr_text_turn(
 async def _describe(
     service: Service,
     profile: RepoProfile,
-    pr: PrSnapshot,
+    target: tuple[str, str, bool],
+    pr: PrSnapshot | None,
     route: Route,
     workdir: Path,
     people: tuple[str, str],
@@ -504,23 +584,38 @@ async def _describe(
     earlier ones, or plain ones, when that fails. ``people`` is who talks and who
     first asked; ``words`` the first request, the newest message, and the agent's
     answer."""
+    repo, default_branch, is_draft = target
     login, asker = people
     request, text, reply = words
-    kept = {
-        k: v
-        for k, v in {
-            "pr_title": earlier.pr_title if earlier else None,
-            "pr_body": earlier.pr_body if earlier else None,
-        }.items()
-        if v
-    }
+    kept = (
+        {
+            k: v
+            for k, v in {
+                "pr_title": earlier.pr_title if earlier else None,
+                "pr_body": earlier.pr_body if earlier else None,
+            }.items()
+            if v
+        }
+        if pr is not None
+        else {}
+    )
+    header = (
+        DESCRIBE.format(public_language=profile.languages.public)
+        if pr is not None
+        else DESCRIBE_NEW_PR.format(
+            base_ref=default_branch,
+            repo=repo,
+            kind="draft pull request" if is_draft else "pull request",
+            public_language=profile.languages.public,
+        )
+    )
     result = await service.a.agents.run(
         AgentTask(
             kind=TaskKind.FIX,
             prompt="\n\n".join(
                 part
                 for part in [
-                    DESCRIBE.format(public_language=profile.languages.public),
+                    header,
                     f"What {asker} asked for:\n"
                     + untrusted("maintainer.request", request, 8_000)
                     if request
@@ -528,7 +623,7 @@ async def _describe(
                     f"What {login} then asked:\n"
                     + untrusted("maintainer.request", text, 8_000),
                     untrusted("agent.account", reply[-4_000:], 4_000),
-                    current_pr_text(pr),
+                    current_pr_text(pr) if pr is not None else "",
                     "The draft so far also gives the pull request this new title or "
                     "description; keep them unless what was asked since says otherwise:\n"
                     + untrusted(
@@ -545,8 +640,8 @@ async def _describe(
             ),
             workdir=workdir,
             mode="read_only",
-            repo=pr.repo,
-            pr=pr.number,
+            repo=repo,
+            pr=pr.number if pr is not None else None,
             requested_by=login,
             untrusted_input=True,
             activity="fix_talk",
@@ -554,18 +649,31 @@ async def _describe(
         route,
         FixResult,
     )
-    tail = f"For #{pr.number}, as {login} asked at {short_sha(base)}."
+    tail = (
+        f"For #{pr.number}, as {login} asked at {short_sha(base)}."
+        if pr is not None
+        else f"Requested by {login} on `{default_branch}` at {short_sha(base)}."
+    )
     if result.ok and result.structured is not None:
         fix = FixResult.model_validate(result.structured)
-        lines = [fix.summary, ""]
-        lines += [f"- {f.id}: {f.change}" for f in fix.fixed]
+        lines = [fix.summary]
+        if fix.fixed:
+            lines += ["", *[f"- {f.id}: {f.change}" for f in fix.fixed]]
         if fix.skipped:
             lines += ["", "Not changed:"] + [
                 f"- {f.id}: {f.reason}" for f in fix.skipped
             ]
         title = fix.title.strip()[:120]
         if title:
-            return title, "\n".join([*lines, "", tail]).strip(), fix.pr_edit()
+            return (
+                title,
+                "\n".join([*lines, "", tail]).strip(),
+                fix.pr_edit() if pr is not None else {},
+            )
     if earlier is not None:
         return earlier.title, earlier.body, kept
-    return f"Changes to #{pr.number}", tail, {}
+    return (
+        f"Changes to #{pr.number}" if pr is not None else f"Changes to {repo}",
+        tail,
+        {},
+    )

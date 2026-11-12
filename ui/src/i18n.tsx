@@ -2481,6 +2481,11 @@ const zh: Record<string, string> = {
   "Diagnosing the selected failures": "正在诊断所选失败",
   "Other checks": "其他检查",
   "Earlier diagnoses": "更早的诊断",
+  "Open a PR": "开 PR",
+  "Open a draft PR": "开草稿 PR",
+  "Open the draft PR as me": "以我的身份开草稿 PR",
+  "draft PR into": "草稿 PR 合入",
+  "into": "合入",
 };
 
 const LangContext = createContext<{ lang: Lang; setLang: (l: Lang) => void }>({ lang: "zh", setLang: () => {} });

@@ -419,6 +419,28 @@ async def test_approving_rebasing_and_merging() -> None:
     await service.convert_to_draft(REPO, 7)
     assert ("PUT", mr, {"title": "Draft: T"}) in fake.sent
 
+    fake.on(
+        "POST",
+        f"/projects/{PID}/merge_requests",
+        {
+            "iid": 8,
+            "web_url": "https://gitlab.corp.com/grp/sub/proj/-/merge_requests/8",
+        },
+    )
+    opened = await maria.create_pr(
+        REPO, "am/pr-1", "main", public("docs: add skill"), public("Body"), draft=True
+    )
+    assert opened.id == 8
+    [mr_post] = [
+        b for m, p, b in fake.sent if m == "POST" and p.endswith("/merge_requests")
+    ]
+    assert mr_post == {
+        "source_branch": "am/pr-1",
+        "target_branch": "main",
+        "title": "Draft: docs: add skill",
+        "description": "Body",
+    }
+
 
 async def test_ci_retries_a_pipeline_and_reads_a_job_log() -> None:
     fake = FakeGitLab()

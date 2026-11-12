@@ -396,16 +396,23 @@ class MemoryChangePayload(_Payload):
 
 
 class FixPrPayload(_Payload):
-    """Changes an agent made to a PR, pushed by the maintainer who approves it, with
-    their own account: as a PR into the PR's branch, or straight onto that branch.
-    A merge of the base branch into the PR (with an agent's resolution of its
-    conflicts) is the same action with ``merge_ref`` set."""
+    """Changes an agent made to a repository or PR, pushed by the maintainer who
+    approves it, with their own account: as a new PR (or draft PR) against the
+    default branch when ``Action.number`` is ``None``, or as a PR into an existing
+    PR's branch or straight onto that branch. A merge of the base branch into the
+    PR (with an agent's resolution of its conflicts) is the same action with
+    ``merge_ref`` set."""
 
     title: str
     body: str
     patch: str
-    """``git diff --binary`` of the change, on the reviewed PR's head commit."""
+    """``git diff --binary`` of the change, on ``base_sha``."""
     base_sha: str
+    base_ref: str | None = None
+    """The branch a new PR targets when ``Action.number`` is ``None`` (the
+    repository's default branch)."""
+    draft: bool = False
+    """Open the PR as a draft PR."""
     target: Literal["pr", "branch"] = "pr"
     """``pr``: a new branch and a PR into the PR's branch. ``branch``: one commit on
     the PR's branch itself, which the approver must be allowed to push to; the

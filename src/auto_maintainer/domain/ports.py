@@ -244,7 +244,14 @@ class ForgeWriter(Protocol):
         ...
 
     async def create_pr(
-        self, repo: str, head: str, base: str, title: PublicText, body: PublicText
+        self,
+        repo: str,
+        head: str,
+        base: str,
+        title: PublicText,
+        body: PublicText,
+        *,
+        draft: bool = False,
     ) -> CommentRef:
         """Open a PR on a repository the service maintains (``head`` may be
         ``owner:branch`` from another repository in the same fork network)."""

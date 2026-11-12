@@ -477,7 +477,14 @@ class FakeForge:
         return CommentRef(id=n)
 
     async def create_pr(
-        self, repo: str, head: str, base: str, title: PublicText, body: PublicText
+        self,
+        repo: str,
+        head: str,
+        base: str,
+        title: PublicText,
+        body: PublicText,
+        *,
+        draft: bool = False,
     ) -> CommentRef:
         n = next(self._ids)
         self._record(
@@ -487,6 +494,7 @@ class FakeForge:
             base=base,
             title=self._text(title),
             body=self._text(body),
+            draft=draft,
             number=n,
             author=self.login,
         )

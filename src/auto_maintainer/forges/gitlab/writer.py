@@ -328,11 +328,19 @@ class GitLabWriter:
         return await self._open(repo, head, base, title, body)
 
     async def create_pr(
-        self, repo: str, head: str, base: str, title: PublicText, body: PublicText
+        self,
+        repo: str,
+        head: str,
+        base: str,
+        title: PublicText,
+        body: PublicText,
+        *,
+        draft: bool = False,
     ) -> CommentRef:
-        return await self._open(
-            repo, head, base, _public(title, repo, "title"), _public(body, repo, "body")
-        )
+        checked = _public(title, repo, "title")
+        if draft and not checked.lower().startswith("draft:"):
+            checked = f"Draft: {checked}"
+        return await self._open(repo, head, base, checked, _public(body, repo, "body"))
 
     async def merge_service_pr(
         self, repo: str, number: int, method: str = "merge"

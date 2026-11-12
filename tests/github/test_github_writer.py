@@ -230,3 +230,35 @@ async def test_service_issue_and_pr(client, router):
         await writer.create_service_pr("acme/memory", "am/mem/1", "main", "t", "b")
     ).id == 5
     assert await writer.merge_service_pr("acme/memory", 5) == "x"
+
+
+async def test_create_pr_and_draft_pr(client, router):
+    route = router.post("/repos/acme/widget/pulls").respond(
+        201, json={"number": 12, "html_url": "https://github.com/acme/widget/pull/12"}
+    )
+    writer = GitHubWriter(client)
+    ref = await writer.create_pr(
+        "acme/widget", "am/pr-1", "main", public("docs: add skill"), public("Body")
+    )
+    assert ref.id == 12
+    assert _json(route, 0) == {
+        "title": "docs: add skill",
+        "head": "am/pr-1",
+        "base": "main",
+        "body": "Body",
+    }
+    await writer.create_pr(
+        "acme/widget",
+        "am/pr-2",
+        "main",
+        public("docs: add skill"),
+        public("Body"),
+        draft=True,
+    )
+    assert _json(route, 1) == {
+        "title": "docs: add skill",
+        "head": "am/pr-2",
+        "base": "main",
+        "body": "Body",
+        "draft": True,
+    }

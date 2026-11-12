@@ -105,6 +105,9 @@ class HandlerSpec:
     run: Handler
     needs_pr: bool = False
     """Re-read the PR before running and refuse if it closed."""
+    optional_pr: bool = False
+    """With ``needs_pr``: ``action.number`` may be ``None`` (a new PR against the
+    default branch); when set, the PR is still re-read and checked."""
     needs_current_head: bool = False
     """Refuse if the PR's head moved past ``action.head_sha``."""
     approved_on_its_commit: bool = False
@@ -743,18 +746,71 @@ async def _pr_fix(
     approver: str | None,
 ) -> dict[str, Any]:
     """Push the change as the approving maintainer (the executor gives this handler
-    their writer and publisher; the service's own account never runs it): straight
-    onto the PR's branch, or to a new branch with a PR into the PR's branch, which
+    their writer and publisher; the service's own account never runs it): as a new PR
+    or draft PR against the default branch when ``pr`` is ``None``, or straight onto
+    an existing PR's branch or to a new branch with a PR into that PR's branch, which
     the PR's author merges. A merge of the base branch goes either way too, for an
     approver who cannot push to the PR's branch (a fork that does not let them).
 
     A new title or description for the PR (``pr_title``, ``pr_body``) goes onto the
     PR itself either way, after the push, as the approver: they pass the leak guard
     before anything is pushed."""
-    assert profile is not None and pr is not None and approver
+    assert profile is not None and approver
     p = FixPrPayload.model_validate(action.payload)
     if x.publisher is None:
         raise RuntimeError("this service cannot push branches")
+    email = f"{approver}@users.noreply.github.com"
+    message = (
+        f"{p.title}\n\n{p.body}\n\n"
+        f"Drafted by an agent in auto-maintainer; reviewed and pushed by {approver}.\n\n"
+        f"Signed-off-by: {approver} <{email}>"
+    )
+    if pr is None:
+        if p.target == "branch":
+            raise NotWritten(
+                "a change without an open PR opens a PR; it cannot push straight to a branch"
+            )
+        base_ref = p.base_ref or (await x.reader.get_repo(action.repo)).default_branch
+        allowed = {approver, *(await x.code_owners(profile, p.files))}
+        body = await x.public(
+            action,
+            profile,
+            p.body,
+            marker_kind="fix",
+            pr=None,
+            runtime=p.runtime,
+            also_mention=allowed,
+        )
+        title = await x.public(
+            action,
+            profile,
+            p.title,
+            marker_kind="fix",
+            pr=None,
+            bare=True,
+            also_mention=allowed,
+        )
+        branch = f"am/pr-{action.id[-6:]}"
+        sha = await x.publisher.publish(
+            action.repo,
+            p.base_sha,
+            p.patch,
+            branch,
+            message,
+            author=(approver, email),
+            merge_sha=p.merge_sha,
+            resolved=p.resolved,
+        )
+        ref = await x.writer.create_pr(
+            action.repo, branch, base_ref, title, body, draft=p.draft
+        )
+        return {
+            "branch": branch,
+            "sha": sha,
+            "pr": ref.id,
+            "url": ref.url,
+            **({"draft": True} if p.draft else {}),
+        }
     edit = None
     if p.pr_title is not None or p.pr_body is not None:
         edit = await _pr_text(
@@ -766,12 +822,6 @@ async def _pr_fix(
             pr.body if p.pr_body is None else p.pr_body,
         )
     owner = action.repo.split("/", 1)[0]
-    email = f"{approver}@users.noreply.github.com"
-    message = (
-        f"{p.title}\n\n{p.body}\n\n"
-        f"Drafted by an agent in auto-maintainer; reviewed and pushed by {approver}.\n\n"
-        f"Signed-off-by: {approver} <{email}>"
-    )
     head_repo = pr.head_repo or action.repo
     if p.target == "branch":
         if not same_commit(pr.head_sha, p.base_sha):
@@ -795,6 +845,12 @@ async def _pr_fix(
             "sha": sha,
             **await _edit_after_push(x, action, pr, edit),
         }
+    body = await x.public(
+        action, profile, p.body, marker_kind="fix", pr=pr, runtime=p.runtime
+    )
+    title = await x.public(
+        action, profile, p.title, marker_kind="fix", pr=pr, bare=True
+    )
     branch = f"am/{'merge' if p.merge_ref else 'fix'}-{pr.number}-{action.id[-6:]}"
     sha = await x.publisher.publish(
         action.repo,
@@ -806,12 +862,6 @@ async def _pr_fix(
         merge_sha=p.merge_sha,
         resolved=p.resolved,
     )
-    body = await x.public(
-        action, profile, p.body, marker_kind="fix", pr=pr, runtime=p.runtime
-    )
-    title = await x.public(
-        action, profile, p.title, marker_kind="fix", pr=pr, bare=True
-    )
     same_repo = pr.head_repo in (None, "", action.repo)
     ref = await x.writer.create_pr(
         action.repo if same_repo else str(pr.head_repo),
@@ -819,12 +869,14 @@ async def _pr_fix(
         pr.head_ref,
         title,
         body,
+        draft=p.draft,
     )
     return {
         "branch": branch,
         "sha": sha,
         "pr": ref.id,
         "url": ref.url,
+        **({"draft": True} if p.draft else {}),
         **await _edit_after_push(x, action, pr, edit),
     }
 
@@ -1051,7 +1103,9 @@ HANDLERS: dict[ActionKind, HandlerSpec] = {
     ),
     ActionKind.MEMORY_COMMIT: HandlerSpec(_memory_commit),
     ActionKind.MEMORY_CHANGE: HandlerSpec(_memory_change),
-    ActionKind.PR_FIX: HandlerSpec(_pr_fix, needs_pr=True, needs_current_head=True),
+    ActionKind.PR_FIX: HandlerSpec(
+        _pr_fix, needs_pr=True, optional_pr=True, needs_current_head=True
+    ),
     ActionKind.CODE_PR: HandlerSpec(_code_pr),
     ActionKind.CODE_UPDATE: HandlerSpec(
         _code_update, needs_pr=True, needs_current_head=True

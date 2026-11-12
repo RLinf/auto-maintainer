@@ -12,17 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""A fix for a review's findings, or a change someone asked for in their own words, as
-a PR into the PR's branch (design 5.5).
+"""A fix for a review's findings, or a change someone asked for in their own words: as
+a PR into an open PR's branch (or straight onto it), or as a new PR or draft PR against
+the repository's default branch when there is no open PR yet (design 5.5).
 
 A maintainer asks for it from a review (``dashboard.command`` with ``command: fix``),
 or in their own words (``request``): on the PR page, or in a conversation
 (``thread_id``), which is told when the diff is ready.
-An agent changes a checkout of the PR's head in the repository's folder, following the
-repository's own skills, and may ask the maintainer; it never commits, pushes, or
-posts. The playbook proposes the diff as a ``pr.fix`` action drafted for that
-maintainer, who reads it and opens the PR as themselves: the service's own account
-never pushes to a repository it maintains.
+An agent changes a checkout of the PR's head (or the default branch) in the
+repository's folder, following the repository's own skills, and may ask the maintainer;
+it never commits, pushes, or posts. The playbook proposes the diff as a ``pr.fix``
+action drafted for that maintainer, who reads it and opens the PR as themselves: the
+service's own account never pushes to a repository it maintains.
 """
 
 from __future__ import annotations
@@ -58,6 +59,16 @@ FIX = """You are fixing a pull request for {reviewer}, a maintainer, inside an a
 
 DESCRIBE = """Describe changes that an agent made to a pull request, for the PR that proposes them. Read the diff and what it was asked; do not change any file. Write in {public_language}: plain and specific.
 Only when what was asked includes changing the pull request's own title or description, give the new ones in `pr_title` and `pr_body` (the whole description, starting from the current one below); otherwise leave both out."""
+
+NEW_PR = """You are preparing a {kind} against `{base_ref}` of `{repo}` for {reviewer}, a maintainer, inside an automated maintainer service. The working directory is a checkout of `{base_ref}` at commit `{sha}`.
+- Change or add files in the working directory to do what {reviewer} asks below, and nothing else. Follow the repository's existing structure, conventions, and skills; make the smallest sound change that fulfills the request.
+- Check what you changed with the repository's static linters when it has them. Never run its tests, builds, scripts, or repository code on this machine: a repository's code runs only on its test machines, so say which tests a run there should cover.
+- Do not commit, push, or open a PR yourself, and never ask whether to: the service shows your diff to {reviewer}, who decides whether to open the {kind} as themselves.
+- When something blocks a sound change (the intended design or target location is unclear, or two choices are equally plausible), ask {reviewer} with your tool for asking the user.
+- Write any text in {public_language}: plain and specific.
+- When you are done, end with a short message: what you changed, what you left and why, the checks you ran, and what a test run should cover."""
+
+DESCRIBE_NEW_PR = """Describe changes an agent made on `{base_ref}` of `{repo}`, for the {kind} that opens them. Read the diff and what it was asked; do not change any file. Write `title` (in the repository's commit style) and `summary` (what the PR does and why) in {public_language}: plain and specific. Leave `pr_title` and `pr_body` unset."""
 
 
 PR_TEXT = """Read what a maintainer asked an agent to do to a pull request, and the agent's answer. Only when what was asked includes changing the pull request's own title or description, give the new ones in `pr_title` and `pr_body`: as the agent's answer gives them, else written from the request, in {public_language}; `pr_body` is the whole description, starting from the current one below. Leave out either one that should stay as it is, and both when nothing about them was asked. Judge only from what is given here: do not run commands, read files, or fetch anything."""
@@ -201,14 +212,23 @@ class FixPlaybook(Playbook):
     def accepts(self, event, profile) -> bool:  # type: ignore[no-untyped-def]
         return (
             event.payload.get("command") == "fix"
+            and bool(event.repo)
             and bool(event.payload.get("by"))
-            and event.number is not None
+            and (
+                event.number is not None
+                or bool(str(event.payload.get("request") or "").strip())
+            )
         )
 
     def key(self, event: Event) -> str:
-        return f"fix:{event.repo}#{event.number}:req:{event.id}"
+        target = (
+            f"{event.repo}#{event.number}" if event.number is not None else event.repo
+        )
+        return f"fix:{target}:req:{event.id}"
 
     async def run(self, ctx: PlaybookContext, event: Event) -> PlaybookResult:
+        if event.number is None:
+            return await self._run_new_pr(ctx, event)
         profile = ctx.require_profile()
         assert event.repo and event.number
         by = str(event.payload["by"])
@@ -430,6 +450,7 @@ class FixPlaybook(Playbook):
                 body="\n".join(lines).strip(),
                 patch=changes.patch,
                 base_sha=pr.head_sha,
+                draft=bool(event.payload.get("draft")),
                 files=changes.files,
                 findings=[f.id for f in fix.fixed] or [f.id for f in findings],
                 runtime=answer.runtime,
@@ -455,6 +476,179 @@ class FixPlaybook(Playbook):
         return PlaybookResult(
             actions=[action],
             result={"files": changes.files, "fixed": [f.id for f in fix.fixed]},
+        )
+
+    async def _run_new_pr(self, ctx: PlaybookContext, event: Event) -> PlaybookResult:
+        """Edit a checkout of ``event.repo``'s default branch from ``request`` and
+        draft a ``pr.fix`` action that opens a new PR (or draft PR) as the approver."""
+        profile = ctx.require_profile()
+        assert event.repo
+        by = str(event.payload["by"])
+        ctx.requested_by = by
+        ctx.agent = event.payload.get("agent") or None
+        thread = event.payload.get("thread_id")
+        draft = bool(event.payload.get("draft"))
+        request = str(event.payload.get("request") or "").strip()
+        note = str(event.payload.get("note") or "").strip()
+        ctx.trusted_input = by in profile.people.team or (
+            await ctx.permission(by)
+        ).at_least(profile.people.team_min_permission)
+
+        info = await ctx.forge.get_repo(event.repo)
+        base_sha = info.default_branch_sha or await ctx.forge.default_branch_sha(
+            event.repo
+        )
+        kind = "draft pull request" if draft else "pull request"
+        workdir = await ctx.workspace.prepare(
+            event.repo, None, base_sha, info.default_branch
+        )
+        try:
+            asked = f"What {by} asked for:\n" + untrusted(
+                "maintainer.request", request, 8_000
+            )
+            prompt = "\n\n".join(
+                part
+                for part in [
+                    NEW_PR.format(
+                        kind=kind,
+                        base_ref=info.default_branch,
+                        repo=event.repo,
+                        sha=short_sha(base_sha),
+                        reviewer=by,
+                        public_language=profile.languages.public,
+                    ),
+                    review_skill_block(profile, ctx.service.skills_dir, workdir),
+                    asked,
+                    f"What {by} added: " + untrusted("maintainer.note", note, 2000)
+                    if note
+                    else "",
+                ]
+                if part
+            )
+            answer = await ctx.ask(
+                AgentTask(
+                    kind=TaskKind.FIX,
+                    prompt=prompt,
+                    workdir=workdir,
+                    mode="workspace_write",
+                    skill_dirs=ctx.skill_dirs(),
+                    repo=event.repo,
+                    timeout_seconds=2400,
+                )
+            )
+            if not answer.ok:
+                if may_succeed_later(answer):
+                    raise RuntimeError(f"fix agent failed: {answer.error}")
+                await _tell(
+                    ctx,
+                    thread,
+                    f"The agent could not prepare a PR for {event.repo}: {answer.error}",
+                )
+                return PlaybookResult(failed=f"fix agent failed: {answer.error}")
+            account = answer.text.strip()
+            changes = await ctx.workspace.changes(workdir)
+            described = None
+            if changes.files:
+                described = await ctx.ask(
+                    AgentTask(
+                        kind=TaskKind.FIX,
+                        prompt="\n\n".join(
+                            [
+                                DESCRIBE_NEW_PR.format(
+                                    base_ref=info.default_branch,
+                                    repo=event.repo,
+                                    kind=kind,
+                                    public_language=profile.languages.public,
+                                ),
+                                asked,
+                                *(
+                                    [untrusted("agent.account", account[-4000:], 4000)]
+                                    if account
+                                    else []
+                                ),
+                                untrusted("fix.diff", changes.patch, 60_000),
+                                schema_hint(FixResult.model_json_schema()),
+                            ]
+                        ),
+                        workdir=workdir,
+                        mode="read_only",
+                        repo=event.repo,
+                        untrusted_input=True,
+                    ),
+                    FixResult,
+                )
+        finally:
+            await ctx.workspace.release(workdir)
+
+        if not changes.files:
+            await _tell(
+                ctx,
+                thread,
+                f"The agent changed nothing in {event.repo}."
+                + (f" {account[-1500:]}" if account else ""),
+            )
+            return PlaybookResult(
+                result={
+                    "skipped": "the agent changed nothing",
+                    "summary": account[-1000:],
+                }
+            )
+        if described is not None and described.ok and described.structured is not None:
+            fix = FixResult.model_validate(described.structured)
+        else:
+            fix = FixResult(
+                title=f"Changes to {event.repo}",
+                summary=account[-2000:] or "The changes asked for.",
+            )
+        lines = [fix.summary]
+        if fix.fixed:
+            lines += ["", *[f"- {f.id}: {f.change}" for f in fix.fixed]]
+        if fix.skipped:
+            lines += [
+                "",
+                "Not changed:",
+                *[f"- {f.id}: {f.reason}" for f in fix.skipped],
+            ]
+        lines += [
+            "",
+            f"Requested by {by} on `{info.default_branch}` at {short_sha(base_sha)}.",
+        ]
+        what = "draft PR" if draft else "PR"
+        action = make_action(
+            ActionKind.PR_FIX,
+            event.repo,
+            FixPrPayload(
+                title=fix.title.strip()[:120] or f"Changes to {event.repo}",
+                body="\n".join(lines).strip(),
+                patch=changes.patch,
+                base_sha=base_sha,
+                base_ref=info.default_branch,
+                draft=draft,
+                files=changes.files,
+                runtime=answer.runtime,
+                requested_by=by,
+            ),
+            number=None,
+            head_sha=base_sha,
+            discriminator=f"req:{event.id}",
+            rationale=f"new {what} on {event.repo} ({info.default_branch}) {by} asked for",
+            draft_for=by,
+        )
+        await _tell(
+            ctx,
+            thread,
+            f"The {what} for {event.repo} is ready ({len(changes.files)} files: "
+            f"{', '.join(changes.files[:8])}). Read the diff under Approvals, and "
+            f"approve it to open the {what} as yourself; nothing is pushed before "
+            "you do.",
+        )
+        return PlaybookResult(
+            actions=[action],
+            result={
+                "files": changes.files,
+                "draft": draft,
+                "base_ref": info.default_branch,
+            },
         )
 
 

@@ -465,18 +465,20 @@ async def start_change(
     service: Service,
     login: str,
     repo: str,
-    number: int,
+    number: int | None,
     request: str,
     *,
+    draft: bool = False,
     agent: str | None = None,
     thread_id: str | None = None,
     source: str = "dashboard",
 ) -> str:
-    """Start an agent on a change to ``repo#number`` that ``login`` asked for in
-    their own words (``playbooks/fix.py``): it edits a checkout, and the diff comes
-    back as a ``pr.fix`` drafted for them, which only they push, as themselves. A
-    conversation that asked (``thread_id``) is told when the diff is ready. Returns
-    the request event's id, which the jobs API resolves to the job."""
+    """Start an agent on a change to ``repo#number`` (or to ``repo``'s default branch
+    when ``number`` is ``None``, to open a new PR or ``draft`` PR) that ``login``
+    asked for in their own words (``playbooks/fix.py``): it edits a checkout, and the
+    diff comes back as a ``pr.fix`` drafted for them, which only they push, as
+    themselves. A conversation that asked (``thread_id``) is told when the diff is
+    ready. Returns the request event's id, which the jobs API resolves to the job."""
     text, _ = redact_secrets(request.strip())
     event = Event(
         kind=EventKind.DASHBOARD_COMMAND,
@@ -486,6 +488,7 @@ async def start_change(
             "command": "fix",
             "by": login,
             "request": text,
+            **({"draft": True} if draft else {}),
             **({"agent": agent} if agent else {}),
             **({"thread_id": thread_id} if thread_id else {}),
         },
@@ -552,10 +555,12 @@ def service_of(request: Request) -> Service:
 async def _can_push(service: Service, user: User, record: ActionRecord) -> bool | None:
     """Whether ``user`` may push to the branch of the PR ``record`` changes: they
     write to its repository, and for a fork, its author lets maintainers push. Only
-    a hint for where the approval card sends a change; the push itself decides."""
+    a hint for where the approval card sends a change; the push itself decides.
+    A new PR without an open PR (``action.number is None``) never pushes straight to
+    the default branch."""
     action = record.action
     if action.number is None:
-        return None
+        return False
     pr = await service.store.get_snapshot(action.repo, action.number)
     if pr is None:
         return None
