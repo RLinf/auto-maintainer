@@ -300,6 +300,10 @@ class CiStart(_Section):
     their failure means CI did not start, never that a test failed."""
     summary_jobs: list[str] = Field(default_factory=list)
     """Jobs that only report the other jobs' results: never a failure of their own."""
+    optional_checks: list[str] = Field(default_factory=list)
+    """Checks a PR may merge without passing, though the branch rules list them (a
+    sign-off check that only warns): the merge gate does not wait on them, and they
+    are never a failure to look into or fix."""
     start_minutes: int = 5
     """How long a scheduled PR's CI may take to start before an agent looks into why."""
     run_minutes: int = 180
@@ -335,8 +339,38 @@ class Freeze(_Section):
     reason: str = ""
 
 
+ReadyCondition = Literal[
+    "approvals",
+    "threads_resolved",
+    "no_changes_requested",
+    "not_draft",
+    "no_blocking_labels",
+    "no_conflict",
+    "hygiene",
+]
+READY_CONDITIONS: tuple[ReadyCondition, ...] = (
+    "approvals",
+    "threads_resolved",
+    "no_changes_requested",
+    "not_draft",
+    "no_blocking_labels",
+    "no_conflict",
+    "hygiene",
+)
+"""What a PR may have to meet before it is schedulable, named as the merge gate's
+items (``hygiene``: every blocking check). Being up to date and CI are never among
+them: the schedule merges the base in and runs CI itself."""
+
+
 class MergeSchedule(_Section):
     """The repository's merge scheduling (design 5.5)."""
+
+    ready: list[ReadyCondition] | None = None
+    """What a PR must meet before it is schedulable (the repository's target for
+    running its final CI and merging); ``None`` for every condition its merge rules
+    hold a PR to (``READY_CONDITIONS``). What it leaves out but a merge needs is
+    waited for after CI. Drafted by ``playbooks/ci_rules.py``, saved by a
+    maintainer."""
 
     auto: bool = False
     """Schedule every PR that becomes ready, as ``auto_by``; otherwise a maintainer

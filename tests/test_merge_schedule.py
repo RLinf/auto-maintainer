@@ -149,45 +149,90 @@ def test_a_running_pr_keeps_its_turn_and_waiting_ones_follow_the_order() -> None
     assert turns(order, states, True, 3) == [41]
 
 
-def test_a_pr_runs_its_ci_before_the_approvals_it_needs_to_merge() -> None:
+def test_a_pr_is_schedulable_once_it_meets_the_repositorys_target() -> None:
     from auto_maintainer.domain.merge_gate import evaluate_merge_gate
-    from auto_maintainer.domain.merge_schedule import awaiting_review
+    from auto_maintainer.domain.merge_schedule import left_for_merge, ready_conditions
     from auto_maintainer.domain.profile import RepoProfile
 
-    profile = RepoProfile(repo=REPO)
     info = RepoInfo(name=REPO, required_approvals=1, requires_code_owner_reviews=True)
 
-    def gate(pr):  # type: ignore[no-untyped-def]
+    def gate(pr, profile):  # type: ignore[no-untyped-def]
         return evaluate_merge_gate(
             pr, profile, info, None, {"bob": Permission.WRITE}, set(), {}, False, T0
         )
 
-    # Approved by a writer, but GitHub still waits for a code owner: ready to run CI,
-    # not yet to merge.
+    # By default, everything the merge rules hold a PR to but CI and being up to
+    # date: approved by a writer, but GitHub still waits for a code owner.
+    default = RepoProfile(repo=REPO)
     pr = make_pr(
         reviews=[Review(id=1, author="bob", state=ReviewEventState.APPROVED)],
         review_decision="REVIEW_REQUIRED",
+        behind_base=True,
     )
-    assert [i for i in candidate_items(gate(pr)) if not i.ok] == []
-    [waits] = awaiting_review(gate(pr))
-    assert waits.name == "approvals" and "a code owner's" in waits.detail
-    assert all(
-        not i.name.startswith(("check:", "workflow:"))
-        for i in candidate_items(gate(pr))
-    )
-    # A reviewer asking for changes, or a draft, holds it back before its CI.
-    asked = pr.model_copy(
-        update={
-            "reviews": [
-                Review(id=2, author="bob", state=ReviewEventState.CHANGES_REQUESTED)
-            ]
+    ready = ready_conditions(default)
+    back = [i for i in candidate_items(gate(pr, default), ready) if not i.ok]
+    assert [i.name for i in back] == ["approvals"] and "a code owner's" in back[
+        0
+    ].detail
+    approved = pr.model_copy(update={"review_decision": "APPROVED"})
+    assert not [
+        i for i in candidate_items(gate(approved, default), ready) if not i.ok
+    ], "behind main is fine: the schedule merges main in before CI"
+
+    # A repository whose reviewers approve after CI schedules before the approvals,
+    # and its PRs wait for them after their CI.
+    after_ci = RepoProfile.model_validate(
+        {
+            "repo": REPO,
+            "merge": {"schedule": {"ready": ["not_draft", "no_changes_requested"]}},
         }
     )
-    assert [i.name for i in candidate_items(gate(asked)) if not i.ok] == [
-        "no_changes_requested"
+    ready = ready_conditions(after_ci)
+    assert not [i for i in candidate_items(gate(pr, after_ci), ready) if not i.ok]
+    assert [i.name for i in left_for_merge(gate(pr, after_ci), ready)] == ["approvals"]
+
+
+def test_a_check_that_only_warns_may_stay_unpassed() -> None:
+    from auto_maintainer.domain.merge_gate import evaluate_merge_gate
+    from auto_maintainer.domain.profile import RepoProfile
+
+    # GitHub's DCO app asks for action when a commit is not signed off: that is a
+    # check that did not pass, not a workflow waiting for a maintainer's approval.
+    dco = CheckRun(
+        id=9,
+        name="DCO",
+        status=CheckStatus.COMPLETED,
+        conclusion=CheckConclusion.ACTION_REQUIRED,
+    )
+    assert not dco.awaiting_approval
+    held = _job(10, "unit", None, 77, workflow="CI").model_copy(
+        update={
+            "status": CheckStatus.QUEUED,
+            "conclusion": CheckConclusion.ACTION_REQUIRED,
+        }
+    )
+    assert held.awaiting_approval
+    pr = make_pr(
+        reviews=[Review(id=1, author="bob", state=ReviewEventState.APPROVED)],
+        checks=[dco, _job(11, "lint", "success", 78, workflow="Lint")],
+    )
+    info = RepoInfo(name=REPO, required_checks=["DCO", "lint"], required_approvals=1)
+
+    def outcome(profile):  # type: ignore[no-untyped-def]
+        return evaluate_merge_gate(
+            pr, profile, info, None, {"bob": Permission.WRITE}, set(), {}, False, T0
+        )
+
+    strict = RepoProfile(repo=REPO)
+    assert any(i.name == "check:DCO" and not i.ok for i in outcome(strict).items)
+    lenient = RepoProfile.model_validate(
+        {"repo": REPO, "ci": {"start": {"optional_checks": ["DCO"]}}}
+    )
+    unpassed = [
+        i for i in outcome(lenient).items if i.name.startswith("check:") and not i.ok
     ]
-    draft = pr.model_copy(update={"is_draft": True})
-    assert "not_draft" in [i.name for i in candidate_items(gate(draft)) if not i.ok]
+    assert unpassed == []
+    assert ci_view(pr, None, lenient.ci.start).state == "passed"
 
 
 def test_only_a_base_merge_by_the_scheduler_keeps_the_schedule() -> None:
@@ -406,9 +451,23 @@ async def test_a_real_failure_goes_to_the_failure_lane_and_the_next_pr_goes(
 
 
 async def test_a_pr_waits_for_approvals_after_its_ci_without_holding_the_turn(
-    harness: Harness,
+    tmp_path: Path,
 ) -> None:
-    h = harness
+    # A repository whose reviewers approve once CI passed schedules before them.
+    h = await Harness.create(
+        tmp_path,
+        layer={
+            "extends": ["github-actions"],
+            "merge": {
+                "enabled": True,
+                "schedule": {"ready": ["not_draft", "no_changes_requested"]},
+            },
+            "ci": {"required_workflows": ["CI"]},
+            "labels": {"roles": {"ci_gate": "run-ci"}},
+        },
+    )
+    h.forge.set_permission(REPO, "bob", Permission.WRITE)
+    await h.service.a.user_tokens.set("maria", UserToken(token="m"))
     unapproved = _ready(42, "a" * 40, _ci(42, "success")).model_copy(
         update={"reviews": []}
     )
@@ -461,6 +520,36 @@ async def test_a_pr_waits_for_approvals_after_its_ci_without_holding_the_turn(
     )
     await h.settle()
     assert [w["number"] for w in h.forge.writes_of("merge")] == [43, 42]
+    await h.close()
+
+
+async def test_the_repositorys_target_can_be_set_on_the_page(
+    harness: Harness, tmp_path: Path
+) -> None:
+    h = harness
+    unapproved = _ready(42, "a" * 40, []).model_copy(update={"reviews": []})
+    h.forge.put_pr(unapproved)
+    h.forge.put_pr(_ready(43, "c" * 40, [], behind_base=True))
+    await h.poll()
+    app = create_app(h.service, data_dir=tmp_path, allow_dev_login=True)
+    async with _as(app, "maria") as maria:
+        view = (await maria.get(f"/api/merge-schedule/{REPO}/view")).json()
+        assert [c["number"] for c in view["candidates"]] == [43], "behind main is fine"
+        assert view["rules"]["ready_set"] is False
+        out = (
+            await maria.put(
+                f"/api/merge-schedule/{REPO}/ready",
+                json={"ready": ["not_draft", "no_conflict"]},
+            )
+        ).json()
+        assert out["applied"], out
+        view = (await maria.get(f"/api/merge-schedule/{REPO}/view")).json()
+        assert [c["number"] for c in view["candidates"]] == [42, 43]
+        assert view["rules"]["ready"] == ["not_draft", "no_conflict"]
+        bad = await maria.put(
+            f"/api/merge-schedule/{REPO}/ready", json={"ready": ["passes_ci"]}
+        )
+        assert bad.status_code == 422
 
 
 async def test_ci_that_does_not_start_is_looked_into_once(harness: Harness) -> None:
@@ -647,7 +736,9 @@ async def test_the_page_lists_candidates_and_only_maintainers_schedule(
         view = (await bob.get(f"/api/merge-schedule/{REPO}/view")).json()
         assert [c["number"] for c in view["candidates"]] == [42]
         [waiting] = [r for r in view["not_ready"] if r["number"] == 45]
-        assert any("changes requested" in r for r in waiting["reasons"])
+        assert any(
+            "changes requested" in r or "approvals" in r for r in waiting["reasons"]
+        )
         assert view["can_arrange"] is False and view["mode"] == "serial"
         refused = await bob.post(
             f"/api/merge-schedule/{REPO}/schedule", json={"number": 42}
@@ -657,7 +748,7 @@ async def test_the_page_lists_candidates_and_only_maintainers_schedule(
         not_ready = await maria.post(
             f"/api/merge-schedule/{REPO}/schedule", json={"number": 45}
         )
-        assert not_ready.status_code == 409 and "changes requested" in not_ready.text
+        assert not_ready.status_code == 409 and "not ready" in not_ready.text
         done = await maria.post(
             f"/api/merge-schedule/{REPO}/schedule", json={"number": 42}
         )
@@ -728,3 +819,24 @@ async def test_merge_scheduling_is_on_by_default_and_only_maintainers_schedule(
         assert arm is not None and arm.armed_by == "maria"
     finally:
         await h.close()
+
+
+def test_an_agents_draft_keeps_only_what_the_repository_has() -> None:
+    from auto_maintainer.playbooks.ci_rules import CiRulesDraft, checked
+
+    workflows = (
+        "jobs:\n  check-changes:\n    runs-on: x\n  ci-test-finish:\n    runs-on: x\n"
+    )
+    draft = CiRulesDraft(
+        how="CI starts on the run-ci label.",
+        gate_label="run-ci",
+        gate_jobs=["check-changes", "made-up"],
+        summary_jobs=["ci-test-finish"],
+        ready=["approvals", "threads_resolved", "passes_ci"],
+        optional_checks=["DCO", "lint-but-not-required"],
+    )
+    kept, dropped = checked(draft, workflows, ["run-ci"], ["DCO", "ci-test-finish"])
+    assert kept.ready == ["approvals", "threads_resolved"]
+    assert kept.optional_checks == ["DCO"]
+    assert kept.gate_jobs == ["check-changes"]
+    assert len(dropped) == 3

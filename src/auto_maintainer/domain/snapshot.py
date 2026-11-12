@@ -182,8 +182,13 @@ class CheckRun(_Model):
     @property
     def awaiting_approval(self) -> bool:
         """A workflow GitHub holds until a maintainer approves running it; it has
-        not run, so it neither passed nor failed."""
-        return self.conclusion == CheckConclusion.ACTION_REQUIRED
+        not run, so it neither passed nor failed. Another app's check that asks for
+        action (DCO's missing sign-off) is a check that did not pass, not a hold."""
+        return (
+            self.conclusion == CheckConclusion.ACTION_REQUIRED
+            and self.run_id is not None
+            and self.workflow is not None
+        )
 
     @property
     def failed(self) -> bool:

@@ -64,10 +64,11 @@ from ..domain.merge_schedule import (
     UPDATES_PER_TURN,
     WAITING,
     ScheduleState,
-    awaiting_review,
     holding_back,
+    left_for_merge,
     only_base_merged,
     ordered,
+    ready_conditions,
     serial,
     state_key,
     turns,
@@ -231,7 +232,8 @@ class MergePlaybook(Playbook):
                 f"it conflicts with {pr.base_ref}: merge {pr.base_ref} into it "
                 "(Merge on the PR page), then retry",
             )
-        back = holding_back(gate)
+        ready = ready_conditions(profile)
+        back = holding_back(gate, ready)
         if back:
             first = back[0]
             detail = first.name.replace("_", " ") + (
@@ -254,10 +256,10 @@ class MergePlaybook(Playbook):
                 wait=wait.model_copy(update={"reason": paused[0].name}),
                 result={"phase": "queued", "failing": [paused[0].name]},
             )
-        waiting = awaiting_review(gate)
+        waiting = left_for_merge(gate, ready)
         if state.phase == "approval" and waiting:
-            # Its CI passed; it takes a turn again once its reviewers approve, so it
-            # neither holds the turn nor merges the base in while it waits.
+            # Its CI passed; it takes a turn again once it meets what the merge
+            # needs, so it neither holds the turn nor merges the base in meanwhile.
             await self._set(
                 ctx, profile, info, pr, state, "approval", _waiting_for(waiting)
             )
@@ -463,9 +465,10 @@ class MergePlaybook(Playbook):
                 )
             return await self._failed_ci(ctx, profile, info, pr, arm, state, wait, step)
         pending = [i for i in gate.items if not i.ok and i.pending]
-        waiting = awaiting_review(gate)
+        waiting = left_for_merge(gate, ready_conditions(profile))
         if view.state == "passed" and waiting and not pending:
-            # CI passed; the reviewers have not approved yet. The turn passes on.
+            # CI passed; what the merge needs beyond the repository's target to
+            # schedule (approvals, where reviewers approve after CI) is missing.
             text = _waiting_for(waiting)
             events = await self._set(
                 ctx, profile, info, pr, state, "approval", text, wake=True
@@ -477,7 +480,7 @@ class MergePlaybook(Playbook):
                         arm,
                         "merge.approval",
                         f"CI passed at {short_sha(pr.head_sha)}; it merges once "
-                        f"its reviewers approve ({text})",
+                        f"it meets: {text}",
                     )
                 ],
                 events=events,

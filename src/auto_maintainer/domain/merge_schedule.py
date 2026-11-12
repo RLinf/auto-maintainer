@@ -15,17 +15,20 @@
 
 """Merge scheduling (design 5.5): which scheduled PRs act now, and what each is doing.
 
-A scheduled PR is an armed one (``MergeArm``), placed in the repository's order by
-its ``position``. A PR is ready to schedule once it is ready to run its CI
-(``candidate_items``); it merges once its CI passed and its reviewers approved
-(``MERGE_ITEMS``), and waits for them without a turn (the ``approval`` phase).
+A PR is schedulable once it meets its repository's target for running its final CI
+and merging (``merge.schedule.ready``: by default every condition the merge rules
+hold a PR to, such as its approvals and resolved conversations), whether or not it
+is up to date: the schedule merges the base in before its CI. A scheduled PR is an
+armed one (``MergeArm``), placed in the repository's order by its ``position``.
+What the target leaves out but a merge needs is waited for after CI, without a turn
+(the ``approval`` phase).
 
 When PRs must be up to date with the base before they merge, a merge puts every
 other PR behind again, so scheduled PRs take turns (``serial``): one merges the
 base, runs its CI, and merges, then the next. Otherwise several run their CI at once
 (``merge.schedule.parallel``). A PR that is doing something (``ACTIVE``) keeps its
 turn, so its CI is not wasted; the next turn goes down the order, skipping PRs in
-the failure lane, waiting for approvals, or held back by something else.
+the failure lane, waiting after CI, or held back by something else.
 """
 
 from __future__ import annotations
@@ -36,7 +39,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from .merge_gate import GateItem, GateResult, MergeArm
-from .profile import RepoProfile
+from .profile import READY_CONDITIONS, RepoProfile
 from .snapshot import PrSnapshot, RepoInfo
 
 Phase = Literal[
@@ -65,13 +68,6 @@ the schedule takes it to have not happened."""
 UPDATES_PER_TURN = 3
 """How often a PR merges the base during one turn before the base is taken to move
 too fast for it (people merging by hand while it runs)."""
-
-MERGE_ITEMS = ("approvals", "threads_resolved")
-"""Gate items a PR meets by the time it merges, not before its CI runs: reviewers
-often approve once its CI passed. A scheduled PR whose CI passed waits for them in
-the ``approval`` phase, without a turn."""
-NOT_CANDIDATE_ITEMS = ("armed", "up_to_date", "not_paused", "no_freeze", *MERGE_ITEMS)
-CI_ITEM_PREFIXES = ("check:", "workflow:")
 
 
 def state_key(repo: str, number: int) -> str:
@@ -135,26 +131,40 @@ def next_position(arms: list[MergeArm], now: datetime) -> float:
     return max([now.timestamp(), *(position(a) + 1 for a in arms)])
 
 
-def candidate_items(gate: GateResult) -> list[GateItem]:
-    """The merge gate's items that decide whether a PR is ready to schedule, that
-    is, ready to run its CI and then merge: all but being armed, its CI, being up to
-    date, a pause or freeze, and the review items it meets by its merge
-    (``MERGE_ITEMS``)."""
+def condition_of(item: GateItem) -> str | None:
+    """The ``READY_CONDITIONS`` name of a merge gate item, or ``None`` for one that
+    is never a condition to schedule (CI, being up to date, armed, a pause)."""
+    if item.name.startswith("hygiene:"):
+        return "hygiene"
+    return item.name if item.name in READY_CONDITIONS else None
+
+
+def ready_conditions(profile: RepoProfile) -> tuple[str, ...]:
+    """What ``profile`` holds a PR to before it is schedulable."""
+    ready = profile.merge.schedule.ready
+    return tuple(ready) if ready is not None else READY_CONDITIONS
+
+
+def candidate_items(gate: GateResult, ready: tuple[str, ...]) -> list[GateItem]:
+    """The merge gate's items that decide whether a PR is schedulable: those of the
+    conditions in ``ready``."""
+    return [i for i in gate.items if condition_of(i) in ready]
+
+
+def holding_back(gate: GateResult, ready: tuple[str, ...]) -> list[GateItem]:
+    """What keeps a PR from being schedulable; empty when it is."""
+    return [i for i in candidate_items(gate, ready) if not i.ok]
+
+
+def left_for_merge(gate: GateResult, ready: tuple[str, ...]) -> list[GateItem]:
+    """What a merge still needs that ``ready`` does not hold a PR to before its CI
+    (approvals, for a repository whose reviewers approve after CI): a scheduled PR
+    whose CI passed waits for these without a turn."""
     return [
         i
         for i in gate.items
-        if i.name not in NOT_CANDIDATE_ITEMS and not i.name.startswith(CI_ITEM_PREFIXES)
+        if not i.ok and condition_of(i) is not None and condition_of(i) not in ready
     ]
-
-
-def holding_back(gate: GateResult) -> list[GateItem]:
-    """What keeps a PR from being a candidate; empty for a candidate."""
-    return [i for i in candidate_items(gate) if not i.ok]
-
-
-def awaiting_review(gate: GateResult) -> list[GateItem]:
-    """The review items (``MERGE_ITEMS``) that still keep a PR from merging."""
-    return [i for i in gate.items if i.name in MERGE_ITEMS and not i.ok]
 
 
 def turns(

@@ -64,6 +64,7 @@ interface CiStart {
   run_minutes: number;
   gate_label: string | null;
   reruns: number;
+  optional_checks: string[];
 }
 
 interface Draft {
@@ -76,6 +77,8 @@ interface Draft {
     run_minutes: number;
     merge_notes: string;
     approvals: number;
+    ready: string[];
+    optional_checks: string[];
   };
   dropped: string[];
   by: string;
@@ -107,6 +110,8 @@ interface MergeView {
     blocking_labels: string[];
     notes: string;
     hygiene: string[];
+    ready: string[];
+    ready_set: boolean;
   };
   ci_start: CiStart;
   draft: Draft | null;
@@ -128,7 +133,7 @@ const PHASE: Record<Phase, { label: string; cls: string }> = {
   starting: { label: "Starting CI", cls: "job-running" },
   running: { label: "CI running", cls: "job-running" },
   rerunning: { label: "Rerunning a flake", cls: "job-running" },
-  approval: { label: "CI passed, waiting for approvals", cls: "status-warn" },
+  approval: { label: "CI passed, waiting to meet the merge rules", cls: "status-warn" },
   merging: { label: "Merging", cls: "job-running" },
   failed: { label: "Failed", cls: "status-bad" },
   held: { label: "Held back", cls: "status-warn" },
@@ -430,8 +435,8 @@ function Candidates({ v }: { v: MergeView }) {
   }, [["merge-schedule"]]);
   return (
     <Section
-      title={t("Ready to run CI")}
-      hint={v.auto ? t("Automatic scheduling adds these as they become ready.") : t("Schedule one to run its CI; it merges once its reviewers approve and its checks pass.")}
+      title={t("Ready to schedule")}
+      hint={v.auto ? t("Automatic scheduling adds these as they become ready.") : t("They meet the conditions to schedule. Scheduled, a PR merges the base in, runs its CI, and merges.")}
       aside={
         v.can_arrange &&
         v.candidates.length > 1 && (
@@ -442,7 +447,7 @@ function Candidates({ v }: { v: MergeView }) {
       }
     >
       {v.candidates.length === 0 ? (
-        <Empty icon="check">{t("No PR is ready to run its CI right now.")}</Empty>
+        <Empty icon="check">{t("No PR meets the conditions to schedule right now.")}</Empty>
       ) : (
         <div className="list">
           {v.candidates.map((c) => (
@@ -509,44 +514,112 @@ function Yes({ on, children }: { on: boolean | null; children: React.ReactNode }
   );
 }
 
+const READY = ["approvals", "threads_resolved", "no_changes_requested", "not_draft", "no_blocking_labels", "no_conflict", "hygiene"] as const;
+
+function conditionText(c: string, r: MergeView["rules"], t: (s: string) => string): React.ReactNode {
+  switch (c) {
+    case "approvals":
+      return `${r.approvals} ${t("approvals from people with write access")}${r.code_owners ? `, ${t("a code owner's among them")}` : ""}${r.last_push ? `; ${t("the last push approved by someone else")}` : ""}`;
+    case "threads_resolved":
+      return t("Every review conversation is resolved");
+    case "no_changes_requested":
+      return t("No reviewer requested changes");
+    case "not_draft":
+      return t("Not a draft");
+    case "no_blocking_labels":
+      return `${t("None of the labels")} ${r.blocking_labels.join(", ") || "—"}`;
+    case "no_conflict":
+      return t("No conflict with the base");
+    case "hygiene":
+      return (
+        <>
+          {t("The repository's checks pass:")} <span className="mono">{r.hygiene.join(", ") || "—"}</span>
+        </>
+      );
+    default:
+      return c;
+  }
+}
+
 function RulesCard({ v }: { v: MergeView }) {
   const t = useT();
+  const toast = useToast();
   const r = v.rules;
-  const checks = [...(r.required_checks ?? []), ...r.required_workflows.map((w) => `${w} (${t("workflow")})`)];
+  const [editing, setEditing] = useState(false);
+  const [picked, setPicked] = useState<string[]>(r.ready);
+  useEffect(() => setPicked(r.ready), [r.ready.join(",")]);
+  const save = useAct((ready: string[] | null) => api.put<Saved>(`/api/merge-schedule/${v.repo}/ready`, { ready }), [["merge-schedule"]]);
+  const done = (out: Saved) => {
+    toast({ title: out.applied ? t("Saved") : t("Proposed to the maintainers"), icon: out.applied ? "check" : "inbox" });
+    setEditing(false);
+  };
+  const optional = new Set(v.ci_start.optional_checks.map((c) => c.toLowerCase()));
+  const checks = [...(r.required_checks ?? []).filter((c) => !optional.has(c.toLowerCase())), ...r.required_workflows.map((w) => `${w} (${t("workflow")})`)];
+  const after = READY.filter((c) => !r.ready.includes(c) && (c !== "hygiene" || r.hygiene.length) && (c !== "no_blocking_labels" || r.blocking_labels.length));
   return (
     <Section title={t("Conditions")} hint={t("Read from GitHub's branch rules and the repository's profile")}>
       <div className="stack" style={{ gap: 14 }}>
         <div className="stack" style={{ gap: 6 }}>
-          <strong className="small">{t("Ready to run CI when")}</strong>
-          <ul className="merge-rules">
-            <Yes on>{t("Not a draft, and no conflict with the base")}</Yes>
-            <Yes on>{t("No reviewer requested changes")}</Yes>
-            {r.blocking_labels.length > 0 && (
-              <Yes on>
-                {t("None of the labels")} {r.blocking_labels.join(", ")}
-              </Yes>
+          <div className="row" style={{ gap: 8 }}>
+            <strong className="small">{t("Schedulable when")}</strong>
+            {!r.ready_set && <span className="small muted">({t("every condition of the merge rules")})</span>}
+            {v.can_arrange && !editing && (
+              <button className="sm ghost right" onClick={() => setEditing(true)}>
+                {t("Edit")}
+              </button>
             )}
-            {r.hygiene.length > 0 && (
-              <Yes on>
-                {t("The repository's checks pass:")} <span className="mono">{r.hygiene.join(", ")}</span>
-              </Yes>
-            )}
-          </ul>
+          </div>
+          {editing ? (
+            <div className="stack" style={{ gap: 6 }}>
+              {READY.map((c) => (
+                <label key={c} className="row small" style={{ gap: 8 }}>
+                  <input type="checkbox" checked={picked.includes(c)} onChange={(e) => setPicked(e.target.checked ? [...picked, c] : picked.filter((x) => x !== c))} />
+                  <span>{conditionText(c, r, t)}</span>
+                </label>
+              ))}
+              <div className="row" style={{ gap: 8 }}>
+                <button className="sm ghost" disabled={save.isPending} onClick={() => save.mutate(null, { onSuccess: done })}>
+                  {t("Use the merge rules")}
+                </button>
+                <button className="sm ghost right" onClick={() => setEditing(false)}>
+                  {t("Cancel")}
+                </button>
+                <button className="sm primary" disabled={save.isPending} onClick={() => save.mutate(READY.filter((c) => picked.includes(c)), { onSuccess: done })}>
+                  {t("Save")}
+                </button>
+              </div>
+              <ErrorBox error={save.error} />
+            </div>
+          ) : (
+            <ul className="merge-rules">
+              {r.ready.length === 0 && <li className="small muted">{t("Every open PR")}</li>}
+              {r.ready.map((c) => (
+                <Yes key={c} on>
+                  {conditionText(c, r, t)}
+                </Yes>
+              ))}
+              <li className="small muted">{t("It need not be up to date with the base: the service merges the base in before its CI runs.")}</li>
+            </ul>
+          )}
         </div>
         <div className="stack" style={{ gap: 6 }}>
           <strong className="small">{t("Merges after its CI when")}</strong>
           <ul className="merge-rules">
-            <Yes on>
-              {r.approvals} {t("approvals from people with write access")}
-            </Yes>
-            <Yes on={r.code_owners}>{t("A code owner of each changed file approves")}</Yes>
-            <Yes on={r.last_push}>{t("Someone other than the last pusher approves the last push")}</Yes>
-            <Yes on={r.threads}>{t("Every review conversation is resolved")}</Yes>
             {checks.length > 0 && (
               <Yes on>
                 {t("Required checks pass:")} <span className="mono">{checks.join(", ")}</span>
               </Yes>
             )}
+            {v.ci_start.optional_checks.length > 0 && (
+              <li className="small muted">
+                {t("May stay unpassed:")} <span className="mono">{v.ci_start.optional_checks.join(", ")}</span>
+              </li>
+            )}
+            {after.map((c) => (
+              <Yes key={c} on>
+                {conditionText(c, r, t)}
+              </Yes>
+            ))}
             <Yes on={r.up_to_date || r.update_branch}>{t("Up to date with the base: the service merges it in before CI runs")}</Yes>
             <li className="small muted">
               {t("Merges with")} {r.method}
@@ -554,7 +627,7 @@ function RulesCard({ v }: { v: MergeView }) {
               {r.fork_approval && `; ${t("GitHub holds the workflows of")} ${t(FORK_APPROVAL[r.fork_approval] ?? r.fork_approval)}`}
             </li>
           </ul>
-          <span className="small muted">{t("A PR whose CI passed waits for its approvals without holding the turn; once approved, it merges on its next turn, merging the base in and running its CI again first if the base moved.")}</span>
+          {after.length > 0 && <span className="small muted">{t("A PR whose CI passed waits for these without holding the turn; then it merges on its next turn, merging the base in and running its CI again first if the base moved.")}</span>}
         </div>
       </div>
       {r.notes && <Markdown className="md merge-notes" text={r.notes} />}
@@ -615,6 +688,11 @@ function CiStartCard({ v }: { v: MergeView }) {
                 {t("Summary jobs (never the failure)")}: <span className="mono">{s.summary_jobs.join(", ")}</span>
               </li>
             )}
+            {s.optional_checks.length > 0 && (
+              <li className="small">
+                {t("Optional checks (may stay unpassed for a merge)")}: <span className="mono">{s.optional_checks.join(", ")}</span>
+              </li>
+            )}
             <li className="small muted">
               {t("Looked into when CI has not started after")} {s.start_minutes} {t("minutes, or still runs after")} {s.run_minutes}; {t("flakes are rerun up to")} {s.reruns} {t("times")}
             </li>
@@ -638,6 +716,16 @@ function DraftBox({ v, draft, onUse }: { v: MergeView; draft: Draft; onUse: () =
       <span className="small muted">
         {t("Gate label")}: {draft.draft.gate_label || "—"} · {t("Gate jobs")}: {draft.draft.gate_jobs.join(", ") || "—"} · {t("Summary jobs")}: {draft.draft.summary_jobs.join(", ") || "—"}
       </span>
+      {(draft.draft.ready?.length ?? 0) > 0 && (
+        <span className="small">
+          {t("Schedulable when")}: {draft.draft.ready.map((c) => conditionText(c, v.rules, t)).reduce<React.ReactNode[]>((acc, x, i) => (i ? [...acc, "; ", x] : [x]), [])}
+        </span>
+      )}
+      {(draft.draft.optional_checks?.length ?? 0) > 0 && (
+        <span className="small muted">
+          {t("Optional checks (may stay unpassed for a merge)")}: {draft.draft.optional_checks.join(", ")}
+        </span>
+      )}
       {draft.draft.merge_notes && (
         <span className="small">
           {t("Before merging")}: {draft.draft.merge_notes}
@@ -671,6 +759,7 @@ function CiStartForm({ v, onDone }: { v: MergeView; onDone: () => void }) {
   const [start, setStart] = useState(String(d?.start_minutes ?? s.start_minutes));
   const [run, setRun] = useState(String(d?.run_minutes ?? s.run_minutes));
   const [notes, setNotes] = useState(d?.merge_notes ?? v.rules.notes);
+  const [optional, setOptional] = useState((d?.optional_checks ?? s.optional_checks).join(", "));
   const list = (x: string) => x.split(/[,\n]/).map((y) => y.trim()).filter(Boolean);
   const save = useAct(
     () =>
@@ -683,6 +772,8 @@ function CiStartForm({ v, onDone }: { v: MergeView; onDone: () => void }) {
         run_minutes: Math.max(5, Number(run) || 180),
         merge_notes: notes,
         approvals: d?.approvals || null,
+        optional_checks: list(optional),
+        ready: d?.ready?.length ? d.ready : null,
       }),
     [["merge-schedule"]],
   );
@@ -714,6 +805,15 @@ function CiStartForm({ v, onDone }: { v: MergeView; onDone: () => void }) {
         {t("Summary jobs (never the failure)")}
         <input value={summaries} placeholder="ci-test-finish" onChange={(e) => setSummaries(e.target.value)} />
       </label>
+      <label className="stack small" style={{ gap: 2 }}>
+        {t("Optional checks (may stay unpassed for a merge)")}
+        <input value={optional} placeholder="DCO" onChange={(e) => setOptional(e.target.value)} />
+      </label>
+      {d?.ready?.length ? (
+        <span className="small muted">
+          {t("Saving also sets what a PR must meet to be scheduled, as the draft says:")} {d.ready.map((c) => conditionText(c, v.rules, t)).reduce<React.ReactNode[]>((acc, x, i) => (i ? [...acc, "; ", x] : [x]), [])}
+        </span>
+      ) : null}
       <label className="stack small" style={{ gap: 2 }}>
         {t("What the repository asks before a merge, beyond GitHub's rules")}
         <textarea rows={2} value={notes} onChange={(e) => setNotes(e.target.value)} />

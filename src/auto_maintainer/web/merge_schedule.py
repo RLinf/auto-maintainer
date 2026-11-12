@@ -42,11 +42,12 @@ from ..domain.merge_schedule import (
     next_position,
     ordered,
     position,
+    ready_conditions,
     serial,
     skip_key,
     state_key,
 )
-from ..domain.profile import RepoProfile
+from ..domain.profile import ReadyCondition, RepoProfile
 from ..domain.run_ci import ci_view
 from ..domain.snapshot import Mergeable, PrSnapshot, PrState, RepoInfo
 from ..playbooks.auto_schedule import AUTO_COMMAND
@@ -81,8 +82,16 @@ class CiStartBody(BaseModel):
     summary_jobs: list[str] = Field(default_factory=list, max_length=50)
     start_minutes: int = Field(default=5, ge=1, le=24 * 60)
     run_minutes: int = Field(default=180, ge=5, le=7 * 24 * 60)
+    optional_checks: list[str] = Field(default_factory=list, max_length=50)
+    ready: list[ReadyCondition] | None = None
+    """What a PR must meet to be scheduled; ``None`` leaves it as it is."""
     merge_notes: str | None = Field(default=None, max_length=8_000)
     approvals: int | None = Field(default=None, ge=0, le=20)
+
+
+class ReadyBody(BaseModel):
+    ready: list[ReadyCondition] | None
+    """``None`` for every condition the merge rules hold a PR to."""
 
 
 async def gate_of(
@@ -252,7 +261,7 @@ def build_router() -> APIRouter:
             if pr.is_draft and not profile.scope.include_drafts:
                 continue
             gate = await gate_of(service, profile, info, pr, None)
-            back = holding_back(gate)
+            back = holding_back(gate, ready_conditions(profile))
             row = _row(pr, profile)
             if not back:
                 candidates.append(row)
@@ -291,6 +300,8 @@ def build_router() -> APIRouter:
                 ],
                 "notes": profile.merge.schedule.notes,
                 "hygiene": [s.id for s in profile.checks if s.blocking and s.enabled],
+                "ready": list(ready_conditions(profile)),
+                "ready_set": profile.merge.schedule.ready is not None,
             },
             "ci_start": {
                 **start.model_dump(mode="json"),
@@ -327,7 +338,9 @@ def build_router() -> APIRouter:
         if pr is None or pr.state != PrState.OPEN:
             raise HTTPException(409, f"#{body.number} is not open")
         info = await service.a.forge.get_repo(repo)
-        back = holding_back(await gate_of(service, profile, info, pr, None))
+        back = holding_back(
+            await gate_of(service, profile, info, pr, None), ready_conditions(profile)
+        )
         if back:
             raise HTTPException(
                 409,
@@ -528,8 +541,15 @@ def build_router() -> APIRouter:
                     ),
                     "start_minutes": body.start_minutes,
                     "run_minutes": body.run_minutes,
+                    "optional_checks": sorted(
+                        {c.strip() for c in body.optional_checks if c.strip()}
+                    ),
                 }
             )
+            if body.ready is not None:
+                _section(layer, "merge", "schedule")["ready"] = list(
+                    dict.fromkeys(body.ready)
+                )
             if body.gate_label is not None:
                 roles = _section(layer, "labels", "roles")
                 if label:
@@ -545,6 +565,40 @@ def build_router() -> APIRouter:
                 )
 
         return await _save_layer(service, user, repo, change, "ci: how CI starts")
+
+    @r.put("/{repo:path}/ready")
+    async def set_ready(
+        request: Request,
+        repo: str,
+        body: ReadyBody,
+        user: User = Depends(current_user),
+    ) -> dict[str, Any]:
+        """Set what a PR must meet to be scheduled (``merge.schedule.ready``): a
+        profile change, through the gate. ``null`` goes back to every condition the
+        merge rules hold a PR to."""
+        service = service_of(request)
+        repo = _repo(repo)
+        await require_view(service, user, repo)
+
+        def change(layer: dict[str, Any]) -> None:
+            plan = _section(layer, "merge", "schedule")
+            if body.ready is None:
+                plan.pop("ready", None)
+            else:
+                plan["ready"] = list(dict.fromkeys(body.ready))
+
+        return await _save_layer(
+            service,
+            user,
+            repo,
+            change,
+            "merge: schedulable when "
+            + (
+                ", ".join(body.ready)
+                if body.ready is not None
+                else "the merge rules hold"
+            ),
+        )
 
     @r.post("/{repo:path}/investigate")
     async def investigate(

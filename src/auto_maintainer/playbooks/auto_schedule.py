@@ -28,7 +28,12 @@ from __future__ import annotations
 from ..domain.events import Event, EventKind
 from ..domain.ids import same_commit
 from ..domain.merge_gate import MergeArm
-from ..domain.merge_schedule import holding_back, next_position, skip_key
+from ..domain.merge_schedule import (
+    holding_back,
+    next_position,
+    ready_conditions,
+    skip_key,
+)
 from ..domain.profile import RepoProfile
 from ..domain.snapshot import PrState
 from .base import Playbook, PlaybookContext, PlaybookResult, in_scope
@@ -87,7 +92,7 @@ class AutoSchedule(Playbook):
             )
         info = await ctx.forge.get_repo(pr.repo)
         gate = await gate_for(ctx, profile, info, pr, None)
-        back = holding_back(gate)
+        back = holding_back(gate, ready_conditions(profile))
         if back:
             return PlaybookResult(result={"not_ready": [i.name for i in back]})
         now = ctx.clock.now()

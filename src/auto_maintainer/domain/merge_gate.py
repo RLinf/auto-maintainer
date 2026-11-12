@@ -189,7 +189,11 @@ def evaluate_merge_gate(
     checks = latest_checks(pr.checks)
     needs_gate = False
     required_names = set(repo_info.required_checks or [])
+    optional = {c.lower() for c in profile.ci.start.optional_checks}
     for name in sorted(required_names):
+        if name.lower() in optional:
+            # The repository merges without it (a sign-off check that only warns).
+            continue
         runs = [c for c in checks if c.name == name]
         if not runs:
             items.append(

@@ -19,8 +19,8 @@ maintainers (design 5.5, merge scheduling).
 On a maintainer's request from the Merge scheduling page, an agent reads the
 default branch's workflows and contribution guide in a read-only checkout, beside
 facts the service gathers (the branch rules, the fork-approval setting, and which
-jobs fail at the open PRs' heads), and drafts ``ci.start`` and the plain-words
-merge rules. The draft names only jobs that appear in a workflow file and a label
+jobs fail at the open PRs' heads), and drafts ``ci.start``, what a PR must meet to be
+scheduled (``merge.schedule.ready``), and the plain-words merge rules. The draft names only jobs that appear in a workflow file and a label
 the repository has; it is kept for the page (``DRAFT_KEY``) and becomes the
 profile's only when a maintainer saves it, through the configuration gate.
 """
@@ -35,7 +35,7 @@ from pydantic import BaseModel, Field
 
 from ..domain.agents import AgentTask, TaskKind
 from ..domain.events import Event, EventKind
-from ..domain.profile import RepoProfile
+from ..domain.profile import READY_CONDITIONS, RepoProfile
 from ..domain.run_ci import latest_checks
 from .base import Playbook, PlaybookContext, PlaybookResult, may_succeed_later
 from .prompts import schema_hint
@@ -49,6 +49,8 @@ INVESTIGATE = """You are finding out how the CI of {repo} starts and what it tak
 - `gate_jobs`: the job ids of jobs that fail on purpose when CI was not asked for (the gate label missing, a draft PR), as GitHub names the jobs.
 - `summary_jobs`: the job ids of jobs that only collect the other jobs' results (typically `if: always()` with the others under `needs`).
 - `start_minutes`: about how long after the starting event the runs begin; `run_minutes`: a generous bound on how long the full CI takes, from the workflows' timeouts and what the jobs do.
+- `ready`: the repository's target for a PR to be scheduled for its final CI run and merge, as a subset of: `approvals` (the approvals the branch rules require, code owners' included), `threads_resolved` (every review conversation resolved), `no_changes_requested`, `not_draft`, `no_blocking_labels`, `no_conflict` (merges with its base without conflicts), `hygiene` (the repository's own PR checks: title, sign-off). Pick what the branch rules and the guide hold a PR to before it is merged. Being up to date with the base and CI are never part of it: the service merges the base in and runs CI after scheduling.
+- `optional_checks`: required checks the repository merges without passing, such as a sign-off check that only warns when commits are not signed off; only names from the required checks below, and only when the guide or the workflows show they may be left unpassed.
 - `merge_notes`: what the contribution guide asks of a PR before it merges, beyond the forge's own rules listed below (for example who must approve); empty when it says nothing more.
 - `approvals`: the number of approvals the guide asks for when it asks for more than the forge's rules do; otherwise 0.
 Base every answer on what the files say; where they do not settle something, leave it empty and say so in `how`. Do not change files, run anything, or fetch anything."""
@@ -63,6 +65,8 @@ class CiRulesDraft(BaseModel):
     summary_jobs: list[str] = Field(default_factory=list)
     start_minutes: int = Field(default=5, ge=1, le=24 * 60)
     run_minutes: int = Field(default=180, ge=5, le=7 * 24 * 60)
+    ready: list[str] = Field(default_factory=list)
+    optional_checks: list[str] = Field(default_factory=list)
     merge_notes: str = Field(default="")
     approvals: int = Field(default=0, ge=0, le=20)
 
@@ -92,11 +96,28 @@ def known_jobs(text: str) -> set[str]:
 
 
 def checked(
-    draft: CiRulesDraft, workflows: str, labels: list[str]
+    draft: CiRulesDraft,
+    workflows: str,
+    labels: list[str],
+    required: list[str] | None = None,
 ) -> tuple[CiRulesDraft, list[str]]:
-    """``draft`` with what the repository does not have dropped, and what was."""
+    """``draft`` with what the repository does not have dropped, and what was:
+    jobs no workflow declares, a label it lacks, conditions outside
+    ``READY_CONDITIONS``, and optional checks the branch rules do not require."""
     jobs = known_jobs(workflows)
     dropped: list[str] = []
+    ready = [c for c in dict.fromkeys(draft.ready) if c in READY_CONDITIONS]
+    dropped += [
+        f"condition {c!r}, which is not one" for c in draft.ready if c not in ready
+    ]
+    names = set(required or [])
+    optional = [c for c in dict.fromkeys(draft.optional_checks) if c in names]
+    dropped += [
+        f"optional check {c!r}, which the branch rules do not require"
+        for c in draft.optional_checks
+        if c not in optional
+    ]
+    draft = draft.model_copy(update={"ready": ready, "optional_checks": optional})
     keep = {}
     for field in ("gate_jobs", "summary_jobs"):
         names = []
@@ -193,6 +214,7 @@ class CiRulesPlaybook(Playbook):
                 CiRulesDraft.model_validate(answer.structured),
                 _workflow_text(Path(workdir)),
                 info.labels,
+                info.required_checks,
             )
         finally:
             await ctx.workspace.release(workdir)

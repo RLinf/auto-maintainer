@@ -104,6 +104,7 @@ def ci_view(
     start = start or CiStart()
     gates = {j.lower() for j in start.gate_jobs}
     summaries = {j.lower() for j in start.summary_jobs}
+    optional = {j.lower() for j in start.optional_checks}
     checks = latest_checks(pr.checks)
 
     def named(c: CheckRun, names: set[str]) -> bool:
@@ -114,7 +115,11 @@ def ci_view(
     done = [c for c in checks if c.status == CheckStatus.COMPLETED]
     failed = [c for c in done if c.failed]
     cancelled = [c for c in done if c.conclusion == CheckConclusion.CANCELLED]
-    real = [c for c in failed if not named(c, gates) and not named(c, summaries)]
+    real = [
+        c
+        for c in failed
+        if not named(c, gates) and not named(c, summaries) and not named(c, optional)
+    ]
     stopped = [c for c in failed if named(c, gates)]
     running = sum(1 for c in checks if c.status != CheckStatus.COMPLETED)
     passed = sum(

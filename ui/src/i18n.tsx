@@ -2376,6 +2376,23 @@ const zh: Record<string, string> = {
   "Merges after its CI when": "CI 通过后，满足以下条件即合并",
   "approvals from people with write access": "个有写权限者的批准",
   "A PR whose CI passed waits for its approvals without holding the turn; once approved, it merges on its next turn, merging the base in and running its CI again first if the base moved.": "CI 已通过的 PR 等待批准时不占用轮次；获批后在下一轮合并，若基准分支已变化，则先合入基准分支并重新运行 CI。",
+  "Ready to schedule": "可调度",
+  "They meet the conditions to schedule. Scheduled, a PR merges the base in, runs its CI, and merges.": "已满足调度条件。调度后，PR 会先合入基准分支、运行 CI，然后合并。",
+  "No PR meets the conditions to schedule right now.": "目前没有满足调度条件的 PR。",
+  "a code owner's among them": "其中包括代码所有者的批准",
+  "the last push approved by someone else": "最后一次推送由他人批准",
+  "Not a draft": "不是草稿",
+  "No conflict with the base": "与基准分支无冲突",
+  "Schedulable when": "满足以下条件即可调度",
+  "every condition of the merge rules": "合并规则的全部条件",
+  "Use the merge rules": "使用合并规则",
+  "Every open PR": "所有开放的 PR",
+  "It need not be up to date with the base: the service merges the base in before its CI runs.": "无需与基准分支同步：服务会在运行 CI 前先合入基准分支。",
+  "May stay unpassed:": "可不通过：",
+  "A PR whose CI passed waits for these without holding the turn; then it merges on its next turn, merging the base in and running its CI again first if the base moved.": "CI 已通过的 PR 等待这些条件时不占用轮次；满足后在下一轮合并，若基准分支已变化，则先合入基准分支并重新运行 CI。",
+  "Optional checks (may stay unpassed for a merge)": "可选检查（合并时可不通过）",
+  "Saving also sets what a PR must meet to be scheduled, as the draft says:": "保存时也会按草稿设置 PR 的调度条件：",
+  "CI passed, waiting to meet the merge rules": "CI 已通过，等待满足合并规则",
 };
 
 const LangContext = createContext<{ lang: Lang; setLang: (l: Lang) => void }>({ lang: "zh", setLang: () => {} });
