@@ -13,23 +13,30 @@
 # limitations under the License.
 
 
-"""How a repository's CI starts and what its jobs mean, drafted by an agent for its
-maintainers (design 5.5, merge scheduling).
+"""A repository's merge scheduling rules, drafted by an agent for its maintainers
+(design 5.5): what makes a PR schedulable, which labels hold a merge back, which
+required checks may stay unpassed, how its CI starts and what its jobs mean, and how
+failed CI is judged and run again.
 
-On a maintainer's request from the Merge scheduling page, an agent reads the
-default branch's workflows and contribution guide in a read-only checkout, beside
-facts the service gathers (the branch rules, the fork-approval setting, and which
-jobs fail at the open PRs' heads), and drafts ``ci.start``, what a PR must meet to be
-scheduled (``merge.schedule.ready``), and the plain-words merge rules. The draft names only jobs that appear in a workflow file and a label
-the repository has; it is kept for the page (``DRAFT_KEY``) and becomes the
-profile's only when a maintainer saves it, through the configuration gate.
+Two ways fill a draft, both on a maintainer's request from the Merge scheduling
+page. **Investigate**: an agent reads the default branch's workflows and
+contribution guide in a read-only checkout, beside facts the service gathers (the
+branch rules, the fork-approval setting, which jobs fail at the open PRs' heads).
+**Describe**: a quick agent call turns the maintainer's own words into the fields,
+changing only what they spoke to. Either way the draft keeps only what the
+repository has (``checked``: conditions it knows, label roles the profile names,
+jobs a workflow declares or a PR ran, required checks, patterns that compile), is
+kept for the page (``DRAFT_KEY``), and becomes the profile's only when a maintainer
+saves it, through the configuration gate.
 """
 
 from __future__ import annotations
 
+import json
 import re
 from collections import Counter
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -37,38 +44,97 @@ from ..domain.agents import AgentTask, TaskKind
 from ..domain.events import Event, EventKind
 from ..domain.profile import READY_CONDITIONS, RepoProfile
 from ..domain.run_ci import latest_checks
+from ..domain.snapshot import RepoInfo
 from .base import Playbook, PlaybookContext, PlaybookResult, may_succeed_later
-from .prompts import schema_hint
+from .prompts import schema_hint, untrusted
 
 COMMAND = "ci_rules"
 DRAFT_KEY = "ci-rules:{repo}"
+MAX_PATTERNS = 30
 
-INVESTIGATE = """You are finding out how the CI of {repo} starts and what it takes for a pull request to merge, for a service that runs the CI of the PRs its maintainers schedule and merges those that pass. The working directory is a read-only checkout of the default branch `{branch}`. Read `.github/workflows/` (the CI workflows, and the workflows they call) and the contribution guide (`CONTRIBUTING*`, `docs/` pages about contributing or CI), then answer:
-- `how`: a few plain sentences a maintainer and an agent watching CI both need: what starts a PR's CI (pushes, a label, a maintainer approving a fork's workflows, a comment), which events start a run again (adding any label, a push), how runs replace or cancel each other (concurrency groups), and anything that keeps the full CI from running.
-- `gate_label`: the label whose absence keeps the full CI from running, exactly as the workflows spell it; empty when there is none.
-- `gate_jobs`: the job ids of jobs that fail on purpose when CI was not asked for (the gate label missing, a draft PR), as GitHub names the jobs.
-- `summary_jobs`: the job ids of jobs that only collect the other jobs' results (typically `if: always()` with the others under `needs`).
-- `start_minutes`: about how long after the starting event the runs begin; `run_minutes`: a generous bound on how long the full CI takes, from the workflows' timeouts and what the jobs do.
-- `ready`: the repository's target for a PR to be scheduled for its final CI run and merge, as a subset of: `approvals` (the approvals the branch rules require, code owners' included), `threads_resolved` (every review conversation resolved), `no_changes_requested`, `not_draft`, `no_blocking_labels`, `no_conflict` (merges with its base without conflicts), `hygiene` (the repository's own PR checks: title, sign-off). Pick what the branch rules and the guide hold a PR to before it is merged. Being up to date with the base and CI are never part of it: the service merges the base in and runs CI after scheduling.
-- `optional_checks`: required checks the repository merges without passing, such as a sign-off check that only warns when commits are not signed off; only names from the required checks below, and only when the guide or the workflows show they may be left unpassed.
-- `merge_notes`: what the contribution guide asks of a PR before it merges, beyond the forge's own rules listed below (for example who must approve); empty when it says nothing more.
-- `approvals`: the number of approvals the guide asks for when it asks for more than the forge's rules do; otherwise 0.
-Base every answer on what the files say; where they do not settle something, leave it empty and say so in `how`. Do not change files, run anything, or fetch anything."""
+FIELDS = """Fields:
+- `ready`: what a PR must meet before it is scheduled for its final CI run and merge, as a subset of `approvals` (the approvals the branch rules require, code owners' included), `threads_resolved` (every review conversation resolved), `no_changes_requested`, `not_draft`, `no_blocking_labels`, `no_conflict` (merges with its base without conflicts), `hygiene` (the repository's own PR checks: title, sign-off). Being up to date with the base and CI are never part of it: the service merges the base in and runs CI after scheduling.
+- `blocking_roles`: the label roles (from the list below) whose label holds a PR's merge back while it is on the PR; empty when no label does.
+- `optional_checks`: required checks the repository merges without passing, such as a sign-off check that only warns; only names from the required checks below.
+- `how`: a few plain sentences a maintainer and an agent watching CI both need: what starts a PR's CI, which events start a run again, how runs replace or cancel each other, and anything that keeps the full CI from running.
+- `gate_label`: the label whose absence keeps the full CI from running; empty when there is none.
+- `gate_jobs`: jobs that fail on purpose when CI was not asked for (the gate label missing, a draft PR). `summary_jobs`: jobs that only collect the other jobs' results.
+- `start_minutes`: how long CI may take to start before someone looks into it; `run_minutes`: how long it may run.
+- `diagnose`: how a failed job is judged a flake: `agent` (a quick agent look at its log when no flake pattern matches) or `patterns` (only the flake patterns; no agent reads a log before the root cause).
+- `max_reruns`: how many times a run that flaked is run again at one commit; `backoff_seconds`: how long between reruns; `rerun_unknown`: how many times a failure nothing calls a flake is run again before it counts as real (0: never).
+- `root_cause`: whether an agent looks for the root cause of a real failure in a checkout of the PR.
+- `flake_patterns`: known flakes, each an `id`, a Python regular expression `pattern` matched against a failed job's log, a `category` (`flaky`, or `infra` for the runner's own failures), and a `description`.
+- `merge_notes`: what the repository asks of a PR before it merges beyond the forge's rules, in plain words; `approvals`: the approvals it asks for when that is more than the forge's rules require, else 0."""
+
+INVESTIGATE = """You are finding out how {repo} wants its pull requests merged and its CI handled, for a service that runs the final CI of the PRs its maintainers schedule and merges those that pass. The working directory is a read-only checkout of the default branch `{branch}`. Read `.github/workflows/` (the CI workflows, and the workflows they call) and the contribution guide (`CONTRIBUTING*`, `docs/` pages about contributing, reviewing, or CI), then fill in the fields below from what they say, keeping each current value (given below) where they say nothing. Do not change files, run anything, or fetch anything.
+
+{fields}"""
+
+DESCRIBE = """A maintainer of {repo} told you, in their own words, how the service should schedule the repository's pull requests to merge and handle their CI. Turn what they said into the fields below. Start from the current settings given after their words and change only what they spoke to; keep every other field exactly as it is now. When they name something the repository does not have (a label, a check, a job), leave it out. Judge only from what is given here: do not run commands, read files, or fetch anything.
+
+{fields}"""
+
+
+class FlakePattern(BaseModel):
+    id: str = Field(min_length=1, max_length=80)
+    pattern: str = Field(min_length=1, max_length=500)
+    category: Literal["flaky", "infra"] = "flaky"
+    description: str = Field(default="", max_length=500)
 
 
 class CiRulesDraft(BaseModel):
-    """What the agent found; checked before anyone sees it."""
+    """What the agent drafted; checked before anyone sees it."""
 
-    how: str = Field(description="How the CI starts, in plain sentences.")
+    how: str = Field(default="", description="How the CI starts, in plain sentences.")
     gate_label: str = Field(default="", description="The gate label, or empty.")
     gate_jobs: list[str] = Field(default_factory=list)
     summary_jobs: list[str] = Field(default_factory=list)
     start_minutes: int = Field(default=5, ge=1, le=24 * 60)
     run_minutes: int = Field(default=180, ge=5, le=7 * 24 * 60)
     ready: list[str] = Field(default_factory=list)
+    blocking_roles: list[str] = Field(default_factory=list)
     optional_checks: list[str] = Field(default_factory=list)
+    diagnose: Literal["agent", "patterns"] = "agent"
+    max_reruns: int = Field(default=2, ge=0, le=10)
+    backoff_seconds: int = Field(default=120, ge=0, le=24 * 3600)
+    rerun_unknown: int = Field(default=0, ge=0, le=5)
+    root_cause: bool = True
+    flake_patterns: list[FlakePattern] = Field(default_factory=list)
     merge_notes: str = Field(default="")
     approvals: int = Field(default=0, ge=0, le=20)
+
+
+def current(profile: RepoProfile) -> CiRulesDraft:
+    """The repository's settings now, in the draft's terms."""
+    start, rerun = profile.ci.start, profile.ci.rerun
+    ready = profile.merge.schedule.ready
+    return CiRulesDraft(
+        how=start.how,
+        gate_label=profile.label_for("ci_gate") or "",
+        gate_jobs=start.gate_jobs,
+        summary_jobs=start.summary_jobs,
+        start_minutes=start.start_minutes,
+        run_minutes=start.run_minutes,
+        ready=list(ready) if ready is not None else list(READY_CONDITIONS),
+        blocking_roles=list(profile.merge.blocking_roles),
+        optional_checks=start.optional_checks,
+        diagnose=profile.ci.diagnose,
+        max_reruns=rerun.max_per_sha,
+        backoff_seconds=rerun.backoff_seconds,
+        rerun_unknown=rerun.unknown,
+        root_cause=profile.ci.root_cause,
+        flake_patterns=[
+            FlakePattern(
+                id=s.id,
+                pattern=s.pattern,
+                category=s.category,
+                description=s.description,
+            )
+            for s in profile.ci.flake_signatures
+        ],
+        merge_notes=profile.merge.schedule.notes,
+        approvals=0,
+    )
 
 
 def _workflow_text(root: Path) -> str:
@@ -100,15 +166,26 @@ def checked(
     workflows: str,
     labels: list[str],
     required: list[str] | None = None,
+    roles: dict[str, str] | None = None,
+    jobs: set[str] | None = None,
 ) -> tuple[CiRulesDraft, list[str]]:
     """``draft`` with what the repository does not have dropped, and what was:
-    jobs no workflow declares, a label it lacks, conditions outside
-    ``READY_CONDITIONS``, and optional checks the branch rules do not require."""
-    jobs = known_jobs(workflows)
+    conditions outside ``READY_CONDITIONS``, label roles the profile does not name,
+    optional checks the branch rules do not require, jobs no workflow declares (nor
+    ``jobs``, the names already known), a label it lacks, and flake patterns that
+    do not compile."""
+    known = known_jobs(workflows) | (jobs or set())
     dropped: list[str] = []
     ready = [c for c in dict.fromkeys(draft.ready) if c in READY_CONDITIONS]
     dropped += [
         f"condition {c!r}, which is not one" for c in draft.ready if c not in ready
+    ]
+    named = roles or {}
+    blocking = [r for r in dict.fromkeys(draft.blocking_roles) if r in named]
+    dropped += [
+        f"label role {r!r}, which the profile gives no label"
+        for r in draft.blocking_roles
+        if r not in blocking
     ]
     names = set(required or [])
     optional = [c for c in dict.fromkeys(draft.optional_checks) if c in names]
@@ -117,21 +194,70 @@ def checked(
         for c in draft.optional_checks
         if c not in optional
     ]
-    draft = draft.model_copy(update={"ready": ready, "optional_checks": optional})
-    keep = {}
+    keep: dict[str, list[str]] = {}
     for field in ("gate_jobs", "summary_jobs"):
-        names = []
+        kept = []
         for name in getattr(draft, field):
-            if name in jobs:
-                names.append(name)
+            if name in known:
+                kept.append(name)
             else:
                 dropped.append(f"job {name!r}, which no workflow declares")
-        keep[field] = sorted(set(names))
+        keep[field] = sorted(set(kept))
     label = draft.gate_label.strip()
     if label and label not in labels:
         dropped.append(f"label {label!r}, which the repository does not have")
         label = ""
-    return draft.model_copy(update={**keep, "gate_label": label}), dropped
+    patterns: list[FlakePattern] = []
+    for p in draft.flake_patterns:
+        try:
+            re.compile(p.pattern)
+        except re.error as e:
+            dropped.append(f"flake pattern {p.id!r}, which does not compile: {e}")
+            continue
+        if p.id in {q.id for q in patterns}:
+            dropped.append(f"flake pattern {p.id!r}, named twice")
+            continue
+        patterns.append(p)
+    if len(patterns) > MAX_PATTERNS:
+        dropped.append(f"flake patterns past the first {MAX_PATTERNS}")
+        patterns = patterns[:MAX_PATTERNS]
+    return draft.model_copy(
+        update={
+            **keep,
+            "ready": ready,
+            "blocking_roles": blocking,
+            "optional_checks": optional,
+            "gate_label": label,
+            "flake_patterns": patterns,
+        }
+    ), dropped
+
+
+def _facts(
+    info: RepoInfo, profile: RepoProfile, failing: Counter[str], prs: int
+) -> str:
+    return "\n".join(
+        [
+            f"Default branch: {info.default_branch}",
+            f"Required approvals: {info.required_approvals}",
+            f"A code owner must approve: {info.requires_code_owner_reviews}",
+            f"Conversations must be resolved: {info.requires_thread_resolution}",
+            f"PRs must be up to date with the base: {info.requires_up_to_date}",
+            f"Required checks: {', '.join(info.required_checks or []) or '(none)'}",
+            f"Merge methods allowed: {', '.join(info.merge_methods or []) or 'unknown'}",
+            f"Fork workflows wait for approval from: {info.fork_approval or 'unknown'}",
+            "Label roles (role: label): "
+            + (
+                ", ".join(
+                    f"{r}: {lab}" for r, lab in sorted(profile.labels.roles.items())
+                )
+                or "(none)"
+            ),
+            f"Labels: {', '.join(info.labels[:200])}",
+            f"Jobs failing at the heads of the {prs} open PRs: "
+            + (", ".join(f"{n} ({k})" for n, k in failing.most_common(15)) or "(none)"),
+        ]
+    )
 
 
 class CiRulesPlaybook(Playbook):
@@ -146,50 +272,45 @@ class CiRulesPlaybook(Playbook):
         return f"ci_rules:{event.repo}:req:{event.id}"
 
     async def run(self, ctx: PlaybookContext, event: Event) -> PlaybookResult:
-        ctx.require_profile()
+        profile = ctx.require_profile()
         assert event.repo
         repo = event.repo
         by = str(event.payload.get("by"))
+        words = str(event.payload.get("text") or "").strip()
         ctx.requested_by = by
         ctx.trusted_input = True
         ctx.agent = event.payload.get("agent") or None
         info = await ctx.forge.get_repo(repo)
         failing: Counter[str] = Counter()
+        seen_jobs: set[str] = set()
         prs = 0
         for pr in await ctx.store.list_snapshots(repo):
             prs += 1
             for c in latest_checks(pr.checks):
+                seen_jobs |= {c.name, c.name.split(" / ")[-1]}
                 if c.failed:
                     failing[c.name] += 1
-        facts = "\n".join(
-            [
-                f"Default branch: {info.default_branch}",
-                f"Required approvals: {info.required_approvals}",
-                f"A code owner must approve: {info.requires_code_owner_reviews}",
-                f"Conversations must be resolved: {info.requires_thread_resolution}",
-                f"PRs must be up to date with the base: {info.requires_up_to_date}",
-                f"Required checks: {', '.join(info.required_checks or []) or '(none)'}",
-                f"Merge methods allowed: {', '.join(info.merge_methods or []) or 'unknown'}",
-                f"Fork workflows wait for approval from: {info.fork_approval or 'unknown'}",
-                f"Labels: {', '.join(info.labels[:200])}",
-                f"Jobs failing at the heads of the {prs} open PRs: "
-                + (
-                    ", ".join(f"{n} ({k})" for n, k in failing.most_common(15))
-                    or "(none)"
-                ),
-            ]
+        now = current(profile)
+        known = seen_jobs | set(now.gate_jobs) | set(now.summary_jobs)
+        settings = "Current settings:\n" + json.dumps(
+            now.model_dump(mode="json"), ensure_ascii=False, indent=1
         )
-        workdir = await ctx.workspace.prepare(
-            repo,
-            None,
-            info.default_branch_sha or info.default_branch,
-            info.default_branch,
+        facts = "What the service read from the forge:\n" + _facts(
+            info, profile, failing, prs
         )
-        try:
+        task: dict = {
+            "output_schema": CiRulesDraft.model_json_schema(),
+            "repo": repo,
+            "requested_by": by,
+            "activity": "ci_rules",
+        }
+        if words:
             prompt = "\n\n".join(
                 [
-                    INVESTIGATE.format(repo=repo, branch=info.default_branch),
-                    "What the service read from the forge:\n" + facts,
+                    DESCRIBE.format(repo=repo, fields=FIELDS),
+                    "Their words:\n" + untrusted("maintainer.words", words, 8_000),
+                    settings,
+                    facts,
                     schema_hint(CiRulesDraft.model_json_schema()),
                 ]
             )
@@ -197,27 +318,57 @@ class CiRulesPlaybook(Playbook):
                 AgentTask(
                     kind=TaskKind.ONBOARD,
                     prompt=prompt,
-                    workdir=workdir,
+                    workdir=ctx.scratch(),
                     mode="read_only",
-                    output_schema=CiRulesDraft.model_json_schema(),
-                    repo=repo,
-                    requested_by=by,
-                    activity="ci_rules",
+                    budget="quick",
+                    **task,  # type: ignore[arg-type]
                 ),
                 CiRulesDraft,
             )
-            if not answer.ok or answer.structured is None:
-                if may_succeed_later(answer):
-                    return PlaybookResult(retry_after=300)
-                return PlaybookResult(failed=answer.error or "no usable answer")
-            draft, dropped = checked(
-                CiRulesDraft.model_validate(answer.structured),
-                _workflow_text(Path(workdir)),
-                info.labels,
-                info.required_checks,
+            workflows = ""
+        else:
+            workdir = await ctx.workspace.prepare(
+                repo,
+                None,
+                info.default_branch_sha or info.default_branch,
+                info.default_branch,
             )
-        finally:
-            await ctx.workspace.release(workdir)
+            try:
+                prompt = "\n\n".join(
+                    [
+                        INVESTIGATE.format(
+                            repo=repo, branch=info.default_branch, fields=FIELDS
+                        ),
+                        settings,
+                        facts,
+                        schema_hint(CiRulesDraft.model_json_schema()),
+                    ]
+                )
+                answer = await ctx.ask(
+                    AgentTask(
+                        kind=TaskKind.ONBOARD,
+                        prompt=prompt,
+                        workdir=workdir,
+                        mode="read_only",
+                        **task,  # type: ignore[arg-type]
+                    ),
+                    CiRulesDraft,
+                )
+                workflows = _workflow_text(Path(workdir))
+            finally:
+                await ctx.workspace.release(workdir)
+        if not answer.ok or answer.structured is None:
+            if may_succeed_later(answer):
+                return PlaybookResult(retry_after=300)
+            return PlaybookResult(failed=answer.error or "no usable answer")
+        draft, dropped = checked(
+            CiRulesDraft.model_validate(answer.structured),
+            workflows,
+            info.labels,
+            info.required_checks,
+            dict(profile.labels.roles),
+            known,
+        )
         await ctx.store.set_state(
             DRAFT_KEY.format(repo=repo),
             {
@@ -226,6 +377,8 @@ class CiRulesPlaybook(Playbook):
                 "by": by,
                 "at": ctx.clock.now().isoformat(),
                 "sha": info.default_branch_sha,
+                "source": "words" if words else "investigation",
+                "words": words,
             },
         )
         return PlaybookResult(

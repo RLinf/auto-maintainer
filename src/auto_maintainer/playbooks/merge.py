@@ -577,13 +577,25 @@ class MergePlaybook(Playbook):
             )
         failures = await first_looks(ctx, pr, profile, checks)
         reruns: list[Action] = []
+        retrying: set[int] = set()
+        rerun = profile.ci.rerun
         for f in failures:
-            if f.diagnosis.category not in ("flaky", "infra") or not f.check.run_id:
+            if not f.check.run_id:
+                continue
+            flaky = f.diagnosis.category in ("flaky", "infra")
+            # A flake gets the repository's reruns; a failure nothing calls a flake
+            # gets ``ci.rerun.unknown`` of them first, before it counts as real.
+            limit = (
+                rerun.max_per_sha if flaky else min(rerun.unknown, rerun.max_per_sha)
+            )
+            if not limit:
                 continue
             done = await reruns_at_head(ctx, pr, f.check.run_id)
-            if done >= profile.ci.rerun.max_per_sha:
+            if done >= limit:
                 f.reruns = done
-            elif f.check.run_id not in {a.payload["run_id"] for a in reruns}:
+                continue
+            retrying.add(f.check.id)
+            if f.check.run_id not in {a.payload["run_id"] for a in reruns}:
                 reruns.append(
                     step(
                         ActionKind.CI_RERUN_FAILED,
@@ -596,11 +608,7 @@ class MergePlaybook(Playbook):
                         f"{f.check.name}: {f.diagnosis.explanation}",
                     )
                 )
-        stuck = [
-            f
-            for f in failures
-            if f.diagnosis.category not in ("flaky", "infra") or f.reruns
-        ]
+        stuck = [f for f in failures if f.check.id not in retrying]
         if stuck or not reruns:
             jobs = ", ".join(f.check.name for f in stuck or failures) or "CI"
             return await self._fail(

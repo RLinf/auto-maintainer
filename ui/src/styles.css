@@ -1204,3 +1204,8 @@ details.pv-section[open] > summary { margin-bottom: 6px; }
   .merge-actions { width: 100%; justify-content: flex-start; padding-left: 36px; }
   .merge-controls { padding: 12px; }
 }
+.merge-words { margin: 0; padding: 6px 10px; border-left: 3px solid var(--border-strong); color: var(--text-2); white-space: pre-wrap; }
+.merge-diff { width: 100%; border-collapse: collapse; }
+.merge-diff th { text-align: left; font-weight: 600; color: var(--muted); padding: 4px 8px 4px 0; border-bottom: 1px solid var(--border); }
+.merge-diff td { padding: 6px 8px 6px 0; border-bottom: 1px solid var(--border); vertical-align: top; overflow-wrap: anywhere; }
+@media (max-width: 640px) { .merge-diff th:first-child, .merge-diff td:first-child { width: 34%; } }

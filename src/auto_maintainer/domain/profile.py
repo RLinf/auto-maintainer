@@ -278,8 +278,15 @@ class FlakeSignature(_Section):
 
 
 class Rerun(_Section):
-    max_per_sha: int = 2
-    backoff_seconds: int = 120
+    """How failed CI is run again (design 5.5): a flake within ``max_per_sha``
+    reruns of its run at one commit, ``backoff_seconds`` apart; a failure nothing
+    calls a flake ``unknown`` times first, before it counts as real."""
+
+    max_per_sha: int = Field(default=2, ge=0, le=10)
+    backoff_seconds: int = Field(default=120, ge=0, le=24 * 3600)
+    unknown: int = Field(default=0, ge=0, le=5)
+    """Reruns of a failure that neither a flake pattern nor the first look calls
+    a flake, before it goes to the failure lane (0: never)."""
 
 
 class RunnerGroup(_Section):
@@ -321,6 +328,10 @@ class Ci(_Section):
     root_cause: bool = True
     """Look for the root cause of failures that are not flakes, in a checkout of the
     PR head (design 5.5); ``false`` keeps the one-line explanation from the log."""
+    diagnose: Literal["agent", "patterns"] = "agent"
+    """How a failure is judged a flake: ``agent``, a quick first look at its log
+    when no flake pattern matches; ``patterns``, only the flake patterns, so no
+    agent reads a log before the root cause."""
     start: CiStart = Field(default_factory=CiStart)
 
 

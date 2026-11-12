@@ -79,10 +79,36 @@ interface Draft {
     approvals: number;
     ready: string[];
     optional_checks: string[];
+    blocking_roles: string[];
+    diagnose: "agent" | "patterns";
+    max_reruns: number;
+    backoff_seconds: number;
+    rerun_unknown: number;
+    root_cause: boolean;
+    flake_patterns: Pattern[];
   };
   dropped: string[];
   by: string;
   at: string;
+  source?: "words" | "investigation";
+  words?: string;
+}
+
+interface Pattern {
+  id: string;
+  pattern: string;
+  category: "flaky" | "infra";
+  description: string;
+  own?: boolean;
+}
+
+interface Flaky {
+  diagnose: "agent" | "patterns";
+  max_reruns: number;
+  backoff_seconds: number;
+  rerun_unknown: number;
+  root_cause: boolean;
+  patterns: Pattern[];
 }
 
 interface MergeView {
@@ -117,6 +143,7 @@ interface MergeView {
     label_roles: Record<string, string>;
   };
   ci_start: CiStart;
+  flaky: Flaky;
   draft: Draft | null;
   scheduled: Scheduled[];
   failed: Scheduled[];
@@ -209,10 +236,12 @@ export default function MergePage() {
           {v.failed.length > 0 && <FailureLane v={v} />}
           <Candidates v={v} />
           <NotReadyList v={v} />
+          {v.draft && <DraftRules v={v} draft={v.draft} />}
           <div className="merge-grid">
             <RulesCard v={v} />
             <CiStartCard v={v} />
           </div>
+          <FlakyCard v={v} />
           {v.merged.length > 0 && <MergedList v={v} />}
         </div>
       )}
@@ -589,6 +618,7 @@ function RulesCard({ v }: { v: MergeView }) {
   return (
     <Section title={t("Conditions")} hint={t("Read from GitHub's branch rules and the repository's profile")}>
       <div className="stack" style={{ gap: 14 }}>
+        {v.can_arrange && <DescribeBox v={v} />}
         <div className="stack" style={{ gap: 6 }}>
           <div className="row" style={{ gap: 8 }}>
             <strong className="small">{t("Schedulable when")}</strong>
@@ -777,7 +807,6 @@ function CiStartCard({ v }: { v: MergeView }) {
               {t("Looked into when CI has not started after")} {s.start_minutes} {t("minutes, or still runs after")} {s.run_minutes}; {t("flakes are rerun up to")} {s.reruns} {t("times")}
             </li>
           </ul>
-          {v.draft && <DraftBox v={v} draft={v.draft} onUse={() => setEditing(true)} />}
         </div>
       )}
       <ErrorBox error={investigate.error} />
@@ -785,52 +814,10 @@ function CiStartCard({ v }: { v: MergeView }) {
   );
 }
 
-function DraftBox({ v, draft, onUse }: { v: MergeView; draft: Draft; onUse: () => void }) {
-  const t = useT();
-  return (
-    <div className="merge-draft stack" style={{ gap: 6 }}>
-      <span className="small">
-        <Icon name="sparkles" size={12} /> {t("An agent's draft")} · {draft.by} · <When at={draft.at} />
-      </span>
-      <Markdown className="md merge-notes" text={draft.draft.how} />
-      <span className="small muted">
-        {t("Gate label")}: {draft.draft.gate_label || "—"} · {t("Gate jobs")}: {draft.draft.gate_jobs.join(", ") || "—"} · {t("Summary jobs")}: {draft.draft.summary_jobs.join(", ") || "—"}
-      </span>
-      {(draft.draft.ready?.length ?? 0) > 0 && (
-        <span className="small">
-          {t("Schedulable when")}: {draft.draft.ready.map((c) => conditionText(c, v.rules, t)).reduce<React.ReactNode[]>((acc, x, i) => (i ? [...acc, "; ", x] : [x]), [])}
-        </span>
-      )}
-      {(draft.draft.optional_checks?.length ?? 0) > 0 && (
-        <span className="small muted">
-          {t("Optional checks (may stay unpassed for a merge)")}: {draft.draft.optional_checks.join(", ")}
-        </span>
-      )}
-      {draft.draft.merge_notes && (
-        <span className="small">
-          {t("Before merging")}: {draft.draft.merge_notes}
-        </span>
-      )}
-      {draft.dropped.length > 0 && (
-        <span className="small muted">
-          {t("Left out, as the repository does not have them")}: {draft.dropped.join("; ")}
-        </span>
-      )}
-      {v.can_arrange && (
-        <div>
-          <button className="sm primary" onClick={onUse}>
-            {t("Review and save")}
-          </button>
-        </div>
-      )}
-    </div>
-  );
-}
-
 function CiStartForm({ v, onDone }: { v: MergeView; onDone: () => void }) {
   const t = useT();
   const toast = useToast();
-  const d = v.draft?.draft;
+  const d = null as Draft["draft"] | null;
   const s = v.ci_start;
   const [how, setHow] = useState(d?.how ?? s.how);
   const [label, setLabel] = useState(d ? d.gate_label : (s.gate_label ?? ""));
@@ -889,11 +876,6 @@ function CiStartForm({ v, onDone }: { v: MergeView; onDone: () => void }) {
         {t("Optional checks (may stay unpassed for a merge)")}
         <input value={optional} placeholder="DCO" onChange={(e) => setOptional(e.target.value)} />
       </label>
-      {d?.ready?.length ? (
-        <span className="small muted">
-          {t("Saving also sets what a PR must meet to be scheduled, as the draft says:")} {d.ready.map((c) => conditionText(c, v.rules, t)).reduce<React.ReactNode[]>((acc, x, i) => (i ? [...acc, "; ", x] : [x]), [])}
-        </span>
-      ) : null}
       <label className="stack small" style={{ gap: 2 }}>
         {t("What the repository asks before a merge, beyond GitHub's rules")}
         <textarea rows={2} value={notes} onChange={(e) => setNotes(e.target.value)} />
@@ -943,5 +925,322 @@ function MergedList({ v }: { v: MergeView }) {
         ))}
       </div>
     </details>
+  );
+}
+
+function DescribeBox({ v }: { v: MergeView }) {
+  const t = useT();
+  const toast = useToast();
+  const [text, setText] = useState("");
+  const describe = useAct((words: string) => api.post<{ event: string }>(`/api/merge-schedule/${v.repo}/describe`, { text: words }), [["merge-schedule"]]);
+  return (
+    <div className="stack" style={{ gap: 6 }}>
+      <strong className="small">{t("Describe the rules in your words")}</strong>
+      <textarea
+        rows={3}
+        value={text}
+        placeholder={t("For example: schedulable once it has the approvals the branch needs and every comment is resolved; the action-required label does not block a merge; DCO may fail; rerun a flaky job twice, and every other failure once before it counts.")}
+        onChange={(e) => setText(e.target.value)}
+      />
+      <div className="row" style={{ gap: 8 }}>
+        <span className="small muted">{t("An agent turns your words into the settings below and shows them for you to save.")}</span>
+        <button
+          className="sm primary right"
+          disabled={describe.isPending || text.trim().length < 3}
+          onClick={() =>
+            describe.mutate(text.trim(), {
+              onSuccess: (out) => {
+                setText("");
+                toast({ title: t("Turning your words into rules"), body: t("The draft shows on this page when the agent is done."), icon: "sparkles", action: { label: t("Watch"), onClick: () => openJob(out.event) } });
+              },
+            })
+          }
+        >
+          <Icon name="sparkles" size={13} />
+          {t("Turn into rules")}
+        </button>
+      </div>
+      <ErrorBox error={describe.error} />
+    </div>
+  );
+}
+
+const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+
+function DraftRules({ v, draft }: { v: MergeView; draft: Draft }) {
+  const t = useT();
+  const toast = useToast();
+  const d = draft.draft;
+  const r = v.rules;
+  const s = v.ci_start;
+  const f = v.flaky;
+  const labelOf = (role: string) => r.label_roles[role] ?? role;
+  const list = (xs: string[]) => xs.join(", ") || "—";
+  const conds = (xs: string[]) => xs.map((c) => conditionText(c, r, t)).reduce<React.ReactNode[]>((acc, x, i) => (i ? [...acc, "; ", x] : [x]), []);
+  const judge = (x: string) => (x === "agent" ? t("flake patterns, then an agent's look") : t("flake patterns only"));
+  const rows: { label: string; was: React.ReactNode; now: React.ReactNode; changed: boolean }[] = [
+    { label: t("Schedulable when"), was: conds(r.ready), now: conds(d.ready), changed: !same([...r.ready].sort(), [...d.ready].sort()) },
+    { label: t("Labels that hold a merge back"), was: list(r.blocking_roles.map(labelOf)), now: list(d.blocking_roles.map(labelOf)), changed: !same(r.blocking_roles, d.blocking_roles) },
+    { label: t("Optional checks (may stay unpassed for a merge)"), was: list(s.optional_checks), now: list(d.optional_checks), changed: !same(s.optional_checks, d.optional_checks) },
+    { label: t("Gate label"), was: s.gate_label || "—", now: d.gate_label || "—", changed: (s.gate_label || "") !== d.gate_label },
+    { label: t("Gate jobs"), was: list(s.gate_jobs), now: list(d.gate_jobs), changed: !same(s.gate_jobs, d.gate_jobs) },
+    { label: t("Summary jobs"), was: list(s.summary_jobs), now: list(d.summary_jobs), changed: !same(s.summary_jobs, d.summary_jobs) },
+    { label: t("Start within (minutes)"), was: s.start_minutes, now: d.start_minutes, changed: s.start_minutes !== d.start_minutes },
+    { label: t("Finish within (minutes)"), was: s.run_minutes, now: d.run_minutes, changed: s.run_minutes !== d.run_minutes },
+    { label: t("A flake is judged by"), was: judge(f.diagnose), now: judge(d.diagnose), changed: f.diagnose !== d.diagnose },
+    { label: t("Reruns of a flake per commit"), was: f.max_reruns, now: d.max_reruns, changed: f.max_reruns !== d.max_reruns },
+    { label: t("Seconds between reruns"), was: f.backoff_seconds, now: d.backoff_seconds, changed: f.backoff_seconds !== d.backoff_seconds },
+    { label: t("Reruns of any other failure first"), was: f.rerun_unknown, now: d.rerun_unknown, changed: f.rerun_unknown !== d.rerun_unknown },
+    { label: t("Look for the root cause"), was: f.root_cause ? t("yes") : t("no"), now: d.root_cause ? t("yes") : t("no"), changed: f.root_cause !== d.root_cause },
+    {
+      label: t("Flake patterns"),
+      was: list(f.patterns.map((p) => p.id)),
+      now: list(d.flake_patterns.map((p) => p.id)),
+      changed: !same(
+        f.patterns.map((p) => [p.id, p.pattern, p.category]),
+        d.flake_patterns.map((p) => [p.id, p.pattern, p.category]),
+      ),
+    },
+    { label: t("How CI starts"), was: s.how ? t("described") : "—", now: d.how ? t("described anew, below") : "—", changed: (s.how || "") !== d.how },
+    { label: t("Before merging"), was: r.notes || "—", now: d.merge_notes || "—", changed: (r.notes || "") !== d.merge_notes },
+  ];
+  const changed = rows.filter((x) => x.changed);
+  const save = useAct(() => api.post<Saved>(`/api/merge-schedule/${v.repo}/draft/apply`), [["merge-schedule"]]);
+  const discard = useAct(() => api.del(`/api/merge-schedule/${v.repo}/draft`), [["merge-schedule"]]);
+  return (
+    <Section
+      title={t("Draft rules")}
+      hint={`${draft.source === "words" ? t("from your words") : t("from an investigation")} · ${draft.by}`}
+      aside={
+        <span className="small muted">
+          <When at={draft.at} />
+        </span>
+      }
+    >
+      <div className="stack" style={{ gap: 10 }}>
+        {draft.words && <blockquote className="small merge-words">{draft.words}</blockquote>}
+        {changed.length === 0 ? (
+          <span className="small muted">{t("It changes nothing: the settings already say this.")}</span>
+        ) : (
+          <table className="merge-diff small">
+            <thead>
+              <tr>
+                <th>{t("Setting")}</th>
+                <th>{t("Now")}</th>
+                <th>{t("Draft")}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {changed.map((x) => (
+                <tr key={x.label}>
+                  <td>{x.label}</td>
+                  <td className="muted">{x.was}</td>
+                  <td>
+                    <strong>{x.now}</strong>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+        {(s.how || "") !== d.how && d.how && <Markdown className="md merge-notes" text={d.how} />}
+        {draft.dropped.length > 0 && (
+          <span className="small muted">
+            {t("Left out, as the repository does not have them")}: {draft.dropped.join("; ")}
+          </span>
+        )}
+        {v.can_arrange && (
+          <div className="row" style={{ gap: 8 }}>
+            <button className="sm ghost" disabled={discard.isPending} onClick={() => discard.mutate(undefined)}>
+              {t("Discard")}
+            </button>
+            <button
+              className="sm primary right"
+              disabled={save.isPending || changed.length === 0}
+              onClick={() =>
+                save.mutate(undefined, {
+                  onSuccess: (out) => toast({ title: out.applied ? t("Saved") : t("Proposed to the maintainers"), icon: out.applied ? "check" : "inbox" }),
+                })
+              }
+            >
+              {t("Save these rules")}
+            </button>
+          </div>
+        )}
+        <ErrorBox error={save.error || discard.error} />
+      </div>
+    </Section>
+  );
+}
+
+function FlakyCard({ v }: { v: MergeView }) {
+  const t = useT();
+  const toast = useToast();
+  const f = v.flaky;
+  const [editing, setEditing] = useState(false);
+  const [diagnose, setDiagnose] = useState(f.diagnose);
+  const [maxReruns, setMaxReruns] = useState(String(f.max_reruns));
+  const [backoff, setBackoff] = useState(String(f.backoff_seconds));
+  const [unknown, setUnknown] = useState(String(f.rerun_unknown));
+  const [rootCause, setRootCause] = useState(f.root_cause);
+  const [adding, setAdding] = useState(false);
+  const [pid, setPid] = useState("");
+  const [pattern, setPattern] = useState("");
+  const [category, setCategory] = useState<"flaky" | "infra">("flaky");
+  const [description, setDescription] = useState("");
+  const done = (out: Saved) => toast({ title: out.applied ? t("Saved") : t("Proposed to the maintainers"), icon: out.applied ? "check" : "inbox" });
+  const save = useAct(
+    () =>
+      api.put<Saved>(`/api/merge-schedule/${v.repo}/flaky`, {
+        diagnose,
+        max_reruns: Math.min(10, Number(maxReruns) || 0),
+        backoff_seconds: Math.max(0, Number(backoff) || 0),
+        rerun_unknown: Math.min(5, Number(unknown) || 0),
+        root_cause: rootCause,
+      }),
+    [["merge-schedule"]],
+  );
+  const own = f.patterns.filter((p) => p.own);
+  const patterns = useAct((next: Pattern[]) => api.put<Saved>(`/api/merge-schedule/${v.repo}/flake-patterns`, { patterns: next.map(({ id, pattern, category, description }) => ({ id, pattern, category, description })) }), [["merge-schedule"]]);
+  return (
+    <Section
+      title={t("Flaky tests and reruns")}
+      hint={t("How a failed job of a scheduled PR, or one someone asks about, is judged and run again")}
+      aside={
+        v.can_arrange &&
+        !editing && (
+          <button className="sm ghost" onClick={() => setEditing(true)}>
+            {t("Edit")}
+          </button>
+        )
+      }
+    >
+      {editing ? (
+        <div className="stack" style={{ gap: 8 }}>
+          <label className="stack small" style={{ gap: 2 }}>
+            {t("A flake is judged by")}
+            <select value={diagnose} onChange={(e) => setDiagnose(e.target.value as "agent" | "patterns")}>
+              <option value="agent">{t("flake patterns, then an agent's look")}</option>
+              <option value="patterns">{t("flake patterns only")}</option>
+            </select>
+          </label>
+          <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+            <label className="stack small" style={{ gap: 2, flex: "1 1 140px" }}>
+              {t("Reruns of a flake per commit")}
+              <input value={maxReruns} inputMode="numeric" onChange={(e) => setMaxReruns(e.target.value.replace(/\D/g, ""))} />
+            </label>
+            <label className="stack small" style={{ gap: 2, flex: "1 1 140px" }}>
+              {t("Seconds between reruns")}
+              <input value={backoff} inputMode="numeric" onChange={(e) => setBackoff(e.target.value.replace(/\D/g, ""))} />
+            </label>
+            <label className="stack small" style={{ gap: 2, flex: "1 1 140px" }}>
+              {t("Reruns of any other failure first")}
+              <input value={unknown} inputMode="numeric" onChange={(e) => setUnknown(e.target.value.replace(/\D/g, ""))} />
+            </label>
+          </div>
+          <label className="row small" style={{ gap: 8 }}>
+            <input type="checkbox" checked={rootCause} onChange={(e) => setRootCause(e.target.checked)} />
+            {t("Look for the root cause of a real failure (an agent reads the PR's code)")}
+          </label>
+          <div className="row" style={{ gap: 8 }}>
+            <button className="sm ghost right" onClick={() => setEditing(false)}>
+              {t("Cancel")}
+            </button>
+            <button className="sm primary" disabled={save.isPending} onClick={() => save.mutate(undefined, { onSuccess: (out) => (done(out), setEditing(false)) })}>
+              {t("Save")}
+            </button>
+          </div>
+          <ErrorBox error={save.error} />
+        </div>
+      ) : (
+        <ul className="merge-rules">
+          <li className="small">
+            {t("A flake is judged by")}: <strong>{f.diagnose === "agent" ? t("flake patterns, then an agent's look") : t("flake patterns only")}</strong>
+          </li>
+          <li className="small">
+            {t("Reruns of a flake per commit")}: <strong>{f.max_reruns}</strong>, {f.backoff_seconds} {t("seconds apart")}
+          </li>
+          <li className="small">
+            {t("Reruns of any other failure first")}: <strong>{f.rerun_unknown}</strong>
+          </li>
+          <li className="small">
+            {t("Look for the root cause")}: <strong>{f.root_cause ? t("yes") : t("no")}</strong>
+          </li>
+        </ul>
+      )}
+      <div className="stack" style={{ gap: 6, marginTop: 12 }}>
+        <div className="row" style={{ gap: 8 }}>
+          <strong className="small">{t("Flake patterns")}</strong>
+          <span className="small muted">({f.patterns.length})</span>
+          {v.can_arrange && !adding && (
+            <button className="sm ghost right" onClick={() => setAdding(true)}>
+              <Icon name="plus" size={13} />
+              {t("Add")}
+            </button>
+          )}
+        </div>
+        {adding && (
+          <div className="stack merge-draft" style={{ gap: 6 }}>
+            <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+              <input style={{ flex: "1 1 120px" }} value={pid} placeholder={t("id, such as hub-timeout")} onChange={(e) => setPid(e.target.value)} />
+              <select value={category} onChange={(e) => setCategory(e.target.value as "flaky" | "infra")}>
+                <option value="flaky">{t("flaky")}</option>
+                <option value="infra">{t("the runner's")}</option>
+              </select>
+            </div>
+            <input className="mono" value={pattern} placeholder="ReadTimeoutError: HTTPSConnectionPool\(host='huggingface.co'" onChange={(e) => setPattern(e.target.value)} />
+            <input value={description} placeholder={t("What it is")} onChange={(e) => setDescription(e.target.value)} />
+            <div className="row" style={{ gap: 8 }}>
+              <button className="sm ghost right" onClick={() => setAdding(false)}>
+                {t("Cancel")}
+              </button>
+              <button
+                className="sm primary"
+                disabled={patterns.isPending || !pid.trim() || !pattern.trim()}
+                onClick={() =>
+                  patterns.mutate([...own, { id: pid.trim(), pattern, category, description }], {
+                    onSuccess: (out) => {
+                      done(out);
+                      setAdding(false);
+                      setPid("");
+                      setPattern("");
+                      setDescription("");
+                    },
+                  })
+                }
+              >
+                {t("Save")}
+              </button>
+            </div>
+          </div>
+        )}
+        {f.patterns.length === 0 ? (
+          <span className="small muted">{t("No flake patterns yet.")}</span>
+        ) : (
+          <div className="list">
+            {f.patterns.map((p) => (
+              <div key={p.id} className="list-row merge-row">
+                <div className="stack merge-main">
+                  <span className="small">
+                    <strong>{p.id}</strong> <span className="muted">· {p.category === "infra" ? t("the runner's") : t("flaky")}</span>
+                    {!p.own && <span className="muted"> · {t("from a pack")}</span>}
+                  </span>
+                  <code className="small mono" style={{ overflowWrap: "anywhere" }}>
+                    {p.pattern}
+                  </code>
+                  {p.description && <span className="small muted">{p.description}</span>}
+                </div>
+                {v.can_arrange && p.own && (
+                  <button className="sm ghost" disabled={patterns.isPending} onClick={() => patterns.mutate(own.filter((x) => x.id !== p.id), { onSuccess: done })}>
+                    {t("Remove")}
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+        <ErrorBox error={patterns.error} />
+      </div>
+    </Section>
   );
 }

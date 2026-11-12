@@ -26,8 +26,9 @@ changes and go through the gate as any other.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -47,12 +48,12 @@ from ..domain.merge_schedule import (
     skip_key,
     state_key,
 )
-from ..domain.profile import ReadyCondition, RepoProfile
+from ..domain.profile import FlakeSignature, ReadyCondition, RepoProfile
 from ..domain.run_ci import ci_view
 from ..domain.snapshot import Mergeable, PrSnapshot, PrState, RepoInfo
 from ..playbooks.auto_schedule import AUTO_COMMAND
 from ..playbooks.ci_rules import COMMAND as CI_RULES
-from ..playbooks.ci_rules import DRAFT_KEY
+from ..playbooks.ci_rules import DRAFT_KEY, MAX_PATTERNS, CiRulesDraft, FlakePattern
 from ..playbooks.hygiene import hygiene_key
 from ..playbooks.merge import MERGED_KEY
 from ..profiles.layers import ProfileError, parse_yaml
@@ -87,6 +88,24 @@ class CiStartBody(BaseModel):
     """What a PR must meet to be scheduled; ``None`` leaves it as it is."""
     merge_notes: str | None = Field(default=None, max_length=8_000)
     approvals: int | None = Field(default=None, ge=0, le=20)
+
+
+class DescribeBody(BaseModel):
+    text: str = Field(min_length=3, max_length=8_000)
+    """The rules in the maintainer's own words."""
+
+
+class FlakyBody(BaseModel):
+    diagnose: Literal["agent", "patterns"]
+    max_reruns: int = Field(ge=0, le=10)
+    backoff_seconds: int = Field(ge=0, le=24 * 3600)
+    rerun_unknown: int = Field(ge=0, le=5)
+    root_cause: bool
+
+
+class PatternsBody(BaseModel):
+    patterns: list[FlakePattern] = Field(max_length=MAX_PATTERNS)
+    """The repository's own flake patterns; a pack's stay as they are."""
 
 
 class BlockingBody(BaseModel):
@@ -203,6 +222,74 @@ async def _save_layer(
     }
 
 
+def _layer_patterns(layer: dict[str, Any]) -> list[dict[str, Any]]:
+    ci = layer.get("ci") if isinstance(layer.get("ci"), dict) else {}
+    found = ci.get("flake_signatures") if isinstance(ci, dict) else None
+    return [p for p in found or [] if isinstance(p, dict)]
+
+
+async def _own_pattern_ids(service: Service, repo: str) -> set[str]:
+    """The flake patterns the repository's settings layer names itself; the rest
+    come from its packs."""
+    layer = parse_yaml(
+        await service.a.memory.read_text(profile_path(repo)) or "", "settings"
+    )
+    return {str(p.get("id")) for p in _layer_patterns(layer)}
+
+
+def _apply_draft(
+    layer: dict[str, Any], draft: CiRulesDraft, inherited: dict[str, FlakeSignature]
+) -> None:
+    """Write every setting of ``draft`` into ``layer``."""
+    start = _section(layer, "ci", "start")
+    start.update(
+        {
+            "how": draft.how.strip(),
+            "gate_jobs": draft.gate_jobs,
+            "summary_jobs": draft.summary_jobs,
+            "start_minutes": draft.start_minutes,
+            "run_minutes": draft.run_minutes,
+            "optional_checks": draft.optional_checks,
+        }
+    )
+    roles = _section(layer, "labels", "roles")
+    if draft.gate_label:
+        roles["ci_gate"] = draft.gate_label
+    else:
+        roles.pop("ci_gate", None)
+    merge = _section(layer, "merge")
+    merge["blocking_roles"] = draft.blocking_roles
+    plan = _section(merge, "schedule")
+    plan["ready"] = draft.ready
+    if draft.merge_notes.strip():
+        plan["notes"] = draft.merge_notes.strip()
+    if draft.approvals:
+        merge["approvals"] = max(int(merge.get("approvals") or 0), draft.approvals)
+    ci = _section(layer, "ci")
+    ci["diagnose"] = draft.diagnose
+    ci["root_cause"] = draft.root_cause
+    ci["rerun"] = {
+        **(ci.get("rerun") if isinstance(ci.get("rerun"), dict) else {}),
+        "max_per_sha": draft.max_reruns,
+        "backoff_seconds": draft.backoff_seconds,
+        "unknown": draft.rerun_unknown,
+    }
+    own = []
+    for p in draft.flake_patterns:
+        was = inherited.get(p.id)
+        if was is not None and (was.pattern, was.category, was.description) == (
+            p.pattern,
+            p.category,
+            p.description,
+        ):
+            continue  # a pack's, unchanged
+        own.append(p.model_dump(mode="json"))
+    if own:
+        ci["flake_signatures"] = own
+    else:
+        ci.pop("flake_signatures", None)
+
+
 def _section(layer: dict[str, Any], *path: str) -> dict[str, Any]:
     node = layer
     for key in path:
@@ -275,6 +362,7 @@ def build_router() -> APIRouter:
                 row["conflict"] = pr.mergeable == Mergeable.CONFLICTING
                 not_ready.append(row)
         draft = await service.store.get_state(DRAFT_KEY.format(repo=repo))
+        own_patterns = await _own_pattern_ids(service, repo)
         start = profile.ci.start
         return {
             "repo": repo,
@@ -310,6 +398,23 @@ def build_router() -> APIRouter:
                 "ready_set": profile.merge.schedule.ready is not None,
                 "blocking_roles": profile.merge.blocking_roles,
                 "label_roles": dict(sorted(profile.labels.roles.items())),
+            },
+            "flaky": {
+                "diagnose": profile.ci.diagnose,
+                "max_reruns": profile.ci.rerun.max_per_sha,
+                "backoff_seconds": profile.ci.rerun.backoff_seconds,
+                "rerun_unknown": profile.ci.rerun.unknown,
+                "root_cause": profile.ci.root_cause,
+                "patterns": [
+                    {
+                        **sig.model_dump(
+                            mode="json",
+                            include={"id", "pattern", "category", "description"},
+                        ),
+                        "own": sig.id in own_patterns,
+                    }
+                    for sig in profile.ci.flake_signatures
+                ],
             },
             "ci_start": {
                 **start.model_dump(mode="json"),
@@ -661,6 +766,142 @@ def build_router() -> APIRouter:
             "started": started,
             "prs": len(await service.store.list_snapshots(repo)),
         }
+
+    @r.post("/{repo:path}/describe")
+    async def describe(
+        request: Request,
+        repo: str,
+        body: DescribeBody,
+        user: User = Depends(current_user),
+    ) -> dict[str, Any]:
+        """Have an agent turn the rules, in the maintainer's own words, into a draft
+        of the settings, changing only what they spoke to; the draft waits on the
+        page for a maintainer to save."""
+        service = service_of(request)
+        repo = _repo(repo)
+        await require_view(service, user, repo)
+        await _maintainer(service, user, repo)
+        event = Event(
+            kind=EventKind.DASHBOARD_COMMAND,
+            repo=repo,
+            payload={"command": CI_RULES, "by": user.login, "text": body.text},
+        )
+        await service.bus.publish(event)
+        return {"event": event.id}
+
+    @r.post("/{repo:path}/draft/apply")
+    async def apply_draft(
+        request: Request, repo: str, user: User = Depends(current_user)
+    ) -> dict[str, Any]:
+        """Save the agent's draft as it stands, every setting in it: a profile
+        change, through the gate. The draft was checked against what the repository
+        has when it was made (``ci_rules.checked``)."""
+        service = service_of(request)
+        repo = _repo(repo)
+        await require_view(service, user, repo)
+        profile = await service.profiles.active(repo)
+        stored = await service.store.get_state(DRAFT_KEY.format(repo=repo))
+        if profile is None or not isinstance(stored, dict):
+            raise HTTPException(404, "there is no draft to save")
+        draft = CiRulesDraft.model_validate(stored.get("draft") or {})
+        own = await _own_pattern_ids(service, repo)
+        inherited = {
+            s_.id: s_ for s_ in profile.ci.flake_signatures if s_.id not in own
+        }
+        out = await _save_layer(
+            service,
+            user,
+            repo,
+            lambda layer: _apply_draft(layer, draft, inherited),
+            "merge and CI rules, from "
+            + (
+                "their words" if stored.get("source") == "words" else "an investigation"
+            ),
+        )
+        if out["applied"]:
+            await service.store.set_state(DRAFT_KEY.format(repo=repo), None)
+        return out
+
+    @r.delete("/{repo:path}/draft")
+    async def discard_draft(
+        request: Request, repo: str, user: User = Depends(current_user)
+    ) -> dict[str, Any]:
+        service = service_of(request)
+        repo = _repo(repo)
+        await require_view(service, user, repo)
+        await _maintainer(service, user, repo)
+        await service.store.set_state(DRAFT_KEY.format(repo=repo), None)
+        return {"draft": None}
+
+    @r.put("/{repo:path}/flaky")
+    async def set_flaky(
+        request: Request,
+        repo: str,
+        body: FlakyBody,
+        user: User = Depends(current_user),
+    ) -> dict[str, Any]:
+        """Set how failed CI is judged and run again: a profile change, through the
+        gate."""
+        service = service_of(request)
+        repo = _repo(repo)
+        await require_view(service, user, repo)
+
+        def change(layer: dict[str, Any]) -> None:
+            ci = _section(layer, "ci")
+            ci["diagnose"] = body.diagnose
+            ci["root_cause"] = body.root_cause
+            rerun = _section(ci, "rerun")
+            rerun.update(
+                {
+                    "max_per_sha": body.max_reruns,
+                    "backoff_seconds": body.backoff_seconds,
+                    "unknown": body.rerun_unknown,
+                }
+            )
+
+        return await _save_layer(
+            service,
+            user,
+            repo,
+            change,
+            f"ci: flakes judged by {body.diagnose}, rerun up to {body.max_reruns} times",
+        )
+
+    @r.put("/{repo:path}/flake-patterns")
+    async def set_patterns(
+        request: Request,
+        repo: str,
+        body: PatternsBody,
+        user: User = Depends(current_user),
+    ) -> dict[str, Any]:
+        """Set the repository's own flake patterns (a pack's stay): a profile
+        change, through the gate."""
+        service = service_of(request)
+        repo = _repo(repo)
+        await require_view(service, user, repo)
+        ids = [p.id for p in body.patterns]
+        if len(ids) != len(set(ids)):
+            raise HTTPException(422, "each flake pattern needs an id of its own")
+        for p in body.patterns:
+            try:
+                re.compile(p.pattern)
+            except re.error as e:
+                raise HTTPException(
+                    422, f"pattern {p.id!r} is not a regular expression: {e}"
+                ) from e
+
+        def change(layer: dict[str, Any]) -> None:
+            ci = _section(layer, "ci")
+            if body.patterns:
+                ci["flake_signatures"] = [
+                    p.model_dump(mode="json") for p in body.patterns
+                ]
+            else:
+                ci.pop("flake_signatures", None)
+
+        return await _save_layer(
+            service, user, repo, change, f"ci: {len(body.patterns)} own flake patterns"
+        )
 
     @r.post("/{repo:path}/investigate")
     async def investigate(

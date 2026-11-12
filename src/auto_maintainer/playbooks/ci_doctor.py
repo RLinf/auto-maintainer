@@ -323,10 +323,20 @@ async def first_looks(
                 cause=_same_head_cause(before, pr),
             )
         )
-    found = await _diagnose_all(ctx, pr, [(c, excerpt(log)) for c, log, _, _ in new])
+    # ``ci.diagnose: patterns`` keeps agents off the logs: what no pattern names is
+    # not a flake.
+    found = (
+        await _diagnose_all(ctx, pr, [(c, excerpt(log)) for c, log, _, _ in new])
+        if profile.ci.diagnose == "agent"
+        else {}
+    )
     for check, log, sig, mark in new:
         diagnosis = found.get(check.name) or Diagnosis(
-            category="unknown", confidence=0.0, explanation="no diagnosis"
+            category="unknown",
+            confidence=0.0,
+            explanation="no diagnosis"
+            if profile.ci.diagnose == "agent"
+            else "no flake pattern matches its log",
         )
         failures.append(Failure(check, sig, diagnosis, log, fingerprint=mark))
     return failures

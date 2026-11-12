@@ -909,3 +909,171 @@ async def test_checking_all_prs_reads_each_from_the_forge_again(
     assert sorted(reads) == [42, 43]
     stored = await h.store.get_snapshot(REPO, 42)
     assert stored is not None and stored.review_decision == "APPROVED"
+
+
+async def test_rules_described_in_words_become_a_draft_a_maintainer_saves(
+    harness: Harness, tmp_path: Path
+) -> None:
+    h = harness
+    asked: list[str] = []
+
+    def parse(task):  # type: ignore[no-untyped-def]
+        asked.append(task.prompt)
+        assert task.budget == "quick" and task.mode == "read_only"
+        return {
+            "how": "",
+            "gate_label": "run-ci",
+            "gate_jobs": ["check-changes"],
+            "summary_jobs": [],
+            "start_minutes": 20,
+            "run_minutes": 180,
+            "ready": ["approvals", "threads_resolved"],
+            "blocking_roles": [],
+            "optional_checks": ["DCO", "made-up"],
+            "diagnose": "patterns",
+            "max_reruns": 2,
+            "backoff_seconds": 120,
+            "rerun_unknown": 1,
+            "root_cause": False,
+            "flake_patterns": [
+                {
+                    "id": "hub",
+                    "pattern": "huggingface.co.*timed out",
+                    "category": "flaky",
+                },
+                {"id": "broken", "pattern": "(unclosed", "category": "flaky"},
+            ],
+            "merge_notes": "",
+            "approvals": 0,
+        }
+
+    h.runner.on("onboard", parse)
+    h.forge.add_repo(
+        RepoInfo(
+            name=REPO,
+            labels=["run-ci", "waiting on author"],
+            required_checks=["DCO", "lint"],
+            default_branch_sha="d" * 40,
+        )
+    )
+    app = create_app(h.service, data_dir=tmp_path, allow_dev_login=True)
+    async with _as(app, "maria") as maria:
+        words = (
+            "Schedulable once approved with every comment resolved; DCO may fail; "
+            "judge flakes by patterns only and rerun anything else once."
+        )
+        out = await maria.post(
+            f"/api/merge-schedule/{REPO}/describe", json={"text": words}
+        )
+        assert out.status_code == 200, out.text
+        await h.settle()
+        assert asked and words in asked[0] and "Current settings" in asked[0]
+        view = (await maria.get(f"/api/merge-schedule/{REPO}/view")).json()
+        draft = view["draft"]
+        assert draft["source"] == "words" and draft["words"] == words
+        assert draft["draft"]["optional_checks"] == ["DCO"]
+        assert [p["id"] for p in draft["draft"]["flake_patterns"]] == ["hub"]
+        assert len(draft["dropped"]) == 2, draft["dropped"]
+        saved = (await maria.post(f"/api/merge-schedule/{REPO}/draft/apply")).json()
+        assert saved["applied"], saved
+    profile = await h.service.profiles.active(REPO)
+    assert profile is not None
+    assert profile.merge.schedule.ready == ["approvals", "threads_resolved"]
+    assert profile.merge.blocking_roles == []
+    assert profile.ci.start.optional_checks == ["DCO"]
+    assert profile.ci.diagnose == "patterns" and profile.ci.rerun.unknown == 1
+    assert profile.ci.root_cause is False
+    assert "hub" in [s.id for s in profile.ci.flake_signatures]
+    assert await h.store.get_state(f"ci-rules:{REPO}") is None, "saved, so gone"
+
+
+async def test_a_writer_cannot_have_the_rules_drafted(
+    harness: Harness, tmp_path: Path
+) -> None:
+    app = create_app(harness.service, data_dir=tmp_path, allow_dev_login=True)
+    async with _as(app, "bob") as bob:
+        out = await bob.post(
+            f"/api/merge-schedule/{REPO}/describe", json={"text": "merge anything"}
+        )
+        assert out.status_code == 403
+
+
+async def test_with_patterns_only_no_agent_reads_a_log_and_other_failures_rerun_first(
+    tmp_path: Path,
+) -> None:
+    h = await Harness.create(
+        tmp_path,
+        layer={
+            "merge": {"enabled": True},
+            "ci": {
+                "required_workflows": ["CI"],
+                "diagnose": "patterns",
+                "root_cause": False,
+                "rerun": {"max_per_sha": 2, "unknown": 1},
+            },
+        },
+    )
+    try:
+        h.forge.set_permission(REPO, "bob", Permission.WRITE)
+        await h.service.a.user_tokens.set("maria", UserToken(token="m"))
+        h.forge.job_logs[420] = "FAILED tests/test_m.py::test_x\n"
+        h.forge.put_pr(_ready(42, "a" * 40, _ci(42, "failure")))
+        await _schedule(h, 42)
+        await h.settle()
+        assert not [t for t in h.runner.tasks if str(t.kind) == "ci_diagnose"]
+        # Nothing calls it a flake, but it gets one rerun before it counts.
+        assert h.forge.writes_of("rerun_failed_jobs") == [
+            {"repo": REPO, "run_id": 4200}
+        ]
+        assert (await _phase(h, 42)).phase == "rerunning"
+        # The rerun fails the same way: now it is real.
+        pr = await h.forge.get_pr(REPO, 42)
+        again = _job(421, "unit", "failure", 4200, workflow="CI", attempt=2)
+        h.forge.job_logs[421] = "FAILED tests/test_m.py::test_x\n"
+        h.forge.put_pr(pr.model_copy(update={"checks": [again]}))
+        await h.emit(Event(kind=EventKind.CHECKS_COMPLETED, repo=REPO, number=42))
+        await h.settle()
+        assert (await _phase(h, 42)).phase == "failed"
+        assert len(h.forge.writes_of("rerun_failed_jobs")) == 1
+        assert not [t for t in h.runner.tasks if str(t.kind) == "ci_root_cause"]
+    finally:
+        await h.close()
+
+
+async def test_a_maintainer_sets_how_flakes_are_handled_on_the_page(
+    harness: Harness, tmp_path: Path
+) -> None:
+    h = harness
+    app = create_app(h.service, data_dir=tmp_path, allow_dev_login=True)
+    async with _as(app, "maria") as maria:
+        out = (
+            await maria.put(
+                f"/api/merge-schedule/{REPO}/flaky",
+                json={
+                    "diagnose": "patterns",
+                    "max_reruns": 3,
+                    "backoff_seconds": 60,
+                    "rerun_unknown": 1,
+                    "root_cause": True,
+                },
+            )
+        ).json()
+        assert out["applied"], out
+        bad = await maria.put(
+            f"/api/merge-schedule/{REPO}/flake-patterns",
+            json={"patterns": [{"id": "x", "pattern": "(oops"}]},
+        )
+        assert bad.status_code == 422
+        out = (
+            await maria.put(
+                f"/api/merge-schedule/{REPO}/flake-patterns",
+                json={"patterns": [{"id": "hub", "pattern": "timed out"}]},
+            )
+        ).json()
+        assert out["applied"], out
+        view = (await maria.get(f"/api/merge-schedule/{REPO}/view")).json()
+        flaky = view["flaky"]
+        assert flaky["diagnose"] == "patterns" and flaky["max_reruns"] == 3
+        own = [p for p in flaky["patterns"] if p["own"]]
+        assert [p["id"] for p in own] == ["hub"]
+        assert any(not p["own"] for p in flaky["patterns"]), "a pack's stay listed"
