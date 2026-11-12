@@ -766,6 +766,9 @@ textarea.mono-input { width: 100%; }
 .diff-comment-file { font-size: 12px; padding: 6px 10px; background: var(--surface-2); border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
 .diff-comment-body { padding: 10px 12px; border-top: 1px solid var(--border); }
 .diff-comment-body .md.posted { border: 0; padding: 0; }
+/* an agent's final message: its own box, scrolled inside a fixed height so a long
+   one never stretches the review card it sits under */
+.md.posted.final-body { max-height: 420px; overflow: auto; background: var(--surface-2); }
 .diff-lines { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12px; table-layout: fixed; }
 .diff-lines td { padding: 0 6px; line-height: 1.55; vertical-align: top; }
 .diff-lines .dl-no { width: 44px; text-align: right; color: var(--muted); user-select: none; }

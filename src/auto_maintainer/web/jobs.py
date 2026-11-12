@@ -14,10 +14,11 @@
 
 """Agents' work as people follow it: each job that runs an agent, live (design 5.13).
 
-A job's view has who asked for it, which agent runs it, the agent's steps so far, the
-questions it waits on, and what it produced (proposals and actions). Viewing needs
-write access to the job's repository, like every other page; stopping a job needs to
-be the person who asked for it or a maintainer of the repository, checked live.
+A job's view has who asked for it, which agent runs it, the agent's steps so far, what
+the agent said when it finished, the questions it waits on, and what it produced
+(proposals and actions). Viewing needs write access to the job's repository, like every
+other page; stopping a job needs to be the person who asked for it or a maintainer of
+the repository, checked live.
 """
 
 from __future__ import annotations
@@ -132,6 +133,10 @@ async def job_view(
     by = payload.get("by")
     found = await service.progress.steps(job.id)
     ran = next((s.runtime for s in found if s.kind == "start"), None)
+    # What the agent said when it finished; a job run again keeps its newest run's.
+    final = next(
+        (s.output for s in reversed(found) if s.kind == "done" and s.output), None
+    )
     questions = [
         q
         for q in await service.store.list_questions(QuestionState.PENDING, job.repo)
@@ -189,6 +194,7 @@ async def job_view(
         ),
         "produced": produced,
         "last_step": found[-1].model_dump(mode="json") if found else None,
+        "final": final,
     }
     if steps:
         out["steps"] = [s.model_dump(mode="json") for s in found]

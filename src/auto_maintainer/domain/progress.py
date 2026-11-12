@@ -45,6 +45,10 @@ StepKind = Literal[
 """``output`` is the live output of a run on a test machine: ``text`` names it,
 ``detail`` holds its newest lines."""
 
+FINAL_OUTPUT_LIMIT = 8000
+"""Characters kept of an agent's final message: enough for its reasoning, bounded so a
+job's saved steps stay small."""
+
 _INPUT_KEYS = (
     "command",
     "file_path",
@@ -63,6 +67,9 @@ class JobStep(BaseModel):
     kind: StepKind
     text: str = ""
     detail: str = ""
+    output: str = ""
+    """For ``done``: what the agent said when it finished, in its own words: what it
+    concluded and why. Kept apart from ``text``, which holds the error."""
     runtime: str = ""
     task_kind: str = ""
     ok: bool | None = None
@@ -134,5 +141,11 @@ def step_from_event(event: AgentEvent, runtime: str, task_kind: str) -> JobStep 
         result = event.result
         ok = bool(result and result.ok)
         error = (result.error or "") if result else ""
-        return JobStep(kind="done", ok=ok, text=_clean(error, 1000), **base)
+        return JobStep(
+            kind="done",
+            ok=ok,
+            text=_clean(error, 1000),
+            output=_clean(event.text, FINAL_OUTPUT_LIMIT),
+            **base,
+        )
     return None
