@@ -3,6 +3,39 @@
 
 export type RunCiState = "gated" | "failed" | "approval" | "running" | "passed" | "none";
 
+export interface CheckLink {
+  name: string;
+  workflow?: string | null;
+  details_url?: string | null;
+}
+
+/** A docs build's check: Read the Docs' PR preview and the like, by name or by the
+ * host its details link points at. */
+const DOCS_CHECK = /readthedocs|build[-_ ]?preview/i;
+const DOCS_HOST = /(^|\.)readthedocs\.(io|org)$/i;
+
+export function isDocsCheck(check: CheckLink): boolean {
+  return DOCS_CHECK.test(`${check.name} ${check.workflow ?? ""}`);
+}
+
+function hostOf(url: string | null | undefined): string {
+  if (!url) return "";
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return "";
+  }
+}
+
+/** The docs build's link among a PR's checks: the first docs check that reported a
+ * details link, by its name, workflow, or the host that link is on. */
+export function docsCheckUrl(checks: CheckLink[]): string | null {
+  const found = checks.find(
+    (c) => !!c.details_url && (isDocsCheck(c) || DOCS_HOST.test(hostOf(c.details_url))),
+  );
+  return found?.details_url ?? null;
+}
+
 const NAMES: Record<string, string> = {
   "claude-code": "Claude Code",
   codex: "Codex",

@@ -43,7 +43,7 @@ import { CodeOwnersCard } from "../codeOwners";
 import { ReviewProgressPanel } from "../progress";
 import { ACTIVE, PrWork, usePrWork } from "../jobs";
 import { openJob } from "../openJob";
-import { activePrActionPanel, describeRunCi, prMenuItems, type PrActionPanel } from "../prActions";
+import { activePrActionPanel, describeRunCi, docsCheckUrl, prMenuItems, type PrActionPanel } from "../prActions";
 import { MenuItem, Popover, Skeleton, Tabs, useTab, useToast } from "../ui";
 import { TranslateReview } from "../translate";
 import { forgeOf } from "../forges";
@@ -116,6 +116,8 @@ export default function PrPage({ me }: { me: Me }) {
       : lang === "zh"
         ? `在 ${forgeName} 打开`
         : `Open on ${forgeName}`;
+  // The PR's compiled docs: the docs build's check, when one reported a link.
+  const docsHref = docsCheckUrl(pr.checks);
   const mutationError = review.error || arm.error || disarm.error;
   const job = row?.review_activity.job;
   const reviewing = !!job && ["queued", "running", "waiting"].includes(job.status);
@@ -277,6 +279,12 @@ export default function PrPage({ me }: { me: Me }) {
               <Icon name="external" size={14} />
               <span className="hide-narrow">{openOnForge}</span>
             </a>
+            {docsHref && (
+              <a className="button" href={docsHref} target="_blank" rel="noreferrer" title={t("Open the docs built for this PR")}>
+                <Icon name="book" size={14} />
+                <span>{t("Docs")}</span>
+              </a>
+            )}
             <PrActionsButton
               repo={full}
               pr={pr}
@@ -545,18 +553,37 @@ function Overview({ d, ciActions, repo, canPush }: { d: PrDetail; ciActions?: Re
       <Section title={t("Checks")} aside={ciActions}>
         {d.pr.checks.length ? (
           <div className="list">
-            {d.pr.checks.map((c) => (
-              <div key={c.id} className="list-row">
-                <Status
-                  value={c.conclusion ?? c.status}
-                  label={c.conclusion === "action_required" ? t("awaiting approval") : undefined}
-                />
-                <span className="main">
-                  <span className="t">{c.name}</span>
-                  {c.workflow && <span className="meta">{c.workflow}</span>}
-                </span>
-              </div>
-            ))}
+            {d.pr.checks.map((c) => {
+              // Each check opens its own details page on the forge, when it has one.
+              const body = (
+                <>
+                  <Status
+                    value={c.conclusion ?? c.status}
+                    label={c.conclusion === "action_required" ? t("awaiting approval") : undefined}
+                  />
+                  <span className="main">
+                    <span className="t">{c.name}</span>
+                    {c.workflow && <span className="meta">{c.workflow}</span>}
+                  </span>
+                </>
+              );
+              return c.details_url ? (
+                <a
+                  key={c.id}
+                  className="list-row"
+                  href={c.details_url}
+                  target="_blank"
+                  rel="noreferrer"
+                  title={t("Open this check's details")}
+                >
+                  {body}
+                </a>
+              ) : (
+                <div key={c.id} className="list-row">
+                  {body}
+                </div>
+              );
+            })}
           </div>
         ) : (
           <span className="muted small">{t("No checks reported.")}</span>

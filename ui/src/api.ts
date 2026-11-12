@@ -591,7 +591,15 @@ export interface PrDetail {
     is_draft: boolean;
     state: string;
     files: { path: string; additions: number; deletions: number }[];
-    checks: { id: number; name: string; workflow: string | null; status: string; conclusion: string | null }[];
+    checks: {
+      id: number;
+      name: string;
+      workflow: string | null;
+      status: string;
+      conclusion: string | null;
+      /** The check's own page on the forge; missing for a check that has none. */
+      details_url?: string | null;
+    }[];
     reviews?: { id: number; author: string; state: string; submitted_at: string | null; commit_sha: string | null }[];
     requested_reviewers?: string[];
   };

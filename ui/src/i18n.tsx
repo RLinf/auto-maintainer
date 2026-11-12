@@ -2203,6 +2203,8 @@ const zh: Record<string, string> = {
   "Requirements": "基本要求",
   "Tests": "测试",
   "Docs": "文档",
+  "Open the docs built for this PR": "打开为此 PR 构建的文档",
+  "Open this check's details": "打开此检查的详情",
   "Style": "风格",
   "Design": "设计",
   "met": "满足",

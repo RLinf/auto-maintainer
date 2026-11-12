@@ -57,6 +57,7 @@ import {{
   activePrActionPanel,
   agentName,
   describeRunCi,
+  docsCheckUrl,
   prMenuItems,
   resolveAgentChoices,
 }} from {module_url!r};
@@ -128,6 +129,19 @@ assert.equal(activePrActionPanel("change", closedClean), "menu");
 assert.equal(activePrActionPanel("fix-ci", closedClean), "menu");
 assert.equal(activePrActionPanel("merge-base", closedClean), "menu");
 assert.equal(activePrActionPanel("reproduce", closedClean), "reproduce");
+
+// A docs build's check gives the PR page its Docs link: by its name, its workflow,
+// or the host Read the Docs' details link points at; a docs check with no link does not.
+const docs = [
+  {{ name: "unit", workflow: "CI", details_url: "https://ci.test/runs/1" }},
+  {{ name: "docs/readthedocs.org:widget", workflow: "docs", details_url: "https://readthedocs.org/projects/widget/builds/7" }},
+];
+assert.equal(docsCheckUrl(docs), "https://readthedocs.org/projects/widget/builds/7");
+assert.equal(docsCheckUrl([{{ name: "build-preview", details_url: "https://docs.test/pr/42" }}]), "https://docs.test/pr/42");
+assert.equal(docsCheckUrl([{{ name: "preview", details_url: "https://widget.readthedocs.io/en/pr-42/" }}]), "https://widget.readthedocs.io/en/pr-42/");
+assert.equal(docsCheckUrl([{{ name: "docs", details_url: null }}]), null);
+assert.equal(docsCheckUrl([{{ name: "unit", details_url: "https://ci.test/runs/1" }}]), null);
+assert.equal(docsCheckUrl([]), null);
 """
     proc = subprocess.run([*argv, "-e", script], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr or proc.stdout
