@@ -75,6 +75,7 @@ from ..domain.merge_schedule import (
 )
 from ..domain.permissions import Permission
 from ..domain.profile import RepoProfile
+from ..domain.records import RootCause
 from ..domain.review import ReviewState
 from ..domain.run_ci import ci_view, latest_checks, rerun_targets
 from ..domain.snapshot import PrSnapshot, PrState, RepoInfo
@@ -545,6 +546,41 @@ class MergePlaybook(Playbook):
     ) -> PlaybookResult:
         """Rerun what flaked within the budget; otherwise the failure lane."""
         checks = failing_checks(pr, profile)
+        if state.retry:
+            # A maintainer sent it back from the failure lane: run what failed
+            # again, past the budget, before judging it anew.
+            state.retry = False
+            view = ci_view(pr, profile.label_for("ci_gate"), profile.ci.start)
+            runs = {c.run_id for c in [*checks, *view.cancelled] if c.run_id}
+            targets = [
+                t for t in rerun_targets(latest_checks(pr.checks)) if t.run_id in runs
+            ]
+            if targets:
+                state.rerun_of = [c.id for c in [*checks, *view.cancelled]]
+                await self._set(
+                    ctx,
+                    profile,
+                    info,
+                    pr,
+                    state,
+                    "rerunning",
+                    "running what failed again, as a maintainer asked",
+                )
+                return PlaybookResult(
+                    actions=[
+                        step(
+                            ActionKind.CI_RERUN_FAILED,
+                            RerunPayload(
+                                run_id=t.run_id, workflow=t.workflow, attempt=t.attempt
+                            ),
+                            f"retry:{t.run_id}:{state.retries}",
+                            "a maintainer sent it back to run again",
+                        )
+                        for t in targets
+                    ],
+                    wait=wait,
+                    result={"phase": "rerunning", "retry": state.retries},
+                )
         if not checks:
             # Only cancelled runs: nothing failed, the run stopped short.
             view = ci_view(pr, profile.label_for("ci_gate"), profile.ci.start)
@@ -616,12 +652,55 @@ class MergePlaybook(Playbook):
                     )
                 )
         stuck = [f for f in failures if f.check.id not in retrying]
+        found: tuple[list[RootCause] | None, str] | None = None
+        if stuck:
+            # The first look could not call these flakes: the root cause decides
+            # before the failure lane. One the runner or a flake caused is run again
+            # within the flake budget; one in the change, the base, or unclear is not.
+            real = [f.check.name for f in failures if f.real]
+            if real and profile.ci.root_cause:
+                await self._note(
+                    ctx,
+                    pr,
+                    state,
+                    "diagnosing",
+                    "looking for the root cause of " + ", ".join(real),
+                )
+            found = await find_causes(ctx, pr, profile, failures)
+            by_job = {job: c for c in found[0] or [] for job in c.jobs}
+            for f in stuck:
+                cause = by_job.get(f.check.name)
+                if cause is None or cause.origin not in ("infra", "flaky"):
+                    continue
+                f.diagnosis = f.diagnosis.model_copy(
+                    update={"category": cause.origin, "explanation": cause.cause}
+                )
+                done = await reruns_at_head(ctx, pr, f.check.run_id or 0)
+                if not f.check.run_id or done >= rerun.max_per_sha:
+                    f.reruns = done
+                    continue
+                f.reruns = 0
+                retrying.add(f.check.id)
+                if f.check.run_id not in {a.payload["run_id"] for a in reruns}:
+                    reruns.append(
+                        step(
+                            ActionKind.CI_RERUN_FAILED,
+                            RerunPayload(
+                                run_id=f.check.run_id,
+                                workflow=f.check.workflow,
+                                attempt=f.check.run_attempt,
+                            ),
+                            f"rerun:{f.check.run_id}:{done}",
+                            f"{f.check.name}: {cause.cause}",
+                        )
+                    )
+            stuck = [f for f in failures if f.check.id not in retrying]
         if stuck or not reruns:
             jobs = ", ".join(f.check.name for f in stuck or failures) or "CI"
             return await self._fail(
-                ctx, profile, pr, arm, state, f"{jobs} failed", failures
+                ctx, profile, pr, arm, state, f"{jobs} failed", failures, found
             )
-        await record(ctx, pr, failures, None)
+        await record(ctx, pr, failures, found[0] if found else None)
         state.rerun_of = [f.check.id for f in failures]
         await self._set(
             ctx,
@@ -776,23 +855,26 @@ class MergePlaybook(Playbook):
         state: ScheduleState,
         why: str,
         failures: list | None = None,
+        found: tuple[list[RootCause] | None, str] | None = None,
     ) -> PlaybookResult:
-        """Move the PR to the failure lane, with the root cause of what failed, and
-        pass the turn on."""
+        """Move the PR to the failure lane, with the root cause of what failed
+        (``found`` when it was looked for already), and pass the turn on."""
         actions: list[Action] = []
         state.failed_jobs = [f.check.name for f in failures or [] if f.real]
         state.causes = []
         if failures:
-            real = [f.check.name for f in failures if f.real]
-            if real and profile.ci.root_cause:
-                await self._note(
-                    ctx,
-                    pr,
-                    state,
-                    "diagnosing",
-                    "looking for the root cause of " + ", ".join(real),
-                )
-            causes, base = await find_causes(ctx, pr, profile, failures)
+            if found is None:
+                real = [f.check.name for f in failures if f.real]
+                if real and profile.ci.root_cause:
+                    await self._note(
+                        ctx,
+                        pr,
+                        state,
+                        "diagnosing",
+                        "looking for the root cause of " + ", ".join(real),
+                    )
+                found = await find_causes(ctx, pr, profile, failures)
+            causes, base = found
             await record(ctx, pr, failures, causes)
             state.causes = explained(failures, causes, base)
             if state.causes:

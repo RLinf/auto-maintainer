@@ -1140,3 +1140,70 @@ async def test_the_pr_page_reads_ci_as_the_schedule_and_github_do(
     assert sorted(status["latest"]) == [2, 3]
     [row] = [r for r in view["candidates"] + view["not_ready"] if r["number"] == 42]
     assert row["ci"]["state"] == status["state"]
+
+
+async def test_a_failure_the_root_cause_lays_on_the_runner_is_rerun_not_failed(
+    harness: Harness,
+) -> None:
+    h = harness
+    # The quick look cannot tell; the look at the code finds the runner broke.
+    h.runner.on(
+        "ci_diagnose",
+        lambda t: {"category": "unknown", "confidence": 0.3, "explanation": "unclear"},
+    )
+    causes: list[str] = []
+
+    def root_cause(task):  # type: ignore[no-untyped-def]
+        causes.append(task.prompt)
+        return {
+            "causes": [
+                {
+                    "jobs": ["unit"],
+                    "failing": "the job's container",
+                    "origin": "infra",
+                    "cause": "The runner ran out of disk while pulling the image.",
+                    "confidence": 0.8,
+                }
+            ]
+        }
+
+    h.runner.on("ci_root_cause", root_cause)
+    h.forge.job_logs[420] = "Error: write /var/lib/docker: no space left\n"
+    h.forge.put_pr(_ready(42, "a" * 40, _ci(42, "failure")))
+    await _schedule(h, 42)
+    await h.settle()
+    assert h.forge.writes_of("rerun_failed_jobs") == [{"repo": REPO, "run_id": 4200}]
+    state = await _phase(h, 42)
+    assert state.phase == "rerunning", state.detail
+    assert len(causes) == 1, "the root cause is looked for once"
+    [observation] = [
+        o for o in await h.store.list_ci_observations(REPO) if o.check_id == 420
+    ]
+    assert observation.category == "infra", (
+        "kept, so the same failure is known next time"
+    )
+
+
+async def test_retry_runs_what_failed_again(harness: Harness, tmp_path: Path) -> None:
+    h = harness
+    h.runner.on(
+        "ci_diagnose",
+        lambda t: {"category": "unknown", "confidence": 0.5, "explanation": "unclear"},
+    )
+    h.runner.on("ci_root_cause", lambda t: {"causes": []})
+    h.forge.job_logs[420] = "FAILED tests/test_m.py::test_x\n"
+    h.forge.put_pr(_ready(42, "a" * 40, _ci(42, "failure")))
+    await h.poll()
+    await _schedule(h, 42)
+    await h.settle()
+    assert (await _phase(h, 42)).phase == "failed"
+    assert not h.forge.writes_of("rerun_failed_jobs")
+    app = create_app(h.service, data_dir=tmp_path, allow_dev_login=True)
+    async with _as(app, "maria") as maria:
+        out = await maria.post(f"/api/merge-schedule/{REPO}/42/retry")
+        assert out.status_code == 200, out.text
+    await h.settle()
+    # The maintainer's retry runs it again, whatever the first look said.
+    assert h.forge.writes_of("rerun_failed_jobs") == [{"repo": REPO, "run_id": 4200}]
+    state = await _phase(h, 42)
+    assert state.phase == "rerunning" and not state.retry

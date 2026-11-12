@@ -108,6 +108,11 @@ class ScheduleState(BaseModel):
     """The failure lane's root causes, as the PR author reads them."""
     approval_needed: bool = False
     """A fork's workflows wait for a person to approve them."""
+    retries: int = 0
+    """Times a maintainer sent it back from the failure lane at this head."""
+    retry: bool = False
+    """Sent back and not yet run again: its turn reruns the runs that failed, past
+    the rerun budget, since a maintainer asked."""
     rerun_of: list[int] = Field(default_factory=list)
     """The failed checks a rerun was asked for: until newer attempts replace them,
     the rerun has not started, and they are not a failure to act on again."""

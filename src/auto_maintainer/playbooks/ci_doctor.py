@@ -548,6 +548,41 @@ class CiDoctor(Playbook):
                     )
                 )
         causes, base = await find_causes(ctx, pr, profile, failures)
+        # What the first look could not call a flake but the root cause lays on the
+        # runner or a flake is run again too, within the same budget.
+        by_job = {job: c for c in causes or [] for job in c.jobs}
+        for f in failures:
+            cause = by_job.get(f.check.name)
+            run = f.check.run_id
+            if (
+                cause is None
+                or cause.origin not in ("infra", "flaky")
+                or not run
+                or run in reruns
+                or f.diagnosis.category in ("flaky", "infra")
+            ):
+                continue
+            f.diagnosis = f.diagnosis.model_copy(
+                update={"category": cause.origin, "explanation": cause.cause}
+            )
+            done = await reruns_at_head(ctx, pr, run)
+            if done >= profile.ci.rerun.max_per_sha:
+                continue
+            reruns.add(run)
+            action = make_action(
+                ActionKind.CI_RERUN_FAILED,
+                pr.repo,
+                RerunPayload(
+                    run_id=run, workflow=f.check.workflow, attempt=f.check.run_attempt
+                ),
+                number=pr.number,
+                head_sha=pr.head_sha,
+                discriminator=f"{run}:{done}",
+                rationale=f"{f.check.name}: {cause.cause}",
+                hints=hints,
+            )
+            action.provenance.requested_by = by
+            actions.append(action)
         await record(ctx, pr, failures, causes)
         lines = explained(failures, causes, base)
         for cause in causes or []:

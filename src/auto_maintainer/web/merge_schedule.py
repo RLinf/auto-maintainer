@@ -588,7 +588,9 @@ def build_router() -> APIRouter:
             raise HTTPException(404, f"#{number} is not scheduled")
         state = await _state(service, repo, number)
         state.phase = "queued"
-        state.detail = f"sent back by {user.login}"
+        state.detail = f"sent back by {user.login} to run its CI again"
+        state.retry = True
+        state.retries += 1
         state.updates = 0
         state.started_at = None
         state.running_since = None
