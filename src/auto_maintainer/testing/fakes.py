@@ -93,6 +93,7 @@ class FakeForge:
         self.teams: dict[str, set[str]] = {}
         self.path_changers: dict[tuple[str, str], str] = {}
         self.job_logs: dict[int, str] = {}
+        self.status_logs: dict[str, str] = {}
         self.merged: list[MergedPrSummary] = []
         self.runners: list[RunnerInfo] = []
         self.writes: list[tuple[str, dict[str, Any]]] = []
@@ -516,6 +517,9 @@ class FakeForge:
 
     async def get_job_log(self, repo: str, job_id: int) -> str | None:
         return self.job_logs.get(job_id)
+
+    async def get_status_log(self, repo: str, url: str) -> str | None:
+        return self.status_logs.get(url)
 
     async def rerun_failed_jobs(self, repo: str, run_id: int) -> None:
         self._record("rerun_failed_jobs", repo=repo, run_id=run_id)

@@ -59,7 +59,7 @@ from ..domain.progress import agent_session_key
 from ..domain.records import Job
 from ..domain.review import ReviewClassification, classify_review_state
 from ..domain.settings import LabMachine
-from ..domain.snapshot import PrSnapshot, RunnerInfo
+from ..domain.snapshot import CheckRun, PrSnapshot, RunnerInfo
 from ..profiles.governance import GovernanceRecords
 from ..profiles.knowledge import Knowledge
 from ..profiles.service import ProfileService
@@ -115,6 +115,13 @@ class CiReader:
 
     async def get_job_log(self, repo: str, job_id: int) -> str | None:
         return await self._ci.get_job_log(repo, job_id)
+
+    async def log_of(self, repo: str, check: CheckRun) -> str | None:
+        """The log of a failed check: a CI job's, or, for a commit status an
+        outside service reported (Read the Docs), that service's build log."""
+        if check.workflow is None and check.run_id is None and check.details_url:
+            return await self._ci.get_status_log(repo, check.details_url)
+        return await self._ci.get_job_log(repo, check.id)
 
     async def list_runners(self, repo: str) -> list[RunnerInfo]:
         return await self._ci.list_runners(repo)

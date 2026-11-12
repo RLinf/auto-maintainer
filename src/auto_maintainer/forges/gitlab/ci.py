@@ -34,6 +34,10 @@ class GitLabCi:
             raw=True,
         )
 
+    async def get_status_log(self, repo: str, url: str) -> str | None:
+        """No outside service's log is read on GitLab."""
+        return None
+
     async def rerun_failed_jobs(self, repo: str, run_id: int) -> None:
         """Retry the pipeline's failed jobs (GitLab's retry runs only those)."""
         await self._client.post(

@@ -71,6 +71,77 @@ async def test_job_log_follows_redirect_without_credentials(client, router):
     await ci.aclose()
 
 
+async def test_a_read_the_docs_builds_log_comes_from_its_api(client, router):
+    build = router.get("https://readthedocs.org/api/v2/build/35842899/").respond(
+        200,
+        json={
+            "success": False,
+            "error": None,
+            "commands": [
+                {"command": "git clone ...", "exit_code": 0, "output": "cloned"},
+                {
+                    "command": "git checkout --force 0562492",
+                    "exit_code": 128,
+                    "output": "fatal: unable to read tree (0562492)",
+                },
+            ],
+        },
+    )
+    ci = GitHubActionsCi(client)
+    log = await ci.get_status_log(
+        "acme/widget", "https://app.readthedocs.org/projects/rlinf/builds/35842899/"
+    )
+    assert log is not None and "failed" in log
+    assert "unable to read tree" in log and "cloned" not in log
+    assert "Authorization" not in build.calls[0].request.headers
+    # Any other link, whoever set it, is never fetched.
+    assert await ci.get_status_log("acme/widget", "http://169.254.169.254/x") is None
+    assert (
+        await ci.get_status_log(
+            "acme/widget", "https://evil.example/projects/rlinf/builds/1/"
+        )
+        is None
+    )
+    await ci.aclose()
+
+
+async def test_a_read_the_docs_build_of_a_stale_pull_ref_says_so(client, router):
+    head = "0562492444af5479b5325bc4f0c14a1b527fd7c3"
+    old = "5d322a1cb1c699ea99c7ca6850754c84284e64c8"
+
+    def build(n: int) -> dict:
+        return {
+            "success": False,
+            "commit": head,
+            "version_type": "external",
+            "version_slug": str(n),
+            "commands": [{"command": f"git checkout --force {head}", "exit_code": 128}],
+        }
+
+    router.get("https://readthedocs.org/api/v2/build/1/").respond(200, json=build(7))
+    router.get("https://readthedocs.org/api/v2/build/2/").respond(200, json=build(8))
+    router.get("/repos/acme/widget/git/ref/pull/7/head").respond(
+        200, json={"object": {"sha": old}}
+    )
+    router.get("/repos/acme/widget/git/ref/pull/8/head").respond(
+        200, json={"object": {"sha": head}}
+    )
+    ci = GitHubActionsCi(client)
+    stale = await ci.get_status_log(
+        "acme/widget", "https://app.readthedocs.org/projects/rlinf/builds/1/"
+    )
+    assert stale is not None
+    assert "refs/pull/7/head is still at 5d322a1cb1" in stale
+    assert "no change to them fixes it" in stale
+    # A ref at the head: the checkout failed for another reason, and the log says
+    # only what Read the Docs ran.
+    current = await ci.get_status_log(
+        "acme/widget", "https://app.readthedocs.org/projects/rlinf/builds/2/"
+    )
+    assert current is not None and "refs/pull/" not in current
+    await ci.aclose()
+
+
 async def test_rerun_and_runners(client, router):
     rerun = router.post(
         "/repos/acme/widget/actions/runs/555/rerun-failed-jobs"

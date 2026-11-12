@@ -37,6 +37,7 @@ from auto_maintainer.domain.agents import (
 from auto_maintainer.domain.permissions import Permission
 from auto_maintainer.domain.records import Job, JobStatus
 from auto_maintainer.domain.settings import UserToken
+from auto_maintainer.domain.snapshot import CheckConclusion, CheckRun, CheckStatus
 from auto_maintainer.testing.demo import build_demo
 from auto_maintainer.web.app import create_app
 
@@ -725,6 +726,47 @@ async def test_a_review_reports_the_reproduction_on_record(demo) -> None:
     record = task.prompt.split("Reproduction on record")[1]
     assert "gpu-01" in record and '"conclusion": "reproduced"' in record
     assert "Traceback" not in record, "run output stays with the job"
+
+
+async def test_a_change_asked_in_own_words_gets_the_outside_services_logs(
+    demo,
+) -> None:
+    """A person asking to fix a failed docs build means a log the agent's tools do
+    not reach: the service reads the outside service's build and hands it over."""
+    h, app = demo
+    url = "https://app.readthedocs.org/projects/widget/builds/9/"
+    pr = h.forge.prs[(REPO, 42)]
+    h.forge.put_pr(
+        pr.model_copy(
+            update={
+                "checks": [
+                    *pr.checks,
+                    CheckRun(
+                        id=9,
+                        name="docs/readthedocs.org:widget",
+                        status=CheckStatus.COMPLETED,
+                        conclusion=CheckConclusion.FAILURE,
+                        details_url=url,
+                    ),
+                ]
+            }
+        )
+    )
+    h.forge.status_logs[url] = "refs/pull/42/head is still at an older commit"
+    asked: list[Any] = []
+
+    def change(task: Any) -> Any:
+        asked.append(task)
+        return AgentResult(runtime="scripted", ok=True, text="Nothing to change.")
+
+    h.runner.on("fix", change)
+    async with _as(app, "maria") as maria:
+        started = await maria.post(
+            f"/api/prs/{REPO}/42/fix", json={"request": "Fix the docs build."}
+        )
+        assert started.status_code == 200, started.text
+        await h.settle()
+    assert "refs/pull/42/head is still at an older commit" in asked[0].prompt
 
 
 async def test_a_change_in_the_persons_own_words_needs_no_review(demo) -> None:

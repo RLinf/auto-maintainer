@@ -323,7 +323,7 @@ async def first_looks(
     failures: list[Failure] = []
     new: list[tuple[CheckRun, str, FlakeSignature | None, str | None]] = []
     for check in checks:
-        log = await ctx.ci.get_job_log(pr.repo, check.id) or check.summary or ""
+        log = await ctx.ci.log_of(pr.repo, check) or check.summary or ""
         sig = match_signature(log, check, signatures)
         mark = fingerprint(log, check)
         word = next(
@@ -475,6 +475,34 @@ def failing_checks(pr: PrSnapshot, profile: RepoProfile) -> list[CheckRun]:
     if profile.ci.cancelled_is_failure:
         checks += [c for c in view.cancelled if c not in checks]
     return checks
+
+
+async def outside_logs(
+    ctx: PlaybookContext,
+    pr: PrSnapshot,
+    profile: RepoProfile,
+    chosen: set[str] | None = None,
+) -> str:
+    """The logs of ``pr``'s failed checks that an outside service reported as commit
+    statuses (Read the Docs), those in ``chosen`` when a person chose, read by the
+    service: an agent's tools reach only the forge's own CI. Empty when none failed
+    or the forge has no log for them."""
+    out = []
+    for c in failing_checks(pr, profile):
+        if c.workflow is not None or c.run_id is not None:
+            continue
+        if chosen and c.name not in chosen:
+            continue
+        log = await ctx.ci.log_of(pr.repo, c)
+        if log:
+            out.append(f"{c.name}:\n{log[-15_000:]}")
+    return "\n\n".join(out)
+
+
+OUTSIDE_LOGS = (
+    "Logs of the failed checks outside services reported, read by the service "
+    "(your tools cannot reach them):\n"
+)
 
 
 async def reruns_at_head(ctx: PlaybookContext, pr: PrSnapshot, run_id: int) -> int:

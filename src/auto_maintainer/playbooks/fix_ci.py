@@ -46,7 +46,7 @@ from .base import (
     keeps_session,
     may_succeed_later,
 )
-from .ci_doctor import failing_checks
+from .ci_doctor import OUTSIDE_LOGS, failing_checks, outside_logs
 from .fix import DESCRIBE, FixResult
 from .prompts import pr_block, review_skill_block, schema_hint, untrusted
 
@@ -147,6 +147,7 @@ class FixCiPlaybook(Playbook):
             return PlaybookResult(result={"skipped": "the PR is not open"})
         chosen = set(request.payload.get("jobs") or [])
         jobs = failed_jobs(pr, profile, chosen)
+        outside = await outside_logs(ctx, pr, profile, chosen)
         if not jobs:
             return PlaybookResult(result={"skipped": "no CI job failed at its head"})
 
@@ -221,6 +222,9 @@ class FixCiPlaybook(Playbook):
                     "The service's diagnosis of them:\n"
                     + untrusted("ci.diagnosis", found, 12_000)
                     if found
+                    else "",
+                    OUTSIDE_LOGS + untrusted("ci.outside_logs", outside, 40_000)
+                    if outside
                     else "",
                     f"What {by} added: " + untrusted("maintainer.note", note, 2000)
                     if note

@@ -44,6 +44,7 @@ from ..domain.records import ChatMessage
 from ..domain.review import Finding, ReviewResult
 from ..domain.snapshot import PrSnapshot, PrState
 from .base import Playbook, PlaybookContext, PlaybookResult, may_succeed_later
+from .ci_doctor import OUTSIDE_LOGS, outside_logs
 from .prompts import pr_block, review_skill_block, schema_hint, untrusted
 
 FIX = """You are fixing a pull request for {reviewer}, a maintainer, inside an automated maintainer service. The working directory is a checkout of the PR's head commit.
@@ -262,6 +263,9 @@ class FixPlaybook(Playbook):
                 + untrusted("review.findings", listing, 20_000)
             )
             note = str(event.payload.get("note") or "").strip()
+            # Asked in their own words, a person may mean a failed check whose log the
+            # agent's tools cannot reach (Read the Docs).
+            outside = await outside_logs(ctx, pr, profile) if request or note else ""
             prompt = "\n\n".join(
                 [
                     FIX.format(
@@ -276,6 +280,9 @@ class FixPlaybook(Playbook):
                     asked,
                     f"What {by} added: " + untrusted("maintainer.note", note, 2000)
                     if note
+                    else "",
+                    OUTSIDE_LOGS + untrusted("ci.outside_logs", outside, 40_000)
+                    if outside
                     else "",
                     pr_block(pr, diff),
                 ]
