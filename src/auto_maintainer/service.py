@@ -372,6 +372,7 @@ class Service:
             sandbox_repo=settings.sandbox_repo,
             service_login=settings.login,
             standby=settings.standby,
+            signed_in=self.can_post_as,
         )
         self.info = ServiceInfo(
             login=settings.login,

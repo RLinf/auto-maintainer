@@ -230,6 +230,7 @@ async def test_get_repo_with_unreadable_protection(client, router):
                     "require_code_owner_review": True,
                     "require_last_push_approval": True,
                     "dismiss_stale_reviews_on_push": False,
+                    "required_review_thread_resolution": True,
                 },
             },
             {
@@ -242,8 +243,13 @@ async def test_get_repo_with_unreadable_protection(client, router):
         ],
     )
     router.get("/repos/acme/widget/labels").respond(200, json=[{"name": "bug"}])
+    router.get(
+        "/repos/acme/widget/actions/permissions/fork-pr-contributor-approval"
+    ).respond(403, json={"message": "admin only"})
     info = await GitHubReader(client).get_repo("acme/widget")
     assert info.default_branch_sha == "abc123" and info.private
+    assert info.requires_thread_resolution is True, "from the branch's ruleset"
+    assert info.fork_approval is None, "unreadable without admin"
     assert info.required_checks == ["e2e", "lint", "unit"]
     assert info.requires_up_to_date is True and info.required_approvals == 2
     assert info.requires_code_owner_reviews is True, "from the branch's ruleset"
@@ -268,7 +274,12 @@ async def test_get_repo_unprotected_branch(client, router):
     )
     router.get("/repos/acme/widget/rules/branches/dev").respond(200, json=[])
     router.get("/repos/acme/widget/labels").respond(200, json=[])
+    router.get(
+        "/repos/acme/widget/actions/permissions/fork-pr-contributor-approval"
+    ).respond(200, json={"approval_policy": "all_external_contributors"})
     info = await GitHubReader(client).get_repo("acme/widget")
+    assert info.fork_approval == "all_external_contributors"
+    assert info.requires_thread_resolution is False
     assert (
         info.required_checks,
         info.requires_up_to_date,
@@ -544,3 +555,33 @@ async def test_lists_one_query_cuts_short_are_read_to_the_end(client, router):
     )
     assert any(c.id == 99 and c.conclusion == "failure" for c in pr.checks)
     assert {(a["id"], a["cursor"]) for a in asked} == {("PR_1", "t1"), ("CS_1", "r1")}
+
+
+async def test_a_ruleset_narrows_the_merge_methods(client, router):
+    router.get("/repos/acme/widget").respond(
+        200,
+        json={
+            "default_branch": "main",
+            "allow_squash_merge": True,
+            "allow_merge_commit": True,
+            "allow_rebase_merge": True,
+        },
+    )
+    router.get("/repos/acme/widget/branches/main").respond(
+        200, json={"commit": {"sha": "s"}, "protected": False}
+    )
+    router.get("/repos/acme/widget/rules/branches/main").respond(
+        200,
+        json=[
+            {
+                "type": "pull_request",
+                "parameters": {"allowed_merge_methods": ["squash"]},
+            }
+        ],
+    )
+    router.get("/repos/acme/widget/labels").respond(200, json=[])
+    router.get(
+        "/repos/acme/widget/actions/permissions/fork-pr-contributor-approval"
+    ).respond(404)
+    info = await GitHubReader(client).get_repo("acme/widget")
+    assert info.merge_methods == ["squash"]

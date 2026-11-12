@@ -162,6 +162,10 @@ class Provenance(BaseModel):
     signals: list[str] = Field(default_factory=list)
     requested_by: str | None = None
     """The maintainer who asked for the action, for dashboard and chat actions."""
+    scheduled_by: str | None = None
+    """The maintainer whose merge schedule covers the action: a step the scheduler
+    takes for a PR they scheduled, drafted for them and approved by the schedule
+    (``actuator/pipeline.py:SCHEDULED``)."""
 
 
 class ActionHints(BaseModel):

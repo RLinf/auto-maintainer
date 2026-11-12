@@ -24,6 +24,7 @@ export interface Command {
 /** Every page, in the order the top bar shows them while they fit. */
 export const NAV: { to: string; label: string; icon: IconName; keys?: string; hint: string }[] = [
   { to: "/", label: "Home", icon: "home", keys: "g h", hint: "Decisions waiting for you and the state of the service" },
+  { to: "/merge", label: "Merge scheduling", icon: "merge", keys: "g e", hint: "Ready PRs, their merge order, CI runs, and failures" },
   { to: "/prs", label: "Pull requests", icon: "pr", keys: "g p", hint: "The review queue, ranked by priority" },
   { to: "/ci", label: "CI health", icon: "activity", hint: "Diagnosed failures, flaky jobs, reruns" },
   { to: "/repos", label: "Repositories", icon: "repo", keys: "g r", hint: "Profiles, settings, and onboarding" },

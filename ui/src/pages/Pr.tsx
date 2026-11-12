@@ -37,7 +37,7 @@ import { DataTable, ListToolbar, useList, type Column } from "../list";
 import { ApproveButton, FixForm, MergeBaseButton, MergeBaseForm, MergeNowButton, type InlineComment, type MergeOptions } from "../proposal";
 import { ReproduceForm } from "../reproduce";
 import { DescriptionSection, EditableTitle } from "../prEdit";
-import { failedChecks, FixCiButton, FixCiForm } from "../fixCi";
+import { ExplainCiButton, failedChecks, FixCiButton, FixCiForm } from "../fixCi";
 import { PrPeopleCards } from "../assignees";
 import { CodeOwnersCard } from "../codeOwners";
 import { ReviewProgressPanel } from "../progress";
@@ -108,7 +108,7 @@ export default function PrPage({ me }: { me: Me }) {
   if (detail.error || !d) return <ErrorBox error={detail.error} />;
   const pr = d.pr;
   const canPush = !!me.can_post_as_me;
-  const failed = failedChecks(pr.checks);
+  const failed = d.ci_failed ?? failedChecks(pr.checks);
   const forgeName = forgeOf(full).terms.forge_name;
   const openOnForge =
     forgeName === "GitHub" || forgeName === "GitLab"
@@ -135,6 +135,7 @@ export default function PrPage({ me }: { me: Me }) {
     describeRunCi(d.run_ci.state, canPush).inline !== "none" || (pr.state === "OPEN" && failed.length > 0) ? (
       <span className="row" style={{ gap: 6 }}>
         <RunCiButton repo={full} number={pr.number} plan={d.run_ci} canPush={canPush} size="sm" />
+        {pr.state === "OPEN" && <ExplainCiButton repo={full} number={pr.number} failed={failed} size="sm" />}
         {pr.state === "OPEN" && <FixCiButton repo={full} number={pr.number} failed={failed} canPush={canPush} size="sm" />}
       </span>
     ) : null;
@@ -367,12 +368,12 @@ export default function PrPage({ me }: { me: Me }) {
                 )}
                 {d.arm ? (
                   <button className="danger sm" onClick={() => disarm.mutate(undefined)}>
-                    {t("Cancel merge")}
+                    {t("Unschedule")}
                   </button>
                 ) : (
                   <button className="sm" onClick={() => arm.mutate(undefined)} title={t("Merge automatically once every check passes")}>
                     <Icon name="merge" size={14} />
-                    {t("Arm merge")}
+                    {t("Schedule merge")}
                   </button>
                 )}
               </span>
@@ -405,7 +406,7 @@ export default function PrPage({ me }: { me: Me }) {
                 </ul>
               </div>
             ) : (
-              <span className="small muted">{t("Arm a merge to see what it waits for. The service merges once every item passes.")}</span>
+              <span className="small muted">{t("Schedule it to merge to see what it waits for: the service runs its CI on its turn and merges once every item passes.")}</span>
             )}
           </Section>
           <Section title={t("Details")}>

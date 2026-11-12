@@ -287,6 +287,25 @@ class RunnerGroup(_Section):
     daily_budget: int | None = None
 
 
+class CiStart(_Section):
+    """How the repository's CI starts and what its jobs mean (design 5.5, merge
+    scheduling): written by its maintainers, or drafted by ``playbooks/ci_rules.py``
+    and saved by one."""
+
+    how: str = ""
+    """In plain words, for the agents that watch CI: what starts it (a push, the gate
+    label, a maintainer approving a fork's workflows, a comment) and what to expect."""
+    gate_jobs: list[str] = Field(default_factory=list)
+    """Jobs that fail on purpose when CI was not asked for (the gate label missing):
+    their failure means CI did not start, never that a test failed."""
+    summary_jobs: list[str] = Field(default_factory=list)
+    """Jobs that only report the other jobs' results: never a failure of their own."""
+    start_minutes: int = 20
+    """How long a scheduled PR's CI may take to start before an agent looks into why."""
+    run_minutes: int = 360
+    """How long it may run before an agent looks into why."""
+
+
 class Ci(_Section):
     provider: str = "github-actions"
     required_workflows: list[str] = Field(default_factory=list)
@@ -298,6 +317,7 @@ class Ci(_Section):
     root_cause: bool = True
     """Look for the root cause of failures that are not flakes, in a checkout of the
     PR head (design 5.5); ``false`` keeps the one-line explanation from the log."""
+    start: CiStart = Field(default_factory=CiStart)
 
 
 class Arming(_Section):
@@ -315,6 +335,24 @@ class Freeze(_Section):
     reason: str = ""
 
 
+class MergeSchedule(_Section):
+    """The repository's merge scheduling (design 5.5)."""
+
+    auto: bool = False
+    """Schedule every PR that becomes ready, as ``auto_by``; otherwise a maintainer
+    schedules each one."""
+    auto_by: str | None = None
+    """The maintainer who turned automatic scheduling on: what it schedules is armed
+    as theirs, and only while they still maintain the repository."""
+    parallel: int = Field(default=2, ge=1, le=20)
+    """How many scheduled PRs run their CI at once when PRs need not be up to date
+    with the base; when they must be, one at a time."""
+    notes: str = ""
+    """What the repository asks of a PR before it merges, in plain words, beside the
+    rules its forge enforces (the contribution guide's): shown on the Merge
+    scheduling page."""
+
+
 class Merge(_Section):
     enabled: bool = False
     method: Literal["squash", "merge", "rebase"] = "squash"
@@ -324,6 +362,7 @@ class Merge(_Section):
     message: MergeMessage = Field(default_factory=MergeMessage)
     update_branch: bool = True
     freezes: list[Freeze] = Field(default_factory=list)
+    schedule: MergeSchedule = Field(default_factory=MergeSchedule)
 
 
 class Priority(_Section):

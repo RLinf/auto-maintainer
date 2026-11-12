@@ -57,8 +57,16 @@ class RepoInfo(_Model):
     """Whether the default branch waits for a code owner's approval of the files
     they own; ``None`` when unreadable."""
     merge_methods: list[Literal["squash", "merge", "rebase"]] | None = None
-    """The ways the repository lets a PR merge, in GitHub's terms; ``None`` when
-    unreadable."""
+    """The ways the repository lets a PR merge, in GitHub's terms, as its settings and
+    the default branch's rulesets allow; ``None`` when unreadable."""
+    requires_thread_resolution: bool | None = None
+    """The default branch waits until every review conversation is resolved;
+    ``None`` when unreadable."""
+    fork_approval: str | None = None
+    """Whose workflow runs from forks wait for a maintainer to approve them, in
+    GitHub's terms (``first_time_contributors_new_to_github``,
+    ``first_time_contributors``, ``all_external_contributors``); ``None`` when
+    unreadable or not GitHub."""
 
 
 class PrFile(_Model):

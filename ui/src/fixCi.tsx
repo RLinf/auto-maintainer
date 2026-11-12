@@ -138,6 +138,37 @@ export function FixCiForm({
   );
 }
 
+/** Have the CI doctor explain the failed jobs: the first look at each, then the root
+ * cause of what really fails. Nothing diagnoses a PR's CI unless someone asks. */
+export function ExplainCiButton({ repo, number, failed, size }: { repo: string; number: number; failed: string[]; size?: "sm" }) {
+  const t = useT();
+  const toast = useToast();
+  const ask = useAct(() => api.post<{ event: string }>(`/api/prs/${repo}/${number}/ci-diagnose`), [["work"], ["pr"]]);
+  if (!failed.length) return null;
+  return (
+    <button
+      className={size}
+      disabled={ask.isPending}
+      title={`${t("Have an agent explain why these jobs fail:")} ${failed.join(", ")}`}
+      onClick={() =>
+        ask.mutate(undefined, {
+          onSuccess: (out) =>
+            toast({
+              title: t("Explaining the CI failures"),
+              body: t("The explanation shows on this page under CI; the repository's rules decide whether it is posted on the PR."),
+              icon: "activity",
+              action: { label: t("Watch"), onClick: () => openJob(out.event) },
+            }),
+          onError: (e) => toast({ title: t("Not started"), body: String((e as Error).message), icon: "x" }),
+        })
+      }
+    >
+      <Icon name="search" size={14} />
+      {t("Explain failures")}
+    </button>
+  );
+}
+
 export function FixCiButton({
   repo,
   number,

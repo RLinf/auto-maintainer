@@ -16,9 +16,11 @@
 
 from __future__ import annotations
 
+from .auto_schedule import AutoSchedule
 from .base import Playbook
 from .calibrate import Calibrate
 from .ci_doctor import CiDoctor
+from .ci_rules import CiRulesPlaybook
 from .commands import Commands
 from .comment_check import CommentCheckPlaybook, CommentScan
 from .evaluate import EvaluatePlaybook
@@ -60,6 +62,8 @@ def all_playbooks() -> list[Playbook]:
         Hygiene(),
         CiDoctor(),
         MergePlaybook(),
+        AutoSchedule(),
+        CiRulesPlaybook(),
         Commands(),
         Onboard(),
         ProfileDrift(),

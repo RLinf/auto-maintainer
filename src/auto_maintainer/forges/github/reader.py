@@ -454,6 +454,8 @@ class GitHubReader:
         owners_review: bool | None = None
         last_push: bool | None = None
         stale: bool | None = None
+        threads: bool | None = None
+        rule_methods: set[str] | None = None
         protection_summary = (branch_data.get("protection") or {}).get(
             "required_status_checks"
         ) or {}
@@ -466,7 +468,7 @@ class GitHubReader:
             }
             if not branch_data.get("protected"):
                 strict, approvals, owners_review = False, 0, False
-                last_push, stale = False, False
+                last_push, stale, threads = False, False, False
         protection = None
         if branch_data.get("protected"):
             protection = await self._client.get(
@@ -483,6 +485,11 @@ class GitHubReader:
             owners_review = bool(reviews.get("require_code_owner_reviews"))
             last_push = bool(reviews.get("require_last_push_approval"))
             stale = bool(reviews.get("dismiss_stale_reviews"))
+            threads = bool(
+                (protection.get("required_conversation_resolution") or {}).get(
+                    "enabled"
+                )
+            )
         rules = await self._client.get(
             f"/repos/{repo}/rules/branches/{quote(branch, safe='')}",
             repo=repo,
@@ -508,6 +515,23 @@ class GitHubReader:
                 )
                 last_push = bool(last_push or params.get("require_last_push_approval"))
                 stale = bool(stale or params.get("dismiss_stale_reviews_on_push"))
+                threads = bool(
+                    threads or params.get("required_review_thread_resolution")
+                )
+                allowed = params.get("allowed_merge_methods")
+                if isinstance(allowed, list) and allowed:
+                    methods = {str(m) for m in allowed}
+                    rule_methods = (
+                        methods if rule_methods is None else rule_methods & methods
+                    )
+        approval = await self._client.get(
+            f"/repos/{repo}/actions/permissions/fork-pr-contributor-approval",
+            repo=repo,
+            allow=(403, 404),
+        )
+        methods = _merge_methods(data)
+        if methods is not None and rule_methods is not None:
+            methods = [m for m in methods if m in rule_methods]
         return RepoInfo(
             # GitHub's own spelling: names are not case-sensitive there, and the
             # service keys a repository's records and memory folder by this one.
@@ -522,7 +546,9 @@ class GitHubReader:
             requires_code_owner_reviews=owners_review,
             requires_last_push_approval=last_push,
             dismisses_stale_reviews=stale,
-            merge_methods=_merge_methods(data),
+            merge_methods=methods,
+            requires_thread_resolution=threads,
+            fork_approval=(approval or {}).get("approval_policy"),
         )
 
     async def behind_by(self, repo: str, base: str, head: str) -> int | None:

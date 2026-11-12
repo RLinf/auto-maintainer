@@ -75,6 +75,22 @@ def _pr(**kw):
     return make_pr(**defaults)
 
 
+async def _ask_ci(h: Harness, number: int = 42, by: str = "maria") -> None:
+    """A person presses Explain failures on the PR page: the CI doctor runs only
+    when someone asks."""
+    from auto_maintainer.domain.events import Event
+
+    await h.emit(
+        Event(
+            kind=EventKind.DASHBOARD_COMMAND,
+            repo="acme/widget",
+            number=number,
+            payload={"command": "ci_diagnose", "by": by},
+        )
+    )
+    await h.settle()
+
+
 async def _auto(h: Harness, **levels: str) -> None:
     from auto_maintainer.domain.memory import profile_path
     from auto_maintainer.profiles.layers import dump_yaml, parse_yaml
@@ -209,7 +225,7 @@ async def test_followup_after_new_commits(harness: Harness) -> None:
     assert replies and "Resolved in `bbbbbbb`" in replies[0]["body"]
 
 
-async def test_flaky_ci_is_rerun_once_and_budget_holds(harness: Harness) -> None:
+async def test_asked_about_flaky_ci_the_doctor_reruns_it(harness: Harness) -> None:
     await _auto(harness, ci_rerun_failed="auto")
     check = CheckRun(
         id=7,
@@ -246,6 +262,8 @@ async def test_flaky_ci_is_rerun_once_and_budget_holds(harness: Harness) -> None
     harness.forge.put_pr(pr.model_copy(update={"checks": [check]}))
     events = await harness.poll()
     assert EventKind.CHECKS_COMPLETED in [e.kind for e in events]
+    assert harness.forge.writes_of("rerun_failed_jobs") == [], "nobody asked yet"
+    await _ask_ci(harness)
     assert harness.forge.writes_of("rerun_failed_jobs") == [
         {"repo": "acme/widget", "run_id": 99}
     ]
@@ -297,6 +315,7 @@ async def test_a_standby_host_reruns_only_what_a_person_approves(
         pr = await h.forge.get_pr("acme/widget", 42)
         h.forge.put_pr(pr.model_copy(update={"checks": [check]}))
         await h.poll()
+        await _ask_ci(h)
         assert h.forge.writes_of("rerun_failed_jobs") == [], "the other host reruns it"
         [shadowed] = await h.store.list_actions(
             repo="acme/widget", kinds=[ActionKind.CI_RERUN_FAILED]
@@ -361,6 +380,8 @@ async def _failing_ci(harness: Harness, log: str) -> None:
     pr = await harness.forge.get_pr("acme/widget", 42)
     harness.forge.put_pr(pr.model_copy(update={"checks": [check]}))
     await harness.poll()
+    assert _ci_kinds(harness) == [], "a failed check alone costs no agent"
+    await _ask_ci(harness)
 
 
 async def test_a_real_ci_failure_gets_its_root_cause_from_the_code(
@@ -546,6 +567,7 @@ async def test_the_same_failure_at_the_same_head_is_not_diagnosed_again(
     pr = await harness.forge.get_pr("acme/widget", 42)
     harness.forge.put_pr(pr.model_copy(update={"checks": [again]}))
     await harness.poll()
+    await _ask_ci(harness)
     assert _ci_kinds(harness) == ["ci_diagnose", "ci_root_cause"], "nothing new to ask"
     [first, second] = [
         o
@@ -618,6 +640,7 @@ async def test_a_runs_failed_jobs_get_one_first_look_and_the_runner_no_root_caus
     pr = await harness.forge.get_pr("acme/widget", 42)
     harness.forge.put_pr(pr.model_copy(update={"checks": failed}))
     await harness.poll()
+    await _ask_ci(harness)
     assert _ci_kinds(harness) == ["ci_diagnose"], "one look at both, no root cause"
     notes = [
         a.action.payload["event"]

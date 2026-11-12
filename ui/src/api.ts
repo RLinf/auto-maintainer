@@ -610,6 +610,8 @@ export interface PrDetail {
   arm: { sha: string; armed_by: string; armed_at: string } | null;
   gate: { outcome: string; items: GateItem[]; needs_ci_gate: boolean } | null;
   run_ci: RunCiPlan;
+  /** The failed jobs worth a look: the newest runs, without the repository's gate and summary jobs. */
+  ci_failed?: string[];
   merge_queue: { head: number | null; order: { number: number; title: string }[] } | null;
 }
 

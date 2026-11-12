@@ -25,6 +25,7 @@ from .clock import as_utc
 from .ids import same_commit
 from .permissions import Permission
 from .profile import RepoProfile
+from .run_ci import latest_checks
 from .snapshot import (
     CheckConclusion,
     CheckStatus,
@@ -46,6 +47,13 @@ class MergeArm(BaseModel):
     armed_at: datetime
     armer_permission: Permission = Permission.NONE
     armer_is_codeowner: bool = False
+    position: float | None = None
+    """Where it stands in the repository's merge schedule, lowest first; ``None``
+    keeps its arming time (``merge_schedule.order``)."""
+    auto: bool = False
+    """Armed by automatic scheduling (``merge.schedule.auto``) as ``armed_by``,
+    who never saw this PR: a step that runs outside code with the repository's
+    secrets (approving a fork's held workflows) waits for a person."""
 
 
 class GateItem(BaseModel):
@@ -131,12 +139,21 @@ def evaluate_merge_gate(
         and reviewer_permissions.get(a, Permission.NONE).at_least(Permission.WRITE)
     ]
     needed = max(profile.merge.approvals, repo_info.required_approvals or 0)
+    # GitHub's own verdict on the branch's review rules covers what the count does
+    # not: a code owner's review, an approval of the last push.
+    forge_waits = pr.review_decision == "REVIEW_REQUIRED"
     items.append(
         GateItem(
             name="approvals",
-            ok=len(approvers) >= needed,
+            ok=len(approvers) >= needed and not forge_waits,
             detail=f"{len(approvers)} of {needed} approvals"
-            + (f" ({', '.join(sorted(approvers))})" if approvers else ""),
+            + (f" ({', '.join(sorted(approvers))})" if approvers else "")
+            + (
+                "; GitHub still waits for a review its rules require"
+                + (" (a code owner's)" if repo_info.requires_code_owner_reviews else "")
+                if forge_waits and len(approvers) >= needed
+                else ""
+            ),
         )
     )
     blockers = [a for a, s in latest.items() if s == ReviewEventState.CHANGES_REQUESTED]
@@ -168,11 +185,12 @@ def evaluate_merge_gate(
         )
     )
 
-    # 4. Required checks.
+    # 4. Required checks, from the newest run of each workflow.
+    checks = latest_checks(pr.checks)
     needs_gate = False
     required_names = set(repo_info.required_checks or [])
     for name in sorted(required_names):
-        runs = [c for c in pr.checks if c.name == name]
+        runs = [c for c in checks if c.name == name]
         if not runs:
             items.append(
                 GateItem(
@@ -206,7 +224,7 @@ def evaluate_merge_gate(
                 )
             )
     for wf in profile.ci.required_workflows:
-        runs = [c for c in pr.checks if c.workflow == wf]
+        runs = [c for c in checks if c.workflow == wf]
         if not runs:
             gate_label = profile.label_for("ci_gate")
             needs_gate = bool(gate_label and gate_label not in pr.labels)

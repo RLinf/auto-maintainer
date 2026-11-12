@@ -231,10 +231,10 @@ async def test_after_a_ci_action_the_pr_is_read_again_as_its_runs_start(
         await refresh(repo, number)
 
     h.service._refresh_pr = counted
-    h.service.ci_settle_seconds = (0.01, 0.03)
+    h.service.ci_settle_seconds = (0.3, 0.5)
     async with _as(app, "walt") as walt:
         await walt.post(f"/api/prs/{REPO}/43/ci")  # adds the CI gate label
         await h.settle()
         assert reads.count(43) == 1, "at once"
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.8)
     assert reads.count(43) == 3, "and twice more while the runs start"

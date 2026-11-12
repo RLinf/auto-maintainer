@@ -86,6 +86,7 @@ from ..domain.memory import (
     repos_of_path,
 )
 from ..domain.merge_gate import MergeArm, evaluate_merge_gate, squash_message
+from ..domain.merge_schedule import ACTIVE, ScheduleState, ordered, state_key
 from ..domain.permissions import Permission
 from ..domain.profile import Conditions, RepoProfile, Review
 from ..domain.records import (
@@ -103,10 +104,11 @@ from ..domain.review import (
     review_quality,
 )
 from ..domain.review_progress import checks_key, load_checks, review_progress
-from ..domain.run_ci import plan_run_ci
+from ..domain.run_ci import ci_view, plan_run_ci
 from ..domain.scoring import Evaluation, priority_key, recompute
 from ..domain.secrets import redact_secrets
 from ..domain.snapshot import Mergeable, PrSnapshot, PrState, ReviewEventState
+from ..playbooks.ci_doctor import failing_checks
 from ..playbooks.evaluate import haystack, rubric_of
 from ..playbooks.hygiene import hygiene_key
 from ..playbooks.prompts import DEFAULT_QUALITY_GUIDE, DEFAULT_WRITING_GUIDE
@@ -491,23 +493,19 @@ async def _assignees(service: Service, repo: str, number: int) -> list[dict[str,
 
 
 async def _merge_queue(service: Service, repo: str) -> dict[str, Any]:
-    """The repository's armed PRs in the order they merge, as the merge playbook last
-    worked it out, and whose turn it is (``merge-queue:<repo>``)."""
-    state = await service.store.get_state(f"merge-queue:{repo}") or {}
-    armed = {a.number: a for a in await service.store.list_arms(repo)}
-    order = [n for n in state.get("order") or [] if n in armed]
-    order += sorted(n for n in armed if n not in order)
-    head = state.get("head") if state.get("head") in armed else None
-    if head is not None:
-        order = [head, *(n for n in order if n != head)]
-    titles = {}
-    for n in order:
-        snap = await service.store.get_snapshot(repo, n)
-        titles[n] = snap.title if snap else ""
-    return {
-        "head": head,
-        "order": [{"number": n, "title": titles[n]} for n in order],
-    }
+    """The repository's scheduled PRs in their merge order, and the first of them
+    that is doing something (``domain/merge_schedule.py``)."""
+    arms = ordered(await service.store.list_arms(repo))
+    order = []
+    head = None
+    for a in arms:
+        raw = await service.store.get_state(state_key(repo, a.number))
+        state = ScheduleState.model_validate(raw) if isinstance(raw, dict) else None
+        snap = await service.store.get_snapshot(repo, a.number)
+        if head is None and state is not None and state.phase in ACTIVE:
+            head = a.number
+        order.append({"number": a.number, "title": snap.title if snap else ""})
+    return {"head": head, "order": order}
 
 
 def service_of(request: Request) -> Service:
@@ -1766,8 +1764,13 @@ def build_router() -> APIRouter:
             "merge_queue": await _merge_queue(service, repo) if arm else None,
             "gate": gate,
             "run_ci": plan_run_ci(
-                pr, profile.label_for("ci_gate") if profile else None
+                pr,
+                profile.label_for("ci_gate") if profile else None,
+                profile.ci.start if profile else None,
             ).model_dump(mode="json"),
+            "ci_failed": [c.name for c in failing_checks(pr, profile)]
+            if profile
+            else [c.name for c in pr.checks if c.failed],
         }
 
     @r.get("/prs/{repo:path}/{number:int}/progress")
@@ -2341,7 +2344,7 @@ def build_router() -> APIRouter:
         ) or await service.store.get_snapshot(repo, number)
         if pr is None or pr.state != PrState.OPEN:
             raise HTTPException(409, f"{repo}#{number} is not open")
-        plan = plan_run_ci(pr, profile.label_for("ci_gate"))
+        plan = plan_run_ci(pr, profile.label_for("ci_gate"), profile.ci.start)
         if plan.state == "approval":
             # Approving runs the contributor's code on CI: it is the person's own.
             if not await service.can_post_as(user.login):
@@ -2385,8 +2388,9 @@ def build_router() -> APIRouter:
                 {
                     "running": "CI is already running at this commit",
                     "passed": "CI passed at this commit; there is nothing to run",
-                    "none": "no CI ran at this commit, and this repository starts it "
-                    "on push, not on a label",
+                    "none": "no CI ran at this commit that a rerun could start: it "
+                    "starts on a push or on its gate label, and a run its gate "
+                    "stopped before the label came stops again when rerun",
                 }[plan.state],
             )
         actions = (
@@ -3055,6 +3059,42 @@ def build_router() -> APIRouter:
         await service.bus.publish(event)
         return {"repo": repo, "number": number, "event": event.id, "review": review}
 
+    @r.post("/prs/{repo:path}/{number:int}/ci-diagnose")
+    async def request_ci_diagnosis(
+        request: Request,
+        repo: str,
+        number: int,
+        user: User = Depends(current_user),
+    ) -> dict[str, Any]:
+        """Have the CI doctor explain the PR's failing CI (``playbooks/ci_doctor.py``):
+        the first look at each failed job, then the root cause of what really fails.
+        Nothing diagnoses a PR's CI unless someone asks, or it is scheduled to merge."""
+        service = service_of(request)
+        repo = _repo(repo)
+        await require_view(service, user, repo)
+        profile = await service.profiles.active(repo)
+        if profile is None:
+            raise HTTPException(409, f"{repo} has no approved profile yet")
+        pr = await service.a.forge.get_pr(repo, number)
+        if pr is None or pr.state != PrState.OPEN:
+            raise HTTPException(409, f"{repo}#{number} is not open")
+        if not failing_checks(pr, profile):
+            view = ci_view(pr, profile.label_for("ci_gate"), profile.ci.start)
+            raise HTTPException(
+                409,
+                f"CI has not run: the {view.label!r} label is missing"
+                if view.state == "gated"
+                else "no CI job failed at this PR's head",
+            )
+        event = Event(
+            kind=EventKind.DASHBOARD_COMMAND,
+            repo=repo,
+            number=number,
+            payload={"command": "ci_diagnose", "by": user.login},
+        )
+        await service.bus.publish(event)
+        return {"event": event.id}
+
     @r.post("/prs/{repo:path}/{number:int}/fix-ci")
     async def request_ci_fix(
         request: Request,
@@ -3075,12 +3115,14 @@ def build_router() -> APIRouter:
         pr = await service.a.forge.get_pr(repo, number)
         if pr is None or pr.state != PrState.OPEN:
             raise HTTPException(409, f"{repo}#{number} is not open")
-        failed = [c for c in pr.checks if c.failed]
+        profile = await service.profiles.active(repo)
+        if profile is None:
+            raise HTTPException(409, f"{repo} has no approved profile yet")
+        failed = failing_checks(pr, profile)
         if not failed:
             raise HTTPException(409, "no CI job failed at this PR's head")
         session: dict[str, Any] | None = None
         if body.lab:
-            profile = await service.profiles.active(repo)
             machine = service.machines.get(body.lab)
             binding = profile.labs.get(body.lab) if profile else None
             why = unusable(repo, body.lab, machine, binding, user.login)

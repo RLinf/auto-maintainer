@@ -22,6 +22,7 @@ import CiPage from "./pages/Ci";
 import HomePage from "./pages/Home";
 import InboxPage from "./pages/Inbox";
 import MemoryPage from "./pages/Memory";
+import MergePage from "./pages/Merge";
 import PrPage from "./pages/Pr";
 import QuestionsPage from "./pages/Questions";
 import QueuePage from "./pages/Queue";
@@ -346,6 +347,7 @@ function Shell({ me }: { me: Me }) {
         )}
         <Routes>
           <Route path="/" element={<HomePage me={me} />} />
+          <Route path="/merge" element={<MergePage />} />
           <Route path="/prs" element={<QueuePage me={me} />} />
           <Route path="/pr/*" element={<PrPage me={me} />} />
           <Route path="/inbox" element={<InboxPage me={me} />} />

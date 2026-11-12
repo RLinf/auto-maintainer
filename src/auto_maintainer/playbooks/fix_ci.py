@@ -35,6 +35,7 @@ from ..domain.actions import ActionKind, ActionStatus, FixPrPayload, make_action
 from ..domain.agents import AgentTask, TaskKind
 from ..domain.events import Event, EventKind
 from ..domain.ids import short_sha
+from ..domain.profile import RepoProfile
 from ..domain.records import ActionRecord, CiObservation
 from ..domain.snapshot import PrSnapshot, PrState
 from .base import (
@@ -45,6 +46,7 @@ from .base import (
     keeps_session,
     may_succeed_later,
 )
+from .ci_doctor import failing_checks
 from .fix import DESCRIBE, FixResult
 from .prompts import pr_block, review_skill_block, schema_hint, untrusted
 
@@ -81,13 +83,14 @@ SESSION_GRACE_SECONDS = 600
 """How much longer than its session the agent's run may take, to finish its account."""
 
 
-def failed_jobs(pr: PrSnapshot) -> list[str]:
-    """The failed checks at the PR's head, one line each, with the run to read."""
+def failed_jobs(pr: PrSnapshot, profile: RepoProfile) -> list[str]:
+    """The failed jobs at the PR's head worth fixing (``ci_doctor.failing_checks``:
+    the newest runs, without the repository's gate and summary jobs), one line
+    each, with the run to read."""
     return [
         f"- {c.workflow + ' / ' if c.workflow else ''}{c.name}: {c.conclusion}"
         + (f" (run {c.run_id})" if c.run_id else "")
-        for c in pr.checks
-        if c.failed
+        for c in failing_checks(pr, profile)
     ]
 
 
@@ -139,7 +142,7 @@ class FixCiPlaybook(Playbook):
         pr = await ctx.forge.get_pr(request.repo, request.number)
         if pr is None or pr.state != PrState.OPEN:
             return PlaybookResult(result={"skipped": "the PR is not open"})
-        jobs = failed_jobs(pr)
+        jobs = failed_jobs(pr, profile)
         if not jobs:
             return PlaybookResult(result={"skipped": "no CI job failed at its head"})
 
@@ -166,7 +169,7 @@ class FixCiPlaybook(Playbook):
             session_id, machine_note = self._session(record)
 
         ctx.trusted_input = await ctx.author_is_team(pr)
-        names = {c.name for c in pr.checks if c.failed}
+        names = {c.name for c in failing_checks(pr, profile)}
         found = diagnoses(
             await ctx.store.list_ci_observations(pr.repo, sha=pr.head_sha), names
         )

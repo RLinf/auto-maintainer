@@ -23,6 +23,7 @@ from __future__ import annotations
 import difflib
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from datetime import timedelta
 from typing import Any
 
@@ -59,6 +60,25 @@ RUN_ON_REQUEST = frozenset({ActionKind.LAB_REPRODUCE})
 reproduction someone asked for, whose request is its approval. The repository's
 rule still decides on that approval (``off`` refuses it, a pause holds it)."""
 
+SCHEDULED = frozenset(
+    {
+        ActionKind.PR_UPDATE_BRANCH,
+        ActionKind.LABEL_CI_GATE,
+        ActionKind.CI_APPROVE_RUN,
+        ActionKind.CI_RERUN_FAILED,
+        ActionKind.PR_MERGE,
+    }
+)
+"""Steps of merge scheduling (design 5.5) that the schedule approves: drafted for
+the maintainer who scheduled the PR (``Provenance.scheduled_by``) and approved as
+them when made, while their arm stands at the action's head. The repository's rule
+still decides on that approval (``off`` refuses it, a pause holds it)."""
+AS_SCHEDULER = frozenset({ActionKind.PR_UPDATE_BRANCH, ActionKind.CI_APPROVE_RUN})
+"""Of ``SCHEDULED``, the steps that run with the scheduler's own sign-in when they
+have one: a base merge is a commit, which the service's account never makes, and
+approving a fork's workflows is only ever a person's. Without their sign-in a base
+merge runs as the service and the approval waits for them."""
+
 
 class ApprovalError(ValueError):
     pass
@@ -78,7 +98,10 @@ class ActionPipeline:
         sandbox_repo: str | None = None,
         service_login: str = "",
         standby: bool = False,
+        signed_in: Callable[[str], Awaitable[bool]] | None = None,
     ) -> None:
+        self.signed_in = signed_in
+        """Whether a person signed in so that actions can run as them."""
         self.service_login = service_login
         """The service's own account, which posts what nobody posts as themselves:
         ``ONE_PER_SHA`` counts per posting account."""
@@ -178,6 +201,28 @@ class ActionPipeline:
             max_repo_public_writes_per_hour=self.write_caps[1],
         )
 
+    async def _scheduled(self, action: Action) -> bool:
+        """Whether the merge schedule approves ``action``: a ``SCHEDULED`` step for
+        a PR whose arm is its scheduler's, drafted for them, at the arm's head."""
+        who = action.provenance.scheduled_by
+        if (
+            action.kind not in SCHEDULED
+            or not who
+            or action.draft_for != who
+            or action.number is None
+            or not action.head_sha
+        ):
+            return False
+        arm = await self.store.get_arm(action.repo, action.number)
+        return (
+            arm is not None
+            and arm.armed_by.lower() == who.lower()
+            and same_commit(arm.sha, action.head_sha)
+            # Automatic scheduling armed it unseen: running a fork's code with the
+            # repository's secrets stays a person's decision.
+            and not (arm.auto and action.kind == ActionKind.CI_APPROVE_RUN)
+        )
+
     async def _profile_for(self, action: Action) -> RepoProfile | None:
         return await self.profiles.active(action.repo)
 
@@ -270,6 +315,18 @@ class ActionPipeline:
             )
             if action.kind in RUN_ON_REQUEST and action.draft_for:
                 await self.approve(proposal.id, action.draft_for)
+                return await self.store.get_action(action.id) or record
+            if await self._scheduled(action):
+                assert action.draft_for
+                as_them = action.kind in AS_SCHEDULER and bool(
+                    self.signed_in and await self.signed_in(action.draft_for)
+                )
+                if as_them or action.kind != ActionKind.CI_APPROVE_RUN:
+                    await self.approve(
+                        proposal.id,
+                        action.draft_for,
+                        post_as=action.draft_for if as_them else None,
+                    )
                 return await self.store.get_action(action.id) or record
         elif decision.kind == DecisionKind.EXECUTE:
             self.actuator.enqueue(action.id, action.repo, kind=action.kind)
