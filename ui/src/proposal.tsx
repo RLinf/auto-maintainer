@@ -753,7 +753,7 @@ export function MergeBaseForm({
   const [agent, setAgent] = useAgentChoice("fix");
   const merge = useAct(
     () =>
-      api.post<{ run: "update" | "resolve"; status?: string; error?: string | null; event?: string }>(`/api/prs/${repo}/${number}/merge-base`, {
+      api.post<{ run: "update" | "resolve"; status?: string; error?: string | null; event?: string; action?: string }>(`/api/prs/${repo}/${number}/merge-base`, {
         agent: agent || null,
       }),
     [["pr"], ["prs"], ["proposals"], ["work"]],
@@ -784,6 +784,10 @@ export function MergeBaseForm({
                   });
                 } else if (out.status === "executed") {
                   toast({ title: `${t("Merged")} ${base}`, body: t("GitHub updated the PR's branch as you."), icon: "check" });
+                } else if (out.status === "queued" || out.status === "intent") {
+                  // Still running after the server's wait: say how it ends once it does.
+                  if (out.action) watchAction(out.action, actionTitle("pr.update_branch", number, t));
+                  toast({ title: `${t("Merge")} ${base}`, body: t("Updating the PR's branch on the forge."), icon: "clock" });
                 } else {
                   toast({ title: t("The branch was not updated"), body: out.error ?? out.status, icon: "x" });
                 }

@@ -200,11 +200,28 @@ class GitHubWriter:
     async def update_branch(
         self, repo: str, number: int, expected_head_sha: str
     ) -> None:
-        await self._client.put(
-            f"/repos/{repo}/pulls/{number}/update-branch",
-            repo=repo,
-            json={"expected_head_sha": expected_head_sha},
-        )
+        """Merge the base branch into the PR's branch. A sign-in through an OAuth
+        app without the ``workflow`` scope (a person's dashboard sign-in) cannot do
+        this when the base's new commits change workflow files; the error then says
+        so and what to do instead, with GitHub's own message."""
+        try:
+            await self._client.put(
+                f"/repos/{repo}/pulls/{number}/update-branch",
+                repo=repo,
+                json={"expected_head_sha": expected_head_sha},
+            )
+        except GitHubError as e:
+            if e.status == 403 and "workflow" in str(e) and "scope" in str(e):
+                raise GitHubError(
+                    403,
+                    "the base branch's new commits change workflow files, and the "
+                    "GitHub sign-in this service holds may not change workflow "
+                    "files (it lacks the workflow scope). Press Update branch on "
+                    "the PR's page on GitHub, or merge the base branch locally and "
+                    f"push. GitHub said: {str(e).split(': ', 1)[-1]}",
+                    e.body,
+                ) from e
+            raise
 
     async def merge(
         self,

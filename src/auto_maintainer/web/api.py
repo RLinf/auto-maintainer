@@ -300,6 +300,28 @@ async def _run_now(
     return await service.store.get_action(record.action.id) or record
 
 
+OUTCOME_WAIT_SECONDS = 20.0
+"""How long a press waits for its action to run before it answers with the action
+still running (``queued`` or ``intent``)."""
+
+
+async def _outcome(
+    service: Service, record: ActionRecord, timeout: float = OUTCOME_WAIT_SECONDS
+) -> ActionRecord:
+    """``record`` once its action ran, or as it stands after ``timeout`` seconds: an
+    approved action waits in its repository's queue, so ``_run_now`` returns before
+    the forge answers, and a press should report how it went, errors included."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while (
+        record.status in (ActionStatus.QUEUED, ActionStatus.INTENT)
+        and loop.time() < deadline
+    ):
+        await asyncio.sleep(0.2)
+        record = await service.store.get_action(record.action.id) or record
+    return record
+
+
 USAGE_RUNS = 20_000
 """The most runs a usage summary reads; the answer says when it hit this."""
 
@@ -2091,8 +2113,9 @@ def build_router() -> APIRouter:
     ) -> dict[str, Any]:
         """Bring the PR's base branch into it, as the person who pressed the button.
         Without conflicts GitHub updates the branch at once (the press is the
-        approval); with conflicts an agent resolves them and the merge comes back as
-        a draft for them to read and push."""
+        approval), and the answer says how that went, waiting for it up to
+        ``OUTCOME_WAIT_SECONDS``; with conflicts an agent resolves them and the merge
+        comes back as a draft for them to read and push."""
         service = service_of(request)
         repo = _repo(repo)
         await require_view(service, user, repo)
@@ -2121,6 +2144,7 @@ def build_router() -> APIRouter:
                 ),
                 as_them=True,
             )
+            record = await _outcome(service, record)
             return {
                 "run": "update",
                 "status": record.status,

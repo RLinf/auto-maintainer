@@ -407,9 +407,19 @@ async def test_merging_the_base_branch_without_conflicts_is_githubs_update(
         await h.service.a.user_tokens.set("maria", UserToken(token="t"))
         out = (await maria.post(f"/api/prs/{REPO}/42/merge-base", json={})).json()
         await h.settle()
-    assert out["run"] == "update"
+    assert out["run"] == "update" and out["status"] == "executed"
     [update] = h.forge.writes_of("update_branch")
     assert update["number"] == 42 and update["author"] == "maria"
+
+
+async def test_merging_the_base_branch_reports_the_forges_refusal(demo) -> None:
+    h, app = demo
+    await h.service.a.user_tokens.set("maria", UserToken(token="t"))
+    h.forge.fail_next["update_branch"] = RuntimeError("GitHub API error 403: refused")
+    async with _as(app, "maria") as maria:
+        out = (await maria.post(f"/api/prs/{REPO}/42/merge-base", json={})).json()
+    assert out["status"] == "failed", "the outcome of the press, not that it queued"
+    assert "refused" in out["error"]
 
 
 async def test_an_agent_resolves_conflicts_and_the_merge_is_pushed_as_the_approver(
