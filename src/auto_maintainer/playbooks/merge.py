@@ -217,7 +217,11 @@ class MergePlaybook(Playbook):
         wait = Wait(kinds=WAIT_KINDS, seconds=WAIT_SECONDS, reason="merge schedule")
         if state.phase == "failed" and same_commit(state.sha, pr.head_sha):
             ran = ci_view(pr, profile.label_for("ci_gate"), profile.ci.start).state
-            if ran not in ("running", "passed") or state.retry:
+            if (
+                not state.failed_on_ci
+                or ran not in ("running", "passed")
+                or state.retry
+            ):
                 return PlaybookResult(
                     wait=wait.model_copy(update={"reason": "in the failure lane"}),
                     result={"phase": "failed"},
@@ -607,7 +611,7 @@ class MergePlaybook(Playbook):
                     )
             if not again:
                 return await self._fail(
-                    ctx, profile, pr, arm, state, "its CI was cancelled, again"
+                    ctx, profile, pr, arm, state, "its CI was cancelled, again", []
                 )
             state.rerun_of = [c.id for c in view.cancelled]
             await self._set(
@@ -865,6 +869,7 @@ class MergePlaybook(Playbook):
         """Move the PR to the failure lane, with the root cause of what failed
         (``found`` when it was looked for already), and pass the turn on."""
         actions: list[Action] = []
+        state.failed_on_ci = failures is not None
         state.failed_jobs = [f.check.name for f in failures or [] if f.real]
         state.causes = []
         if failures:
@@ -1034,6 +1039,16 @@ class MergePlaybook(Playbook):
             return None
         error = str(event.payload.get("error") or record_.error or "it failed")
         kind = record_.action.kind
+        if "workflow" in error and ("scope" in error or "OAuth App" in error):
+            # GitHub lets no sign-in without the workflow scope write a change to a
+            # workflow file: a merge or base merge of a PR that has one.
+            return (
+                f"GitHub refused to {'merge' if kind == ActionKind.PR_MERGE else 'update'} "
+                "it: it changes a workflow file, and the GitHub sign-in that "
+                f"{'merged' if kind == ActionKind.PR_MERGE else 'updated'} it lacks the "
+                "workflow scope. Add the scope to that sign-in (gh auth refresh -s "
+                "workflow) and retry, or merge it on GitHub"
+            )
         if kind == ActionKind.PR_UPDATE_BRANCH:
             return f"merging the base in failed: {error}"
         if kind == ActionKind.PR_MERGE:

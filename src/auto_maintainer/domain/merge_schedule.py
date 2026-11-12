@@ -103,6 +103,10 @@ class ScheduleState(BaseModel):
     """``<sha>:<why>`` for each stall an agent looked into, so it looks once."""
     finding: str = ""
     """What that agent found."""
+    failed_on_ci: bool = False
+    """It went to the failure lane because its CI failed (not a refused merge or
+    base merge, nor a conflict): CI that runs again at the same head brings it
+    back."""
     failed_jobs: list[str] = Field(default_factory=list)
     causes: list[str] = Field(default_factory=list)
     """The failure lane's root causes, as the PR author reads them."""

@@ -1460,3 +1460,30 @@ async def test_a_pr_whose_ci_ran_again_and_passed_leaves_the_failure_lane(
     await h.emit(Event(kind=EventKind.CHECKS_COMPLETED, repo=REPO, number=42))
     await h.settle()
     assert [w["number"] for w in h.forge.writes_of("merge")] == [42]
+
+
+async def test_a_refused_merge_stays_in_the_failure_lane_with_what_to_do(
+    harness: Harness,
+) -> None:
+    h = harness
+    h.forge.put_pr(_ready(42, "a" * 40, _ci(42, "success")))
+    merge = h.forge.merge
+
+    async def refuse(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise RuntimeError(
+            "GitHub API error 403: refusing to allow an OAuth App to create or "
+            "update workflow `.github/workflows/ci.yml` without `workflow` scope"
+        )
+
+    h.forge.merge = refuse  # type: ignore[method-assign]
+    await _schedule(h, 42)
+    await h.settle()
+    state = await _phase(h, 42)
+    assert state.phase == "failed" and "workflow scope" in state.detail
+    assert not state.failed_on_ci
+    # Its CI passed already: that does not bring it back to fail again.
+    h.forge.merge = merge  # type: ignore[method-assign]
+    await h.emit(Event(kind=EventKind.CHECKS_COMPLETED, repo=REPO, number=42))
+    await h.settle()
+    assert (await _phase(h, 42)).phase == "failed"
+    assert not h.forge.writes_of("merge")
