@@ -94,7 +94,7 @@ export default function PrPage({ me }: { me: Me }) {
     { id: "files", label: t("Files"), count: d?.pr.files.length },
     { id: "timeline", label: t("Timeline"), count: d?.actions.length },
     { id: "reviews", label: t("Reviews"), count: d?.reviews.length },
-    { id: "ci", label: t("CI"), count: d?.ci.length },
+    { id: "ci", label: t("CI"), count: d?.ci_status?.failed.length || undefined },
   ];
   const [tab, setTab] = useTab(tabs);
 
@@ -309,30 +309,12 @@ export default function PrPage({ me }: { me: Me }) {
           {tab === "timeline" && <Timeline d={d} />}
           {tab === "reviews" && <ReviewsTab d={d} repo={full} number={pr.number} />}
           {tab === "ci" && (
-            <Section title={t("CI diagnoses")} aside={ciControls}>
-              {d.ci.length ? (
-                <div className="list">
-                  {d.ci.map((o, i) => (
-                    <div key={i} className="list-row" style={{ alignItems: "flex-start" }}>
-                      <Status value={o.category} />
-                      <span className="main">
-                        <span className="t">{o.workflow ? `${o.workflow} / ${o.check_name}` : o.check_name}</span>
-                        <span className="small" style={{ whiteSpace: "normal", display: "block" }}>
-                          {o.explanation}
-                        </span>
-                        {o.root_cause && <RootCauseView cause={o.root_cause} prUrl={d.pr.url} sha={o.sha} />}
-                        <span className="meta">
-                          {o.signature && <code>{o.signature}</code>} {o.rerun ? `· ${t("rerun requested")}` : ""} · <When at={o.created_at} />
-                        </span>
-                      </span>
-                      {o.id && <VerdictButtons repo={full} obs={o} />}
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <Empty icon="activity">{t("No failed jobs diagnosed on this PR.")}</Empty>
-              )}
-            </Section>
+            <CiTab
+              d={d}
+              repo={full}
+              canPush={canPush}
+              actions={describeRunCi(d.run_ci.state, canPush).inline !== "none" ? <RunCiButton repo={full} number={pr.number} plan={d.run_ci} canPush={canPush} size="sm" /> : null}
+            />
           )}
         </div>
 
@@ -554,6 +536,216 @@ function Overview({ d, ciActions, repo, canPush }: { d: PrDetail; ciActions?: Re
       <Section title={t("Checks")} aside={ciActions}>
         <ChecksList d={d} />
       </Section>
+    </>
+  );
+}
+
+const CI_PASSED = new Set(["success", "neutral", "skipped"]);
+const CI_FAILED = new Set(["failure", "timed_out", "startup_failure", "cancelled"]);
+
+function took(c: { started_at?: string | null; completed_at?: string | null }): string {
+  if (!c.started_at) return "";
+  const end = c.completed_at ? Date.parse(c.completed_at) : Date.now();
+  const s = Math.max(0, Math.round((end - Date.parse(c.started_at)) / 1000));
+  if (Number.isNaN(s)) return "";
+  return s >= 3600 ? `${Math.floor(s / 3600)}h ${Math.round((s % 3600) / 60)}m` : s >= 60 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${s}s`;
+}
+
+/** The PR's CI as it runs: the newest run of each workflow, job by job, with what
+ * failed selectable to diagnose or fix, each failure's latest diagnosis under it, and
+ * the earlier diagnoses folded below. */
+function CiTab({ d, repo, canPush, actions }: { d: PrDetail; repo: string; canPush: boolean; actions: ReactNode }) {
+  const t = useT();
+  const toast = useToast();
+  const [picked, setPicked] = useState<string[]>([]);
+  const [fixing, setFixing] = useState(false);
+  const [older, setOlder] = useState(false);
+  const ci = d.ci_status;
+  const open = d.pr.state === "OPEN";
+  const latest = new Set(ci?.latest ?? d.pr.checks.map((c) => c.id));
+  const current = d.pr.checks.filter((c) => latest.has(c.id));
+  const replaced = d.pr.checks.filter((c) => !latest.has(c.id));
+  const failedNames = new Set(ci?.failed ?? []);
+  const chosen = picked.filter((n) => failedNames.has(n));
+  const groups = new Map<string, typeof current>();
+  for (const c of current) {
+    const key = c.workflow ?? "";
+    groups.set(key, [...(groups.get(key) ?? []), c]);
+  }
+  // The latest diagnosis of each job at this head.
+  const atHead = d.ci.filter((o) => o.sha === d.pr.head_sha);
+  const diagnosis = new Map<string, CiObservation>();
+  for (const o of atHead) diagnosis.set(o.check_name, o);
+  const earlier = d.ci.filter((o) => o.sha !== d.pr.head_sha || diagnosis.get(o.check_name) !== o);
+  const diagnose = useAct(
+    (jobs: string[]) => api.post<{ event: string }>(`/api/prs/${repo}/${d.pr.number}/ci-diagnose`, { jobs }),
+    [["pr"], ["work"]],
+  );
+  const toggle = (name: string) => setPicked(picked.includes(name) ? picked.filter((x) => x !== name) : [...picked, name]);
+  const summary = !ci
+    ? null
+    : ci.state === "gated"
+      ? `${t("CI not started: the label is missing")} (${ci.label})`
+      : ci.state === "stopped"
+        ? t("CI stopped at its gate before the label came; a push or the label starts it again")
+        : ci.state === "approval"
+          ? t("CI waits for a maintainer's approval")
+          : ci.state === "running"
+            ? `${ci.running} ${t("running")}, ${ci.passed} ${t("passed")}${ci.failed.length ? ` · ${t("Failed")}: ${ci.failed.length}` : ""}`
+            : ci.state === "failed"
+              ? `${t("Failed")}: ${ci.failed.length || t("cancelled")}`
+              : ci.state === "passed"
+                ? t("CI passed")
+                : t("No CI yet");
+  const row = (c: (typeof current)[number]) => {
+    const failedHere = failedNames.has(c.name);
+    const o = diagnosis.get(c.name);
+    const value = c.conclusion ?? c.status;
+    return (
+      <div key={c.id} className="list-row ci-row">
+        <span className="ci-pick">
+          {failedHere && open && <input type="checkbox" aria-label={c.name} checked={picked.includes(c.name)} onChange={() => toggle(c.name)} />}
+        </span>
+        <div className="stack ci-main">
+          <span className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+            <Status value={value} label={c.conclusion === "action_required" ? (c.workflow ? t("awaiting approval") : t("action required")) : undefined} />
+            {c.details_url ? (
+              <a href={c.details_url} target="_blank" rel="noreferrer" className="t">
+                {c.name}
+              </a>
+            ) : (
+              <span className="t">{c.name}</span>
+            )}
+            {took(c) && <span className="small muted">{took(c)}</span>}
+          </span>
+          {failedHere && o && (
+            <div className="stack ci-diagnosis">
+              <span className="row small" style={{ gap: 8, flexWrap: "wrap" }}>
+                <Status value={o.category} />
+                <span style={{ whiteSpace: "normal" }}>{o.explanation}</span>
+              </span>
+              {o.root_cause && <RootCauseView cause={o.root_cause} prUrl={d.pr.url} sha={o.sha} />}
+              <span className="row small muted" style={{ gap: 8 }}>
+                <When at={o.created_at} />
+                {o.id && <VerdictButtons repo={repo} obs={o} />}
+              </span>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
+  const order = (cs: typeof current) =>
+    [...cs].sort((a, b) => {
+      const rank = (c: (typeof current)[number]) => (failedNames.has(c.name) ? 0 : !c.conclusion ? 1 : CI_FAILED.has(c.conclusion) ? 2 : 3);
+      return rank(a) - rank(b) || a.name.localeCompare(b.name);
+    });
+  return (
+    <>
+      <Section title={t("CI")} aside={actions}>
+        {!d.pr.checks.length ? (
+          <Empty icon="activity">{t("No checks reported.")}</Empty>
+        ) : (
+          <div className="stack" style={{ gap: 12 }}>
+            {summary && (
+              <span className="small" style={{ color: ci?.state === "failed" ? "var(--bad)" : ci?.state === "passed" ? "var(--ok)" : "var(--text-2)" }}>
+                {summary}
+              </span>
+            )}
+            {open && failedNames.size > 0 && (
+              <div className="row ci-bar">
+                <label className="row small" style={{ gap: 6 }}>
+                  <input
+                    type="checkbox"
+                    checked={chosen.length === failedNames.size}
+                    onChange={(e) => setPicked(e.target.checked ? [...failedNames] : [])}
+                  />
+                  {chosen.length ? `${chosen.length} ${t("selected")}` : t("Select the failed jobs")}
+                </label>
+                <button
+                  className="sm right"
+                  disabled={!chosen.length || diagnose.isPending}
+                  onClick={() =>
+                    diagnose.mutate(chosen, {
+                      onSuccess: (out) =>
+                        toast({ title: t("Diagnosing the selected failures"), icon: "activity", action: { label: t("Watch"), onClick: () => openJob(out.event) } }),
+                      onError: (e) => toast({ title: t("Not started"), body: String((e as Error).message), icon: "x" }),
+                    })
+                  }
+                >
+                  <Icon name="search" size={13} />
+                  {t("Diagnose")}
+                </button>
+                <button className={`sm ${fixing ? "on" : ""}`} disabled={!chosen.length} onClick={() => setFixing(!fixing)}>
+                  <Icon name="activity" size={13} />
+                  {t("Fix")}
+                </button>
+              </div>
+            )}
+            {fixing && chosen.length > 0 && (
+              <div className="ci-fix">
+                <FixCiForm repo={repo} number={d.pr.number} failed={chosen} canPush={canPush} onClose={() => setFixing(false)} />
+              </div>
+            )}
+            {[...groups.entries()]
+              .sort(([a, ga], [b, gb]) => {
+                const bad = (g: typeof current) => g.some((c) => failedNames.has(c.name));
+                return Number(bad(gb)) - Number(bad(ga)) || a.localeCompare(b);
+              })
+              .map(([workflow, cs]) => {
+                const passed = cs.filter((c) => c.conclusion && CI_PASSED.has(c.conclusion)).length;
+                const running = cs.filter((c) => !c.conclusion).length;
+                const bad = cs.filter((c) => failedNames.has(c.name)).length;
+                return (
+                  <details key={workflow || "-"} className="ci-group" open={bad > 0 || running > 0 || groups.size <= 2}>
+                    <summary>
+                      <strong className="small">{workflow || t("Other checks")}</strong>
+                      <span className="small muted">
+                        {" "}
+                        {passed} {t("passed")}
+                        {running ? `, ${running} ${t("running")}` : ""}
+                        {bad ? `, ${bad} ${t("failed")}` : ""}
+                      </span>
+                    </summary>
+                    <div className="list">{order(cs).map(row)}</div>
+                  </details>
+                );
+              })}
+            {replaced.length > 0 && (
+              <button className="link-button small" style={{ alignSelf: "flex-start" }} onClick={() => setOlder(!older)}>
+                {older ? t("Hide older runs") : `${t("Show older runs")} (${replaced.length})`}
+              </button>
+            )}
+            {older && <div className="list" style={{ opacity: 0.6 }}>{replaced.map(row)}</div>}
+            <ErrorBox error={diagnose.error} />
+          </div>
+        )}
+      </Section>
+      {earlier.length > 0 && (
+        <details className="card merge-details">
+          <summary>
+            <strong>{t("Earlier diagnoses")}</strong> <span className="muted small">({earlier.length})</span>
+          </summary>
+          <div className="list">
+            {earlier.map((o, i) => (
+              <div key={o.id ?? i} className="list-row" style={{ alignItems: "flex-start" }}>
+                <Status value={o.category} />
+                <span className="main">
+                  <span className="t">{o.workflow ? `${o.workflow} / ${o.check_name}` : o.check_name}</span>
+                  <span className="small" style={{ whiteSpace: "normal", display: "block" }}>
+                    {o.explanation}
+                  </span>
+                  {o.root_cause && <RootCauseView cause={o.root_cause} prUrl={d.pr.url} sha={o.sha} />}
+                  <span className="meta">
+                    <code>{o.sha.slice(0, 7)}</code> {o.signature && <code>{o.signature}</code>} {o.rerun ? `· ${t("rerun requested")}` : ""} · <When at={o.created_at} />
+                  </span>
+                </span>
+                {o.id && <VerdictButtons repo={repo} obs={o} />}
+              </div>
+            ))}
+          </div>
+        </details>
+      )}
     </>
   );
 }

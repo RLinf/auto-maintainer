@@ -1209,3 +1209,13 @@ details.pv-section[open] > summary { margin-bottom: 6px; }
 .merge-diff th { text-align: left; font-weight: 600; color: var(--muted); padding: 4px 8px 4px 0; border-bottom: 1px solid var(--border); }
 .merge-diff td { padding: 6px 8px 6px 0; border-bottom: 1px solid var(--border); vertical-align: top; overflow-wrap: anywhere; }
 @media (max-width: 640px) { .merge-diff th:first-child, .merge-diff td:first-child { width: 34%; } }
+
+/* ---- a PR's CI tab ------------------------------------------------------------------------ */
+.ci-bar { gap: 8px; padding: 8px 10px; border-radius: var(--r-sm); background: var(--surface-2); flex-wrap: wrap; }
+.ci-fix { padding: 4px 0; }
+.ci-group summary { cursor: pointer; padding: 4px 0; }
+.ci-row { align-items: flex-start; gap: 8px; }
+.ci-pick { width: 18px; flex-shrink: 0; padding-top: 3px; }
+.ci-main { gap: 6px; flex: 1; min-width: 0; }
+.ci-main .t { overflow-wrap: anywhere; }
+.ci-diagnosis { gap: 6px; padding: 8px 10px; border-left: 3px solid var(--border-strong); background: var(--surface-2); border-radius: 0 var(--r-sm) var(--r-sm) 0; }

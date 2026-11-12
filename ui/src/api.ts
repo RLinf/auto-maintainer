@@ -599,6 +599,8 @@ export interface PrDetail {
       conclusion: string | null;
       /** The check's own page on the forge; missing for a check that has none. */
       details_url?: string | null;
+      started_at?: string | null;
+      completed_at?: string | null;
     }[];
     reviews?: { id: number; author: string; state: string; submitted_at: string | null; commit_sha: string | null }[];
     requested_reviewers?: string[];

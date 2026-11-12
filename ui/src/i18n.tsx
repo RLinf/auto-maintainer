@@ -2476,6 +2476,11 @@ const zh: Record<string, string> = {
   "The last request was not approved in time.": "上一次请求未及时批准。",
   "GitHub merges a PR that changes a workflow file only for a sign-in with the workflow scope.": "只有拥有 workflow 权限的登录才能合并修改工作流文件的 PR。",
   "Ask for the workflow scope": "申请 workflow 权限",
+  "Select the failed jobs": "选择失败的任务",
+  "Diagnose": "诊断",
+  "Diagnosing the selected failures": "正在诊断所选失败",
+  "Other checks": "其他检查",
+  "Earlier diagnoses": "更早的诊断",
 };
 
 const LangContext = createContext<{ lang: Lang; setLang: (l: Lang) => void }>({ lang: "zh", setLang: () => {} });

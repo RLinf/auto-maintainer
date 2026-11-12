@@ -528,6 +528,10 @@ class CiDoctor(Playbook):
         by = str(event.payload.get("by"))
         ctx.requested_by = by
         checks = failing_checks(pr, profile)
+        chosen = set(event.payload.get("jobs") or [])
+        if chosen:
+            # The jobs the person chose; the rest stay as they are.
+            checks = [c for c in checks if c.name in chosen]
         if not checks:
             view = ci_view(pr, profile.label_for("ci_gate"), profile.ci.start)
             return PlaybookResult(

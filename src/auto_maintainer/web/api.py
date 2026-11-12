@@ -515,6 +515,18 @@ async def _merge_queue(service: Service, repo: str) -> dict[str, Any]:
     return {"head": head, "order": order}
 
 
+def _chosen_jobs(asked: list[str], failing: set[str]) -> list[str]:
+    """The failed jobs a person chose, by name; refused when one of them is not
+    failing at the head (it passed meanwhile, or never ran)."""
+    chosen = list(dict.fromkeys(j for j in asked if j))
+    gone = [j for j in chosen if j not in failing]
+    if gone:
+        raise HTTPException(
+            409, "not failing at this PR's head any more: " + ", ".join(gone)
+        )
+    return chosen
+
+
 def _ci_summary(pr: PrSnapshot, profile: RepoProfile | None) -> dict[str, Any]:
     """``pr``'s CI as the merge schedule reads it (``domain/run_ci.py:ci_view``),
     and which of its checks belong to the newest runs."""
@@ -902,7 +914,14 @@ class MergeBaseBody(BaseModel):
     """The agent that resolves conflicts, when there are any."""
 
 
+class CiJobsBody(BaseModel):
+    jobs: list[str] = Field(default_factory=list, max_length=200)
+    """The failed jobs to act on, by name; empty for every one."""
+
+
 class FixCiBody(BaseModel):
+    jobs: list[str] = Field(default_factory=list, max_length=200)
+    """The failed jobs to fix, by name; empty for every one."""
     agent: str | None = None
     lab: str | None = None
     """A test machine to test the fix on; none tests nothing."""
@@ -3101,6 +3120,7 @@ def build_router() -> APIRouter:
         request: Request,
         repo: str,
         number: int,
+        body: CiJobsBody | None = None,
         user: User = Depends(current_user),
     ) -> dict[str, Any]:
         """Have the CI doctor explain the PR's failing CI (``playbooks/ci_doctor.py``):
@@ -3115,7 +3135,8 @@ def build_router() -> APIRouter:
         pr = await service.a.forge.get_pr(repo, number)
         if pr is None or pr.state != PrState.OPEN:
             raise HTTPException(409, f"{repo}#{number} is not open")
-        if not failing_checks(pr, profile):
+        failing = {c.name for c in failing_checks(pr, profile)}
+        if not failing:
             view = ci_view(pr, profile.label_for("ci_gate"), profile.ci.start)
             raise HTTPException(
                 409,
@@ -3123,11 +3144,16 @@ def build_router() -> APIRouter:
                 if view.state == "gated"
                 else "no CI job failed at this PR's head",
             )
+        jobs = _chosen_jobs(body.jobs if body else [], failing)
         event = Event(
             kind=EventKind.DASHBOARD_COMMAND,
             repo=repo,
             number=number,
-            payload={"command": "ci_diagnose", "by": user.login},
+            payload={
+                "command": "ci_diagnose",
+                "by": user.login,
+                **({"jobs": jobs} if jobs else {}),
+            },
         )
         await service.bus.publish(event)
         return {"event": event.id}
@@ -3158,6 +3184,9 @@ def build_router() -> APIRouter:
         failed = failing_checks(pr, profile)
         if not failed:
             raise HTTPException(409, "no CI job failed at this PR's head")
+        chosen = _chosen_jobs(body.jobs, {c.name for c in failed})
+        if chosen:
+            failed = [c for c in failed if c.name in chosen]
         session: dict[str, Any] | None = None
         if body.lab:
             machine = service.machines.get(body.lab)
@@ -3210,6 +3239,7 @@ def build_router() -> APIRouter:
             payload={
                 "command": "fix_ci",
                 "by": user.login,
+                **({"jobs": chosen} if chosen else {}),
                 **({"agent": body.agent} if body.agent else {}),
                 **({"note": body.note} if body.note else {}),
                 **(

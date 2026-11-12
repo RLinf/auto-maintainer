@@ -83,14 +83,17 @@ SESSION_GRACE_SECONDS = 600
 """How much longer than its session the agent's run may take, to finish its account."""
 
 
-def failed_jobs(pr: PrSnapshot, profile: RepoProfile) -> list[str]:
+def failed_jobs(
+    pr: PrSnapshot, profile: RepoProfile, chosen: set[str] | None = None
+) -> list[str]:
     """The failed jobs at the PR's head worth fixing (``ci_doctor.failing_checks``:
-    the newest runs, without the repository's gate and summary jobs), one line
-    each, with the run to read."""
+    the newest runs, without the repository's gate and summary jobs), those a person
+    ``chosen`` when they chose, one line each, with the run to read."""
     return [
         f"- {c.workflow + ' / ' if c.workflow else ''}{c.name}: {c.conclusion}"
         + (f" (run {c.run_id})" if c.run_id else "")
         for c in failing_checks(pr, profile)
+        if not chosen or c.name in chosen
     ]
 
 
@@ -142,7 +145,8 @@ class FixCiPlaybook(Playbook):
         pr = await ctx.forge.get_pr(request.repo, request.number)
         if pr is None or pr.state != PrState.OPEN:
             return PlaybookResult(result={"skipped": "the PR is not open"})
-        jobs = failed_jobs(pr, profile)
+        chosen = set(request.payload.get("jobs") or [])
+        jobs = failed_jobs(pr, profile, chosen)
         if not jobs:
             return PlaybookResult(result={"skipped": "no CI job failed at its head"})
 
@@ -169,7 +173,11 @@ class FixCiPlaybook(Playbook):
             session_id, machine_note = self._session(record)
 
         ctx.trusted_input = await ctx.author_is_team(pr)
-        names = {c.name for c in failing_checks(pr, profile)}
+        names = {
+            c.name
+            for c in failing_checks(pr, profile)
+            if not chosen or c.name in chosen
+        }
         found = diagnoses(
             await ctx.store.list_ci_observations(pr.repo, sha=pr.head_sha), names
         )

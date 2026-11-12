@@ -46,6 +46,7 @@ export function FixCiForm({
   const start = useAct(
     () =>
       api.post<{ event: string; session: { status: string; reason: string | null } | null }>(`/api/prs/${repo}/${number}/fix-ci`, {
+        jobs: failed,
         agent: agent || null,
         lab: chosen || null,
         gpu,

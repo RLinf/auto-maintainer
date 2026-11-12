@@ -1575,3 +1575,39 @@ async def test_a_missing_scope_is_asked_for_and_the_merge_goes_once_granted(
     await h.settle()
     assert forgotten == [REPO]
     assert [w["number"] for w in h.forge.writes_of("merge")] == [42]
+
+
+async def test_a_person_diagnoses_or_fixes_only_the_failures_they_chose(
+    harness: Harness, tmp_path: Path
+) -> None:
+    h = harness
+    looked: list[str] = []
+
+    def first_look(task):  # type: ignore[no-untyped-def]
+        looked.append(task.prompt)
+        return {"category": "pr_caused", "confidence": 0.8, "explanation": "it breaks"}
+
+    h.runner.on("ci_diagnose", first_look)
+    h.runner.on("ci_root_cause", lambda t: {"causes": []})
+    checks = [
+        _job(420, "unit", "failure", 4200, workflow="CI"),
+        _job(421, "lint", "failure", 4200, workflow="CI"),
+    ]
+    h.forge.job_logs[420] = "FAILED tests/test_m.py::test_x\n"
+    h.forge.job_logs[421] = "E501 line too long\n"
+    h.forge.put_pr(_ready(42, "a" * 40, checks))
+    await h.poll()
+    app = create_app(h.service, data_dir=tmp_path, allow_dev_login=True)
+    async with _as(app, "maria") as maria:
+        gone = await maria.post(
+            f"/api/prs/{REPO}/42/ci-diagnose", json={"jobs": ["docs"]}
+        )
+        assert gone.status_code == 409 and "docs" in gone.text
+        out = await maria.post(
+            f"/api/prs/{REPO}/42/ci-diagnose", json={"jobs": ["unit"]}
+        )
+        assert out.status_code == 200, out.text
+        await h.settle()
+    seen = {o.check_name for o in await h.store.list_ci_observations(REPO)}
+    assert seen == {"unit"}, "lint was not chosen"
+    assert len(looked) == 1 and "E501" not in looked[0]
