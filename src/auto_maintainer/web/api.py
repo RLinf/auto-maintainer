@@ -86,7 +86,14 @@ from ..domain.memory import (
     repos_of_path,
 )
 from ..domain.merge_gate import MergeArm, evaluate_merge_gate, squash_message
-from ..domain.merge_schedule import ACTIVE, ScheduleState, ordered, state_key
+from ..domain.merge_schedule import (
+    ACTIVE,
+    ScheduleState,
+    next_position,
+    ordered,
+    skip_key,
+    state_key,
+)
 from ..domain.permissions import Permission
 from ..domain.profile import Conditions, RepoProfile, Review
 from ..domain.records import (
@@ -2948,11 +2955,14 @@ def build_router() -> APIRouter:
         profile = await service.profiles.active(repo)
         pr = await service.a.actuator_reader.get_pr(repo, number)
         if profile is None or pr is None or not profile.merge.enabled:
-            raise HTTPException(409, "merging is not enabled for this repository")
+            raise HTTPException(409, "merge scheduling is off for this repository")
+        # Scheduling approves the steps the schedule takes, the merge among them.
+        if not await is_maintainer(service, user, repo):
+            raise HTTPException(403, f"only {repo}'s maintainers schedule merges")
         perm = await service.a.forge.get_permission(repo, user.login)
         who = profile.merge.arming.who
         if who != "codeowners" and not perm.at_least(Permission(who)):
-            raise HTTPException(403, f"arming a merge needs {who}")
+            raise HTTPException(403, f"scheduling a merge needs {who}")
         now = service.clock.now()
         arm_ = MergeArm(
             repo=repo,
@@ -2961,6 +2971,7 @@ def build_router() -> APIRouter:
             armed_by=user.login,
             armed_at=now,
             armer_permission=perm,
+            position=next_position(await service.store.list_arms(repo), now),
         )
         await service.store.save_arm(arm_)
         await service.bus.publish(
@@ -2984,7 +2995,12 @@ def build_router() -> APIRouter:
         service = service_of(request)
         repo = _repo(repo)
         await require_view(service, user, repo)
+        if not await is_maintainer(service, user, repo):
+            raise HTTPException(403, f"only {repo}'s maintainers unschedule merges")
+        arm_ = await service.store.get_arm(repo, number)
         await service.store.delete_arm(repo, number)
+        if arm_ is not None:
+            await service.store.set_state(skip_key(repo, number), arm_.sha)
         await service.bus.publish(
             Event(
                 kind=EventKind.MERGE_DISARMED,

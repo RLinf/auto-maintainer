@@ -103,7 +103,7 @@ const LABELS: Record<string, string> = {
   "ci.flake_signatures[]": "Known flake",
   "ci.gate_daily_budget": "CI gate runs per day",
   "ci.root_cause": "Find the root cause of real failures",
-  "merge.enabled": "Merge automatically",
+  "merge.enabled": "Merge scheduling",
   "merge.method": "Merge method",
   "merge.arming.who": "Who may mark a PR ready to merge",
   "merge.approvals": "Approvals needed",

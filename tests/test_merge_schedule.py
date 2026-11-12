@@ -614,3 +614,42 @@ async def test_turning_automatic_scheduling_on_records_who_did(
             await bob.put(f"/api/merge-schedule/{REPO}/settings", json={"auto": False})
         ).json()
         assert not proposed["applied"], "only a maintainer changes it"
+
+
+async def test_merge_scheduling_is_on_by_default_and_only_maintainers_schedule(
+    tmp_path: Path,
+) -> None:
+    from auto_maintainer.domain.snapshot import IssueComment
+
+    h = await Harness.create(tmp_path)
+    try:
+        profile = await h.service.profiles.active(REPO)
+        assert profile is not None and profile.merge.enabled
+        assert not profile.merge.schedule.auto, "automatic scheduling stays off"
+        h.forge.set_permission(REPO, "walt", Permission.WRITE)
+        h.forge.set_permission(REPO, "bob", Permission.WRITE)
+        h.forge.put_pr(_ready(42, "a" * 40, _ci(42, "success")))
+        await h.poll()
+        pr = await h.forge.get_pr(REPO, 42)
+        assert pr is not None
+        asked = IssueComment(id=5, author="walt", body="/am merge")
+        h.forge.put_pr(pr.model_copy(update={"comments": [asked]}))
+        await h.poll()
+        assert await h.store.get_arm(REPO, 42) is None, "a writer does not schedule"
+        replies = [
+            a.action.payload["body"]
+            for a in await h.store.list_actions(
+                repo=REPO, kinds=[ActionKind.COMMENT_UPSERT]
+            )
+        ]
+        assert any("needs a maintainer" in r for r in replies), replies
+        app = create_app(h.service, data_dir=tmp_path, allow_dev_login=True)
+        async with _as(app, "walt") as walt:
+            out = await walt.post(f"/api/prs/{REPO}/42/merge")
+            assert out.status_code == 403
+        async with _as(app, "maria") as maria:
+            assert (await maria.post(f"/api/prs/{REPO}/42/merge")).status_code == 200
+        arm = await h.store.get_arm(REPO, 42)
+        assert arm is not None and arm.armed_by == "maria"
+    finally:
+        await h.close()

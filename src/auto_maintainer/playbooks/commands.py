@@ -88,12 +88,12 @@ class Commands(Playbook):
                 continue
             if name == "merge":
                 if not profile.merge.enabled:
-                    replies.append("Merging is not enabled for this repository.")
+                    replies.append("Merge scheduling is off for this repository.")
                     continue
                 allowed, permission, owner = await arm_allowed(ctx, author, pr.paths)
                 if not allowed:
                     replies.append(
-                        f"Arming a merge here needs `{profile.merge.arming.who}`."
+                        "Scheduling a merge here needs a maintainer of this repository."
                     )
                     continue
                 now = ctx.clock.now()
@@ -118,7 +118,7 @@ class Commands(Playbook):
                     )
                 )
                 replies.append(
-                    f"Merge armed at `{pr.head_sha[:7]}` by {author}. It merges once the checklist holds."
+                    f"Merge scheduled at `{pr.head_sha[:7]}` by {author}. It merges on its turn once the checklist holds."
                 )
             elif name == "merge_cancel":
                 await ctx.store.delete_arm(pr.repo, pr.number)

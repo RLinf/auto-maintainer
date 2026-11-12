@@ -79,8 +79,8 @@ class CiStartBody(BaseModel):
     gate_label: str | None = Field(default=None, max_length=200)
     gate_jobs: list[str] = Field(default_factory=list, max_length=50)
     summary_jobs: list[str] = Field(default_factory=list, max_length=50)
-    start_minutes: int = Field(default=20, ge=1, le=24 * 60)
-    run_minutes: int = Field(default=360, ge=5, le=7 * 24 * 60)
+    start_minutes: int = Field(default=5, ge=1, le=24 * 60)
+    run_minutes: int = Field(default=180, ge=5, le=7 * 24 * 60)
     merge_notes: str | None = Field(default=None, max_length=8_000)
     approvals: int | None = Field(default=None, ge=0, le=20)
 

@@ -241,9 +241,9 @@ async def test_settings_change_by_writer_waits_and_maintainer_applies(
     try:
         h.forge.set_permission(REPO, "walt", Permission.WRITE)
         h.forge.set_permission(REPO, "op", Permission.NONE)
-        layer = {"schema": 1, "extends": ["dco"], "merge": {"enabled": True}}
+        layer = {"schema": 1, "extends": ["dco"], "merge": {"enabled": False}}
         _, change = await h.service.profiles.propose_memory_layer(
-            REPO, layer, "walt", "enable merging"
+            REPO, layer, "walt", "turn merge scheduling off"
         )
         decision = await h.service.gate.check(
             REPO, "walt", await h.service.profiles.active(REPO)
@@ -254,7 +254,7 @@ async def test_settings_change_by_writer_waits_and_maintainer_applies(
         assert (
             await h.store.get_memory_change(change.id)
         ).state == MemoryChangeState.OPEN
-        assert (await h.service.profiles.active(REPO)).merge.enabled is False
+        assert (await h.service.profiles.active(REPO)).merge.enabled is True
 
         decisions, _ = await h.service.approve_memory_change(change.id, "op")
         assert not decisions[0].allowed, (
@@ -263,7 +263,7 @@ async def test_settings_change_by_writer_waits_and_maintainer_applies(
         decisions, state = await h.service.approve_memory_change(change.id, "maria")
         assert decisions[0].allowed and state == MemoryChangeState.MERGED
         profile = await h.service.profiles.active(REPO)
-        assert profile is not None and profile.merge.enabled is True
+        assert profile is not None and profile.merge.enabled is False
         lock = parse_lock(h.memory.files[lock_path(REPO)], "lock")
         assert lock is not None and lock.approved_by == ["maria"]
     finally:

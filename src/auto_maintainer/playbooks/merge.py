@@ -936,18 +936,38 @@ class MergePlaybook(Playbook):
         )
 
 
+async def maintains(
+    ctx: PlaybookContext,
+    profile: RepoProfile,
+    repo: str,
+    login: str,
+    permission: Permission,
+) -> bool:
+    """Whether ``login`` may schedule merges, or have them scheduled as them: they
+    maintain ``repo`` (its People record's maintainers, else ``access.configure``,
+    as the configuration gate reads it) and may arm merges (``merge.arming.who``).
+    Scheduling approves the steps the schedule takes, a merge among them."""
+    arming = profile.merge.arming.who
+    if not permission.at_least(
+        Permission.WRITE if arming == "codeowners" else Permission(arming)
+    ):
+        return False
+    named = await ctx.governance.maintainers_of(repo) if ctx.governance else set()
+    if named:
+        return login.lower() in {m.lower() for m in named}
+    return permission.at_least(profile.access.configure)
+
+
 async def arm_allowed(
     ctx: PlaybookContext, login: str, paths: list[str]
 ) -> tuple[bool, Permission, bool]:
-    """Whether ``login`` may arm a merge under the profile's ``merge.arming.who``."""
+    """Whether ``login`` may schedule a merge (``maintains``; with
+    ``merge.arming.who: codeowners``, only a code owner of ``paths`` among them)."""
     profile = ctx.require_profile()
     permission = await ctx.permission(login)
     owner = login in await ctx.codeowners_for(paths)
-    who = profile.merge.arming.who
-    allowed = (
-        owner and permission.at_least(Permission.WRITE)
-        if who == "codeowners"
-        else permission.at_least(Permission(who))
+    allowed = await maintains(ctx, profile, profile.repo, login, permission) and (
+        owner or profile.merge.arming.who != "codeowners"
     )
     return allowed, permission, owner
 

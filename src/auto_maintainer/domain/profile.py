@@ -300,9 +300,9 @@ class CiStart(_Section):
     their failure means CI did not start, never that a test failed."""
     summary_jobs: list[str] = Field(default_factory=list)
     """Jobs that only report the other jobs' results: never a failure of their own."""
-    start_minutes: int = 20
+    start_minutes: int = 5
     """How long a scheduled PR's CI may take to start before an agent looks into why."""
-    run_minutes: int = 360
+    run_minutes: int = 180
     """How long it may run before an agent looks into why."""
 
 
@@ -354,7 +354,10 @@ class MergeSchedule(_Section):
 
 
 class Merge(_Section):
-    enabled: bool = False
+    enabled: bool = True
+    """Merge scheduling (design 5.5), on by default: it merges nothing that a
+    maintainer did not schedule, and automatic scheduling stays off until one turns
+    it on (``schedule.auto``)."""
     method: Literal["squash", "merge", "rebase"] = "squash"
     arming: Arming = Field(default_factory=Arming)
     approvals: int = 1

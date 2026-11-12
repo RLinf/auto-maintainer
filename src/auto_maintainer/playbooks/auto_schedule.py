@@ -29,11 +29,10 @@ from ..domain.events import Event, EventKind
 from ..domain.ids import same_commit
 from ..domain.merge_gate import MergeArm
 from ..domain.merge_schedule import holding_back, next_position, skip_key
-from ..domain.permissions import Permission
 from ..domain.profile import RepoProfile
 from ..domain.snapshot import PrState
 from .base import Playbook, PlaybookContext, PlaybookResult, in_scope
-from .merge import gate_for
+from .merge import gate_for, maintains
 
 AUTO_COMMAND = "merge_schedule"
 """The dashboard command that looks at one PR, sent for each open PR when a
@@ -115,24 +114,3 @@ class AutoSchedule(Playbook):
             ],
             result={"scheduled": pr.number, "as": who},
         )
-
-
-async def maintains(
-    ctx: PlaybookContext,
-    profile: RepoProfile,
-    repo: str,
-    login: str,
-    permission: Permission,
-) -> bool:
-    """Whether ``login`` may still have merges scheduled as them: they maintain
-    ``repo`` (its People record's maintainers, else ``access.configure``, as the
-    configuration gate reads it) and may arm merges (``merge.arming.who``)."""
-    arming = profile.merge.arming.who
-    if not permission.at_least(
-        Permission.WRITE if arming == "codeowners" else Permission(arming)
-    ):
-        return False
-    named = await ctx.governance.maintainers_of(repo) if ctx.governance else set()
-    if named:
-        return login.lower() in {m.lower() for m in named}
-    return permission.at_least(profile.access.configure)

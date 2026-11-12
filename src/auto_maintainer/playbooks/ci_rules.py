@@ -61,8 +61,8 @@ class CiRulesDraft(BaseModel):
     gate_label: str = Field(default="", description="The gate label, or empty.")
     gate_jobs: list[str] = Field(default_factory=list)
     summary_jobs: list[str] = Field(default_factory=list)
-    start_minutes: int = Field(default=20, ge=1, le=24 * 60)
-    run_minutes: int = Field(default=360, ge=5, le=7 * 24 * 60)
+    start_minutes: int = Field(default=5, ge=1, le=24 * 60)
+    run_minutes: int = Field(default=180, ge=5, le=7 * 24 * 60)
     merge_notes: str = Field(default="")
     approvals: int = Field(default=0, ge=0, le=20)
 
