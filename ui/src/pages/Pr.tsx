@@ -4,7 +4,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link, useLocation, useParams } from "react-router-dom";
-import { api, type Evaluation, type Me, type PrDetail, type QuickQuality, type ReviewQuality, type ReviewStart, type RootCause, type RunCiPlan } from "../api";
+import { api, type CiObservation, type Evaluation, type Me, type PrDetail, type QuickQuality, type ReviewQuality, type ReviewStart, type RootCause, type RunCiPlan } from "../api";
 import { agentName, useAgentChoice, useAgentOptions } from "../agentPicker";
 import {
   Empty,
@@ -325,6 +325,7 @@ export default function PrPage({ me }: { me: Me }) {
                           {o.signature && <code>{o.signature}</code>} {o.rerun ? `· ${t("rerun requested")}` : ""} · <When at={o.created_at} />
                         </span>
                       </span>
+                      {o.id && <VerdictButtons repo={full} obs={o} />}
                     </div>
                   ))}
                 </div>
@@ -554,6 +555,37 @@ function Overview({ d, ciActions, repo, canPush }: { d: PrDetail; ciActions?: Re
         <ChecksList d={d} />
       </Section>
     </>
+  );
+}
+
+/** A person's word on a CI failure: flaky or real. The same failure is taken that way
+ * after, the CI doctor's first look learns from it, and a flaky one teaches an agent a
+ * flake pattern a maintainer can add. Pressing the chosen one again takes it back. */
+function VerdictButtons({ repo, obs }: { repo: string; obs: CiObservation }) {
+  const t = useT();
+  const toast = useToast();
+  const judge = useAct(
+    (verdict: "flaky" | "real" | null) => api.put<CiObservation>(`/api/merge-schedule/${repo}/verdicts/${obs.id}`, { verdict }),
+    [["pr"], ["ci"], ["merge-schedule"]],
+  );
+  const press = (verdict: "flaky" | "real") =>
+    judge.mutate(obs.verdict === verdict ? null : verdict, {
+      onSuccess: () =>
+        toast({
+          title: obs.verdict === verdict ? t("Verdict taken back") : verdict === "flaky" ? t("Marked flaky") : t("Marked a real failure"),
+          body: verdict === "flaky" && obs.verdict !== verdict ? t("The same failure is rerun from now on, and an agent drafts a flake pattern for the Merge scheduling page.") : undefined,
+          icon: "check",
+        }),
+    });
+  return (
+    <span className="row" style={{ gap: 4, flexShrink: 0 }} title={obs.verdict_by ? `${t("marked by")} ${obs.verdict_by}` : undefined}>
+      <button className={`sm ${obs.verdict === "flaky" ? "on" : "ghost"}`} disabled={judge.isPending} onClick={() => press("flaky")}>
+        {t("Flaky")}
+      </button>
+      <button className={`sm ${obs.verdict === "real" ? "on" : "ghost"}`} disabled={judge.isPending} onClick={() => press("real")}>
+        {t("Real failure")}
+      </button>
+    </span>
   );
 }
 

@@ -276,6 +276,12 @@ class CiObservation(BaseModel):
     fingerprint: str | None = None
     """The failure's identity across runs (``playbooks.ci_doctor.fingerprint``), so a
     failure seen before is not diagnosed again."""
+    verdict: Literal["flaky", "real"] | None = None
+    """A person's word on the failure, which outweighs any agent's: the same failure
+    is taken that way after (``ci_doctor.first_looks``), and the first look learns
+    from the repository's verdicts."""
+    verdict_by: str | None = None
+    verdict_at: datetime | None = None
     id: str = Field(default_factory=lambda: new_id("ci"))
     created_at: datetime = Field(default_factory=utc_now)
 

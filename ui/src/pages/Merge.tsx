@@ -117,6 +117,7 @@ interface Flaky {
   rerun_unknown: number;
   root_cause: boolean;
   patterns: Pattern[];
+  suggestions: (Pattern & { from: string; by: string; at: string })[];
 }
 
 interface MergeView {
@@ -469,6 +470,7 @@ function ScheduleSection({ v }: { v: MergeView }) {
 function FailureLane({ v }: { v: MergeView }) {
   const t = useT();
   const retry = useAct((n: number) => api.post(`/api/merge-schedule/${v.repo}/${n}/retry`), [["merge-schedule"]]);
+  const flaky = useAct((n: number) => api.post(`/api/merge-schedule/${v.repo}/${n}/flaky`), [["merge-schedule"]]);
   const remove = useAct((n: number) => api.del(`/api/merge-schedule/${v.repo}/${n}`), [["merge-schedule"]]);
   return (
     <Section title={t("Failure lane")} hint={t("Set aside after their CI really failed; the next PR took the turn.")}>
@@ -499,6 +501,14 @@ function FailureLane({ v }: { v: MergeView }) {
                 <button className="sm" disabled={retry.isPending} onClick={() => retry.mutate(f.number)}>
                   {t("Retry")}
                 </button>
+                <button
+                  className="sm"
+                  disabled={flaky.isPending || !f.failed_jobs.length}
+                  title={t("Mark these failures flaky, so the same failure is rerun from now on, and run them again")}
+                  onClick={() => flaky.mutate(f.number)}
+                >
+                  {t("Flaky, rerun")}
+                </button>
                 <button className="sm ghost" disabled={remove.isPending} onClick={() => remove.mutate(f.number)}>
                   {t("Unschedule")}
                 </button>
@@ -507,7 +517,7 @@ function FailureLane({ v }: { v: MergeView }) {
           </div>
         ))}
       </div>
-      <ErrorBox error={retry.error || remove.error} />
+      <ErrorBox error={retry.error || remove.error || flaky.error} />
     </Section>
   );
 }
@@ -1146,6 +1156,7 @@ function FlakyCard({ v }: { v: MergeView }) {
     [["merge-schedule"]],
   );
   const own = f.patterns.filter((p) => p.own);
+  const dismiss = useAct((sid: string) => api.del(`/api/merge-schedule/${v.repo}/suggestions/${encodeURIComponent(sid)}`), [["merge-schedule"]]);
   const patterns = useAct((next: Pattern[]) => api.put<Saved>(`/api/merge-schedule/${v.repo}/flake-patterns`, { patterns: next.map(({ id, pattern, category, description }) => ({ id, pattern, category, description })) }), [["merge-schedule"]]);
   return (
     <Section
@@ -1257,6 +1268,47 @@ function FlakyCard({ v }: { v: MergeView }) {
                 {t("Save")}
               </button>
             </div>
+          </div>
+        )}
+        {f.suggestions.length > 0 && (
+          <div className="stack merge-draft" style={{ gap: 6 }}>
+            <span className="small">
+              <Icon name="sparkles" size={12} /> {t("Learned from failures marked flaky")}
+            </span>
+            {f.suggestions.map((g) => (
+              <div key={g.id} className="list-row merge-row">
+                <div className="stack merge-main">
+                  <span className="small">
+                    <strong>{g.id}</strong> <span className="muted">· {g.from} · {t("marked by")} {g.by}</span>
+                  </span>
+                  <code className="small mono" style={{ overflowWrap: "anywhere" }}>
+                    {g.pattern}
+                  </code>
+                  {g.description && <span className="small muted">{g.description}</span>}
+                </div>
+                {v.can_arrange && (
+                  <div className="row merge-actions">
+                    <button
+                      className="sm primary"
+                      disabled={patterns.isPending}
+                      onClick={() =>
+                        patterns.mutate([...own, { id: g.id, pattern: g.pattern, category: g.category, description: g.description }], {
+                          onSuccess: (out) => {
+                            done(out);
+                            dismiss.mutate(g.id);
+                          },
+                        })
+                      }
+                    >
+                      {t("Add")}
+                    </button>
+                    <button className="sm ghost" disabled={dismiss.isPending} onClick={() => dismiss.mutate(g.id)}>
+                      {t("Dismiss")}
+                    </button>
+                  </div>
+                )}
+              </div>
+            ))}
           </div>
         )}
         {f.patterns.length === 0 ? (

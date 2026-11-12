@@ -1207,3 +1207,114 @@ async def test_retry_runs_what_failed_again(harness: Harness, tmp_path: Path) ->
     assert h.forge.writes_of("rerun_failed_jobs") == [{"repo": REPO, "run_id": 4200}]
     state = await _phase(h, 42)
     assert state.phase == "rerunning" and not state.retry
+
+
+async def test_a_failure_marked_flaky_is_rerun_after_and_teaches_a_pattern(
+    harness: Harness, tmp_path: Path
+) -> None:
+    h = harness
+    looks: list[str] = []
+
+    def agent(task):  # type: ignore[no-untyped-def]
+        looks.append(task.activity or "")
+        if "marked a failed CI job flaky" in task.prompt:
+            return {
+                "id": "zmq-port-in-use",
+                "pattern": r"ZMQError: Address already in use",
+                "category": "flaky",
+                "description": "SGLang could not bind its ZMQ port on a shared runner.",
+            }
+        return {"category": "unknown", "confidence": 0.5, "explanation": "unclear"}
+
+    h.runner.on("ci_diagnose", agent)
+    h.runner.on("ci_root_cause", lambda t: {"causes": []})
+    log = (
+        "Traceback\nzmq.error.ZMQError: Address already in use (addr='tcp://*:5557')\n"
+    )
+    h.forge.job_logs[420] = log
+    h.forge.put_pr(_ready(42, "a" * 40, _ci(42, "failure")))
+    await h.poll()
+    await _schedule(h, 42)
+    await h.settle()
+    assert (await _phase(h, 42)).phase == "failed"
+    app = create_app(h.service, data_dir=tmp_path, allow_dev_login=True)
+    async with _as(app, "maria") as maria:
+        out = (await maria.post(f"/api/merge-schedule/{REPO}/42/flaky")).json()
+        assert out["marked"] == 1
+        await h.settle()
+        # It runs again at once, and an agent learned a pattern from the log.
+        assert h.forge.writes_of("rerun_failed_jobs") == [
+            {"repo": REPO, "run_id": 4200}
+        ]
+        view = (await maria.get(f"/api/merge-schedule/{REPO}/view")).json()
+        [suggested] = view["flaky"]["suggestions"]
+        assert suggested["id"] == "zmq-port-in-use" and suggested["by"] == "maria"
+    [judged] = [
+        o for o in await h.store.list_ci_observations(REPO) if o.check_id == 420
+    ][:1]
+    assert judged.verdict == "flaky" and judged.verdict_by == "maria"
+
+    # The same failure on another run: taken as flaky with no agent's look.
+    looks.clear()
+    pr = await h.forge.get_pr(REPO, 42)
+    again = _job(422, "unit", "failure", 4200, workflow="CI", attempt=2)
+    h.forge.job_logs[422] = log.replace("5557", "5561")
+    h.forge.put_pr(pr.model_copy(update={"checks": [again]}))
+    await h.emit(Event(kind=EventKind.CHECKS_COMPLETED, repo=REPO, number=42))
+    await h.settle()
+    assert looks == [], "a person's word needs no agent's look"
+    assert (await _phase(h, 42)).phase == "rerunning"
+
+
+async def test_a_learned_pattern_must_match_its_log_and_no_ordinary_failure() -> None:
+    from auto_maintainer.playbooks.flake_learn import Suggested, usable
+
+    log = "ConnectionResetError: [Errno 104] Connection reset by peer while downloading"
+    assert (
+        usable(Suggested(id="reset", pattern=r"Connection reset by peer"), log) is None
+    )
+    assert "does not match" in (
+        usable(Suggested(id="quota", pattern=r"Disk quota"), log) or ""
+    )
+    assert "ordinary failure" in (
+        usable(Suggested(id="broad", pattern=r"Error|reset by peer"), log) or ""
+    )
+    assert "compile" in (
+        usable(Suggested(id="broken", pattern=r"(unclosed group"), log) or ""
+    )
+
+
+async def test_verdicts_are_recorded_by_people_who_see_the_repository(
+    harness: Harness, tmp_path: Path
+) -> None:
+    from auto_maintainer.domain.records import CiObservation
+
+    h = harness
+    obs = CiObservation(
+        repo=REPO,
+        number=42,
+        sha="a" * 40,
+        check_id=1,
+        check_name="unit",
+        category="unknown",
+    )
+    await h.store.add_ci_observation(obs)
+    app = create_app(h.service, data_dir=tmp_path, allow_dev_login=True)
+    async with _as(app, "bob") as bob:
+        out = (
+            await bob.put(
+                f"/api/merge-schedule/{REPO}/verdicts/{obs.id}",
+                json={"verdict": "real"},
+            )
+        ).json()
+        assert out["verdict"] == "real" and out["verdict_by"] == "bob"
+        back = (
+            await bob.put(
+                f"/api/merge-schedule/{REPO}/verdicts/{obs.id}", json={"verdict": None}
+            )
+        ).json()
+        assert back["verdict"] is None
+        missing = await bob.put(
+            f"/api/merge-schedule/{REPO}/verdicts/ci_nope", json={"verdict": "flaky"}
+        )
+        assert missing.status_code == 404

@@ -709,6 +709,30 @@ class SqliteStore:
             )
         )
 
+    async def set_ci_verdict(
+        self, obs_id: str, verdict: str | None, by: str | None, at: datetime | None
+    ) -> CiObservation | None:
+        async with self._write, self._engine.begin() as conn:
+            row = (
+                await conn.execute(
+                    select(m.ci_observations.c.data).where(
+                        m.ci_observations.c.id == obs_id
+                    )
+                )
+            ).first()
+            if row is None:
+                return None
+            obs = CiObservation.model_validate_json(row[0])
+            obs = obs.model_copy(
+                update={"verdict": verdict, "verdict_by": by, "verdict_at": at}
+            )
+            await conn.execute(
+                update(m.ci_observations)
+                .where(m.ci_observations.c.id == obs_id)
+                .values(data=_dump(obs))
+            )
+            return obs
+
     async def list_ci_observations(
         self,
         repo: str | None = None,

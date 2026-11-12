@@ -779,6 +779,13 @@ class Store(Protocol):
         self, repo: str, number: int
     ) -> list[ReviewRecord]: ...
     async def add_ci_observation(self, obs: CiObservation) -> None: ...
+    async def set_ci_verdict(
+        self, obs_id: str, verdict: str | None, by: str | None, at: datetime | None
+    ) -> CiObservation | None:
+        """Record a person's verdict on a CI observation; ``None`` when there is no
+        such observation."""
+        ...
+
     async def list_ci_observations(
         self,
         repo: str | None = None,

@@ -660,6 +660,10 @@ export interface CiObservation {
   rerun: boolean;
   /** For a failure that is not a flake: what a look at the code found. */
   root_cause: RootCause | null;
+  /** A person's word on the failure, which the CI doctor learns from. */
+  verdict?: "flaky" | "real" | null;
+  verdict_by?: string | null;
+  id?: string;
   created_at: string;
 }
 

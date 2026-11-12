@@ -26,6 +26,7 @@ from .comment_check import CommentCheckPlaybook, CommentScan
 from .evaluate import EvaluatePlaybook
 from .fix import FixPlaybook
 from .fix_ci import FixCiPlaybook
+from .flake_learn import FlakeLearn
 from .followup import Followup
 from .governance import GovernancePlaybook
 from .housekeeping import Journal, LabTest, Stale
@@ -64,6 +65,7 @@ def all_playbooks() -> list[Playbook]:
         MergePlaybook(),
         AutoSchedule(),
         CiRulesPlaybook(),
+        FlakeLearn(),
         Commands(),
         Onboard(),
         ProfileDrift(),

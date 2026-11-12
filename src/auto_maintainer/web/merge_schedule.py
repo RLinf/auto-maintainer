@@ -49,12 +49,14 @@ from ..domain.merge_schedule import (
     state_key,
 )
 from ..domain.profile import FlakeSignature, ReadyCondition, RepoProfile
-from ..domain.records import JobStatus
+from ..domain.records import CiObservation, JobStatus
 from ..domain.run_ci import ci_view
 from ..domain.snapshot import Mergeable, PrSnapshot, PrState, RepoInfo
 from ..playbooks.auto_schedule import AUTO_COMMAND
 from ..playbooks.ci_rules import COMMAND as CI_RULES
 from ..playbooks.ci_rules import DRAFT_KEY, MAX_PATTERNS, CiRulesDraft, FlakePattern
+from ..playbooks.flake_learn import COMMAND as LEARN_COMMAND
+from ..playbooks.flake_learn import SUGGESTIONS
 from ..playbooks.hygiene import hygiene_key
 from ..playbooks.merge import MERGED_KEY
 from ..profiles.layers import ProfileError, parse_yaml
@@ -107,6 +109,10 @@ class FlakyBody(BaseModel):
 class PatternsBody(BaseModel):
     patterns: list[FlakePattern] = Field(max_length=MAX_PATTERNS)
     """The repository's own flake patterns; a pack's stay as they are."""
+
+
+class VerdictBody(BaseModel):
+    verdict: Literal["flaky", "real"] | None
 
 
 class BlockingBody(BaseModel):
@@ -299,6 +305,33 @@ def _apply_draft(
         ci.pop("flake_signatures", None)
 
 
+async def _judge(
+    service: Service, repo: str, obs_id: str, verdict: str | None, by: str
+) -> CiObservation:
+    """Record ``by``'s verdict on observation ``obs_id`` of ``repo``; a flaky one
+    has an agent learn a flake pattern from the job's log."""
+    known = {o.id: o for o in await service.store.list_ci_observations(repo)}
+    if obs_id not in known:
+        raise HTTPException(404, f"{repo} has no CI observation {obs_id}")
+    obs = await service.store.set_ci_verdict(
+        obs_id,
+        verdict,
+        by if verdict else None,
+        service.clock.now() if verdict else None,
+    )
+    assert obs is not None
+    if verdict == "flaky":
+        await service.bus.publish(
+            Event(
+                kind=EventKind.DASHBOARD_COMMAND,
+                repo=repo,
+                number=obs.number,
+                payload={"command": LEARN_COMMAND, "by": by, "observation": obs_id},
+            )
+        )
+    return obs
+
+
 def _section(layer: dict[str, Any], *path: str) -> dict[str, Any]:
     node = layer
     for key in path:
@@ -446,6 +479,10 @@ def build_router() -> APIRouter:
                     }
                     for sig in profile.ci.flake_signatures
                 ],
+                "suggestions": await service.store.get_state(
+                    SUGGESTIONS.format(repo=repo)
+                )
+                or [],
             },
             "ci_start": {
                 **start.model_dump(mode="json"),
@@ -571,24 +608,12 @@ def build_router() -> APIRouter:
         )
         return {"scheduled": False}
 
-    @r.post("/{repo:path}/{number:int}/retry")
-    async def retry(
-        request: Request,
-        repo: str,
-        number: int,
-        user: User = Depends(current_user),
+    async def _send_back(
+        service: Service, repo: str, number: int, user: User, why: str
     ) -> dict[str, Any]:
-        """Send a PR from the failure lane back into the order, its reruns and base
-        merges counted afresh."""
-        service = service_of(request)
-        repo = _repo(repo)
-        await require_view(service, user, repo)
-        await _maintainer(service, user, repo)
-        if await service.store.get_arm(repo, number) is None:
-            raise HTTPException(404, f"#{number} is not scheduled")
         state = await _state(service, repo, number)
         state.phase = "queued"
-        state.detail = f"sent back by {user.login} to run its CI again"
+        state.detail = why
         state.retry = True
         state.retries += 1
         state.updates = 0
@@ -603,6 +628,94 @@ def build_router() -> APIRouter:
             Event(kind=EventKind.MERGE_QUEUE, repo=repo, number=number)
         )
         return {"phase": state.phase}
+
+    @r.post("/{repo:path}/{number:int}/retry")
+    async def retry(
+        request: Request,
+        repo: str,
+        number: int,
+        user: User = Depends(current_user),
+    ) -> dict[str, Any]:
+        """Send a PR from the failure lane back into the order: on its turn it runs
+        what failed again, past the rerun budget, and its base merges count afresh."""
+        service = service_of(request)
+        repo = _repo(repo)
+        await require_view(service, user, repo)
+        await _maintainer(service, user, repo)
+        if await service.store.get_arm(repo, number) is None:
+            raise HTTPException(404, f"#{number} is not scheduled")
+        return await _send_back(
+            service,
+            repo,
+            number,
+            user,
+            f"sent back by {user.login} to run its CI again",
+        )
+
+    @r.post("/{repo:path}/{number:int}/flaky")
+    async def flaky(
+        request: Request,
+        repo: str,
+        number: int,
+        user: User = Depends(current_user),
+    ) -> dict[str, Any]:
+        """Mark the failures that sent a PR to the failure lane flaky, as the
+        maintainer who pressed it, and send it back to run them again. The verdicts
+        teach the CI doctor (``ci_doctor.first_looks``, ``playbooks/flake_learn.py``)."""
+        service = service_of(request)
+        repo = _repo(repo)
+        await require_view(service, user, repo)
+        await _maintainer(service, user, repo)
+        if await service.store.get_arm(repo, number) is None:
+            raise HTTPException(404, f"#{number} is not scheduled")
+        pr = await service.store.get_snapshot(repo, number)
+        state = await _state(service, repo, number)
+        marked = 0
+        if pr is not None:
+            for o in await service.store.list_ci_observations(repo, sha=pr.head_sha):
+                if (
+                    o.number == number
+                    and o.verdict is None
+                    and o.check_name in state.failed_jobs
+                ):
+                    await _judge(service, repo, o.id, "flaky", user.login)
+                    marked += 1
+        out = await _send_back(
+            service, repo, number, user, f"{user.login} marked its failures flaky"
+        )
+        return {**out, "marked": marked}
+
+    @r.put("/{repo:path}/verdicts/{obs_id}")
+    async def verdict(
+        request: Request,
+        repo: str,
+        obs_id: str,
+        body: VerdictBody,
+        user: User = Depends(current_user),
+    ) -> dict[str, Any]:
+        """Record a person's word on a CI failure: flaky, real, or none. The same
+        failure is taken that way after, and the CI doctor learns from it."""
+        service = service_of(request)
+        repo = _repo(repo)
+        await require_view(service, user, repo)
+        obs = await _judge(service, repo, obs_id, body.verdict, user.login)
+        return obs.model_dump(mode="json")
+
+    @r.delete("/{repo:path}/suggestions/{sid}")
+    async def dismiss_suggestion(
+        request: Request, repo: str, sid: str, user: User = Depends(current_user)
+    ) -> dict[str, Any]:
+        """Drop a flake pattern learned from a verdict without adding it."""
+        service = service_of(request)
+        repo = _repo(repo)
+        await require_view(service, user, repo)
+        await _maintainer(service, user, repo)
+        key = SUGGESTIONS.format(repo=repo)
+        kept = [
+            k for k in await service.store.get_state(key) or [] if k.get("id") != sid
+        ]
+        await service.store.set_state(key, kept)
+        return {"suggestions": kept}
 
     @r.put("/{repo:path}/settings")
     async def settings(

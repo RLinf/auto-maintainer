@@ -2450,6 +2450,16 @@ const zh: Record<string, string> = {
   "CI stopped at its gate before the label came; a push or the label starts it again": "CI 在加标签前就在门控处停止；推送或重新加标签会再次启动",
   "Hide older runs": "隐藏较早的运行",
   "Show older runs": "显示较早的运行",
+  "Verdict taken back": "已撤回判断",
+  "Marked flaky": "已标记为偶发失败",
+  "Marked a real failure": "已标记为真正失败",
+  "The same failure is rerun from now on, and an agent drafts a flake pattern for the Merge scheduling page.": "以后同样的失败会被重跑，智能体还会为合并调度页起草一个失败模式。",
+  "marked by": "标记人",
+  "Real failure": "真正失败",
+  "Mark these failures flaky, so the same failure is rerun from now on, and run them again": "把这些失败标记为偶发失败（以后同样的失败会被重跑），并立即重跑",
+  "Flaky, rerun": "偶发失败，重跑",
+  "Learned from failures marked flaky": "从标记为偶发失败的记录中学到的",
+  "Dismiss": "忽略",
 };
 
 const LangContext = createContext<{ lang: Lang; setLang: (l: Lang) => void }>({ lang: "zh", setLang: () => {} });

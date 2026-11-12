@@ -71,6 +71,28 @@ _VOLATILE_RE = re.compile(
 )
 REUSE_DAYS = 7
 """How long a flake's or a runner failure's first look stands for the same failure."""
+VERDICT_DAYS = 90
+"""How long a person's verdict on a failure stands for the same failure, and serves
+the first look as an example."""
+LESSONS_KEPT = 12
+
+
+def lessons(judged: list[CiObservation]) -> str:
+    """The repository's latest verdicts from people, as examples for the first look:
+    which failures its maintainers called flaky and which real."""
+    rows = [
+        f"- {o.check_name}: {o.verdict}"
+        + (f" ({o.explanation[:200]})" if o.explanation else "")
+        for o in judged[-LESSONS_KEPT:]
+    ]
+    if not rows:
+        return ""
+    # The verdicts are people's; the explanations beside them came from logs.
+    return (
+        "How this repository's maintainers judged earlier failures (their word, to "
+        "learn from; a failure like one of these is likely the same):\n"
+        + untrusted("ci.verdicts", "\n".join(rows), 4_000)
+    )
 
 
 FROM_THE_LOG = (
@@ -291,14 +313,39 @@ async def first_looks(
     seen = await ctx.store.list_ci_observations(
         pr.repo, since=ctx.clock.now() - timedelta(days=REUSE_DAYS)
     )
+    judged = [
+        o
+        for o in await ctx.store.list_ci_observations(
+            pr.repo, since=ctx.clock.now() - timedelta(days=VERDICT_DAYS)
+        )
+        if o.verdict
+    ]
     failures: list[Failure] = []
     new: list[tuple[CheckRun, str, FlakeSignature | None, str | None]] = []
     for check in checks:
         log = await ctx.ci.get_job_log(pr.repo, check.id) or check.summary or ""
         sig = match_signature(log, check, signatures)
         mark = fingerprint(log, check)
+        word = next(
+            (
+                o
+                for o in reversed(judged)
+                if mark and o.fingerprint == mark and o.check_name == check.name
+            ),
+            None,
+        )
         before = _seen_before(seen, pr, check, mark) if sig is None else None
-        if sig is not None:
+        if word is not None:
+            # A person's word on the same failure outweighs patterns and agents.
+            diagnosis = Diagnosis(
+                category="flaky" if word.verdict == "flaky" else "pr_caused",
+                confidence=1.0,
+                explanation=f"{word.verdict_by} marked the same failure "
+                + ("flaky" if word.verdict == "flaky" else "a real failure")
+                + (f": {word.explanation}" if word.explanation else ""),
+            )
+            before = None
+        elif sig is not None:
             diagnosis = Diagnosis(
                 category=sig.category,
                 confidence=0.9,
@@ -326,7 +373,9 @@ async def first_looks(
     # ``ci.diagnose: patterns`` keeps agents off the logs: what no pattern names is
     # not a flake.
     found = (
-        await _diagnose_all(ctx, pr, [(c, excerpt(log)) for c, log, _, _ in new])
+        await _diagnose_all(
+            ctx, pr, [(c, excerpt(log)) for c, log, _, _ in new], lessons(judged)
+        )
         if profile.ci.diagnose == "agent"
         else {}
     )
@@ -774,7 +823,10 @@ async def _root_cause(
 
 
 async def _diagnose_all(
-    ctx: PlaybookContext, pr: PrSnapshot, logs: list[tuple[CheckRun, str]]
+    ctx: PlaybookContext,
+    pr: PrSnapshot,
+    logs: list[tuple[CheckRun, str]],
+    learned: str = "",
 ) -> dict[str, Diagnosis]:
     """The first look at each of ``logs``, by job name: one agent call for them
     all, since most of a call's tokens go to the agent's own setup."""
@@ -782,7 +834,7 @@ async def _diagnose_all(
         return {}
     if len(logs) == 1:
         check, log = logs[0]
-        one = await _diagnose(ctx, pr, check, log)
+        one = await _diagnose(ctx, pr, check, log, learned)
         return {check.name: one} if one is not None else {}
     each = max(8_000, 60_000 // len(logs))
     prompt = "\n\n".join(
@@ -793,6 +845,7 @@ async def _diagnose_all(
             "`pr_caused`: the change broke a build or test. `unknown`: not enough "
             "evidence. Suggest a regex signature only for flaky or infra failures "
             f"that will recur. {FROM_THE_LOG}",
+            learned,
             *(
                 untrusted(
                     f"ci.log {check.name}",
@@ -826,7 +879,7 @@ async def _diagnose_all(
 
 
 async def _diagnose(
-    ctx: PlaybookContext, pr: PrSnapshot, check: CheckRun, log: str
+    ctx: PlaybookContext, pr: PrSnapshot, check: CheckRun, log: str, learned: str = ""
 ) -> Diagnosis | None:
     workdir = ctx.scratch()
     prompt = "\n\n".join(
@@ -835,6 +888,7 @@ async def _diagnose(
             "`infra`: the runner or CI system failed. `pr_caused`: the change broke a build or test. "
             "`unknown`: not enough evidence. Suggest a regex signature only for flaky or infra failures that will recur. "
             + FROM_THE_LOG,
+            learned,
             f"Job: {check.name} (workflow {check.workflow}, run {check.run_id})",
             untrusted("ci.log", log, 40_000),
             pr_block(pr),
