@@ -152,7 +152,7 @@ export default function MergePage() {
   });
   const v = q.data;
   return (
-    <div className="page">
+    <>
       <PageHead
         title={t("Merge scheduling")}
         sub={t("Choose which ready PRs merge and in what order. The service starts their CI the way the repository starts it, reruns what flakes, sets real failures aside with their cause, and merges what passes.")}
@@ -167,7 +167,7 @@ export default function MergePage() {
       ) : !v.enabled ? (
         <TurnOn v={v} />
       ) : (
-        <div className="stack" style={{ gap: 16 }}>
+        <div className="stack" style={{ gap: 18 }}>
           <Controls v={v} />
           <ScheduleSection v={v} />
           {v.failed.length > 0 && <FailureLane v={v} />}
@@ -180,7 +180,7 @@ export default function MergePage() {
           {v.merged.length > 0 && <MergedList v={v} />}
         </div>
       )}
-    </div>
+    </>
   );
 }
 
