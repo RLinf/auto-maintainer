@@ -296,6 +296,7 @@ def build_router() -> APIRouter:
                     "name": name,
                     "mine": bool(machine.owner),
                     "description": machine.description,
+                    "suited_for": machine.suited_for,
                     "transport": machine.transport,
                     "host": machine.host,
                     "workdir": machine.workdir,

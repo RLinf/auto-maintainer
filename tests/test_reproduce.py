@@ -627,6 +627,54 @@ async def test_a_review_that_needs_a_reproduction_starts_the_skills_agent(
     assert brief in update.prompt, "the review is revised with its record"
 
 
+async def _robot_machine(h: Any) -> None:
+    """A second machine the repository uses, suited to robot PRs."""
+    from auto_maintainer.domain.memory import profile_path
+    from auto_maintainer.domain.settings import LabMachine
+    from auto_maintainer.profiles.layers import dump_yaml, parse_yaml
+
+    h.service.machines["robot-01"] = LabMachine(
+        host="robot-01",
+        suited_for="PRs that change the arm's driver; a robot arm is attached",
+    )
+    path = profile_path(REPO)
+    layer = parse_yaml(h.memory.files[path], path)
+    layer.setdefault("labs", {})["robot-01"] = {"use": True}
+    h.memory.files[path] = dump_yaml(layer)
+    await h.approve_directly(REPO, "maria")
+
+
+async def test_a_pr_runs_on_the_machine_suited_to_it(demo) -> None:
+    """With several machines, an agent reads what each is suited for beside the PR
+    and picks one; a reproduction picks again from its brief."""
+    h, app = demo
+    runner = h.service.a.lab_runner
+    await _robot_machine(h)
+    picks: list[Any] = []
+    answer = h.runner.handlers.get("triage")
+
+    def triage(task: Any) -> Any:
+        if task.activity == "machine_choice":
+            picks.append(task)
+            assert "a robot arm is attached" in task.prompt
+            assert task.budget == "quick" and task.mode == "read_only"
+            wants_gpu = "gpu-only benchmark" in task.prompt
+            return {"machine": "gpu-01" if wants_gpu else "robot-01", "why": "fits"}
+        return answer(task) if answer else {"summary": "s", "labels": []}
+
+    h.runner.on("triage", triage)
+    review = h.runner.handlers["review"]
+    h.runner.on(
+        "review", lambda t: {**review(t), "reproduction": "Run the gpu-only benchmark."}
+    )
+    async with _as(app, "maria") as maria:
+        await _review(h, maria, 42)
+    first, repro = runner.reproduced
+    assert first["payload"].lab == "robot-01", "the review tests on the robot machine"
+    assert repro["payload"].lab == "gpu-01", "its reproduction picks from its brief"
+    assert len(picks) == 2, "once for the review, once for its brief; not on resuming"
+
+
 async def test_a_restart_keeps_the_reviews_session_for_its_next_run(demo) -> None:
     """A deploy stops the service while a review's agent works in its session: the
     session stays, and the review that runs again on the next start resumes in it.
@@ -1091,3 +1139,28 @@ async def test_a_reviews_reproduction_stored_before_the_change_ends_cleanly(
     done = await h.store.get_job(job.id)
     assert done is not None and done.status == "done"
     assert done.result and "ask for one again" in done.result["skipped"]
+
+
+async def test_one_machine_needs_no_choice(demo) -> None:
+    h, app = demo
+    calls: list[Any] = []
+    answer = h.runner.handlers.get("triage")
+    h.runner.on(
+        "triage",
+        lambda t: (
+            calls.append(t) or (answer(t) if answer else {"summary": "s", "labels": []})
+        ),
+    )
+    async with _as(app, "maria") as maria:
+        await _review(h, maria, 42)
+    assert not [t for t in calls if t.activity == "machine_choice"]
+    assert h.service.a.lab_runner.reproduced[0]["payload"].lab == "gpu-01"
+
+
+async def test_a_choice_that_fails_falls_back_to_the_first_machine(demo) -> None:
+    h, app = demo
+    await _robot_machine(h)
+    h.runner.on("triage", lambda t: {"summary": "not a machine", "labels": []})
+    async with _as(app, "maria") as maria:
+        await _review(h, maria, 42)
+    assert h.service.a.lab_runner.reproduced[0]["payload"].lab == "gpu-01"

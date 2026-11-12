@@ -71,7 +71,7 @@ export function FixCiForm({
                   {m.name}
                   {m.mine && <span className="muted"> · {t("your own")}</span>}
                 </strong>
-                {m.description && <span className="small muted clamp2">{m.description}</span>}
+                {(m.suited_for || m.description) && <span className="small muted clamp2">{m.suited_for || m.description}</span>}
               </span>
             </label>
           ))}

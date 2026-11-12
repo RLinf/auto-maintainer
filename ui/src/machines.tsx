@@ -27,6 +27,8 @@ export interface RepoMachine {
   name: string;
   /** The signed-in person's own machine: their work uses it on any repository. */
   mine?: boolean;
+  /** What it is for: the PRs and tests it suits. */
+  suited_for?: string;
   description: string;
   transport: string;
   host?: string | null;
@@ -265,6 +267,11 @@ function MachineUse({ repo, m, canConfigure }: { repo: string; m: RepoMachine; c
             <span className="muted small">{m.transport === "ssh" ? m.host || m.name : t("this host")}</span>
             {m.used ? <span className="pill status-ok">{t("used here")}</span> : <span className="pill">{t("not used here")}</span>}
           </span>
+          {m.suited_for && (
+            <span className="small">
+              <span className="muted">{t("Suited for")}:</span> {m.suited_for}
+            </span>
+          )}
           <span className="small muted">
             {m.description || t("No description")} · {t("at most")} {Math.round(Math.min(m.timeout_seconds ?? Infinity, m.machine_timeout_seconds) / 60)}{" "}
             {t("minutes")}

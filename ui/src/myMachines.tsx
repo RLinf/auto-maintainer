@@ -20,6 +20,7 @@ interface MyMachine {
   port: number | null;
   proxy_jump: string | null;
   description: string;
+  suited_for: string;
   workdir: string;
   setup: string;
   timeout_seconds: number;
@@ -120,6 +121,7 @@ function MachineForm({ initial, onDone }: { initial?: MyMachine; onDone: () => v
   const [setup, setSetup] = useState(initial?.setup ?? "");
   const [minutes, setMinutes] = useState(String(Math.round((initial?.timeout_seconds ?? 3600) / 60)));
   const [description, setDescription] = useState(initial?.description ?? "");
+  const [suitedFor, setSuitedFor] = useState(initial?.suited_for ?? "");
   const save = useAct(
     () =>
       api.put(`/api/me/machines/${encodeURIComponent(name.trim())}`, {
@@ -131,6 +133,7 @@ function MachineForm({ initial, onDone }: { initial?: MyMachine; onDone: () => v
         setup,
         timeout_seconds: Math.max(1, Number(minutes) || 60) * 60,
         description,
+        suited_for: suitedFor,
       }),
     KEYS,
   );
@@ -172,6 +175,10 @@ function MachineForm({ initial, onDone }: { initial?: MyMachine; onDone: () => v
       <label className="stack small" style={{ gap: 2 }}>
         {t("Setup before each command")}
         <input value={setup} placeholder="source ~/venv/bin/activate" onChange={(e) => setSetup(e.target.value)} />
+      </label>
+      <label className="stack small" style={{ gap: 2 }}>
+        {t("Suited for (chooses it for those PRs)")}
+        <textarea rows={2} value={suitedFor} placeholder={t("PRs that change the Franka arm's driver or its real-world environments; a Franka arm and a RealSense camera are attached.")} onChange={(e) => setSuitedFor(e.target.value)} />
       </label>
       <label className="stack small" style={{ gap: 2 }}>
         {t("About the machine (the agents read this)")}
@@ -231,6 +238,11 @@ function MachineRow({ m }: { m: MyMachine }) {
           </button>
         )}
       </div>
+      {m.suited_for && (
+        <span className="small">
+          <span className="muted">{t("Suited for")}:</span> {m.suited_for}
+        </span>
+      )}
       {m.description && <span className="small muted">{m.description}</span>}
       {c &&
         (c.ok ? (

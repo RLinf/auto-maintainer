@@ -40,11 +40,12 @@ from ..domain.actions import (
     make_action,
 )
 from ..domain.events import EventKind
-from ..domain.labs import first_usable, setup_lines, time_limit
+from ..domain.labs import setup_lines, time_limit
 from ..domain.profile import RepoProfile
 from ..domain.snapshot import PrSnapshot
 from ..policy.engine import PolicyFacts, level_for
 from .base import PlaybookContext, PlaybookResult, Wait
+from .machine_choice import choose_machine
 
 REVIEW_SESSION = "review:"
 """How a review's ``lab.review`` discriminator starts; the request's id follows."""
@@ -80,6 +81,7 @@ def machine_facts(
     gpus: list[int] | None,
     setup: list[str] | None = None,
     minutes: int | None = None,
+    suited_for: str = "",
 ) -> str:
     """What an agent with a session on ``lab`` needs to know to use it: how ``lab``
     works, what runs before each command, how long the session lasts, and what the
@@ -91,6 +93,10 @@ def machine_facts(
         else "no GPU"
     )
     about = (
+        f"\n\nWhat {lab} is for, as its maintainers put it:\n{suited_for.strip()}"
+        if suited_for.strip()
+        else ""
+    ) + (
         f"\n\nWhat {lab}'s maintainers say about it (where things are, mirrors, "
         f"limits):\n{description.strip()}"
         if description.strip()
@@ -145,16 +151,17 @@ class ReviewMachine:
             self.gpus,
             setup_lines(machine, binding) if machine else None,
             time_limit(machine, binding) // 60 if machine else None,
+            machine.suited_for if machine else "",
         )
         return facts + ("\n" + REPRODUCTION.format(lab=self.lab) if reproduce else "")
 
 
-def machine_for(
+async def machine_for(
     ctx: PlaybookContext, pr: PrSnapshot, profile: RepoProfile, by: str | None
 ) -> str | None:
-    """The machine a review of ``pr`` that ``by`` asked for tests on: their own first,
-    else the first the repository uses that can take it."""
-    return first_usable(ctx.service.machines, profile.labs, pr.repo, by)
+    """The machine a review of ``pr`` that ``by`` asked for tests on: of their own
+    and the repository's, the one suited to the PR (``machine_choice``)."""
+    return await choose_machine(ctx, pr, profile, by)
 
 
 async def review_machine(
@@ -180,7 +187,7 @@ async def review_machine(
         None,
     )
     if mine is None:
-        lab = machine_for(ctx, pr, profile, by)
+        lab = await machine_for(ctx, pr, profile, by)
         if lab is None:
             return ReviewMachine(
                 note="No test machine is set up for this repository, so nothing ran."

@@ -358,7 +358,8 @@ async def test_asking_for_a_run_in_the_conversation_starts_a_reproduction(demo) 
         ).json()
         assert (
             len(said["jobs"]) == 1
-            and "Started a reproduction on gpu-01" in said["text"]
+            and "Started a reproduction on the test machine suited to it"
+            in said["text"]
         )
         await h.settle()
         work = (

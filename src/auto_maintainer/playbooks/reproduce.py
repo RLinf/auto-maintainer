@@ -71,6 +71,7 @@ from .base import (
     Wait,
     keeps_session,
 )
+from .machine_choice import choose_machine
 from .prompts import (
     pr_block,
     reproduction_block,
@@ -137,7 +138,6 @@ class ReproducePlaybook(Playbook):
         return (
             event.payload.get("command") == "reproduce"
             and bool(event.payload.get("by") or event.payload.get("brief"))
-            and bool(event.payload.get("lab"))
             and event.number is not None
         )
 
@@ -156,7 +156,8 @@ class ReproducePlaybook(Playbook):
             )
         assert request.repo and request.number
         by: str | None = request.payload.get("by") or None
-        lab = str(request.payload["lab"])
+        # The machine the person picked; without one, the playbook chooses.
+        lab = str(request.payload.get("lab") or "")
         ctx.requested_by = by
         ctx.agent = request.payload.get("agent") or None
         discriminator = f"req:{request.id}"
@@ -187,11 +188,25 @@ class ReproducePlaybook(Playbook):
         if reported is not None:
             return PlaybookResult(result={"reported": reported.action.id})
         if planned is not None:
+            lab = str(planned.action.payload.get("lab") or lab)
             return await self._after_run(ctx, request, event, planned, by, lab)
 
         pr = await ctx.forge.get_pr(request.repo, request.number)
         if pr is None or pr.state != PrState.OPEN:
             return PlaybookResult(result={"skipped": "the PR is not open"})
+        if not lab:
+            need = str(
+                request.payload.get("brief") or request.payload.get("note") or ""
+            )
+            lab = await choose_machine(ctx, pr, profile, by, need) or ""
+            if not lab:
+                return await self._not_run(
+                    ctx,
+                    request,
+                    pr,
+                    "no test machine may take it",
+                    reason="no test machine may take it",
+                )
         machine = ctx.service.machines.get(lab)
         binding = profile.labs.get(lab)
         why = unusable(pr.repo, lab, machine, binding, by)
@@ -437,6 +452,7 @@ class ReproducePlaybook(Playbook):
                     held_gpus(record.external_ref),
                     setup_lines(machine, profile.labs.get(lab)) if machine else None,
                     payload.timeout_seconds // 60,
+                    machine.suited_for if machine else "",
                 ),
                 pr_block(pr),
                 schema_hint(ReproReport.model_json_schema()),

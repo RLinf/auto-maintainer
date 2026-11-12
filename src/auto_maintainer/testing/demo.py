@@ -505,6 +505,10 @@ def _answer(task: AgentTask) -> dict[str, Any]:
         return _talk(task, kind)
     if kind in ("review", "followup") and REPRODUCED in task.prompt:
         return _with_reproduction(kind)
+    if kind == "triage" and task.activity == "machine_choice":
+        # The first machine listed: the asker's own come first.
+        listed = task.prompt.split("Machines, in order:\n", 1)[-1]
+        return {"machine": listed[2:].split(":", 1)[0], "why": "listed first"}
     if kind == "triage":
         return {
             "summary": "Handles empty batches in the loader without crashing.",

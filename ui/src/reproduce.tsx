@@ -70,7 +70,7 @@ export function ReproduceForm({ repo, number, onClose }: { repo: string; number:
                     {m.name}
                     {m.mine && <span className="muted"> · {t("your own")}</span>}
                   </strong>
-                  {m.description && <span className="small muted">{m.description}</span>}
+                  {(m.suited_for || m.description) && <span className="small muted">{m.suited_for || m.description}</span>}
                 </span>
               </label>
             ))}

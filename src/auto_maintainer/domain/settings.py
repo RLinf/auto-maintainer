@@ -322,6 +322,12 @@ class LabMachine(BaseModel):
     do, how long they may take. The reproduction agent reads it as written; the
     settings after ``repos`` are drafted from it (``web/settings.py``, the draft
     endpoint) and are what the service enforces."""
+    suited_for: str = ""
+    """What the machine is for, in plain language, as its maintainers want reviews
+    and reproductions to choose it: the PRs and tests it suits, such as those for
+    hardware attached to it ("PRs that change the Franka arm's driver; a Franka arm
+    is attached"). When a PR could run on several machines, an agent picks one by
+    this text (``playbooks/machine_choice.py``); the agents working there read it."""
     transport: Literal["ssh", "local"] = "ssh"
     host: str | None = None
     """The host to reach (``HostName``: an address, a name, or an alias from the

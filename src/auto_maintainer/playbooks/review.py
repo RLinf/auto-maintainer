@@ -354,7 +354,7 @@ class ReviewPlaybook(Playbook):
                 )
             )
         # The skill's reproduction agent: the service runs it from the brief, on the
-        # machine the review used, and adds its record to this review.
+        # machine suited to what the brief needs, and adds its record to this review.
         brief = (result.reproduction or "").strip()
         events = (
             [
@@ -366,7 +366,6 @@ class ReviewPlaybook(Playbook):
                     payload={
                         "command": "reproduce",
                         "by": request.by if request else None,
-                        "lab": machine.lab,
                         "brief": brief[:8_000],
                         "review": actions[0].id,
                     },

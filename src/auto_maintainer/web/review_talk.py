@@ -710,10 +710,9 @@ async def _reproduce(
     service: Service, user: User, profile: RepoProfile, pr: PrSnapshot, focus: str
 ) -> tuple[str | None, str]:
     """Start a reproduction of ``pr`` for ``user``, as the Reproduce button does, on
-    the first test machine the repository uses, checking ``focus``. Returns the
+    the test machine suited to ``focus`` (the reproduction chooses it), checking it. Returns the
     request event's id (the jobs API resolves it) and a note for the reply."""
-    lab = first_usable(service.machines, profile.labs, pr.repo, user.login)
-    if lab is None:
+    if first_usable(service.machines, profile.labs, pr.repo, user.login) is None:
         return None, (
             "No test machine is in use for this repository, so no reproduction "
             "started; a maintainer turns one on in the repository's Test machines."
@@ -726,15 +725,14 @@ async def _reproduce(
         payload={
             "command": "reproduce",
             "by": user.login,
-            "lab": lab,
             "note": focus[:2_000],
         },
         source="review-talk",
     )
     await service.bus.publish(event)
     return event.id, (
-        f"Started a reproduction on {lab}, checking: {focus[:500]} Its record is "
-        "added to the review when it is done."
+        f"Started a reproduction on the test machine suited to it, checking: "
+        f"{focus[:500]} Its record is added to the review when it is done."
     )
 
 

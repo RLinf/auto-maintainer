@@ -1169,6 +1169,8 @@ export interface LabMachine {
   name: string;
   /** Its environment and rules in plain language; the settings below are drafted from it. */
   description: string;
+  /** What it is for: the PRs and tests it suits, such as those for hardware attached to it. */
+  suited_for?: string;
   transport: "ssh" | "local";
   host: string | null;
   user?: string | null;

@@ -52,6 +52,9 @@ class MachineForm(BaseModel):
     """Jump hosts to go through first: ``[user@]host[:port]``, several separated by
     commas, each reached with the same key."""
     description: str = Field(default="", max_length=8_000)
+    suited_for: str = Field(default="", max_length=2_000)
+    """What the machine is for: the PRs and tests it suits, such as those for hardware
+    attached to it."""
     workdir: str = Field(default="am-labs", max_length=500)
     setup: str = Field(default="", max_length=4_000)
     timeout_seconds: int = Field(default=3600, ge=60, le=6 * 3600)
@@ -67,6 +70,7 @@ class MachineForm(BaseModel):
             port=self.port,
             proxy_jump=(self.proxy_jump or "").strip() or None,
             description=self.description.strip(),
+            suited_for=self.suited_for.strip(),
             workdir=self.workdir.strip() or "am-labs",
             setup=self.setup.strip(),
             timeout_seconds=self.timeout_seconds,
@@ -106,6 +110,7 @@ def _row(login: str, name: str, machine: LabMachine) -> dict[str, Any]:
         "port": machine.port,
         "proxy_jump": machine.proxy_jump,
         "description": machine.description,
+        "suited_for": machine.suited_for,
         "workdir": machine.workdir,
         "setup": machine.setup,
         "timeout_seconds": machine.timeout_seconds,

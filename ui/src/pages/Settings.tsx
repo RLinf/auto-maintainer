@@ -1177,6 +1177,11 @@ function MachineRow({ m, canChange }: { m: LabMachine; canChange: boolean }) {
           <span className="small muted">
             {m.repos.length ? `${t("offered only to")} ${m.repos.join(", ")}` : t("offered to every repository")}
           </span>
+          {m.suited_for ? (
+            <span className="small">
+              <span className="muted">{t("Suited for")}:</span> {m.suited_for}
+            </span>
+          ) : null}
           {m.description ? (
             <span className="small" style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>
               {m.description}
@@ -1255,6 +1260,7 @@ function MachineForm({ initial, onDone }: { initial?: LabMachine; onDone: () => 
   const [ssh, setSsh] = useState(initial ? sshEntry(initial.name, initial) : "");
   const [repos, setRepos] = useState<string[]>(initial?.repos ?? []);
   const [description, setDescription] = useState(initial?.description ?? "");
+  const [suitedFor, setSuitedFor] = useState(initial?.suited_for ?? "");
   const [draft, setDraft] = useState<{ for: string; result: MachineDraft } | null>(null);
   const repoOptions = Array.from(new Set([...(onboarded.data ?? []).map((r) => r.repo), ...(initial?.repos ?? [])]));
   const base: Omit<LabMachine, "name"> = initial ?? DEFAULT_MACHINE;
@@ -1263,7 +1269,7 @@ function MachineForm({ initial, onDone }: { initial?: LabMachine; onDone: () => 
   const current = draft && draft.for === description.trim() ? draft.result : null;
   const needsDraft = changed && description.trim() !== "" && !current;
   const body = (m: Omit<LabMachine, "name">) => ({
-    machine: { ...m, name: undefined, transport, description: description.trim(), repos },
+    machine: { ...m, name: undefined, transport, description: description.trim(), suited_for: suitedFor.trim(), repos },
     ssh_config: transport === "ssh" ? ssh : null,
   });
   const drafting = useAct(() => api.post<MachineDraft>(`/api/settings/labs/${name.trim()}/draft`, body(base)), []);
@@ -1355,6 +1361,16 @@ function MachineForm({ initial, onDone }: { initial?: LabMachine; onDone: () => 
           })}
         </div>
       </div>
+      <label className="stack" style={{ gap: 4 }}>
+        <span className="small muted">{t("Suited for: the PRs and tests this machine is for, so reviews and reproductions of those PRs choose it")}</span>
+        <textarea
+          rows={2}
+          style={{ fontFamily: "inherit", lineHeight: 1.5 }}
+          value={suitedFor}
+          onChange={(e) => setSuitedFor(e.target.value)}
+          placeholder={t("PRs that change the Franka arm's driver or its real-world environments; a Franka arm and a RealSense camera are attached.")}
+        />
+      </label>
       <label className="stack" style={{ gap: 4 }}>
         <span className="small muted">{t("Environment and rules, in plain words: the hardware, how to set up the environment, where data lives, what runs must not do, how long they may take")}</span>
         <textarea

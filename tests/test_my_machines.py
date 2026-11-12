@@ -61,6 +61,7 @@ MACHINE = {
     "host": "203.0.113.7",
     "user": "ci",
     "description": "4x A100; models in /data/models",
+    "suited_for": "PRs for the robot arm attached to it",
     "setup": "source ~/venv/bin/activate",
 }
 
@@ -81,6 +82,7 @@ async def test_a_person_adds_a_machine_of_their_own(demo, tmp_path: Path) -> Non
         assert added.status_code == 200, added.text
         [row] = added.json()["machines"]
         assert row["id"] == MINE and row["host"] == "203.0.113.7"
+        assert row["suited_for"] == "PRs for the robot arm attached to it"
     machine = h.service.machines[MINE]
     assert machine.owner == "maria" and machine.ssh_config and machine.identity_file
     config = Path(machine.ssh_config).read_text()
