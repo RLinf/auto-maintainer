@@ -151,7 +151,7 @@ class Followup(Playbook):
         )
         answer = None
         try:
-            testing = machine.testing(ctx.requested_by) if machine.token else None
+            testing = machine.testing(ctx, reproduce=False) if machine.token else None
             incremental = without_generated(
                 await ctx.workspace.diff(workdir, previous_sha, pr.head_sha)
                 if previous_sha

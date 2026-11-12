@@ -277,6 +277,13 @@ class ReviewResult(BaseModel):
     quality: QualityVerdict | None = Field(
         default=None, description=_QUALITY_DESCRIPTION
     )
+    reproduction: str = Field(
+        default="",
+        description="When you have a test machine and the review skill says the PR "
+        "needs a reproduction: the brief for the skill's reproduction agent, which the "
+        "service runs (what the skill says a brief holds, and how many GPUs the run "
+        "needs). Empty otherwise.",
+    )
 
     _quality = field_validator("quality", mode="before")(_lenient_quality)
 

@@ -648,7 +648,7 @@ async def test_a_review_posts_in_the_format_of_the_repositorys_skill(demo) -> No
     [task] = [t for t in h.runner.tasks if t.kind == TaskKind.REVIEW]
     assert "fixes the main comment's format" in task.prompt
     assert "The main review comment has these sections" not in task.prompt
-    assert "Test and reproduce the PR on test machine gpu-01" in task.prompt
+    assert "Test machine gpu-01 is yours while you work" in task.prompt
     assert task.lab_session, "the reviewing agent tests the PR in its own session"
     async with _as(app, "maria") as maria:
         [draft] = [

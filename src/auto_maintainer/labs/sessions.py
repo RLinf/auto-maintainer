@@ -51,7 +51,8 @@ JANITOR_SECONDS = 30
 
 
 class LabSessionServer:
-    """Serves ``POST /run``, ``POST /sync``, and ``GET /session`` on ``socket_path``."""
+    """Serves ``POST /run``, ``POST /sync``, ``POST /gpus``, and ``GET /session`` on
+    ``socket_path``."""
 
     def __init__(self, socket_path: Path, labs: LabExecutor) -> None:
         self.socket_path = socket_path
@@ -64,6 +65,7 @@ class LabSessionServer:
                 Route("/run", self._run, methods=["POST"]),
                 Route("/session", self._session, methods=["GET"]),
                 Route("/sync", self._sync, methods=["POST"]),
+                Route("/gpus", self._gpus, methods=["POST"]),
             ]
         )
 
@@ -130,6 +132,25 @@ class LabSessionServer:
         except Exception as e:  # reported to the agent, not raised into the server
             log.exception("copying a checkout to a test machine failed")
             out = {"error": f"the copy failed: {e}"}
+        return JSONResponse(out)
+
+    async def _gpus(self, request: Request) -> Response:
+        """``{"count": N, "wait_minutes": M}``: hold N GPUs, waiting up to M minutes
+        for enough to be idle (``LabExecutor.grow_gpus``)."""
+        token = request.headers.get("x-lab-session", "")
+        if self.labs.session_info(token) is None:
+            return JSONResponse({"error": "no open session for this token"}, 403)
+        try:
+            body = json.loads(await request.body() or b"{}")
+            count = int(body["count"])
+            wait = int(float(body.get("wait_minutes") or 0) * 60)
+        except (ValueError, KeyError, TypeError):
+            return JSONResponse({"error": 'send {"count": N}'}, 400)
+        try:
+            out = await self.labs.grow_gpus(token, count, wait)
+        except Exception as e:  # reported to the agent, not raised into the server
+            log.exception("leasing GPUs for a session failed")
+            out = {"error": f"could not lease GPUs: {e}"}
         return JSONResponse(out)
 
     async def _run(self, request: Request) -> Response:

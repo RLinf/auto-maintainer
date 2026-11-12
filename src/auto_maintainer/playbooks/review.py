@@ -199,7 +199,7 @@ class ReviewPlaybook(Playbook):
                 else ""
             )
             own_format = skill_owns_format(profile, workdir)
-            testing = machine.testing(ctx.requested_by) if machine.token else None
+            testing = machine.testing(ctx, reproduce=True) if machine.token else None
             prompt = "\n\n".join(
                 [
                     interactive(profile, ctx.requested_by, testing)
@@ -353,14 +353,39 @@ class ReviewPlaybook(Playbook):
                     draft_for=request.by if request else None,
                 )
             )
+        # The skill's reproduction agent: the service runs it from the brief, on the
+        # machine the review used, and adds its record to this review.
+        brief = (result.reproduction or "").strip()
+        events = (
+            [
+                Event(
+                    kind=EventKind.DASHBOARD_COMMAND,
+                    repo=pr.repo,
+                    number=pr.number,
+                    sha=pr.head_sha,
+                    payload={
+                        "command": "reproduce",
+                        "by": request.by if request else None,
+                        "lab": machine.lab,
+                        "brief": brief[:8_000],
+                        "review": actions[0].id,
+                    },
+                    source="review",
+                )
+            ]
+            if brief and machine.lab
+            else []
+        )
         return PlaybookResult(
             actions=actions,
+            events=events,
             result={
                 "findings": len(result.findings),
                 "dismissed": len(result.dismissed),
                 "recommendation": result.recommendation,
                 "labels": result.labels,
                 **machine.summary(),
+                **({"reproduction": events[0].id} if events else {}),
             },
         )
 
@@ -408,7 +433,7 @@ class ReviewPlaybook(Playbook):
 
 
 async def reproduction_record(store: Store, repo: str, number: int) -> str | None:
-    """The PR's latest reproduction on a test machine that ran: the approved plan,
+    """The PR's latest reproduction on a test machine that ran: its brief,
     where and at which commits it ran, and what the service concluded from the runs.
     Run output comes from the PR's code, so it is marked untrusted."""
     runs = [

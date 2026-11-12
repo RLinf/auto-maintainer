@@ -389,8 +389,8 @@ def build_router() -> APIRouter:
         body: ReproduceBody,
         user: User = Depends(current_user),
     ) -> dict[str, Any]:
-        """Have an agent write a reproduction for the PR; the script comes back to the
-        requester to approve before it runs on the machine."""
+        """Have the review skill's reproduction agent reproduce the PR on the machine,
+        at once: the request is its approval (``pipeline.RUN_ON_REQUEST``)."""
         service = service_of(request)
         repo = repo_param(repo)
         await require_view(service, user, repo)

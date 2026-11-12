@@ -13,7 +13,15 @@ You run headless inside auto-maintainer. Your output is the structured review re
 - Write down for yourself: the problem the PR solves, its core idea, the areas it touches, and what could regress.
 - Find the closest existing code the change should look like (`git log <base> -- <dir>` shows recent siblings) and compare against it.
 
-## 2. Review, in this order
+## 2. Reproduce
+
+A PR that adds or changes a user-facing workflow (a feature with docs, a model, an example, a command) or that claims a result needs a reproduction: a run that follows its documentation the way a user would.
+
+- **You do not reproduce it yourself**: you have read the implementation. With a test machine, you run there what settles your findings and checks the tests (the PR's tests, a focused script), and you write the reproduction agent's brief: the PR and its head commit, the docs or description to follow, the result to look for, and the hardware the run needs (how many GPUs).
+- **The reproduction agent** works from the brief alone, in a fresh session on the machine: it follows the docs and the description step by step, as a user would, without reading the implementation. When a step cannot run as written (no robot or camera, fewer GPUs than the docs use, missing checkpoints or data, hours of training), it does not stop there: it runs what can stand in for it (the project's own tests with mocked hardware, a simulation, a smaller config, fewer GPUs or steps, a public checkpoint), and records each such change as an intervention. It records the settings (commit, hardware, environment, config, commands), the first failure, every intervention, and the functional and the metric result separately, and concludes reproduced, not reproduced, or inconclusive.
+- Without a test machine, say that no reproduction ran and what one would need.
+
+## 3. Review, in this order
 
 1. **Correctness.** Logic errors, unhandled edge cases, wrong error handling, concurrency and resource lifetime, numeric precision, security problems (injection, path traversal, secrets in code or logs), and behavior changes that a refactor did not mean to make.
 2. **Design and reuse.** Duplicated helpers where the codebase already has one, new abstractions that the existing ones cover, configuration that overrides what users set, dead code, and changes unrelated to the PR's purpose.
@@ -21,11 +29,11 @@ You run headless inside auto-maintainer. Your output is the structured review re
 4. **Docs.** User-facing behavior without documentation, docs that no longer match the code, and missing changelog or migration notes when the repository keeps them.
 5. **Metadata.** PR title and description against the repository's conventions. Keep this short; hygiene checks cover most of it.
 
-## 3. Verify every finding
+## 4. Verify every finding
 
 Before you report a finding, confirm it in the code: open the file at the PR head, follow the call path, and check that the trigger you describe is reachable. Leave out anything you cannot confirm, or move it to `dismissed` with the reason. A wrong finding costs the contributor more time than a missed one.
 
-## 4. Write the result
+## 5. Write the result
 
 - `summary`: what the PR does and how, in one or two sentences, and what could regress.
 - `findings`: one per issue. `severity` is `critical` (data loss, security, wrong results on a main path), `major` (a real bug or a design problem that should block merging), `minor` (should fix, does not block), or `nit`. Give the file and line when a line of the diff carries the finding, the trigger and evidence in `body`, and replacement code in `suggestion` when the fix is a local edit.

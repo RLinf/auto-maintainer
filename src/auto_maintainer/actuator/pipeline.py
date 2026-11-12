@@ -54,6 +54,11 @@ log = logging.getLogger(__name__)
 
 PAUSE_KEY = "paused"
 
+RUN_ON_REQUEST = frozenset({ActionKind.LAB_REPRODUCE})
+"""Drafts that run once made, approved by the person they are drafted for: a
+reproduction someone asked for, whose request is its approval. The repository's
+rule still decides on that approval (``off`` refuses it, a pause holds it)."""
+
 
 class ApprovalError(ValueError):
     pass
@@ -247,14 +252,13 @@ class ActionPipeline:
         )
         if decision.kind == DecisionKind.PROPOSE:
             warnings = await self._warnings(action, profile)
-            await self.store.add_proposal(
-                Proposal(
-                    action_id=action.id,
-                    repo=action.repo,
-                    warnings=warnings,
-                    requested_by=action.draft_for,
-                )
+            proposal = Proposal(
+                action_id=action.id,
+                repo=action.repo,
+                warnings=warnings,
+                requested_by=action.draft_for,
             )
+            await self.store.add_proposal(proposal)
             await self.bus.publish(
                 Event(
                     kind=EventKind.PROPOSAL_CREATED,
@@ -264,6 +268,9 @@ class ActionPipeline:
                     source="pipeline",
                 )
             )
+            if action.kind in RUN_ON_REQUEST and action.draft_for:
+                await self.approve(proposal.id, action.draft_for)
+                return await self.store.get_action(action.id) or record
         elif decision.kind == DecisionKind.EXECUTE:
             self.actuator.enqueue(action.id, action.repo, kind=action.kind)
         elif decision.kind == DecisionKind.DENY and decision.rule == WRITE_CAP_RULE:

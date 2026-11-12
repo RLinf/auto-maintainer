@@ -28,31 +28,43 @@ from dataclasses import dataclass
 from .profile import LabBinding
 from .settings import LabMachine
 
+_RUNS = r"(?:^|[;&|(`{]|\$\(|\b(?:then|do|else|exec|nohup|xargs|time|sudo)\b)\s*"
+"""Where a word runs as a command: the start of a line or of a command after a
+separator, so the same word inside a search pattern or a string does not count."""
+
 BUILTIN_FORBID: tuple[tuple[str, str], ...] = (
-    (r"\bsudo\b", "uses sudo"),
-    (r"\b(shutdown|reboot|poweroff|halt)\b", "shuts the machine down"),
-    (r"\bray\s+stop\b", "stops every Ray job on the machine"),
-    (r"\b(pkill|killall)\b|\bkill\s+-\d+\s+-1\b", "kills processes it did not start"),
-    (r"\bmkfs\b|\bdd\s+[^\n]*of=/dev/", "writes to a disk device"),
-    (r"nvidia-smi\s+[^\n]*(-r\b|--gpu-reset|-pm\b|-pl\b)", "changes GPU settings"),
+    (_RUNS + r"sudo\b", "uses sudo"),
+    (_RUNS + r"(shutdown|reboot|poweroff|halt)\b", "shuts the machine down"),
+    (_RUNS + r"ray\s+stop\b", "stops every Ray job on the machine"),
     (
-        r"\brm\s+(-[A-Za-z]+\s+)*(/|~|\$HOME|\$\{HOME\})/?(\s|$|;|&)",
+        _RUNS + r"(pkill|killall)\b|" + _RUNS + r"kill\s+-\d+\s+-1\b",
+        "kills processes it did not start",
+    ),
+    (_RUNS + r"mkfs\b|" + _RUNS + r"dd\s+[^\n;&|]*of=/dev/", "writes to a disk device"),
+    (
+        _RUNS + r"nvidia-smi\s+[^\n;&|]*(-r\b|--gpu-reset|-pm\b|-pl\b)",
+        "changes GPU settings",
+    ),
+    (
+        _RUNS + r"rm\s+(-[A-Za-z]+\s+)*(/|~|\$HOME|\$\{HOME\})/?(\s|$|;|&)",
         "removes a root or home directory",
     ),
     (r":\(\)\s*\{", "is a fork bomb"),
-    (r"\bcrontab\b|\bsystemctl\b", "changes services or scheduled jobs"),
+    (_RUNS + r"(crontab|systemctl)\b", "changes services or scheduled jobs"),
     (
         r"(>>?\s*|\btee\s+(-a\s+)?)(/etc|/usr|/boot|/var/lib)/",
         "writes under a system directory",
     ),
 )
+"""What no command on a shared test machine may do, matched where the command
+runs; a machine and a repository add their own patterns (``forbidden``)."""
 
 
 def script_refusals(text: str, extra: list[str] | None = None) -> list[str]:
     """Why ``text`` (setup and script together) may not run; empty when it may."""
     out = []
     for pattern, why in BUILTIN_FORBID:
-        if re.search(pattern, text):
+        if re.search(pattern, text, re.MULTILINE):
             out.append(why)
     for pattern in extra or []:
         try:

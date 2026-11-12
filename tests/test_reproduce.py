@@ -352,9 +352,10 @@ async def test_only_service_maintainers_add_machines(demo) -> None:
         assert denied.status_code == 403
 
 
-async def test_an_agent_does_the_reproduction_in_its_session_once_approved(
-    demo,
-) -> None:
+async def test_a_reproduction_asked_for_runs_at_once_in_its_session(demo) -> None:
+    """A person's request is the approval: the skill's reproduction agent starts on
+    the machine at once, reads its skill and what was asked, and works through
+    ``lab``; its record comes back to the person who asked."""
     h, app = demo
     runner = h.service.a.lab_runner
     async with _as(app, "maria") as maria:
@@ -364,45 +365,38 @@ async def test_an_agent_does_the_reproduction_in_its_session_once_approved(
         )
         assert started.status_code == 200, started.text
         await h.settle()
-        [plan_task] = [t for t in h.runner.tasks if t.kind == "reproduce"]
-        assert "the batch of one" in plan_task.prompt and plan_task.mode == "read_only"
-        assert plan_task.lab_session is None, "planning gets no machine"
-        [job] = [j for j in await h.store.list_jobs() if j.playbook == "reproduce"]
-        assert job.status == JobStatus.WAITING
-        [draft] = [
+        [opened] = runner.reproduced
+        assert set(opened["code"]) == {"base", "head"}
+        [record] = await h.store.list_actions(
+            repo=REPO, number=42, kinds=["lab.reproduce"]
+        )
+        assert record.approver == "maria", "her request approved it"
+        assert not [
             p
             for p in (await maria.get("/api/proposals")).json()
             if p["action"]["action"]["kind"] == "lab.reproduce"
-        ]
-        assert draft["requested_by"] == "maria"
-        steps = draft["action"]["action"]["payload"]["steps"]
-        assert steps and "Install the package" in steps[0], "the plan is approved"
-        assert runner.reproduced == []
-        ok = await maria.post(f"/api/proposals/{draft['id']}/approve", json={})
-        assert ok.status_code == 200, ok.text
-        await h.settle()
-        [opened] = runner.reproduced
-        assert set(opened["code"]) == {"base", "head"}
-        [_, worker] = [t for t in h.runner.tasks if t.kind == "reproduce"]
+        ], "nothing waits for approval"
+        [worker] = [t for t in h.runner.tasks if t.kind == "reproduce"]
         assert worker.lab_session == f"token-{opened['session']}"
         assert worker.env["AM_LAB_SOCKET"], "the agent reaches its session"
-        assert (
-            "lab -- 'COMMAND'" in worker.prompt
-            and "Install the package" in worker.prompt
-        )
-        assert "find the cause in the output" in worker.prompt
-        assert "ask maria with your tool for asking the user" in worker.prompt
+        assert worker.mode == "workspace_write"
+        assert "You are the reproduction agent" in worker.prompt
+        assert "SKILL.md" in worker.prompt, "its skill says what it does"
+        assert "the batch of one" in worker.prompt
+        assert "lab -- 'COMMAND'" in worker.prompt and "lab --gpus N" in worker.prompt
+        assert "source ~/envs/widget/bin/activate" in worker.prompt, "the setup"
+        assert "When only maria can settle something" in worker.prompt
         assert worker.requested_by == "maria", "its questions go to maria"
         assert runner.closed == [opened["session"]], (
             "the session closes when it is done"
         )
+        [job] = [j for j in await h.store.list_jobs() if j.playbook == "reproduce"]
         progress = await h.service.progress.steps(job.id)
         assert [s.text for s in progress if s.kind == "output"] == [
             "gpu-01 · base",
             "gpu-01 · head",
         ], "the job shows the machine's output as it comes"
-        job = await h.store.get_job(job.id)
-        assert job is not None and job.status == JobStatus.DONE
+        assert job.status == JobStatus.DONE
         assert job.result and job.result["conclusion"] == "reproduced"
         assert job.result["commands"][0]["command"] == "python check.py"
         [report] = [
@@ -424,12 +418,6 @@ async def test_an_agent_that_fails_for_now_leaves_its_session_for_the_next_try(
     calls: list[int] = []
 
     def agent(task: Any) -> Any:
-        if "carry it out yourself" not in task.prompt:
-            return {
-                "summary": "check it",
-                "steps": ["run the check"],
-                "sides": ["head"],
-            }
         calls.append(1)
         if len(calls) == 1:
             return AgentResult(
@@ -441,34 +429,28 @@ async def test_an_agent_that_fails_for_now_leaves_its_session_for_the_next_try(
     async with _as(app, "maria") as maria:
         await maria.post(f"/api/prs/{REPO}/42/reproduce", json={"lab": "gpu-01"})
         await h.settle()
-        [draft] = [
-            p
-            for p in (await maria.get("/api/proposals")).json()
-            if p["action"]["action"]["kind"] == "lab.reproduce"
-        ]
-        await maria.post(f"/api/proposals/{draft['id']}/approve", json={})
-        await h.settle()
     [opened] = runner.reproduced
     assert runner.closed == [] and opened["session"] in runner.sessions
 
 
-async def test_a_rejected_plan_ends_the_job_and_runs_nothing(demo) -> None:
+async def test_a_repository_that_turns_reproductions_off_runs_none(demo) -> None:
+    """A request approves its reproduction, but the repository's rule still decides:
+    ``off`` runs nothing, and the job says so."""
     h, app = demo
+    from auto_maintainer.domain.memory import profile_path
+    from auto_maintainer.profiles.layers import dump_yaml, parse_yaml
+
+    path = profile_path(REPO)
+    layer = parse_yaml(h.memory.files[path], path)
+    layer.setdefault("policy", {})["lab.reproduce"] = {"level": "off"}
+    h.memory.files[path] = dump_yaml(layer)
+    await h.approve_directly(REPO, "maria")
     async with _as(app, "maria") as maria:
         await maria.post(f"/api/prs/{REPO}/42/reproduce", json={"lab": "gpu-01"})
         await h.settle()
-        [draft] = [
-            p
-            for p in (await maria.get("/api/proposals")).json()
-            if p["action"]["action"]["kind"] == "lab.reproduce"
-        ]
-        await maria.post(
-            f"/api/proposals/{draft['id']}/reject", json={"reason": "too slow"}
-        )
-        await h.settle()
     [job] = [j for j in await h.store.list_jobs() if j.playbook == "reproduce"]
     assert job.status == JobStatus.DONE and job.result
-    assert job.result["skipped"] == "the plan was not approved"
+    assert job.result["skipped"] == "the repository's settings refused it"
     assert h.service.a.lab_runner.reproduced == []
 
 
@@ -521,9 +503,9 @@ async def test_each_repository_turns_machines_on_and_sets_how_it_uses_them(
         )
         assert started.status_code == 200, started.text
         await h.settle()
-        [plan] = [t for t in h.runner.tasks if t.kind == "reproduce"]
-        assert "source ~/envs/cpu/bin/activate" in plan.prompt
-        assert "at most 10 minutes" in plan.prompt
+        [worker] = [t for t in h.runner.tasks if t.kind == "reproduce"]
+        assert "source ~/envs/cpu/bin/activate" in worker.prompt
+        assert "at most 10 minutes" in worker.prompt
         off = await maria.put(f"/api/repos/{REPO}/labs/gpu-01", json={"use": False})
         assert off.json()["applied"] is True
         offered = (await maria.get(f"/api/labs?repo={REPO}")).json()["machines"]
@@ -602,9 +584,10 @@ async def test_a_review_tests_and_reproduces_its_pr_in_its_own_session(demo) -> 
     [review] = [t for t in h.runner.tasks if t.kind == "review"]
     assert review.lab_session == f"token-{opened['session']}"
     assert review.env["AM_LAB_SOCKET"] and review.min_timeout_seconds
-    assert "Test and reproduce the PR on test machine gpu-01" in review.prompt
+    assert "Test machine gpu-01 is yours while you work" in review.prompt
+    assert "lab --gpus N" in review.prompt, "it takes the GPUs it needs"
+    assert "choose its reproduction agent" in review.prompt, "the service runs it"
     assert "Do not run the PR's tests" not in review.prompt
-    assert "ask maria with your tool for asking the user" in review.prompt
     assert runner.closed == [opened["session"]], "the session closes after the review"
     [job] = [j for j in await h.store.list_jobs() if j.playbook == "review"]
     assert job.result and job.result["tested_on"] == "gpu-01"
@@ -612,6 +595,36 @@ async def test_a_review_tests_and_reproduces_its_pr_in_its_own_session(demo) -> 
     assert not [j for j in await h.store.list_jobs() if j.playbook == "reproduce"], (
         "no separate reproduction follows the review"
     )
+
+
+async def test_a_review_that_needs_a_reproduction_starts_the_skills_agent(
+    demo,
+) -> None:
+    """The reviewer writes the brief the skill describes; the service runs a fresh
+    reproduction agent with it on the machine at once, under the rule the review's
+    own session runs by, and its record goes into that review's draft."""
+    h, app = demo
+    runner = h.service.a.lab_runner
+    answer = h.runner.handlers["review"]
+    brief = "Follow docs/batching.md on 1 GPU; check a batch of one loads."
+    h.runner.on("review", lambda t: {**answer(t), "reproduction": brief})
+    async with _as(app, "maria") as maria:
+        draft = await _review(h, maria, 42)
+        assert not [
+            p
+            for p in (await maria.get("/api/proposals")).json()
+            if p["action"]["action"]["kind"] in ("lab.review", "lab.reproduce")
+        ], "nobody approves it"
+    sessions = await h.store.list_actions(repo=REPO, number=42, kinds=["lab.review"])
+    assert len(sessions) == 2, "the review's own session, then the reproduction's"
+    assert all(r.status == "executed" for r in sessions)
+    [worker] = [t for t in h.runner.tasks if t.kind == "reproduce"]
+    assert brief in worker.prompt and "You are the reproduction agent" in worker.prompt
+    assert len(runner.reproduced) == 2 and len(runner.closed) == 2
+    [job] = [j for j in await h.store.list_jobs() if j.playbook == "reproduce"]
+    assert job.result and job.result["revised"] == draft["action_id"]
+    [update] = [t for t in h.runner.tasks if "That reproduction has ended" in t.prompt]
+    assert brief in update.prompt, "the review is revised with its record"
 
 
 async def test_a_restart_keeps_the_reviews_session_for_its_next_run(demo) -> None:
@@ -888,13 +901,20 @@ async def test_a_run_on_a_test_machine_does_not_hold_up_posting(demo) -> None:
     runner.open_session = slow_open
     async with _as(app, "maria") as maria:
         await maria.post(f"/api/prs/{REPO}/42/reproduce", json={"lab": "gpu-01"})
-        await h.settle()
-        [draft] = [
-            p
-            for p in (await maria.get("/api/proposals")).json()
-            if p["action"]["action"]["kind"] == "lab.reproduce"
-        ]
-        await maria.post(f"/api/proposals/{draft['id']}/approve", json={})
+    # The request runs at once; the machine holds its session until it is free.
+    settling = asyncio.create_task(h.settle())
+
+    async def lab_record() -> Any:
+        found = await h.store.list_actions(
+            repo=REPO, number=42, kinds=["lab.reproduce"]
+        )
+        return found[0] if found else None
+
+    for _ in range(200):
+        record = await lab_record()
+        if record is not None and record.status == "intent":
+            break
+        await asyncio.sleep(0.02)
     pr = await h.forge.get_pr(REPO, 42)
     assert pr is not None
     await h.service.pipeline.submit(
@@ -924,9 +944,10 @@ async def test_a_run_on_a_test_machine_does_not_hold_up_posting(demo) -> None:
     assert await label_status() not in ("queued", "intent"), (
         "the label waited for the machine"
     )
-    lab = await h.store.get_action(draft["action_id"])
+    lab = await lab_record()
     assert lab is not None and lab.status == "intent", "the run is still going"
     machine_free.set()
+    await settling
     await h.settle()
     assert len(runner.reproduced) == 1
 
@@ -968,26 +989,12 @@ async def test_actions_waiting_in_the_queue_at_a_restart_go_out_after_it(demo) -
         )
 
 
-async def _approve_scripts(h: Any, client: httpx.AsyncClient) -> int:
-    """Approve every reproduction script waiting; how many there were."""
-    waiting = [
-        p
-        for p in (await client.get("/api/proposals")).json()
-        if p["action"]["action"]["kind"] == "lab.reproduce"
-    ]
-    for p in waiting:
-        await client.post(f"/api/proposals/{p['id']}/approve", json={})
-    await h.settle()
-    return len(waiting)
-
-
 async def test_a_reproduction_asked_for_goes_into_the_waiting_review(demo) -> None:
     h, app = demo
     async with _as(app, "maria") as maria:
         draft = await _review(h, maria, 42)
         await maria.post(f"/api/prs/{REPO}/42/reproduce", json={"lab": "gpu-01"})
         await h.settle()
-        assert await _approve_scripts(h, maria) == 1
     comments = await h.store.list_actions(
         repo=REPO, number=42, kinds=["comment.upsert"]
     )

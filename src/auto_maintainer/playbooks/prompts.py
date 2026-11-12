@@ -164,7 +164,6 @@ HEADLESS = """You are running headless inside an automated maintainer service.
 - Do not ask questions, do not post anything, do not push, and do not edit files.
 - Steps of the skill that ask the user or post to GitHub are replaced by returning the structured result.
 {no_code}
-- Verify every finding against the code before reporting it; leave out anything you cannot confirm.
 - Public text you write is in {public_language}. Write plainly and specifically."""
 
 
@@ -181,7 +180,6 @@ INTERACTIVE = """You are reviewing for {reviewer}, a maintainer, inside an autom
 - When something you cannot settle from the code, the PR, or the repository would change your review (the intent behind a change, an unwritten convention, which of two designs is wanted), ask {reviewer} with your tool for asking the user. Ask only what matters, a few questions at most, each answerable in a line.
 - Never ask whether to post, publish, or comment, and never post, push, or edit files. Return the review as the structured result: {reviewer} reads it, edits it, and decides what is posted.
 {no_code}
-- Verify every finding against the code before reporting it; leave out anything you cannot confirm.
 - Public text you write is in {public_language}. Write plainly and specifically."""
 
 
@@ -221,6 +219,17 @@ def builtin_review_skill(profile: RepoProfile, skills_dir: Path) -> str | None:
         return None
     path = skills_dir / profile.review.skill.split(":", 1)[1] / "SKILL.md"
     return str(path) if path.is_file() else None
+
+
+def review_skill_path(profile: RepoProfile, skills_dir: Path, workdir: Path) -> str:
+    """The review skill a review of the repository follows, as a path an agent in
+    ``workdir`` opens: the repository's own, else the service's (``review_skill_block``
+    tells the reviewer the same)."""
+    own = own_review_skill(profile, workdir)
+    if own:
+        return own
+    builtin = builtin_review_skill(profile, skills_dir)
+    return builtin or str(skills_dir / "pr-review" / "SKILL.md")
 
 
 def own_review_skill(profile: RepoProfile, workdir: Path) -> str | None:

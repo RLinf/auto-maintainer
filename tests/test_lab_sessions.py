@@ -130,3 +130,89 @@ async def test_what_a_login_shell_prints_before_the_command_is_dropped() -> None
     lines.clear()
     result = await LocalLabHost("here").run("echo one; exit 3", on_output=seen)
     assert (result.exit_code, result.stdout, lines) == (3, "one\n", ["one"])
+
+
+async def test_lab_takes_the_gpus_a_run_needs_only_when_they_are_idle(
+    tmp_path: Path,
+) -> None:
+    """A session asks for more GPUs from inside it and gets them only all at once;
+    the commands after it see every GPU it holds, and it can give some back."""
+    from auto_maintainer.domain.ports import GpuStatus
+    from auto_maintainer.store.sqlite import SqliteStore
+
+    host = FakeLabHost(
+        "gpu-01",
+        gpus=[GpuStatus(index=i, memory_used_mib=0) for i in range(4)],
+    )
+    store = await SqliteStore.open(tmp_path / "am.db")
+    labs = LabExecutor({}, {}, store, FixedClock())
+    labs.configure({"gpu-01": LabMachine()})
+    labs.hosts["gpu-01"] = host
+    folder = Path(tempfile.mkdtemp(prefix="am-lab-", dir="/tmp"))
+    server = LabSessionServer(folder / "lab.sock", labs)
+    await server.start()
+    try:
+        payload = LabReproducePayload(
+            lab="gpu-01", summary="s", sides=["head"], wants_gpu=True
+        )
+        mine = await labs.open_session(
+            payload,
+            "acme/widget",
+            42,
+            {"head": ""},
+            "act_mine0001",
+            binding=LabBinding(),
+        )
+        other = await labs.open_session(
+            payload,
+            "acme/widget",
+            43,
+            {"head": ""},
+            "act_other001",
+            binding=LabBinding(),
+        )
+        assert (mine["gpus"], other["gpus"]) == ([0], [1])
+        token = labs.session_token(mine["session"])
+        assert token
+        code, _, err = await _lab(server, token, "--gpus", "4")
+        assert code == 1 and "not idle" in err, "three more are not free at once"
+        assert labs.session_info(token)["gpus"] == [0], "it took none of them"
+        code, out, _ = await _lab(server, token, "--gpus", "3")
+        assert code == 0 and "holds 3 GPU(s): 0, 2, 3" in out
+        await _lab(server, token, "--", "nvidia-smi")
+        assert host.commands[-1][2]["CUDA_VISIBLE_DEVICES"] == "0,2,3"
+        code, out, _ = await _lab(server, token, "--gpus", "1")
+        assert code == 0 and "holds 1 GPU(s): 0" in out
+        other_token = labs.session_token(other["session"])
+        assert other_token
+        code, out, _ = await _lab(server, other_token, "--gpus", "3")
+        assert code == 0 and "1, 2, 3" in out, "what it gave back is free again"
+    finally:
+        await server.stop()
+        shutil.rmtree(folder, ignore_errors=True)
+
+
+@pytest.mark.parametrize(
+    ("command", "refused"),
+    [
+        ('grep -n "ray.shutdown\\|Shutting down" run.log | tail -5', []),
+        ("grep -r 'pkill' docs/", []),
+        ("python -c 'print(\"reboot\")'", []),
+        ("rm -rf ./build /tmp/run", []),
+        ("pytest tests && ray stop", ["stops every Ray job on the machine"]),
+        ("sudo apt install x", ["uses sudo"]),
+        ("echo $(sudo id)", ["uses sudo"]),
+        ("if busy; then reboot; fi", ["shuts the machine down"]),
+        ("pkill -f train.py", ["kills processes it did not start"]),
+        ("rm -rf /", ["removes a root or home directory"]),
+        ("systemctl restart docker", ["changes services or scheduled jobs"]),
+    ],
+)
+def test_the_machine_refuses_a_command_only_where_it_runs(
+    command: str, refused: list[str]
+) -> None:
+    """A word inside a search pattern or a string is no command: only one that runs
+    is refused (two harmless reviews' commands were before)."""
+    from auto_maintainer.domain.labs import script_refusals
+
+    assert script_refusals(command) == refused

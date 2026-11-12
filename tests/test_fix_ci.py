@@ -93,7 +93,7 @@ async def test_an_agent_fixes_failing_ci_and_tests_it_on_a_machine(demo) -> None
                 json={"lab": "gpu-01", "note": "the progress bar"},
             )
         ).json()
-        assert out["session"]["status"] in ("queued", "executed"), out
+        assert out["session"]["status"] in ("queued", "intent", "executed"), out
         await h.settle()
 
         [opened] = runner.reproduced

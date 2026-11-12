@@ -426,8 +426,9 @@ class FixPrPayload(_Payload):
 
 
 class LabReproducePayload(_Payload):
-    """A reproduction of a PR on a test machine, as an agent planned it. Once it is
-    approved (or the repository's rule runs it), the actuator opens a session on the
+    """A session on a test machine for an agent that tests or reproduces a PR. Once
+    the repository's rule runs it (a person's request approves its own), the
+    actuator opens a session on the
     machine with a copy of the code before the PR (``base``) and at its head
     (``head``), and the agent works there one command at a time, each command
     checked against the machine's rules (design 5.10)."""
@@ -436,7 +437,8 @@ class LabReproducePayload(_Payload):
     summary: str
     """What the reproduction checks, in plain words."""
     steps: list[str] = Field(default_factory=list)
-    """The plan, step by step in words, that the approver reads."""
+    """From reproductions planned before an agent ran them from a brief; kept so
+    they still read."""
     setup: str = ""
     """From the one-script reproductions before sessions; kept so they still read."""
     script: str = ""
@@ -444,8 +446,14 @@ class LabReproducePayload(_Payload):
     """What result would confirm what the PR claims, on each side."""
     needs_gpu: bool = False
     wants_gpu: bool = False
-    """Lease an idle GPU when there is one; without one the session opens with the
-    GPUs hidden (``CUDA_VISIBLE_DEVICES`` empty), so it never takes a busy one."""
+    """Lease idle GPUs when there are; without one the session opens with the GPUs
+    hidden (``CUDA_VISIBLE_DEVICES`` empty), so it never takes a busy one."""
+    gpus: int = Field(default=1, ge=0, le=64)
+    """How many GPUs to lease when it opens, of those idle then; its agent asks for
+    more, and waits for them, from inside the session (``lab --gpus``)."""
+    brief: str = ""
+    """For a reproduction a review asked for: the reviewer's brief, as the review
+    skill describes it (what to follow, the hardware it needs)."""
     timeout_seconds: int = 1800
     sides: list[Literal["base", "head"]] = Field(
         default_factory=lambda: ["base", "head"]

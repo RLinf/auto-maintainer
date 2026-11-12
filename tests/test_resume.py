@@ -105,7 +105,7 @@ async def test_a_review_a_restart_cut_off_resumes_its_agent(demo) -> None:
     assert review.resume_session == "s-before" and route.primary == "antigravity"
     assert review.prompt.startswith("The service restarted while you were working")
     assert "Your session on the test machine is still open" in review.prompt
-    assert "Test and reproduce the PR" in review.prompt, "the whole task follows"
+    assert "is yours while you work" in review.prompt, "the whole task follows"
 
 
 async def test_an_agent_that_cannot_resume_starts_afresh(demo) -> None:

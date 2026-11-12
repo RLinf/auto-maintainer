@@ -59,6 +59,9 @@ from .hosts import LocalLabHost, SshLabHost
 
 TAIL_LINES = 150
 
+GPU_POLL_SECONDS = 30
+"""How often a session waiting for more GPUs (``grow_gpus``) looks again."""
+
 
 SESSIONS_KEY = "lab-sessions:open"
 """Where open sessions are recorded, so a restart cleans up their run folders."""
@@ -103,7 +106,8 @@ class LabSession:
     holder: str
     run_dir: str
     sides: list[str]
-    gpu: int | None
+    gpus: list[int]
+    """The GPUs it leased; its commands see these and no others."""
     env: dict[str, str]
     before: list[str]
     forbid: list[str]
@@ -120,6 +124,11 @@ class LabSession:
     ready: bool = False
     """Its code is on the machine; a session a restart finds before that is removed."""
 
+    @property
+    def gpu(self) -> int | None:
+        """Its first GPU, for those who know a session by one."""
+        return self.gpus[0] if self.gpus else None
+
     def record(self) -> dict[str, Any]:
         """What survives a restart: everything but its token and its callbacks."""
         return {
@@ -130,6 +139,7 @@ class LabSession:
             "holder": self.holder,
             "run_dir": self.run_dir,
             "sides": self.sides,
+            "gpus": self.gpus,
             "gpu": self.gpu,
             "env": self.env,
             "before": self.before,
@@ -314,22 +324,29 @@ class LabExecutor:
         run_dir = f"{root}/{repo.replace('/', '__')}-{number}-{holder[-8:]}"
         limit = min(payload.timeout_seconds, time_limit(machine, binding))
         env: dict[str, str] = {}
-        gpu: int | None = None
+        gpus: list[int] = []
         if payload.needs_gpu or payload.wants_gpu:
-            await tell(phase=f"Waiting for an idle GPU on {payload.lab}")
-            gpu = await self._lease_gpu(payload.lab, host, holder, limit)
-            if gpu is None and payload.needs_gpu:
+            await tell(phase=f"Looking for idle GPUs on {payload.lab}")
+            # As many as it asks for that are idle now; the agent asks for more,
+            # and waits for them, from inside the session (``grow_gpus``).
+            for _ in range(max(1, payload.gpus)):
+                gpu = await self._lease_gpu(payload.lab, host, holder, limit)
+                if gpu is None:
+                    break
+                gpus.append(gpu)
+            if not gpus and payload.needs_gpu:
                 return {
                     "lab": payload.lab,
                     "deferred": True,
                     "reason": "no idle GPU on the machine; nothing ran",
                 }
-            if gpu is None:
-                await tell(phase="No idle GPU; the session runs without one")
-            else:
-                await tell(phase=f"Leased GPU {gpu}")
-            # Without a lease, the GPUs stay hidden: they are other people's work.
-            env["CUDA_VISIBLE_DEVICES"] = "" if gpu is None else str(gpu)
+            await tell(
+                phase=f"Leased GPU {', '.join(map(str, gpus))}"
+                if gpus
+                else "No idle GPU yet; the agent can ask for one"
+            )
+        # The GPUs it holds are the only ones it sees: the rest are other people's.
+        env["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, gpus))
         session = LabSession(
             id=new_id("lab"),
             token=secrets.token_urlsafe(32),
@@ -339,7 +356,7 @@ class LabExecutor:
             holder=holder,
             run_dir=run_dir,
             sides=list(payload.sides),
-            gpu=gpu,
+            gpus=gpus,
             env=env,
             before=setup_lines(machine, binding),
             forbid=forbidden(machine, binding),
@@ -374,7 +391,8 @@ class LabExecutor:
         return {
             "lab": payload.lab,
             "session": session.id,
-            "gpu": gpu,
+            "gpu": session.gpu,
+            "gpus": session.gpus,
             "sides": session.sides,
             "expires_at": session.deadline.isoformat(),
         }
@@ -394,6 +412,7 @@ class LabExecutor:
             "lab": session.lab,
             "sides": session.sides,
             "gpu": session.gpu,
+            "gpus": session.gpus,
             "seconds_left": max(0, int(left)),
             "run_dir": session.run_dir,
         }
@@ -468,6 +487,59 @@ class LabExecutor:
         await self._save(session)
         return outcome
 
+    async def grow_gpus(
+        self, token: str, count: int, wait_seconds: int = 0
+    ) -> dict[str, Any]:
+        """Make the session hold ``count`` GPUs: give back those beyond it, or lease
+        the missing ones, only all at once (two sessions waiting for the same GPUs
+        never hold part of them each), waiting up to ``wait_seconds`` (and no longer
+        than the session lasts) for enough to be idle. Its later commands see every
+        GPU it holds."""
+        session = self._by_token(token)
+        if session is None:
+            return {"error": "there is no open session for this token"}
+        host = self.hosts.get(session.lab)
+        if host is None:
+            return {"error": f"there is no test machine named {session.lab!r}"}
+        count = max(0, min(int(count), 64))
+        for gpu in session.gpus[count:]:
+            await self._release(session.lab, gpu, session.holder)
+        session.gpus = session.gpus[:count]
+        until = min(
+            self.clock.now() + timedelta(seconds=max(0, wait_seconds)),
+            session.deadline,
+        )
+        waited = False
+        while len(session.gpus) < count:
+            ttl = int((session.deadline - self.clock.now()).total_seconds())
+            got = await self._lease_all(
+                session.lab,
+                host,
+                session.holder,
+                max(ttl, 60),
+                count - len(session.gpus),
+                exclude=set(session.gpus),
+            )
+            if got:
+                session.gpus = sorted(session.gpus + got)
+                break
+            if self.clock.now() >= until:
+                break
+            if not waited:
+                waited = True
+                await session.tell(
+                    phase=f"Waiting for {count - len(session.gpus)} more idle GPUs"
+                )
+            await asyncio.sleep(GPU_POLL_SECONDS)
+        session.env["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, session.gpus))
+        await self._save(session)
+        await session.tell(
+            phase=f"Holds GPU {', '.join(map(str, session.gpus))}"
+            if session.gpus
+            else "Holds no GPU"
+        )
+        return {"gpus": session.gpus, "wanted": count}
+
     def allow_sync(self, session_id: str, source: str) -> None:
         """Let the session's agent copy ``source``, the checkout it edits, to the
         machine's head side (``lab --sync``)."""
@@ -538,9 +610,16 @@ class LabExecutor:
         if not session.closed:
             session.closed = True
             await session.tell(phase=f"Removing the run folder on {session.lab}")
-            await self._clean(session.lab, session.run_dir, session.gpu, session.holder)
+            await self._clean(
+                session.lab, session.run_dir, session.gpus, session.holder
+            )
             await self._forget(session_id)
-        return {"lab": session.lab, "gpu": session.gpu, "commands": session.log}
+        return {
+            "lab": session.lab,
+            "gpu": session.gpu,
+            "gpus": session.gpus,
+            "commands": session.log,
+        }
 
     async def expire_sessions(self) -> int:
         """Close the sessions past their time limit; how many."""
@@ -568,10 +647,7 @@ class LabExecutor:
             cleaned += 1
             with contextlib.suppress(Exception):
                 await self._clean(
-                    record["lab"],
-                    record["run_dir"],
-                    record.get("gpu"),
-                    record["holder"],
+                    record["lab"], record["run_dir"], _gpus(record), record["holder"]
                 )
         await self.store.set_state(SESSIONS_KEY, kept)
         return cleaned
@@ -594,7 +670,7 @@ class LabExecutor:
                 holder=str(record["holder"]),
                 run_dir=str(record["run_dir"]),
                 sides=list(record["sides"]),
-                gpu=record.get("gpu"),
+                gpus=_gpus(record),
                 env=dict(record.get("env") or {}),
                 before=list(record.get("before") or []),
                 forbid=list(record.get("forbid") or []),
@@ -622,13 +698,14 @@ class LabExecutor:
         return None
 
     async def _clean(
-        self, lab: str, run_dir: str, gpu: int | None, holder: str
+        self, lab: str, run_dir: str, gpus: list[int], holder: str
     ) -> None:
         host = self.hosts.get(lab)
         if host is not None:
             with contextlib.suppress(Exception):
                 await host.run(f"rm -rf {shlex.quote(run_dir)}", timeout=300)
-        await self._release(lab, gpu, holder)
+        for gpu in gpus:
+            await self._release(lab, gpu, holder)
 
     async def _remember(self, session: LabSession) -> None:
         self._opening[session.id] = session
@@ -764,9 +841,51 @@ class LabExecutor:
                 await self.store.release_lease(lab, f"gpu{gpu.index}", holder)
         return None
 
+    async def _lease_all(
+        self,
+        lab: str,
+        host: LabHost,
+        holder: str,
+        ttl: int,
+        count: int,
+        exclude: set[int] | None = None,
+    ) -> list[int]:
+        """Lease ``count`` idle GPUs at once, or none; never those in ``exclude``."""
+        thresholds = self.thresholds.get(lab, GpuThresholds())
+        idle = [
+            g.index
+            for g in await host.gpu_status()
+            if is_idle(g, thresholds) and g.index not in (exclude or set())
+        ]
+        if len(idle) < count:
+            return []
+        got: list[int] = []
+        for index in idle:
+            if await self.store.acquire_lease(
+                lab, f"gpu{index}", holder, ttl + 600, self.clock.now()
+            ):
+                got.append(index)
+                if len(got) == count:
+                    break
+        again = {g.index: g for g in await host.gpu_status()}
+        if len(got) < count or not all(
+            i in again and is_idle(again[i], thresholds) for i in got
+        ):
+            for index in got:
+                await self.store.release_lease(lab, f"gpu{index}", holder)
+            return []
+        return got
+
     async def _release(self, lab: str, gpu: int | None, holder: str) -> None:
         if gpu is not None:
             await self.store.release_lease(lab, f"gpu{gpu}", holder)
+
+
+def _gpus(record: dict[str, Any]) -> list[int]:
+    """The GPUs a saved session holds, also from a record of one GPU."""
+    if record.get("gpus") is not None:
+        return [int(g) for g in record["gpus"]]
+    return [] if record.get("gpu") is None else [int(record["gpu"])]
 
 
 def _tail(text: str) -> list[str]:

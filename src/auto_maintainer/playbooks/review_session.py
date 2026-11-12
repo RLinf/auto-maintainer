@@ -40,7 +40,7 @@ from ..domain.actions import (
     make_action,
 )
 from ..domain.events import EventKind
-from ..domain.labs import time_limit, unusable
+from ..domain.labs import setup_lines, time_limit, unusable
 from ..domain.profile import RepoProfile
 from ..domain.snapshot import PrSnapshot
 from ..policy.engine import PolicyFacts, level_for
@@ -55,16 +55,55 @@ OPEN_WAIT_SECONDS = 3600
 SESSION_GRACE_SECONDS = 600
 """How much longer than its session the agent's run may take, to write the review."""
 
-ON_MACHINE = """- Test and reproduce the PR on test machine {lab} as you see fit while you review: its tests, the commands and examples its documentation gives (follow them the way a user would, and note every step they leave out), experiments that check what it claims, and the code before the PR where a comparison settles something.
-- `lab -- 'COMMAND'` (one quoted string) runs a command in a fresh shell in a copy of the PR's head on the machine, after the machine's own setup; `lab --side base -- 'COMMAND'` runs it in the code before the PR. Chain what needs one shell with `&&`, keep environments, caches, and downloads inside the copy, and activate an environment in each command that needs it. `lab --timeout MINUTES -- 'COMMAND'` gives a long step more time; `lab --info` says how long the session has left and whether it has a GPU (without one, say which steps need a GPU and could not run).
-- Run each `lab` command in the foreground and wait until it exits, even when it takes many minutes: give your tool for running commands enough time, and if the tool moves it to the background anyway, wait on that task with the tool until it ends. Never end your turn while a command still runs: the end of your turn ends the session.
-- The working directory here is a checkout of the PR's head to read; the PR's code runs only on the machine, through `lab`. To read GitHub (this PR's reviews and comments, other PRs, issues, CI runs), use gh; it reads only.
-- When a step fails because of the machine or the setup rather than the PR (a missing package, a path, a mirror or download), find the cause, fix it inside the copy, and say what you changed; {stuck} A failure the PR causes is a finding.
-- Never use sudo, change anything outside the session's folders, or stop other people's work on the machine; the machine refuses commands that would.
-- Spend the time on what matters for this review: what the PR changes and claims. Report what you ran, on what kind of machine, and what came out where the review skill asks how the PR was tested or reproduced (or in the summary), with the first failure and the steps the docs left out; a claim the runs disprove is a finding."""
+MACHINE = """Test machine {lab} is yours while you work: run on it whatever your skill has you run.
+- `lab -- 'COMMAND'` (one quoted string) runs COMMAND in a fresh shell in a copy of the PR's head on the machine, after the machine's own setup; `lab --side base -- 'COMMAND'` runs it in the code before the PR. Chain what needs one shell with `&&`, and keep environments, caches, and downloads inside the copy.
+- The session holds {gpus} now. `lab --gpus N` makes it hold N, waiting up to `--wait MINUTES` for them to be idle; the commands after it see all of them. `lab --info` says what it holds and how long it has left, and `lab --timeout MINUTES -- 'COMMAND'` gives a long command more time.
+- Run each `lab` command in the foreground until it exits, even when it takes many minutes; if your tool moves it to the background, wait on it there. The end of your turn ends the session.
+- The working directory here is a checkout of the PR's head to read; the PR's code runs on the machine, through `lab`. To read GitHub (this PR, its reviews and CI, other PRs and issues), use gh; it reads only.
+- The machine is shared: it refuses commands that would reach beyond the session (sudo, shutting it down, killing processes it did not start, stopping every Ray job, writing system folders).{setup}{about}"""
 
-STUCK_ASK = "when you cannot, ask {by} with your tool for asking the user."
-STUCK_NOTE = "when you cannot, say what the machine needs and go on with the review."
+REPRODUCTION = """Where the review skill has you choose how the PR is reproduced, choose its reproduction agent, and do not start one yourself: the service runs it. Put its brief in `reproduction`, holding what the skill says a brief holds and the hardware the run needs (how many GPUs). Once your review is done, a fresh agent follows the brief on {lab}, and its record is added to the review. Leave `reproduction` empty when the skill says the PR needs no reproduction."""
+
+
+def held_gpus(opened: dict[str, Any]) -> list[int]:
+    """The GPUs a session held when it opened, from the outcome of its action (one
+    GPU in sessions from before there could be several)."""
+    gpus = opened.get("gpus")
+    if gpus is None:
+        gpus = [] if opened.get("gpu") is None else [opened["gpu"]]
+    return [int(g) for g in gpus]
+
+
+def machine_facts(
+    lab: str,
+    description: str,
+    gpus: list[int] | None,
+    setup: list[str] | None = None,
+    minutes: int | None = None,
+) -> str:
+    """What an agent with a session on ``lab`` needs to know to use it: how ``lab``
+    works, what runs before each command, how long the session lasts, and what the
+    machine's maintainers wrote about it. Facts, not rules: what to run is the
+    skill's to say."""
+    held = (
+        f"{len(gpus)} GPU{'s' if len(gpus) != 1 else ''} ({', '.join(map(str, gpus))})"
+        if gpus
+        else "no GPU"
+    )
+    about = (
+        f"\n\nWhat {lab}'s maintainers say about it (where things are, mirrors, "
+        f"limits):\n{description.strip()}"
+        if description.strip()
+        else ""
+    )
+    before = (
+        "\n- Before each command, the session runs: " + " && ".join(setup)
+        if setup
+        else ""
+    )
+    if minutes:
+        before += f"\n- The session lasts at most {minutes} minutes."
+    return MACHINE.format(lab=lab, gpus=held, setup=before, about=about)
 
 
 @dataclass
@@ -77,6 +116,8 @@ class ReviewMachine:
     session_id: str | None = None
     token: str | None = None
     lab: str | None = None
+    gpus: list[int] = field(default_factory=list)
+    """The GPUs the session held when it opened."""
     note: str = ""
     """Why the review runs nothing, for its prompt and result; empty with a session."""
     commands: list[dict[str, object]] = field(default_factory=list)
@@ -92,10 +133,20 @@ class ReviewMachine:
             }
         return {"not_tested": self.note} if self.note else {}
 
-    def testing(self, by: str | None) -> str:
-        """The prompt's rules on running code, with this session."""
-        stuck = STUCK_ASK.format(by=by) if by else STUCK_NOTE
-        return ON_MACHINE.format(lab=self.lab, stuck=stuck)
+    def testing(self, ctx: PlaybookContext, *, reproduce: bool) -> str:
+        """What the agent is told about its session: the machine's facts, and for a
+        review, that the service runs the skill's reproduction agent."""
+        assert self.lab
+        machine = ctx.service.machines.get(self.lab)
+        binding = ctx.profile.labs.get(self.lab) if ctx.profile else None
+        facts = machine_facts(
+            self.lab,
+            machine.description if machine else "",
+            self.gpus,
+            setup_lines(machine, binding) if machine else None,
+            time_limit(machine, binding) // 60 if machine else None,
+        )
+        return facts + ("\n" + REPRODUCTION.format(lab=self.lab) if reproduce else "")
 
 
 def machine_for(
@@ -226,7 +277,12 @@ async def review_machine(
             note=f"The session on {payload.lab} ended before the agent could use it, "
             "so nothing ran."
         )
-    return ReviewMachine(session_id=session_id, token=token, lab=payload.lab)
+    return ReviewMachine(
+        session_id=session_id,
+        token=token,
+        lab=payload.lab,
+        gpus=held_gpus(outcome),
+    )
 
 
 def session_task_fields(ctx: PlaybookContext, machine: ReviewMachine) -> dict[str, Any]:

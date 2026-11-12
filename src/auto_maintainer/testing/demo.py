@@ -660,7 +660,7 @@ def _answer(task: AgentTask) -> dict[str, Any]:
             "summary": "Adds the boundary test the review asked for.",
             "fixed": [{"id": "F1", "change": "added a test for a batch of one item"}],
         }
-    if kind == "reproduce" and "carry it out yourself" in task.prompt:
+    if kind == "reproduce":
         return {
             "conclusion": "reproduced",
             "comment": (
@@ -669,18 +669,6 @@ def _answer(task: AgentTask) -> dict[str, Any]:
                 "this PR's head the same check passes (`1 passed`)."
             ),
             "notes": "",
-        }
-    if kind == "reproduce":
-        return {
-            "summary": "Load a batch of one item, which the review says is untested.",
-            "steps": [
-                "Install the package in a virtual environment in the session's folder.",
-                "On the code before the PR, load a batch of one item and count it.",
-                "Do the same at the PR's head.",
-            ],
-            "expect": "base raises AssertionError; head prints 1 passed",
-            "needs_gpu": False,
-            "timeout_minutes": 10,
         }
     if kind == "onboard":
         return {

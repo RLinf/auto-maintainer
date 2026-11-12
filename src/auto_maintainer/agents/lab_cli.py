@@ -21,9 +21,12 @@ the standard library, so any Python 3 in the agent's container runs it. Each com
 runs in a fresh shell in the session's folder for one side of the PR (``head`` by
 default, or ``base``) on the machine; its output streams here as it comes, and
 ``lab`` exits with the command's exit code. When the agent changes the code (fixing
-CI), ``lab --sync`` copies its working directory to the head side first.
+CI), ``lab --sync`` copies its working directory to the head side first. ``lab
+--gpus N`` makes the session hold N GPUs, waiting up to ``--wait MINUTES`` for them
+to be idle; the commands after it see all of them.
 
     lab [--side head|base] [--timeout MINUTES] -- COMMAND ...
+    lab --gpus N [--wait MINUTES]
     lab --sync
     lab --info
 """
@@ -67,6 +70,34 @@ def main(argv: list[str]) -> int:
         reply = conn.getresponse()
         print(reply.read().decode())
         return 0 if reply.status == 200 else 1
+    if rest[:1] == ["--gpus"]:
+        try:
+            count = int(rest[1])
+            wait = float(rest[3]) if rest[2:3] == ["--wait"] else 0.0
+        except (IndexError, ValueError):
+            return _usage()
+        conn = _UnixConnection(path)
+        conn.request(
+            "POST",
+            "/gpus",
+            body=json.dumps({"count": count, "wait_minutes": wait}),
+            headers={"x-lab-session": token, "content-type": "application/json"},
+        )
+        reply = conn.getresponse()
+        out = json.loads(reply.read().decode() or "{}")
+        if reply.status != 200 or out.get("error"):
+            print(f"lab: {out.get('error') or reply.status}", file=sys.stderr)
+            return 1
+        held = out.get("gpus") or []
+        print(f"holds {len(held)} GPU(s): {', '.join(map(str, held)) or 'none'}")
+        if len(held) < count:
+            print(
+                f"lab: {count - len(held)} more were not idle; "
+                "try again later or with --wait MINUTES",
+                file=sys.stderr,
+            )
+            return 1
+        return 0
     if rest[:1] == ["--sync"]:
         conn = _UnixConnection(path)
         conn.request(

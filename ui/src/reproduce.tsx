@@ -1,6 +1,7 @@
-// Reproduce a PR on a test machine: pick a machine, say what to check if the PR does
-// not make it obvious, and an agent plans the reproduction. Nothing runs until the
-// person who asked approves the plan; then the agent does it on the machine.
+// Reproduce a PR on a test machine: pick a machine and say what to check if the PR
+// does not make it obvious. The review skill's reproduction agent starts at once on
+// the machine, takes the GPUs the run needs when they are idle, and its record goes
+// into the PR's review.
 
 import { useState } from "react";
 import { Link } from "react-router-dom";
@@ -30,7 +31,7 @@ export function ReproduceForm({ repo, number, onClose }: { repo: string; number:
   );
   return (
     <div className="stack" style={{ gap: 10, padding: 6, width: "min(360px, calc(100vw - 24px))", maxWidth: "100%" }}>
-      <span className="small muted">{t("An agent plans how to check what the PR claims. You approve the plan; then the agent does it on the machine step by step, and the result goes into the PR's review.")}</span>
+      <span className="small muted">{t("The review skill's reproduction agent runs it on the machine at once, taking the GPUs it needs when they are idle; its record goes into the PR's review.")}</span>
       {view.isLoading ? (
         <Skeleton rows={2} />
       ) : !used.length ? (
@@ -84,7 +85,7 @@ export function ReproduceForm({ repo, number, onClose }: { repo: string; number:
                     setNote("");
                     toast({
                       title: t("Reproduction started"),
-                      body: `${t("The agent plans the reproduction; you approve the plan before it runs on")} ${out.lab}.`,
+                      body: `${t("The reproduction agent is starting on")} ${out.lab}.`,
                       icon: "server",
                       action: { label: t("Watch"), onClick: () => openJob(out.event) },
                     });

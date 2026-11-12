@@ -14,7 +14,7 @@
 
 """The reproduction sessions the actuator opened, as playbooks see them (design 5.10).
 
-The ``lab.reproduce`` handler opens a session once its plan is approved; the
+The ``lab.reproduce`` and ``lab.review`` handler opens a session once it may run; the
 reproduce playbook gets the session's token for its agent here, and closes the
 session here when the agent is done, which removes its run folder and releases its
 GPU on the machine. A session also closes at its time limit.

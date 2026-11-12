@@ -104,7 +104,7 @@ _turns: dict[str, asyncio.Lock] = {}
 TALK = """You wrote the {what} of PR #{number} in {repo} given below, and {user}, a reviewer, is talking with you about it. They may ask why you found something, disagree with a finding, ask you to change the draft, or ask you to check more: other files, a test, the docs, a scenario.
 - Answer in `reply`, plainly and briefly, in the language {user} writes in; point to code as `path:line`.
 - Check before you answer: read the code in the working directory and its git history. Never post, push, or change the repository's files.
-- Never run code on this machine: not the PR's code, its tests, builds, installs, or its workflow. A repository's code runs only on its test machines, through the service's reproduction. When {user} asks for a run, or agrees to one that would settle the question, put what it should check in `reproduce`: the service starts a reproduction on the repository's test machine, and its script comes back to {user} to approve before it runs. Say so in `reply`.
+- Never run code on this machine: not the PR's code, its tests, builds, installs, or its workflow. A repository's code runs only on its test machines, through the service's reproduction. When {user} asks for a run, or agrees to one that would settle the question, put what it should check in `reproduce`: the service starts the review skill's reproduction agent on the repository's test machine at once, and its record is added to the {what}. Say so in `reply`.
 - When {user} asks for a change to the {what}, or what you check changes it, return the whole revised {what} in `{field}`: every finding, section, and line that should stay, word for word, including edits the reviewers made to the draft by hand. Leave `{field}` null when it stays as it is.
 - When only {user} can settle something that would change your answer, ask them with your tool for asking the user.
 - Put a rule in `lessons` only when {user} states one for future reviews of this repository or agrees to one.
@@ -741,8 +741,8 @@ async def _reproduce(
     )
     await service.bus.publish(event)
     return event.id, (
-        f"Started a reproduction on {lab}, checking: {focus[:500]} Its script comes "
-        f"back to {user.login} to approve before it runs."
+        f"Started a reproduction on {lab}, checking: {focus[:500]} Its record is "
+        "added to the review when it is done."
     )
 
 
