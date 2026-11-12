@@ -2396,6 +2396,12 @@ const zh: Record<string, string> = {
   "No label holds the merge back": "没有标签会阻止合并",
   "Hold the merge back while a PR has one of these labels:": "PR 带有以下任一标签时暂不合并：",
   "The profile gives no labels to roles.": "配置中没有为角色指定标签。",
+  "Read every open PR from GitHub again now, instead of at the next poll": "立即从 GitHub 重新读取所有开放的 PR，而不是等下一次轮询",
+  "Checking": "正在检查",
+  "Already checking": "已在检查中",
+  "Each PR is read from GitHub again; the lists update as they are read.": "每个 PR 都会从 GitHub 重新读取；列表会随读取进度更新。",
+  "Checking all PRs…": "正在检查所有 PR…",
+  "Check all PRs": "检查所有 PR",
 };
 
 const LangContext = createContext<{ lang: Lang; setLang: (l: Lang) => void }>({ lang: "zh", setLang: () => {} });

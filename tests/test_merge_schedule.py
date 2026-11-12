@@ -877,3 +877,35 @@ async def test_a_maintainer_chooses_which_labels_hold_a_merge_back(
         ).json()
         assert proposed["applied"] is False, proposed
         assert proposed["change"]["state"] == "open", "a proposal for the maintainers"
+
+
+async def test_checking_all_prs_reads_each_from_the_forge_again(
+    harness: Harness, tmp_path: Path
+) -> None:
+    h = harness
+    h.forge.put_pr(_ready(42, "a" * 40, []))
+    h.forge.put_pr(_ready(43, "c" * 40, []))
+    await h.poll()
+    reads: list[int] = []
+    refresh = h.service._refresh_pr
+
+    async def counted(repo: str, number: int) -> None:
+        reads.append(number)
+        await refresh(repo, number)
+
+    h.service._refresh_pr = counted
+    # GitHub counts an approval a moment late: the stored PR still waits for it.
+    pr = await h.forge.get_pr(REPO, 42)
+    h.forge.put_pr(pr.model_copy(update={"review_decision": "APPROVED"}))
+    app = create_app(h.service, data_dir=tmp_path, allow_dev_login=True)
+    async with _as(app, "bob") as bob:
+        out = (await bob.post(f"/api/merge-schedule/{REPO}/check")).json()
+        assert out == {"started": True, "prs": 2}
+        again = (await bob.post(f"/api/merge-schedule/{REPO}/check")).json()
+        assert again["started"] is False, "one check at a time"
+        await h.service._checks[REPO]
+        view = (await bob.get(f"/api/merge-schedule/{REPO}/view")).json()
+        assert view["checking"] is False
+    assert sorted(reads) == [42, 43]
+    stored = await h.store.get_snapshot(REPO, 42)
+    assert stored is not None and stored.review_decision == "APPROVED"

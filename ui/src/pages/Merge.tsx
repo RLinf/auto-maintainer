@@ -95,6 +95,7 @@ interface MergeView {
   auto: boolean;
   auto_by: string | null;
   paused: boolean;
+  checking: boolean;
   rules: {
     approvals: number;
     code_owners: boolean | null;
@@ -153,18 +154,44 @@ export default function MergePage() {
   const repos = useRepos();
   const names = (repos.data ?? []).map((r) => r.repo).sort((a, b) => a.localeCompare(b));
   const [scope, setScope] = useRepoScope(names);
+  const toast = useToast();
   const q = useQuery({
     queryKey: ["merge-schedule", scope],
     queryFn: () => api.get<MergeView>(`/api/merge-schedule/${scope}/view`),
     enabled: !!scope,
-    refetchInterval: 20_000,
+    // Faster while every PR is being read again, so the lists follow along.
+    refetchInterval: (query) => (query.state.data?.checking ? 4_000 : 20_000),
   });
   const v = q.data;
+  const check = useAct(() => api.post<{ started: boolean; prs: number }>(`/api/merge-schedule/${scope}/check`), [["merge-schedule"]]);
+  const checking = check.isPending || !!v?.checking;
   return (
     <>
       <PageHead
         title={t("Merge scheduling")}
         sub={t("Choose which ready PRs merge and in what order. The service starts their CI the way the repository starts it, reruns what flakes, sets real failures aside with their cause, and merges what passes.")}
+        actions={
+          v?.enabled && (
+            <button
+              disabled={checking}
+              title={t("Read every open PR from GitHub again now, instead of at the next poll")}
+              onClick={() =>
+                check.mutate(undefined, {
+                  onSuccess: (out) =>
+                    toast({
+                      title: out.started ? `${t("Checking")} ${out.prs} ${t("PRs")}` : t("Already checking"),
+                      body: t("Each PR is read from GitHub again; the lists update as they are read."),
+                      icon: "refresh",
+                    }),
+                  onError: (e) => toast({ title: t("Not started"), body: String((e as Error).message), icon: "x" }),
+                })
+              }
+            >
+              <Icon name="refresh" size={14} />
+              {checking ? t("Checking all PRs…") : t("Check all PRs")}
+            </button>
+          )
+        }
       />
       <RepoTabs names={names} scope={scope} onPick={setScope} />
       {repos.isLoading || (q.isLoading && !!scope) ? (

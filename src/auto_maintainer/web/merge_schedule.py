@@ -286,6 +286,7 @@ def build_router() -> APIRouter:
             "auto": profile.merge.schedule.auto,
             "auto_by": profile.merge.schedule.auto_by,
             "paused": await service.pipeline.paused(repo),
+            "checking": service.checking_prs(repo),
             "rules": {
                 "approvals": max(profile.merge.approvals, info.required_approvals or 0),
                 "code_owners": info.requires_code_owner_reviews,
@@ -640,6 +641,26 @@ def build_router() -> APIRouter:
             change,
             "merge: held back by " + (", ".join(labels) if labels else "no label"),
         )
+
+    @r.post("/{repo:path}/check")
+    async def check(
+        request: Request, repo: str, user: User = Depends(current_user)
+    ) -> dict[str, Any]:
+        """Read every open PR of ``repo`` from GitHub again now, in full, in the
+        background (``Service.check_prs``); the page updates as each is read."""
+        service = service_of(request)
+        repo = _repo(repo)
+        await require_view(service, user, repo)
+        record = await service.store.get_repo(repo)
+        if record is None or not record.active or not service.serves(repo):
+            raise HTTPException(
+                409, f"the service does not read {repo} until its profile is approved"
+            )
+        started = service.check_prs(repo)
+        return {
+            "started": started,
+            "prs": len(await service.store.list_snapshots(repo)),
+        }
 
     @r.post("/{repo:path}/investigate")
     async def investigate(

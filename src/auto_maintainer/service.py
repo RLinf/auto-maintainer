@@ -303,6 +303,8 @@ class Service:
         """Set after a deploy; ``am serve`` then exits for its supervisor to restart it."""
         self._confirming: asyncio.Task[None] | None = None
         self._polls: dict[str, asyncio.Task[None]] = {}
+        self._checks: dict[str, asyncio.Task[None]] = {}
+        """Full reads of every open PR of a repository a person asked for."""
         """Polls started because a repository's approved profile changed, by repository."""
         self.questions = QuestionDesk(
             adapters.store,
@@ -561,7 +563,12 @@ class Service:
         self.closing.set()
         loose = [
             t
-            for t in [self._confirming, *self._polls.values(), *self._install_tasks]
+            for t in [
+                self._confirming,
+                *self._polls.values(),
+                *self._checks.values(),
+                *self._install_tasks,
+            ]
             if t is not None
         ]
         for task in loose:
@@ -1204,6 +1211,34 @@ class Service:
                 log.exception("polling %s after its profile changed failed", repo)
 
         self._polls[repo] = asyncio.create_task(poll(), name=f"poll {repo}")
+        return True
+
+    def checking_prs(self, repo: str) -> bool:
+        """Whether ``check_prs`` is reading ``repo``'s PRs now."""
+        task = self._checks.get(repo)
+        return task is not None and not task.done()
+
+    def check_prs(self, repo: str) -> bool:
+        """Read every open PR of ``repo`` from the forge again now, in full, one at a
+        time in the background: a poll reads in full only the PRs whose update time
+        changed, and the forge's own verdicts (a review decision) can trail that.
+        Dashboards hear of each PR as it is read. Returns whether a check started;
+        ``False`` when one is already running or the service does not read ``repo``."""
+        if not self.serves(repo) or self.checking_prs(repo):
+            return False
+
+        async def check() -> None:
+            record = await self.store.get_repo(repo)
+            if record is None or not record.active:
+                return
+            try:
+                await self.poller.poll_repo(repo)
+            except Exception:
+                log.exception("polling %s before checking its PRs failed", repo)
+            for pr in await self.store.list_snapshots(repo):
+                await self._refresh_pr(repo, pr.number)
+
+        self._checks[repo] = asyncio.create_task(check(), name=f"check {repo}")
         return True
 
     # -- operations used by the dashboard and the CLI ----------------------------------
