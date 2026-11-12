@@ -2460,6 +2460,10 @@ const zh: Record<string, string> = {
   "Flaky, rerun": "偶发失败，重跑",
   "Learned from failures marked flaky": "从标记为偶发失败的记录中学到的",
   "Dismiss": "忽略",
+  "by hand, before it was ready": "手动调度，尚未满足条件",
+  "Run its CI on its turn though it is not ready; it merges once the merge rules hold": "尽管尚未满足条件，轮到它时也运行 CI；满足合并规则后合并",
+  "Scheduled by hand": "已手动调度",
+  "Schedule anyway": "仍然调度",
 };
 
 const LangContext = createContext<{ lang: Lang; setLang: (l: Lang) => void }>({ lang: "zh", setLang: () => {} });

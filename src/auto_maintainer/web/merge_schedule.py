@@ -67,6 +67,8 @@ from .auth import User, current_user
 
 class ScheduleBody(BaseModel):
     number: int = Field(ge=1)
+    force: bool = False
+    """Schedule it by hand though it does not meet the repository's target yet."""
 
 
 class OrderBody(BaseModel):
@@ -405,6 +407,7 @@ def build_router() -> APIRouter:
                 "approval_needed": state.approval_needed,
                 "stale": not same_commit(arm.sha, pr.head_sha),
                 "job": jobs.get(arm.number),
+                "forced": arm.forced,
             }
             (failed if state.phase == "failed" else scheduled).append(row)
         candidates, not_ready = [], []
@@ -505,8 +508,10 @@ def build_router() -> APIRouter:
         body: ScheduleBody,
         user: User = Depends(current_user),
     ) -> dict[str, Any]:
-        """Schedule a ready PR as the maintainer who pressed it: that arms its merge
-        at its head and approves the steps the schedule takes for it."""
+        """Schedule a PR as the maintainer who pressed it: that arms its merge at its
+        head and approves the steps the schedule takes for it. One that does not meet
+        the repository's target yet is scheduled only with ``force`` (by hand): its
+        CI runs on its turn, and it merges once the merge rules hold."""
         service = service_of(request)
         repo = _repo(repo)
         await require_view(service, user, repo)
@@ -523,7 +528,7 @@ def build_router() -> APIRouter:
         back = holding_back(
             await gate_of(service, profile, info, pr, None), ready_conditions(profile)
         )
-        if back:
+        if back and not body.force:
             raise HTTPException(
                 409,
                 f"#{body.number} is not ready: "
@@ -539,6 +544,7 @@ def build_router() -> APIRouter:
             armed_at=now,
             armer_permission=perm,
             position=next_position(await service.store.list_arms(repo), now),
+            forced=bool(back),
         )
         await service.store.save_arm(arm)
         await service.store.set_state(skip_key(repo, body.number), None)

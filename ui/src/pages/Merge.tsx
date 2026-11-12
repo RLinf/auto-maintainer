@@ -50,6 +50,7 @@ interface Scheduled extends Row {
   approval_needed: boolean;
   stale: boolean;
   job: { id: string; status: string; playbook: string } | null;
+  forced: boolean;
 }
 
 interface NotReady extends Row {
@@ -434,6 +435,7 @@ function ScheduleSection({ v }: { v: MergeView }) {
                     <span className="small muted">
                       {t("scheduled by")} {s.scheduled_by}
                       {s.auto && ` (${t("automatically")})`}
+                      {s.forced && ` (${t("by hand, before it was ready")})`}
                     </span>
                   </span>
                   {s.approval_needed && (
@@ -581,6 +583,8 @@ function Candidates({ v }: { v: MergeView }) {
 
 function NotReadyList({ v }: { v: MergeView }) {
   const t = useT();
+  const toast = useToast();
+  const force = useAct((n: number) => api.post(`/api/merge-schedule/${v.repo}/schedule`, { number: n, force: true }), [["merge-schedule"]]);
   if (!v.not_ready.length) return null;
   return (
     <details className="card merge-details">
@@ -594,6 +598,21 @@ function NotReadyList({ v }: { v: MergeView }) {
               <PrLink repo={v.repo} row={r} />
               <span className="small muted">{r.reasons.map((x) => t(x)).join(" · ")}</span>
             </div>
+            {v.can_arrange && (
+              <button
+                className="sm ghost"
+                disabled={force.isPending}
+                title={t("Run its CI on its turn though it is not ready; it merges once the merge rules hold")}
+                onClick={() =>
+                  force.mutate(r.number, {
+                    onSuccess: () => toast({ title: `${t("Scheduled by hand")} #${r.number}`, icon: "merge" }),
+                    onError: (e) => toast({ title: t("Not scheduled"), body: String((e as Error).message), icon: "x" }),
+                  })
+                }
+              >
+                {t("Schedule anyway")}
+              </button>
+            )}
           </div>
         ))}
       </div>

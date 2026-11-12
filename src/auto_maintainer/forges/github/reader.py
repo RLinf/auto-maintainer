@@ -145,7 +145,8 @@ query($owner: String!, $name: String!, $cursor: String) {
     pullRequests(states: OPEN, first: PAGE_SIZE, after: $cursor, orderBy: {field: UPDATED_AT, direction: DESC}) {
       pageInfo { hasNextPage endCursor }
       nodes {
-        number updatedAt headRefOid
+        number updatedAt headRefOid reviewDecision
+        reviewThreads(last: 100) { totalCount nodes { isResolved } }
         commits(last: 1) { nodes { commit { checkSuites(first: 20) { totalCount nodes { updatedAt status } } } } }
       }
     }
@@ -383,12 +384,18 @@ def _light_fingerprint(node: dict[str, Any]) -> str:
     head = _nodes(node.get("commits"))
     suites = (head[0]["commit"].get("checkSuites") or {}) if head else {}
     stamps = sorted(f"{s.get('updatedAt')}:{s.get('status')}" for s in _nodes(suites))
+    # Resolving a conversation, and GitHub working out its review verdict anew, leave
+    # the PR's update time as it was: they count here on their own.
+    threads = node.get("reviewThreads") or {}
+    resolved = sum(1 for t in _nodes(threads) if t.get("isResolved"))
     return "|".join(
         [
             node.get("updatedAt") or "",
             node.get("headRefOid") or "",
             str(suites.get("totalCount", 0)),
             *stamps,
+            str(node.get("reviewDecision") or ""),
+            f"{resolved}/{threads.get('totalCount', 0)}",
         ]
     )
 

@@ -233,7 +233,7 @@ class MergePlaybook(Playbook):
                 f"it conflicts with {pr.base_ref}: merge {pr.base_ref} into it "
                 "(Merge on the PR page), then retry",
             )
-        ready = ready_conditions(profile)
+        ready = ready_conditions(profile, arm)
         back = holding_back(gate, ready)
         if back:
             first = back[0]
@@ -466,7 +466,7 @@ class MergePlaybook(Playbook):
                 )
             return await self._failed_ci(ctx, profile, info, pr, arm, state, wait, step)
         pending = [i for i in gate.items if not i.ok and i.pending]
-        waiting = left_for_merge(gate, ready_conditions(profile))
+        waiting = left_for_merge(gate, ready_conditions(profile, arm))
         if view.state == "passed" and waiting and not pending:
             # CI passed; what the merge needs beyond the repository's target to
             # schedule (approvals, where reviewers approve after CI) is missing.

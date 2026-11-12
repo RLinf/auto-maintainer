@@ -54,6 +54,9 @@ class MergeArm(BaseModel):
     """Armed by automatic scheduling (``merge.schedule.auto``) as ``armed_by``,
     who never saw this PR: a step that runs outside code with the repository's
     secrets (approving a fork's held workflows) waits for a person."""
+    forced: bool = False
+    """Scheduled by hand before it met the repository's target: its CI runs on its
+    turn whatever the target says, and it merges once the merge rules hold."""
 
 
 class GateItem(BaseModel):
@@ -75,6 +78,11 @@ class GateResult(BaseModel):
 
     def failing(self) -> list[GateItem]:
         return [i for i in self.items if not i.ok]
+
+
+def is_bot(login: str) -> bool:
+    """Whether ``login`` is a bot's account (a GitHub App), never a person's."""
+    return login.lower().endswith("[bot]")
 
 
 def _latest_review_by_author(pr: PrSnapshot) -> dict[str, ReviewEventState]:
@@ -105,9 +113,14 @@ def evaluate_merge_gate(
 
     ``reviewer_permissions`` maps each reviewer's login to their permission;
     ``blocking_checks`` maps each blocking hygiene check to whether it passed.
+    Approvals count from people with write access. One from a bot account never
+    counts, the service's own among them; the service's login counts when it is a
+    person's account (a deployment acting as its owner), since the service itself
+    never approves: its reviews only comment or request changes, and an approval
+    runs only as the person who pressed it.
     """
     items: list[GateItem] = []
-    ids = {i.lower() for i in service_identities}
+    ids = {i.lower() for i in service_identities if is_bot(i)}
 
     # 1. Armed by someone allowed, at the current head.
     who = profile.merge.arming.who
@@ -136,6 +149,7 @@ def evaluate_merge_gate(
         for a, s in latest.items()
         if s == ReviewEventState.APPROVED
         and a.lower() not in ids
+        and not is_bot(a)
         and reviewer_permissions.get(a, Permission.NONE).at_least(Permission.WRITE)
     ]
     needed = max(profile.merge.approvals, repo_info.required_approvals or 0)

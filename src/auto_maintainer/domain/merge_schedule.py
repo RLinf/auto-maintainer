@@ -145,8 +145,14 @@ def condition_of(item: GateItem) -> str | None:
     return item.name if item.name in READY_CONDITIONS else None
 
 
-def ready_conditions(profile: RepoProfile) -> tuple[str, ...]:
-    """What ``profile`` holds a PR to before it is schedulable."""
+def ready_conditions(
+    profile: RepoProfile, arm: MergeArm | None = None
+) -> tuple[str, ...]:
+    """What ``profile`` holds a PR to before it is schedulable; nothing for one a
+    maintainer scheduled by hand (``MergeArm.forced``), which waits for the merge
+    rules after its CI instead."""
+    if arm is not None and arm.forced:
+        return ()
     ready = profile.merge.schedule.ready
     return tuple(ready) if ready is not None else READY_CONDITIONS
 

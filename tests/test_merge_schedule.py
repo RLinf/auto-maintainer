@@ -1318,3 +1318,80 @@ async def test_verdicts_are_recorded_by_people_who_see_the_repository(
             f"/api/merge-schedule/{REPO}/verdicts/ci_nope", json={"verdict": "flaky"}
         )
         assert missing.status_code == 404
+
+
+def test_the_owners_approval_counts_when_the_service_acts_as_them() -> None:
+    from auto_maintainer.domain.merge_gate import evaluate_merge_gate
+    from auto_maintainer.domain.profile import RepoProfile
+
+    profile = RepoProfile(repo=REPO)
+    info = RepoInfo(name=REPO, required_approvals=2)
+
+    def approvals(*authors: str) -> str:
+        pr = make_pr(
+            reviews=[
+                Review(id=i, author=a, state=ReviewEventState.APPROVED)
+                for i, a in enumerate(authors, 1)
+            ]
+        )
+        perms = dict.fromkeys(authors, Permission.ADMIN)
+        gate = evaluate_merge_gate(
+            pr, profile, info, None, perms, {"maria", "am-bot[bot]"}, {}, False, T0
+        )
+        return next(i.detail for i in gate.items if i.name == "approvals")
+
+    # The deployment acts on GitHub as its owner maria: her approval is hers.
+    assert approvals("maria", "bob").startswith("2 of 2")
+    # A bot's never counts, the service's own bot account among them.
+    assert approvals("am-bot[bot]", "bob").startswith("1 of 2")
+    assert approvals("dependabot[bot]", "bob").startswith("1 of 2")
+
+
+def test_the_light_poll_notices_a_resolved_conversation() -> None:
+    from auto_maintainer.forges.github.reader import _light_fingerprint
+
+    def node(resolved: list[bool], decision: str | None) -> dict:
+        return {
+            "number": 42,
+            "updatedAt": "2026-11-12T11:19:50Z",
+            "headRefOid": "a" * 40,
+            "reviewDecision": decision,
+            "reviewThreads": {
+                "totalCount": len(resolved),
+                "nodes": [{"isResolved": r} for r in resolved],
+            },
+            "commits": {"nodes": []},
+        }
+
+    before = _light_fingerprint(node([True, False], "REVIEW_REQUIRED"))
+    # GitHub keeps the update time when a conversation is resolved.
+    assert _light_fingerprint(node([True, True], "REVIEW_REQUIRED")) != before
+    assert _light_fingerprint(node([True, False], "APPROVED")) != before
+
+
+async def test_a_pr_scheduled_by_hand_runs_ci_then_waits_for_the_merge_rules(
+    harness: Harness, tmp_path: Path
+) -> None:
+    h = harness
+    unapproved = _ready(42, "a" * 40, _ci(42, "success")).model_copy(
+        update={"reviews": []}
+    )
+    h.forge.put_pr(unapproved)
+    await h.poll()
+    app = create_app(h.service, data_dir=tmp_path, allow_dev_login=True)
+    async with _as(app, "maria") as maria:
+        refused = await maria.post(
+            f"/api/merge-schedule/{REPO}/schedule", json={"number": 42}
+        )
+        assert refused.status_code == 409
+        out = await maria.post(
+            f"/api/merge-schedule/{REPO}/schedule", json={"number": 42, "force": True}
+        )
+        assert out.status_code == 200, out.text
+        assert out.json()["forced"] is True
+        await h.settle()
+        view = (await maria.get(f"/api/merge-schedule/{REPO}/view")).json()
+    [row] = view["scheduled"]
+    assert row["forced"] and row["phase"] == "approval", row
+    assert "approvals" in row["detail"]
+    assert not h.forge.writes_of("merge"), "it merges only once the rules hold"
