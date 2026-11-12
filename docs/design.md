@@ -682,7 +682,7 @@ class Playbook(Protocol):
 
 The page shows the order with each PR's phase (`queued`, `updating`, `starting`, `running`, `rerunning`, `diagnosing` while an agent reads its failed jobs or looks for their root cause, `approval`, `merging`) and, while an agent works on it or on the rules, **Watch**, which opens that job's live view, the failure lane with each PR's causes, the candidates with Schedule buttons (or, with automatic scheduling, what it scheduled), the PRs that are not ready and why, the rules it read and how CI starts, and the PRs it merged lately.
 
-The merge uses `merge.method`. For a squash, the subject comes from `merge.message.subject` (default: the PR title with `(#N)`), and the body lists the commit subjects followed by every distinct trailer named in `merge.message.preserve_trailers` (the `dco` pack adds `Signed-off-by` and `Co-authored-by`).
+The merge uses `merge.method`. For a squash, the subject comes from `merge.message.subject` (default: the PR title with `(#N)`), and the body lists the commit subjects followed by every distinct trailer named in `merge.message.preserve_trailers`: by default `Signed-off-by` and `Co-authored-by` (`profile.DEFAULT_TRAILERS`), as GitHub's own squash keeps every commit message, so the contributors' sign-offs that a check on the default branch looks for survive the merge; a repository that wants none sets `[]`.
 
 **CI doctor.** On request (the PR page's Explain failures, or `/am rerun` for the rerun alone), and for a scheduled PR whose CI failed, for each failed check run on the current head SHA, leaving out the repository's gate and summary jobs (`ci.start`) and runs a newer run of the same workflow superseded:
 

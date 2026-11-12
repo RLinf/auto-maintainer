@@ -616,6 +616,24 @@ class TestMergeGate:
             and "Reviewed-by" not in body
         )
 
+    def test_squash_message_keeps_sign_offs_unless_the_repository_says_not(
+        self,
+    ) -> None:
+        """A merge commit on the default branch keeps the contributors' sign-offs,
+        which checks there may require, with no setting; ``[]`` keeps none."""
+        pr = make_pr(
+            commits=[
+                Commit(sha="1" * 40, message="feat: a\n\nSigned-off-by: A <a@x>"),
+                Commit(sha="2" * 40, message="Merge branch 'main' into a"),
+            ]
+        )
+        _, body = squash_message(pr, RepoProfile(repo="acme/widget"))
+        assert body.endswith("\n\nSigned-off-by: A <a@x>")
+        none = RepoProfile.model_validate(
+            {"repo": "acme/widget", "merge": {"message": {"preserve_trailers": []}}}
+        )
+        assert "Signed-off-by" not in squash_message(pr, none)[1]
+
 
 def test_markers_and_commands() -> None:
     m = parse_markers(build_marker("hygiene", 3, "f" * 40, "act_x") + "\ntext")

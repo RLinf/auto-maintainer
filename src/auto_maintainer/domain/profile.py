@@ -339,9 +339,17 @@ class Arming(_Section):
     who: Literal["write", "maintain", "admin", "codeowners"] = "write"
 
 
+DEFAULT_TRAILERS = ("Signed-off-by", "Co-authored-by")
+"""The trailers a squash keeps unless a repository says otherwise: GitHub's own
+squash keeps every commit message, so sign-offs (which a repository's checks on
+its default branch may require) and co-authors survive it."""
+
+
 class MergeMessage(_Section):
     subject: str = "{title} (#{number})"
-    preserve_trailers: list[str] = Field(default_factory=list)
+    preserve_trailers: list[str] = Field(default_factory=lambda: list(DEFAULT_TRAILERS))
+    """Commit trailers the squash body keeps from the PR's commits, each distinct
+    line once; ``[]`` keeps none."""
 
 
 class Freeze(_Section):
