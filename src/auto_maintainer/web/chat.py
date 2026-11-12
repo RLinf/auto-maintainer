@@ -61,6 +61,7 @@ from ..domain.memory import (
 from ..domain.profile import Route
 from ..domain.records import ChatMessage, ChatRequest, ChatThread, JobStatus
 from ..domain.review import review_quality
+from ..domain.run_ci import latest_checks
 from ..domain.secrets import redact_secrets
 from ..domain.settings import (
     PROVIDER_PROTOCOLS,
@@ -809,7 +810,7 @@ async def _page_block(
             + (
                 ", ".join(
                     f"{c.name}={(c.conclusion or c.status).lower()}"
-                    for c in pr.checks[:20]
+                    for c in latest_checks(pr.checks)[:20]
                 )
                 or "none"
             )

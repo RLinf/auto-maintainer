@@ -49,6 +49,7 @@ from ..domain.merge_schedule import (
     state_key,
 )
 from ..domain.profile import FlakeSignature, ReadyCondition, RepoProfile
+from ..domain.records import JobStatus
 from ..domain.run_ci import ci_view
 from ..domain.snapshot import Mergeable, PrSnapshot, PrState, RepoInfo
 from ..playbooks.auto_schedule import AUTO_COMMAND
@@ -265,9 +266,17 @@ def _apply_draft(
         plan["notes"] = draft.merge_notes.strip()
     if draft.approvals:
         merge["approvals"] = max(int(merge.get("approvals") or 0), draft.approvals)
+    merge["method"] = draft.merge_method
+    merge["update_branch"] = draft.update_branch
+    message = _section(merge, "message")
+    message["subject"] = draft.subject
+    message["preserve_trailers"] = draft.preserve_trailers
+    plan["parallel"] = draft.parallel
     ci = _section(layer, "ci")
     ci["diagnose"] = draft.diagnose
     ci["root_cause"] = draft.root_cause
+    ci["required_workflows"] = draft.required_workflows
+    ci["cancelled_is_failure"] = draft.cancelled_is_failure
     ci["rerun"] = {
         **(ci.get("rerun") if isinstance(ci.get("rerun"), dict) else {}),
         "max_per_sha": draft.max_reruns,
@@ -323,6 +332,24 @@ def build_router() -> APIRouter:
         info = await service.view_repo(repo)
         arms = ordered(await service.store.list_arms(repo))
         armed = {a.number: a for a in arms}
+        jobs: dict[int, dict[str, Any]] = {}
+        rules_job: dict[str, Any] | None = None
+        for job in await service.store.list_jobs(
+            [JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.WAITING]
+        ):
+            if job.repo != repo:
+                continue
+            if job.playbook == "ci_rules":
+                rules_job = {"id": job.id, "status": job.status}
+            elif job.playbook in ("merge", "ci_doctor") and job.number is not None:
+                # The live view of the work on the PR; a running one first.
+                was = jobs.get(job.number)
+                if was is None or job.status == JobStatus.RUNNING:
+                    jobs[job.number] = {
+                        "id": job.id,
+                        "status": job.status,
+                        "playbook": job.playbook,
+                    }
         snaps = {p.number: p for p in await service.store.list_snapshots(repo)}
         scheduled, failed = [], []
         for arm in arms:
@@ -344,6 +371,7 @@ def build_router() -> APIRouter:
                 "finding": state.finding,
                 "approval_needed": state.approval_needed,
                 "stale": not same_commit(arm.sha, pr.head_sha),
+                "job": jobs.get(arm.number),
             }
             (failed if state.phase == "failed" else scheduled).append(row)
         candidates, not_ready = [], []
@@ -393,6 +421,9 @@ def build_router() -> APIRouter:
                     if (label := profile.label_for(role))
                 ],
                 "notes": profile.merge.schedule.notes,
+                "subject": profile.merge.message.subject,
+                "preserve_trailers": profile.merge.message.preserve_trailers,
+                "cancelled_is_failure": profile.ci.cancelled_is_failure,
                 "hygiene": [s.id for s in profile.checks if s.blocking and s.enabled],
                 "ready": list(ready_conditions(profile)),
                 "ready_set": profile.merge.schedule.ready is not None,
@@ -422,6 +453,7 @@ def build_router() -> APIRouter:
                 "reruns": profile.ci.rerun.max_per_sha,
             },
             "draft": draft if isinstance(draft, dict) else None,
+            "rules_job": rules_job,
             "scheduled": scheduled,
             "failed": failed,
             "candidates": candidates,

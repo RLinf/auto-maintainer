@@ -575,6 +575,13 @@ class MergePlaybook(Playbook):
             return PlaybookResult(
                 actions=again, wait=wait, result={"phase": "rerunning"}
             )
+        await self._note(
+            ctx,
+            pr,
+            state,
+            "diagnosing",
+            "looking at the failed jobs: " + ", ".join(c.name for c in checks),
+        )
         failures = await first_looks(ctx, pr, profile, checks)
         reruns: list[Action] = []
         retrying: set[int] = set()
@@ -681,6 +688,7 @@ class MergePlaybook(Playbook):
             ]
             if part
         )
+        await self._note(ctx, pr, state, state.phase, f"looking into why CI {what}")
         try:
             answer = await ctx.ask(
                 AgentTask(
@@ -775,6 +783,15 @@ class MergePlaybook(Playbook):
         state.failed_jobs = [f.check.name for f in failures or [] if f.real]
         state.causes = []
         if failures:
+            real = [f.check.name for f in failures if f.real]
+            if real and profile.ci.root_cause:
+                await self._note(
+                    ctx,
+                    pr,
+                    state,
+                    "diagnosing",
+                    "looking for the root cause of " + ", ".join(real),
+                )
             causes, base = await find_causes(ctx, pr, profile, failures)
             await record(ctx, pr, failures, causes)
             state.causes = explained(failures, causes, base)
@@ -810,6 +827,25 @@ class MergePlaybook(Playbook):
                 kinds=WAIT_KINDS, seconds=WAIT_SECONDS, reason="in the failure lane"
             ),
             result={"phase": "failed", "why": why},
+        )
+
+    async def _note(
+        self,
+        ctx: PlaybookContext,
+        pr: PrSnapshot,
+        state: ScheduleState,
+        phase: str,
+        detail: str,
+    ) -> None:
+        """Show what the PR's job is doing before a slow step (an agent at work),
+        without handing the turn on: the page shows it with the job's live view."""
+        if state.phase != phase:
+            state.since = ctx.clock.now()
+        state.phase = phase  # type: ignore[assignment]
+        state.sha = pr.head_sha
+        state.detail = detail
+        await ctx.store.set_state(
+            state_key(pr.repo, pr.number), state.model_dump(mode="json")
         )
 
     async def _set(

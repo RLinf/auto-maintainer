@@ -551,45 +551,76 @@ function Overview({ d, ciActions, repo, canPush }: { d: PrDetail; ciActions?: Re
         canPush={canPush}
       />
       <Section title={t("Checks")} aside={ciActions}>
-        {d.pr.checks.length ? (
-          <div className="list">
-            {d.pr.checks.map((c) => {
-              // Each check opens its own details page on the forge, when it has one.
-              const body = (
-                <>
-                  <Status
-                    value={c.conclusion ?? c.status}
-                    label={c.conclusion === "action_required" ? t("awaiting approval") : undefined}
-                  />
-                  <span className="main">
-                    <span className="t">{c.name}</span>
-                    {c.workflow && <span className="meta">{c.workflow}</span>}
-                  </span>
-                </>
-              );
-              return c.details_url ? (
-                <a
-                  key={c.id}
-                  className="list-row"
-                  href={c.details_url}
-                  target="_blank"
-                  rel="noreferrer"
-                  title={t("Open this check's details")}
-                >
-                  {body}
-                </a>
-              ) : (
-                <div key={c.id} className="list-row">
-                  {body}
-                </div>
-              );
-            })}
-          </div>
-        ) : (
-          <span className="muted small">{t("No checks reported.")}</span>
-        )}
+        <ChecksList d={d} />
       </Section>
     </>
+  );
+}
+
+/** The PR's checks as GitHub shows them: the newest run of each workflow, with a summary
+ * the merge schedule shares; older and cancelled runs a newer one replaced fold away. */
+function ChecksList({ d }: { d: PrDetail }) {
+  const t = useT();
+  const [older, setOlder] = useState(false);
+  const ci = d.ci_status;
+  const latest = new Set(ci?.latest ?? d.pr.checks.map((c) => c.id));
+  const current = d.pr.checks.filter((c) => latest.has(c.id));
+  const replaced = d.pr.checks.filter((c) => !latest.has(c.id));
+  if (!d.pr.checks.length) return <span className="muted small">{t("No checks reported.")}</span>;
+  const summary = !ci
+    ? null
+    : ci.state === "gated"
+      ? `${t("CI not started: the label is missing")} (${ci.label})`
+      : ci.state === "stopped"
+        ? t("CI stopped at its gate before the label came; a push or the label starts it again")
+        : ci.state === "approval"
+          ? t("CI waits for a maintainer's approval")
+          : ci.state === "running"
+            ? `${ci.running} ${t("running")}, ${ci.passed} ${t("passed")}${ci.failed.length ? ` · ${t("Failed")}: ${ci.failed.join(", ")}` : ""}`
+            : ci.state === "failed"
+              ? `${t("Failed")}: ${ci.failed.join(", ") || t("cancelled")}`
+              : ci.state === "passed"
+                ? t("CI passed")
+                : t("No CI yet");
+  const row = (c: PrDetail["pr"]["checks"][number]) => {
+    const body = (
+      <>
+        <Status
+          value={c.conclusion ?? c.status}
+          label={c.conclusion === "action_required" ? (c.workflow ? t("awaiting approval") : t("action required")) : undefined}
+        />
+        <span className="main">
+          <span className="t">{c.name}</span>
+          {c.workflow && <span className="meta">{c.workflow}</span>}
+        </span>
+      </>
+    );
+    // Each check opens its own details page on the forge, when it has one.
+    return c.details_url ? (
+      <a key={c.id} className="list-row" href={c.details_url} target="_blank" rel="noreferrer" title={t("Open this check's details")}>
+        {body}
+      </a>
+    ) : (
+      <div key={c.id} className="list-row">
+        {body}
+      </div>
+    );
+  };
+  return (
+    <div className="stack" style={{ gap: 8 }}>
+      {summary && (
+        <span className="small" style={{ color: ci?.state === "failed" ? "var(--bad)" : ci?.state === "passed" ? "var(--ok)" : "var(--text-2)" }}>
+          {summary}
+        </span>
+      )}
+      <div className="list">{current.map(row)}</div>
+      {replaced.length > 0 && (
+        <button className="link-button small" style={{ alignSelf: "flex-start" }} onClick={() => setOlder(!older)}>
+          {older ? t("Hide older runs") : `${t("Show older runs")} (${replaced.length})`}
+        </button>
+      )}
+      {older && <div className="list" style={{ opacity: 0.6 }}>{replaced.map(row)}</div>}
+    </div>
   );
 }
 

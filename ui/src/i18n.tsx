@@ -2438,6 +2438,18 @@ const zh: Record<string, string> = {
   "What it is": "说明",
   "No flake patterns yet.": "还没有失败模式。",
   "from a pack": "来自配置包",
+  "Commit subject": "提交标题",
+  "Trailers a squash keeps": "压缩合并时保留的尾注",
+  "Merges the base in before merging": "合并前先合入基准分支",
+  "Workflows that must pass": "必须通过的工作流",
+  "A cancelled job counts as a failure": "取消的任务算作失败",
+  "Diagnosing failures": "正在诊断失败",
+  "See what the agent is doing": "查看智能体正在做什么",
+  "An agent is drafting the rules.": "智能体正在起草规则。",
+  "CI not started: the label is missing": "CI 未启动：缺少标签",
+  "CI stopped at its gate before the label came; a push or the label starts it again": "CI 在加标签前就在门控处停止；推送或重新加标签会再次启动",
+  "Hide older runs": "隐藏较早的运行",
+  "Show older runs": "显示较早的运行",
 };
 
 const LangContext = createContext<{ lang: Lang; setLang: (l: Lang) => void }>({ lang: "zh", setLang: () => {} });

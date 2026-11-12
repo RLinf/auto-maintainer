@@ -945,6 +945,11 @@ async def test_rules_described_in_words_become_a_draft_a_maintainer_saves(
             ],
             "merge_notes": "",
             "approvals": 0,
+            "merge_method": "squash",
+            "preserve_trailers": ["Signed-off-by", "not a trailer!"],
+            "required_workflows": ["CI", "Nope"],
+            "parallel": 1,
+            "update_branch": True,
         }
 
     h.runner.on("onboard", parse)
@@ -973,7 +978,9 @@ async def test_rules_described_in_words_become_a_draft_a_maintainer_saves(
         assert draft["source"] == "words" and draft["words"] == words
         assert draft["draft"]["optional_checks"] == ["DCO"]
         assert [p["id"] for p in draft["draft"]["flake_patterns"]] == ["hub"]
-        assert len(draft["dropped"]) == 2, draft["dropped"]
+        assert len(draft["dropped"]) == 4, draft["dropped"]
+        assert draft["draft"]["preserve_trailers"] == ["Signed-off-by"]
+        assert draft["draft"]["required_workflows"] == ["CI"]
         saved = (await maria.post(f"/api/merge-schedule/{REPO}/draft/apply")).json()
         assert saved["applied"], saved
     profile = await h.service.profiles.active(REPO)
@@ -984,6 +991,8 @@ async def test_rules_described_in_words_become_a_draft_a_maintainer_saves(
     assert profile.ci.diagnose == "patterns" and profile.ci.rerun.unknown == 1
     assert profile.ci.root_cause is False
     assert "hub" in [s.id for s in profile.ci.flake_signatures]
+    assert profile.merge.message.preserve_trailers == ["Signed-off-by"]
+    assert profile.merge.schedule.parallel == 1
     assert await h.store.get_state(f"ci-rules:{REPO}") is None, "saved, so gone"
 
 
@@ -1077,3 +1086,57 @@ async def test_a_maintainer_sets_how_flakes_are_handled_on_the_page(
         own = [p for p in flaky["patterns"] if p["own"]]
         assert [p["id"] for p in own] == ["hub"]
         assert any(not p["own"] for p in flaky["patterns"]), "a pack's stay listed"
+
+
+async def test_the_page_shows_a_diagnosis_at_work_with_its_job(
+    harness: Harness, tmp_path: Path
+) -> None:
+    h = harness
+    app = create_app(h.service, data_dir=tmp_path, allow_dev_login=True)
+    seen: list[dict] = []
+    h.runner.on(
+        "ci_diagnose",
+        lambda t: {"category": "pr_caused", "confidence": 0.8, "explanation": "breaks"},
+    )
+
+    async def root_cause(task):  # type: ignore[no-untyped-def]
+        async with _as(app, "bob") as bob:
+            view = (await bob.get(f"/api/merge-schedule/{REPO}/view")).json()
+        seen.append(view["scheduled"][0])
+        return {"causes": []}
+
+    h.runner.on("ci_root_cause", root_cause)
+    h.forge.job_logs[420] = "FAILED tests/test_m.py::test_x\n"
+    h.forge.put_pr(_ready(42, "a" * 40, _ci(42, "failure")))
+    await h.poll()
+    await _schedule(h, 42)
+    await h.settle()
+    [during] = seen
+    assert during["phase"] == "diagnosing"
+    assert "root cause of unit" in during["detail"]
+    assert during["job"] and during["job"]["status"] == "running"
+    assert (await _phase(h, 42)).phase == "failed"
+
+
+async def test_the_pr_page_reads_ci_as_the_schedule_and_github_do(
+    harness: Harness, tmp_path: Path
+) -> None:
+    h = harness
+    # A label started a second run after the first stopped at the gate; GitHub shows
+    # the newest, and so do the PR page and the schedule.
+    old = _job(1, "check-changes", "failure", 100, workflow="CI")
+    new = [
+        _job(2, "check-changes", "success", 101, workflow="CI"),
+        _job(3, "unit", None, 101, workflow="CI"),
+    ]
+    h.forge.put_pr(_ready(42, "a" * 40, [old, *new]))
+    await h.poll()
+    app = create_app(h.service, data_dir=tmp_path, allow_dev_login=True)
+    async with _as(app, "bob") as bob:
+        detail = (await bob.get(f"/api/prs/{REPO}/42")).json()
+        view = (await bob.get(f"/api/merge-schedule/{REPO}/view")).json()
+    status = detail["ci_status"]
+    assert status["state"] == "running" and status["failed"] == []
+    assert sorted(status["latest"]) == [2, 3]
+    [row] = [r for r in view["candidates"] + view["not_ready"] if r["number"] == 42]
+    assert row["ci"]["state"] == status["state"]

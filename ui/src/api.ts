@@ -620,6 +620,9 @@ export interface PrDetail {
   run_ci: RunCiPlan;
   /** The failed jobs worth a look: the newest runs, without the repository's gate and summary jobs. */
   ci_failed?: string[];
+  /** The CI as the merge schedule and GitHub read it: the newest run of each workflow,
+   * the repository's gate and summary jobs aside; ``latest`` are those runs' checks. */
+  ci_status?: { state: string; passed: number; running: number; failed: string[]; label: string | null; latest: number[] };
   merge_queue: { head: number | null; order: { number: number; title: string }[] } | null;
 }
 

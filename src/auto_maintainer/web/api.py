@@ -111,7 +111,7 @@ from ..domain.review import (
     review_quality,
 )
 from ..domain.review_progress import checks_key, load_checks, review_progress
-from ..domain.run_ci import ci_view, plan_run_ci
+from ..domain.run_ci import ci_view, latest_checks, plan_run_ci
 from ..domain.scoring import Evaluation, priority_key, recompute
 from ..domain.secrets import redact_secrets
 from ..domain.snapshot import Mergeable, PrSnapshot, PrState, ReviewEventState
@@ -513,6 +513,24 @@ async def _merge_queue(service: Service, repo: str) -> dict[str, Any]:
             head = a.number
         order.append({"number": a.number, "title": snap.title if snap else ""})
     return {"head": head, "order": order}
+
+
+def _ci_summary(pr: PrSnapshot, profile: RepoProfile | None) -> dict[str, Any]:
+    """``pr``'s CI as the merge schedule reads it (``domain/run_ci.py:ci_view``),
+    and which of its checks belong to the newest runs."""
+    view = ci_view(
+        pr,
+        profile.label_for("ci_gate") if profile else None,
+        profile.ci.start if profile else None,
+    )
+    return {
+        "state": view.state,
+        "passed": view.passed,
+        "running": view.running,
+        "failed": [c.name for c in view.failed],
+        "label": view.label,
+        "latest": [c.id for c in latest_checks(pr.checks)],
+    }
 
 
 def service_of(request: Request) -> Service:
@@ -1778,6 +1796,9 @@ def build_router() -> APIRouter:
             "ci_failed": [c.name for c in failing_checks(pr, profile)]
             if profile
             else [c.name for c in pr.checks if c.failed],
+            # The CI as the merge schedule and GitHub read it: the newest run of each
+            # workflow, the repository's gate and summary jobs aside.
+            "ci_status": _ci_summary(pr, profile),
         }
 
     @r.get("/prs/{repo:path}/{number:int}/progress")

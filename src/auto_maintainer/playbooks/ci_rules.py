@@ -14,9 +14,11 @@
 
 
 """A repository's merge scheduling rules, drafted by an agent for its maintainers
-(design 5.5): what makes a PR schedulable, which labels hold a merge back, which
-required checks may stay unpassed, how its CI starts and what its jobs mean, and how
-failed CI is judged and run again.
+(design 5.5): every setting of its merge schedule but turning it and automatic
+scheduling on, which stay a maintainer's own choice. What makes a PR schedulable,
+which labels hold a merge back, which required checks may stay unpassed, how it
+merges (method, message, trailers, merging the base in first, how many at once),
+how its CI starts and what its jobs mean, and how failed CI is judged and run again.
 
 Two ways fill a draft, both on a maintainer's request from the Merge scheduling
 page. **Investigate**: an agent reads the default branch's workflows and
@@ -64,7 +66,11 @@ FIELDS = """Fields:
 - `max_reruns`: how many times a run that flaked is run again at one commit; `backoff_seconds`: how long between reruns; `rerun_unknown`: how many times a failure nothing calls a flake is run again before it counts as real (0: never).
 - `root_cause`: whether an agent looks for the root cause of a real failure in a checkout of the PR.
 - `flake_patterns`: known flakes, each an `id`, a Python regular expression `pattern` matched against a failed job's log, a `category` (`flaky`, or `infra` for the runner's own failures), and a `description`.
-- `merge_notes`: what the repository asks of a PR before it merges beyond the forge's rules, in plain words; `approvals`: the approvals it asks for when that is more than the forge's rules require, else 0."""
+- `merge_notes`: what the repository asks of a PR before it merges beyond the forge's rules, in plain words; `approvals`: the approvals it asks for when that is more than the forge's rules require, else 0.
+- `merge_method`: how PRs merge (`squash`, `merge`, or `rebase`), one the repository allows; `subject`: the merge commit's subject, a template with `{title}` and `{number}`; `preserve_trailers`: commit trailers a squash keeps from the PR's commits (such as `Signed-off-by` where commits must be signed off, `Co-authored-by`).
+- `update_branch`: whether a PR merges its base in before it merges even where the branch rules do not require it to be up to date (one at a time then).
+- `parallel`: how many scheduled PRs may run their CI at once when PRs need not be up to date (1 to 20; fewer where CI runs on scarce machines such as GPUs).
+- `required_workflows`: workflows, by name, whose runs must pass before a merge besides the checks the branch rules require; `cancelled_is_failure`: whether a cancelled job counts as a failure rather than as a run that stopped short."""
 
 INVESTIGATE = """You are finding out how {repo} wants its pull requests merged and its CI handled, for a service that runs the final CI of the PRs its maintainers schedule and merges those that pass. The working directory is a read-only checkout of the default branch `{branch}`. Read `.github/workflows/` (the CI workflows, and the workflows they call) and the contribution guide (`CONTRIBUTING*`, `docs/` pages about contributing, reviewing, or CI), then fill in the fields below from what they say, keeping each current value (given below) where they say nothing. Do not change files, run anything, or fetch anything.
 
@@ -102,6 +108,13 @@ class CiRulesDraft(BaseModel):
     flake_patterns: list[FlakePattern] = Field(default_factory=list)
     merge_notes: str = Field(default="")
     approvals: int = Field(default=0, ge=0, le=20)
+    merge_method: Literal["squash", "merge", "rebase"] = "squash"
+    subject: str = Field(default="{title} (#{number})", max_length=200)
+    preserve_trailers: list[str] = Field(default_factory=list)
+    update_branch: bool = True
+    parallel: int = Field(default=2, ge=1, le=20)
+    required_workflows: list[str] = Field(default_factory=list)
+    cancelled_is_failure: bool = False
 
 
 def current(profile: RepoProfile) -> CiRulesDraft:
@@ -134,6 +147,13 @@ def current(profile: RepoProfile) -> CiRulesDraft:
         ],
         merge_notes=profile.merge.schedule.notes,
         approvals=0,
+        merge_method=profile.merge.method,
+        subject=profile.merge.message.subject,
+        preserve_trailers=list(profile.merge.message.preserve_trailers),
+        update_branch=profile.merge.update_branch,
+        parallel=profile.merge.schedule.parallel,
+        required_workflows=list(profile.ci.required_workflows),
+        cancelled_is_failure=profile.ci.cancelled_is_failure,
     )
 
 
@@ -152,6 +172,16 @@ def _workflow_text(root: Path) -> str:
     return "\n".join(parts)
 
 
+def known_workflows(text: str) -> set[str]:
+    """The workflow names the workflow files declare (their top-level ``name``)."""
+    return set(
+        re.findall(r"^name:\s*['\"]?([^'\"\n#]+?)['\"]?\s*$", text, re.MULTILINE)
+    )
+
+
+TRAILER = re.compile(r"^[A-Za-z][A-Za-z0-9-]{1,40}$")
+
+
 def known_jobs(text: str) -> set[str]:
     """The job ids and job names the workflow files declare."""
     ids = set(re.findall(r"^  ([A-Za-z0-9_.-]+):\s*(?:#.*)?$", text, re.MULTILINE))
@@ -168,6 +198,8 @@ def checked(
     required: list[str] | None = None,
     roles: dict[str, str] | None = None,
     jobs: set[str] | None = None,
+    methods: list[str] | None = None,
+    workflow_names: set[str] | None = None,
 ) -> tuple[CiRulesDraft, list[str]]:
     """``draft`` with what the repository does not have dropped, and what was:
     conditions outside ``READY_CONDITIONS``, label roles the profile does not name,
@@ -221,9 +253,38 @@ def checked(
     if len(patterns) > MAX_PATTERNS:
         dropped.append(f"flake patterns past the first {MAX_PATTERNS}")
         patterns = patterns[:MAX_PATTERNS]
+    method = draft.merge_method
+    if methods and method not in methods:
+        dropped.append(f"merge method {method!r}, which the repository does not allow")
+        method = "squash" if "squash" in methods else methods[0]  # type: ignore[assignment]
+    subject = draft.subject.strip() or "{title} (#{number})"
+    try:
+        subject.format(title="t", number=1)
+    except (KeyError, IndexError, ValueError):
+        dropped.append(f"subject {subject!r}, which names more than title and number")
+        subject = "{title} (#{number})"
+    trailers = [t for t in dict.fromkeys(draft.preserve_trailers) if TRAILER.match(t)]
+    dropped += [
+        f"trailer {t!r}, which is not one"
+        for t in draft.preserve_trailers
+        if t not in trailers
+    ]
+    names = known_workflows(workflows) | (workflow_names or set())
+    required_workflows = [
+        w for w in dict.fromkeys(draft.required_workflows) if w in names
+    ]
+    dropped += [
+        f"workflow {w!r}, which no workflow file names"
+        for w in draft.required_workflows
+        if w not in required_workflows
+    ]
     return draft.model_copy(
         update={
             **keep,
+            "merge_method": method,
+            "subject": subject,
+            "preserve_trailers": trailers,
+            "required_workflows": required_workflows,
             "ready": ready,
             "blocking_roles": blocking,
             "optional_checks": optional,
@@ -283,11 +344,14 @@ class CiRulesPlaybook(Playbook):
         info = await ctx.forge.get_repo(repo)
         failing: Counter[str] = Counter()
         seen_jobs: set[str] = set()
+        seen_workflows: set[str] = set(profile.ci.required_workflows)
         prs = 0
         for pr in await ctx.store.list_snapshots(repo):
             prs += 1
             for c in latest_checks(pr.checks):
                 seen_jobs |= {c.name, c.name.split(" / ")[-1]}
+                if c.workflow:
+                    seen_workflows.add(c.workflow)
                 if c.failed:
                     failing[c.name] += 1
         now = current(profile)
@@ -368,6 +432,8 @@ class CiRulesPlaybook(Playbook):
             info.required_checks,
             dict(profile.labels.roles),
             known,
+            info.merge_methods,
+            seen_workflows,
         )
         await ctx.store.set_state(
             DRAFT_KEY.format(repo=repo),

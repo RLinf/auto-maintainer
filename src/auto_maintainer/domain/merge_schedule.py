@@ -48,6 +48,7 @@ Phase = Literal[
     "starting",
     "running",
     "rerunning",
+    "diagnosing",
     "approval",
     "merging",
     "failed",
@@ -55,7 +56,7 @@ Phase = Literal[
     "merged",
 ]
 ACTIVE: frozenset[str] = frozenset(
-    {"updating", "starting", "running", "rerunning", "merging"}
+    {"updating", "starting", "running", "rerunning", "diagnosing", "merging"}
 )
 """Phases in which a PR keeps its turn."""
 WAITING: frozenset[str] = frozenset({"queued"})

@@ -19,7 +19,7 @@ import { openJob } from "../openJob";
 import { RepoTabs, useRepoScope } from "../repoScope";
 import { Skeleton, useToast } from "../ui";
 
-type Phase = "queued" | "updating" | "starting" | "running" | "rerunning" | "approval" | "merging" | "failed" | "held" | "merged";
+type Phase = "queued" | "updating" | "starting" | "running" | "rerunning" | "diagnosing" | "approval" | "merging" | "failed" | "held" | "merged";
 
 interface CiSummary {
   state: string;
@@ -49,6 +49,7 @@ interface Scheduled extends Row {
   finding: string;
   approval_needed: boolean;
   stale: boolean;
+  job: { id: string; status: string; playbook: string } | null;
 }
 
 interface NotReady extends Row {
@@ -86,6 +87,13 @@ interface Draft {
     rerun_unknown: number;
     root_cause: boolean;
     flake_patterns: Pattern[];
+    merge_method: string;
+    subject: string;
+    preserve_trailers: string[];
+    update_branch: boolean;
+    parallel: number;
+    required_workflows: string[];
+    cancelled_is_failure: boolean;
   };
   dropped: string[];
   by: string;
@@ -141,10 +149,14 @@ interface MergeView {
     ready_set: boolean;
     blocking_roles: string[];
     label_roles: Record<string, string>;
+    subject: string;
+    preserve_trailers: string[];
+    cancelled_is_failure: boolean;
   };
   ci_start: CiStart;
   flaky: Flaky;
   draft: Draft | null;
+  rules_job: { id: string; status: string } | null;
   scheduled: Scheduled[];
   failed: Scheduled[];
   candidates: Row[];
@@ -163,6 +175,7 @@ const PHASE: Record<Phase, { label: string; cls: string }> = {
   starting: { label: "Starting CI", cls: "job-running" },
   running: { label: "CI running", cls: "job-running" },
   rerunning: { label: "Rerunning a flake", cls: "job-running" },
+  diagnosing: { label: "Diagnosing failures", cls: "job-running" },
   approval: { label: "CI passed, waiting to meet the merge rules", cls: "status-warn" },
   merging: { label: "Merging", cls: "job-running" },
   failed: { label: "Failed", cls: "status-bad" },
@@ -336,6 +349,19 @@ function Controls({ v }: { v: MergeView }) {
   );
 }
 
+/** Open the live view of the agent's work on a PR: its steps, the commands and
+ * files it used, its output. Shown while an agent works, or when it is diagnosing. */
+function WatchButton({ job, busy }: { job: Scheduled["job"]; busy: boolean }) {
+  const t = useT();
+  if (!job || (!busy && job.status !== "running")) return null;
+  return (
+    <button className="sm" title={t("See what the agent is doing")} onClick={() => openJob(job.id)}>
+      <Icon name="eye" size={13} />
+      {t("Watch")}
+    </button>
+  );
+}
+
 function PrLink({ repo, row }: { repo: string; row: Row }) {
   return (
     <Link to={prPath(repo, row.number)} className="merge-pr">
@@ -416,6 +442,7 @@ function ScheduleSection({ v }: { v: MergeView }) {
                   )}
                   {s.finding && <span className="small merge-finding">{s.finding}</span>}
                 </div>
+                <WatchButton job={s.job} busy={s.phase === "diagnosing"} />
                 {v.can_arrange && (
                   <div className="row merge-actions">
                     <button className="sm ghost" aria-label={t("Move up")} title={t("Move up")} disabled={i === 0 || order.isPending} onClick={() => move(i, -1)}>
@@ -465,6 +492,7 @@ function FailureLane({ v }: { v: MergeView }) {
               {f.causes.length > 0 && <Markdown className="md merge-causes" text={f.causes.join("\n")} />}
               {f.finding && <span className="small merge-finding">{f.finding}</span>}
             </div>
+            <WatchButton job={f.job} busy={false} />
             {v.can_arrange && (
               <div className="row merge-actions">
                 <FixCiButton repo={v.repo} number={f.number} failed={f.failed_jobs.length ? f.failed_jobs : f.ci.failed} canPush={v.signed_in} size="sm" />
@@ -618,6 +646,16 @@ function RulesCard({ v }: { v: MergeView }) {
   return (
     <Section title={t("Conditions")} hint={t("Read from GitHub's branch rules and the repository's profile")}>
       <div className="stack" style={{ gap: 14 }}>
+        {v.rules_job && (
+          <span className="row small merge-finding" style={{ gap: 8 }}>
+            <Icon name="sparkles" size={13} />
+            {t("An agent is drafting the rules.")}
+            <button className="sm right" onClick={() => openJob(v.rules_job!.id)}>
+              <Icon name="eye" size={13} />
+              {t("Watch")}
+            </button>
+          </span>
+        )}
         {v.can_arrange && <DescribeBox v={v} />}
         <div className="stack" style={{ gap: 6 }}>
           <div className="row" style={{ gap: 8 }}>
@@ -1001,6 +1039,13 @@ function DraftRules({ v, draft }: { v: MergeView; draft: Draft }) {
         d.flake_patterns.map((p) => [p.id, p.pattern, p.category]),
       ),
     },
+    { label: t("Merges with"), was: r.method, now: d.merge_method, changed: r.method !== d.merge_method },
+    { label: t("Commit subject"), was: r.subject, now: d.subject, changed: r.subject !== d.subject },
+    { label: t("Trailers a squash keeps"), was: list(r.preserve_trailers), now: list(d.preserve_trailers), changed: !same(r.preserve_trailers, d.preserve_trailers) },
+    { label: t("Merges the base in before merging"), was: r.update_branch ? t("yes") : t("no"), now: d.update_branch ? t("yes") : t("no"), changed: r.update_branch !== d.update_branch },
+    { label: t("How many run their CI at once"), was: v.parallel, now: d.parallel, changed: v.parallel !== d.parallel },
+    { label: t("Workflows that must pass"), was: list(r.required_workflows), now: list(d.required_workflows), changed: !same(r.required_workflows, d.required_workflows) },
+    { label: t("A cancelled job counts as a failure"), was: r.cancelled_is_failure ? t("yes") : t("no"), now: d.cancelled_is_failure ? t("yes") : t("no"), changed: r.cancelled_is_failure !== d.cancelled_is_failure },
     { label: t("How CI starts"), was: s.how ? t("described") : "—", now: d.how ? t("described anew, below") : "—", changed: (s.how || "") !== d.how },
     { label: t("Before merging"), was: r.notes || "—", now: d.merge_notes || "—", changed: (r.notes || "") !== d.merge_notes },
   ];
