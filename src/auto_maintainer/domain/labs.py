@@ -80,16 +80,69 @@ FIX_CI_SESSION = "fix-ci:"
 discriminator: it is no reproduction of the PR."""
 
 
-def unusable(
-    repo: str, name: str, machine: LabMachine | None, binding: LabBinding | None
+PERSONAL = "/"
+"""What joins a person's login and their machine's name: ``<login>/<name>``."""
+
+
+def personal_name(login: str, name: str) -> str:
+    """The name a person's own machine goes by in the service."""
+    return f"{login.lower()}{PERSONAL}{name}"
+
+
+def owns(machine: LabMachine | None, login: str | None) -> bool:
+    """Whether ``machine`` is ``login``'s own."""
+    return bool(
+        machine is not None
+        and machine.owner
+        and login
+        and machine.owner.lower() == login.lower()
+    )
+
+
+def offered(machines: dict[str, LabMachine], repo: str, login: str | None) -> list[str]:
+    """The machines ``login`` may see for ``repo``: their own first, then those the
+    service settings offer it; never someone else's own."""
+    mine = sorted(n for n, m in machines.items() if owns(m, login) and m.serves(repo))
+    shared = sorted(n for n, m in machines.items() if not m.owner and m.serves(repo))
+    return mine + shared
+
+
+def first_usable(
+    machines: dict[str, LabMachine],
+    bindings: dict[str, LabBinding],
+    repo: str,
+    login: str | None,
 ) -> str | None:
-    """Why ``repo`` cannot reproduce on machine ``name``, or ``None`` when it can.
+    """The machine the work ``login`` asks for on ``repo`` runs on: their own first,
+    else the first the repository uses; the repository's only for work nobody asked
+    for."""
+    for name in offered(machines, repo, login):
+        if unusable(repo, name, machines.get(name), bindings.get(name), login) is None:
+            return name
+    return None
+
+
+def unusable(
+    repo: str,
+    name: str,
+    machine: LabMachine | None,
+    binding: LabBinding | None,
+    by: str | None = None,
+) -> str | None:
+    """Why ``repo`` cannot reproduce on machine ``name`` for ``by``, or ``None`` when
+    it can.
 
     The service settings offer a machine (to every repository, or to those it names);
-    a repository uses it only when its own profile lists it with ``use: true``.
+    a repository uses it only when its own profile lists it with ``use: true``. A
+    person's own machine (``LabMachine.owner``) runs only the work they ask for, on
+    any repository, whatever the repository's profile lists.
     """
     if machine is None:
         return f"there is no test machine named {name!r}"
+    if machine.owner:
+        if not owns(machine, by):
+            return f"test machine {name!r} is {machine.owner}'s own"
+        return None
     if not machine.serves(repo):
         return f"test machine {name!r} is not offered to {repo}"
     if binding is None or not binding.use:

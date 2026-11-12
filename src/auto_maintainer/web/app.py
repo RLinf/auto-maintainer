@@ -46,6 +46,7 @@ from . import (
     governance,
     jobs,
     my_agents,
+    my_machines,
     ownership,
     people_talk,
     person_notes,
@@ -138,6 +139,7 @@ def create_app(
     app.include_router(settings.build_router())
     app.include_router(jobs.build_router())
     app.include_router(review_talk.build_router())
+    app.include_router(my_machines.build_router())
     app.include_router(governance.build_router())
     app.include_router(people_talk.build_router())
     app.include_router(translate.build_router())

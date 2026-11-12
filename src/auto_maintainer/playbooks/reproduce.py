@@ -194,7 +194,7 @@ class ReproducePlaybook(Playbook):
             return PlaybookResult(result={"skipped": "the PR is not open"})
         machine = ctx.service.machines.get(lab)
         binding = profile.labs.get(lab)
-        why = unusable(pr.repo, lab, machine, binding)
+        why = unusable(pr.repo, lab, machine, binding, by)
         if why or machine is None:
             return await self._not_run(
                 ctx, request, pr, why or f"{lab} is not set up", reason=why

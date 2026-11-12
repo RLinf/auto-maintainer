@@ -239,18 +239,32 @@ class LabExecutor:
         self.thresholds.clear()
         self.thresholds.update(self._fixed_thresholds)
         for name, machine in machines.items():
-            self.hosts[name] = (
-                SshLabHost(
+            if machine.owner:
+                # A person's own: their key and config alone, their own connections.
+                if machine.transport != "ssh" or not machine.ssh_config:
+                    continue
+                self.hosts[name] = SshLabHost(
                     name,
                     machine.host or name,
+                    Path(machine.ssh_config).parent,
                     user=machine.user,
                     port=machine.port,
-                    proxy_jump=machine.proxy_jump,
                     identity_file=machine.identity_file,
+                    config_file=machine.ssh_config,
                 )
-                if machine.transport == "ssh"
-                else LocalLabHost(name)
-            )
+            else:
+                self.hosts[name] = (
+                    SshLabHost(
+                        name,
+                        machine.host or name,
+                        user=machine.user,
+                        port=machine.port,
+                        proxy_jump=machine.proxy_jump,
+                        identity_file=machine.identity_file,
+                    )
+                    if machine.transport == "ssh"
+                    else LocalLabHost(name)
+                )
             self.thresholds[name] = GpuThresholds(
                 max_mem_mib=machine.max_gpu_memory_mib,
                 max_util_pct=machine.max_gpu_util_pct,
@@ -302,7 +316,7 @@ class LabExecutor:
         time limit. Returns the session's id (its token stays in memory)."""
         machine = self.machines.get(payload.lab)
         host = self.hosts.get(payload.lab)
-        why = unusable(repo, payload.lab, machine, binding)
+        why = unusable(repo, payload.lab, machine, binding, payload.requested_by)
         if why or machine is None:
             raise RuntimeError(why)
         if host is None:

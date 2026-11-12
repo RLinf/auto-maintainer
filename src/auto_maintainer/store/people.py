@@ -24,6 +24,12 @@
 - ``keys.json`` (mode 0600): each of those APIs' key, as ``provider:<id>``. Nothing
   reads them back but the runs of their own tasks; the dashboard sees only whether
   one is set.
+- ``machines.json``: their own test machines (``LabMachine``, by name), which only
+  the work they ask for runs on.
+- ``ssh/``: the SSH key the service made for them (they add its public half to their
+  machines; the private half never leaves this folder, and no agent's container
+  mounts it), their machines' known hosts, and the SSH config the service reaches
+  their machines with: that key alone, no agent, none of the service's own config.
 
 Nobody else reaches these through the dashboard: every route works on the signed-in
 person's own login.
@@ -42,7 +48,9 @@ from typing import Any
 from pydantic import ValidationError
 
 from ..domain.agents import PersonalAgent
-from ..domain.settings import PROVIDER_ID, Provider
+from ..domain.labs import personal_name
+from ..domain.settings import PROVIDER_ID, LabMachine, Provider
+from ..subproc import run
 
 _LOGIN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
 
@@ -175,6 +183,128 @@ class PeopleAgents:
             for name, value in self._read(folder / "keys.json").items()
             if name.startswith("provider:") and value
         }
+
+    def ssh_dir(self, login: str) -> Path:
+        path = self.folder(login) / "ssh"
+        path.mkdir(mode=0o700, exist_ok=True)
+        path.chmod(0o700)
+        return path
+
+    async def ssh_public_key(self, login: str) -> str:
+        """The person's own SSH public key, made the first time it is asked for; the
+        private key stays in their folder on the host.
+
+        Raises:
+            RuntimeError: ``ssh-keygen`` could not make it.
+        """
+        folder = self.ssh_dir(login)
+        key = folder / "id_ed25519"
+        async with self._lock:
+            if not key.is_file():
+                made = await run(
+                    [
+                        "ssh-keygen",
+                        "-q",
+                        "-t",
+                        "ed25519",
+                        "-N",
+                        "",
+                        "-C",
+                        f"auto-maintainer for {login.lower()}",
+                        "-f",
+                        str(key),
+                    ],
+                    timeout=60,
+                )
+                if made.exit_code != 0 or not key.is_file():
+                    raise RuntimeError(
+                        f"could not make an SSH key: {made.stderr.strip()[:300]}"
+                    )
+            key.chmod(0o600)
+            self._ssh_config(login)
+        return (folder / "id_ed25519.pub").read_text(encoding="utf-8").strip()
+
+    def _ssh_config(self, login: str) -> Path:
+        """The SSH config for the person's machines: their key alone, their own known
+        hosts, no SSH agent, nothing forwarded."""
+        folder = self.ssh_dir(login)
+        path = folder / "config"
+        text = "\n".join(
+            [
+                "Host *",
+                f"  IdentityFile {folder / 'id_ed25519'}",
+                "  IdentitiesOnly yes",
+                "  IdentityAgent none",
+                "  ForwardAgent no",
+                "  ForwardX11 no",
+                f"  UserKnownHostsFile {folder / 'known_hosts'}",
+                "  StrictHostKeyChecking accept-new",
+                "  PasswordAuthentication no",
+                "  KbdInteractiveAuthentication no",
+                "",
+            ]
+        )
+        if not path.is_file() or path.read_text(encoding="utf-8") != text:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(text)
+        return path
+
+    async def machines(self, login: str) -> dict[str, LabMachine]:
+        """The person's own test machines by name, each with them as its owner and
+        the SSH key and config the service reaches it with."""
+        folder = self.folder(login)
+        out = {}
+        for name, value in self._read(folder / "machines.json").items():
+            try:
+                machine = LabMachine.model_validate(value)
+            except (ValidationError, TypeError):
+                continue
+            ssh = self.ssh_dir(login)
+            out[name] = machine.model_copy(
+                update={
+                    "owner": login.lower(),
+                    "identity_file": str(ssh / "id_ed25519"),
+                    "ssh_config": str(self._ssh_config(login)),
+                }
+            )
+        return out
+
+    async def put_machine(
+        self, login: str, name: str, machine: LabMachine | None
+    ) -> None:
+        """Save the person's machine ``name`` as they gave it, or remove it (``None``).
+        The owner, key, and config are the service's to add when it is read."""
+        folder = self.folder(login)
+        async with self._lock:
+            path = folder / "machines.json"
+            data = self._read(path)
+            if machine is None:
+                data.pop(name, None)
+            else:
+                data[name] = machine.model_dump(
+                    mode="json",
+                    exclude={"owner", "ssh_config", "identity_file", "proxy_jump"},
+                    exclude_none=True,
+                )
+            _write(path, data)
+
+    async def all_machines(self) -> dict[str, LabMachine]:
+        """Everyone's own test machines, by their names in the service
+        (``login/name``)."""
+        out: dict[str, LabMachine] = {}
+        if not self.root.is_dir():
+            return out
+        for folder in sorted(self.root.iterdir()):
+            if not folder.is_dir() or not (folder / "machines.json").is_file():
+                continue
+            try:
+                machines = await self.machines(folder.name)
+            except ValueError:
+                continue
+            for name, machine in machines.items():
+                out[personal_name(folder.name, name)] = machine
+        return out
 
     async def sign_out(self, login: str, paths: tuple[str, ...]) -> None:
         """Remove one CLI's sign-in (its ``home_paths``) from the person's home."""

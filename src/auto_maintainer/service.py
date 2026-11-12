@@ -304,7 +304,10 @@ class Service:
         )
         adapters.agents.bind_questions(self.questions)
         self.machines: dict[str, LabMachine] = {}
-        """Test machines from the service settings; playbooks read this same dict."""
+        """Test machines: the service settings' and everyone's own
+        (``LabMachine.owner``); playbooks read this same dict."""
+        self._shared_machines: dict[str, LabMachine] = {}
+        """The service settings' test machines alone."""
         self.progress = JobProgress(adapters.store, self.bus, adapters.clock)
         """What agents do in each job, for the dashboard's live view."""
         adapters.agents.bind_progress(self.progress.observe)
@@ -671,11 +674,7 @@ class Service:
         )
         self.settings.write_caps = caps
         self.pipeline.write_caps = caps
-        self.machines.clear()
-        self.machines.update(config.labs)
-        configure = getattr(self.a.lab_runner, "configure", None)
-        if configure is not None:
-            configure(dict(config.labs))
+        await self.refresh_machines(config.labs)
         if self.a.reconfigure is not None:
             await self.a.reconfigure(
                 effective_agents(config, legacy), await self.provider_bindings(config)
@@ -683,6 +682,23 @@ class Service:
         sweep = asyncio.create_task(self.check_sign_ins(), name="check-sign-ins")
         self._install_tasks.add(sweep)
         sweep.add_done_callback(self._install_tasks.discard)
+
+    async def refresh_machines(
+        self, shared: dict[str, LabMachine] | None = None
+    ) -> None:
+        """Use the service settings' test machines (``shared``, or those in force)
+        and everyone's own from now on: in ``machines`` and on the lab runner."""
+        if shared is not None:
+            self._shared_machines = dict(shared)
+        personal = (
+            await self.a.people.all_machines() if self.a.people is not None else {}
+        )
+        merged = {**self._shared_machines, **personal}
+        self.machines.clear()
+        self.machines.update(merged)
+        configure = getattr(self.a.lab_runner, "configure", None)
+        if configure is not None:
+            configure(dict(merged))
 
     async def provider_bindings(
         self, config: ServiceConfig

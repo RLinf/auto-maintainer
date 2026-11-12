@@ -25,6 +25,8 @@ export interface ReproducePolicy {
 
 export interface RepoMachine {
   name: string;
+  /** The signed-in person's own machine: their work uses it on any repository. */
+  mine?: boolean;
   description: string;
   transport: string;
   host?: string | null;
@@ -209,7 +211,7 @@ export function RepoMachinesSection({ repo }: { repo: string }) {
           </Empty>
         ) : (
           <div className="stack" style={{ gap: 10 }}>
-            {d.machines.map((m) => (
+            {d.machines.filter((m) => !m.mine).map((m) => (
               <MachineUse key={m.name} repo={repo} m={m} canConfigure={d.can_configure} />
             ))}
           </div>

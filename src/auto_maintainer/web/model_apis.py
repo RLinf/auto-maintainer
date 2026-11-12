@@ -113,20 +113,28 @@ async def refused_address(base_url: str) -> str | None:
     parts = urlsplit(base_url.strip())
     if parts.scheme not in ("http", "https") or not parts.hostname:
         return "the base URL must look like https://host/v1"
+    return await refused_host(
+        parts.hostname,
+        parts.port or (443 if parts.scheme == "https" else 80),
+        "personal model APIs",
+    )
+
+
+async def refused_host(host: str, port: int, what: str) -> str | None:
+    """Why the host should not connect to ``host`` for a person (``what`` they set
+    up): it is the service's own host, a link-local address, or does not resolve."""
     try:
-        infos = await asyncio.get_running_loop().getaddrinfo(
-            parts.hostname, parts.port or (443 if parts.scheme == "https" else 80)
-        )
+        infos = await asyncio.get_running_loop().getaddrinfo(host, port)
     except OSError:
-        return f"{parts.hostname} has no address the host can resolve"
+        return f"{host} has no address the host can resolve"
     for info in infos:
         ip = ipaddress.ip_address(info[4][0].split("%", 1)[0])
         if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
             ip = ip.ipv4_mapped
         if ip.is_loopback or ip.is_link_local or ip.is_unspecified or ip.is_multicast:
             return (
-                f"{parts.hostname} is this host or a link-local address, which "
-                "personal model APIs may not reach"
+                f"{host} is this host or a link-local address, which {what} may not "
+                "reach"
             )
     return None
 

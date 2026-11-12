@@ -350,6 +350,14 @@ class LabMachine(BaseModel):
     max_gpu_memory_mib: int = 500
     """A GPU with less memory in use counts as idle (and none of its processes)."""
     max_gpu_util_pct: int = 0
+    owner: str | None = None
+    """A person's own machine: their login. Only the work they ask for runs on it,
+    nobody else sees it, and the service reaches it with that person's own key
+    (``store/people.py``). Never set in the service settings."""
+    ssh_config: str | None = None
+    """For a person's machine: the SSH config the service writes for it on its host
+    (their key and known hosts, no agent, none of the service's own SSH config).
+    Never set by a person or in the service settings."""
 
     def serves(self, repo: str) -> bool:
         return not self.repos or repo in self.repos
@@ -808,6 +816,33 @@ def machine_problems(name: str, machine: LabMachine) -> list[str]:
     for repo in machine.repos:
         if not re.match(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", repo):
             out.append(f"repos: {repo!r} is not owner/name")
+    if machine.owner is not None or machine.ssh_config is not None:
+        out.append(
+            "owner and ssh_config belong to a person's own machine, which they add "
+            "under My test machines"
+        )
+    return out
+
+
+def personal_machine_problems(name: str, machine: LabMachine) -> list[str]:
+    """Why a person's own machine cannot be used as they gave it: as a shared one,
+    reached over SSH directly (no jump host, no key or config of the service's)."""
+    out = [
+        p
+        for p in machine_problems(
+            name, machine.model_copy(update={"owner": None, "ssh_config": None})
+        )
+        if not p.startswith("owner and ssh_config")
+    ]
+    if machine.transport != "ssh":
+        out.append("a machine of your own is reached over SSH")
+    if machine.proxy_jump or machine.identity_file:
+        out.append(
+            "a machine of your own is reached directly with the key the service made "
+            "for you: no ProxyJump or IdentityFile"
+        )
+    if machine.repos:
+        out.append("a machine of your own serves every repository you work on")
     return out
 
 

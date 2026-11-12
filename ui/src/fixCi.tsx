@@ -67,7 +67,10 @@ export function FixCiForm({
             <label key={m.name} className={`machine-choice ${chosen === m.name ? "on" : ""}`}>
               <input type="radio" name="fix-machine" checked={chosen === m.name} onChange={() => setLab(m.name)} />
               <span className="stack" style={{ gap: 0 }}>
-                <strong className="small">{m.name}</strong>
+                <strong className="small">
+                  {m.name}
+                  {m.mine && <span className="muted"> · {t("your own")}</span>}
+                </strong>
                 {m.description && <span className="small muted clamp2">{m.description}</span>}
               </span>
             </label>

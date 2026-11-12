@@ -51,7 +51,7 @@ from ..domain.agents import AgentTask, TaskKind
 from ..domain.diffs import commentable
 from ..domain.events import Event, EventKind
 from ..domain.ids import new_id
-from ..domain.labs import unusable
+from ..domain.labs import first_usable
 from ..domain.memory import SignalKind
 from ..domain.profile import RepoProfile, Route
 from ..domain.records import ActionRecord, ChatMessage, ChatThread, Job
@@ -712,15 +712,7 @@ async def _reproduce(
     """Start a reproduction of ``pr`` for ``user``, as the Reproduce button does, on
     the first test machine the repository uses, checking ``focus``. Returns the
     request event's id (the jobs API resolves it) and a note for the reply."""
-    lab = next(
-        (
-            name
-            for name, binding in profile.labs.items()
-            if binding.use
-            and unusable(pr.repo, name, service.machines.get(name), binding) is None
-        ),
-        None,
-    )
+    lab = first_usable(service.machines, profile.labs, pr.repo, user.login)
     if lab is None:
         return None, (
             "No test machine is in use for this repository, so no reproduction "

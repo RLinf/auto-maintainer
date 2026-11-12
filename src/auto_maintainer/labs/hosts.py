@@ -162,7 +162,9 @@ class SshLabHost(_Host):
     """One shared SSH connection per host (ControlMaster), batch mode only. ``user``,
     ``port``, ``proxy_jump``, and ``identity_file`` are the machine's ``User``,
     ``Port``, ``ProxyJump``, and ``IdentityFile``, checked by ``machine_problems``;
-    unset, the service user's SSH config decides."""
+    unset, the service user's SSH config decides. With ``config_file`` (a person's
+    own machine), that config replaces the service user's, and its connections are
+    kept in ``control_dir``, apart from the service's own."""
 
     def __init__(
         self,
@@ -174,11 +176,12 @@ class SshLabHost(_Host):
         port: int | None = None,
         proxy_jump: str | None = None,
         identity_file: str | None = None,
+        config_file: str | None = None,
     ) -> None:
         self.name = name
         self.host = host
         self._control = str((control_dir or Path.home() / ".ssh") / "am-%r@%h:%p")
-        self._options: list[str] = []
+        self._options: list[str] = ["-F", config_file] if config_file else []
         for option, value in (
             ("User", user),
             ("Port", port),

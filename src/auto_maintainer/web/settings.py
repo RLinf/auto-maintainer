@@ -32,6 +32,7 @@ from pydantic import BaseModel, Field
 
 from ..domain.agents import AgentTask, TaskKind
 from ..domain.ids import new_id
+from ..domain.labs import owns
 from ..domain.memory import MemoryChangeState
 from ..domain.records import AuditEntry
 from ..domain.settings import (
@@ -860,7 +861,10 @@ def build_router() -> APIRouter:
         """Connect to the machine and report what it is and its GPUs."""
         service = service_of(request)
         machine = service.machines.get(name)
-        if not (await service.service_gate(user.login)).allowed:
+        if machine is not None and machine.owner:
+            if not owns(machine, user.login):
+                machine = None  # someone's own machine is theirs alone to check
+        elif not (await service.service_gate(user.login)).allowed:
             visible = await visible_repos(service, user) if machine else []
             if not (machine and any(machine.serves(repo) for repo in visible)):
                 await _require_maintainer(service, user)

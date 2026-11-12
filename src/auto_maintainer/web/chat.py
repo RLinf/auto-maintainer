@@ -49,6 +49,7 @@ from ..domain.actions import (
 from ..domain.agents import AgentResult, AgentTask, TaskKind
 from ..domain.events import Event, EventKind
 from ..domain.ids import check_repo, new_id
+from ..domain.labs import owns
 from ..domain.memory import (
     MemoryChange,
     Signal,
@@ -898,7 +899,7 @@ async def _page_block(
         offered = [
             (name, m)
             for name, m in sorted(service.machines.items())
-            if m.serves(context.repo)
+            if m.serves(context.repo) and (not m.owner or owns(m, user.login))
         ]
         if offered:
             profile = await service.profiles.active(context.repo)

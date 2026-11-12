@@ -40,7 +40,7 @@ from ..domain.actions import (
     make_action,
 )
 from ..domain.events import EventKind
-from ..domain.labs import setup_lines, time_limit, unusable
+from ..domain.labs import first_usable, setup_lines, time_limit
 from ..domain.profile import RepoProfile
 from ..domain.snapshot import PrSnapshot
 from ..policy.engine import PolicyFacts, level_for
@@ -150,18 +150,11 @@ class ReviewMachine:
 
 
 def machine_for(
-    ctx: PlaybookContext, pr: PrSnapshot, profile: RepoProfile
+    ctx: PlaybookContext, pr: PrSnapshot, profile: RepoProfile, by: str | None
 ) -> str | None:
-    """The first test machine the repository uses that can take ``pr``."""
-    return next(
-        (
-            name
-            for name, binding in profile.labs.items()
-            if binding.use
-            and unusable(pr.repo, name, ctx.service.machines.get(name), binding) is None
-        ),
-        None,
-    )
+    """The machine a review of ``pr`` that ``by`` asked for tests on: their own first,
+    else the first the repository uses that can take it."""
+    return first_usable(ctx.service.machines, profile.labs, pr.repo, by)
 
 
 async def review_machine(
@@ -187,7 +180,7 @@ async def review_machine(
         None,
     )
     if mine is None:
-        lab = machine_for(ctx, pr, profile)
+        lab = machine_for(ctx, pr, profile, by)
         if lab is None:
             return ReviewMachine(
                 note="No test machine is set up for this repository, so nothing ran."

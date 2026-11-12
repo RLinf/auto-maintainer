@@ -3083,7 +3083,7 @@ def build_router() -> APIRouter:
             profile = await service.profiles.active(repo)
             machine = service.machines.get(body.lab)
             binding = profile.labs.get(body.lab) if profile else None
-            why = unusable(repo, body.lab, machine, binding)
+            why = unusable(repo, body.lab, machine, binding, user.login)
             if why or machine is None:
                 raise HTTPException(
                     409, why or f"there is no test machine {body.lab!r}"

@@ -19,6 +19,7 @@ import { agentName } from "../agentPicker";
 import { useAgentsData } from "./Agents";
 import { SettingsChangeCard } from "../settingsChange";
 import { MyAgentsSection, MyApisSection, ServiceSignIn } from "../agentAccounts";
+import { MyMachinesSection } from "../myMachines";
 import { MyNotesSection } from "../personNotes";
 import { ApiForm, ApiSummary, modelsFor, PROTOCOLS } from "../providerForm";
 import { ForgesCard } from "../forgeSetup";
@@ -160,7 +161,12 @@ export default function SettingsPage() {
       )}
       {tab === "routing" && <RoutingTab v={v} ask={ask} />}
       {tab === "usage" && <PeopleUsageTab />}
-      {tab === "labs" && <LabsTab v={v} ask={ask} />}
+      {tab === "labs" && (
+        <div className="stack" style={{ gap: 16 }}>
+          <LabsTab v={v} ask={ask} />
+          <MyMachinesSection />
+        </div>
+      )}
       {tab === "system" && (
         <div className="stack" style={{ gap: 16 }}>
           <SystemTab v={v} ask={ask} />

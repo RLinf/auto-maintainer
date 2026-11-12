@@ -32,7 +32,7 @@ from pydantic import BaseModel, Field
 from ..domain.actions import ActionKind, ProposalState
 from ..domain.agents import QuestionState
 from ..domain.events import Event, EventKind
-from ..domain.labs import unusable
+from ..domain.labs import offered, unusable
 from ..domain.memory import profile_path
 from ..domain.permissions import Permission
 from ..domain.profile import LabBinding
@@ -288,13 +288,13 @@ def build_router() -> APIRouter:
             else None
         )
         out = []
-        for name, machine in sorted(service.machines.items()):
-            if not machine.serves(repo):
-                continue
+        for name in offered(service.machines, repo, user.login):
+            machine = service.machines[name]
             binding = profile.labs.get(name) if profile else None
             out.append(
                 {
                     "name": name,
+                    "mine": bool(machine.owner),
                     "description": machine.description,
                     "transport": machine.transport,
                     "host": machine.host,
@@ -302,7 +302,8 @@ def build_router() -> APIRouter:
                     "machine_setup": machine.setup,
                     "machine_timeout_seconds": machine.timeout_seconds,
                     "machine_forbid": machine.forbid,
-                    "used": binding is not None and binding.use,
+                    "used": bool(machine.owner)
+                    or (binding is not None and binding.use),
                     "setup": (binding.setup or "") if binding else "",
                     "timeout_seconds": binding.timeout_seconds if binding else None,
                     "forbid": binding.guard.forbid if binding else [],
@@ -336,7 +337,8 @@ def build_router() -> APIRouter:
         repo = repo_param(repo)
         await require_view(service, user, repo)
         machine = service.machines.get(lab)
-        if machine is None or not machine.serves(repo):
+        if machine is None or machine.owner or not machine.serves(repo):
+            # A person's own machine is theirs to set up, not a repository's.
             raise HTTPException(404, f"there is no test machine {lab!r} for {repo}")
         current = await service.profiles.active(repo)
         if current is None:
@@ -400,6 +402,7 @@ def build_router() -> APIRouter:
             body.lab,
             service.machines.get(body.lab),
             profile.labs.get(body.lab) if profile else None,
+            user.login,
         )
         if why:
             raise HTTPException(409, why)
