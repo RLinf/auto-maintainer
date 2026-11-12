@@ -199,6 +199,10 @@ class FakeForge:
     ) -> str | None:
         return self.path_changers.get((repo, path))
 
+    async def behind_by(self, repo: str, base: str, head: str) -> int | None:
+        """``1`` for the PR at ``head`` that is behind its base, else ``0``."""
+        return int(any(p.head_sha == head and p.behind_base for p in self.prs.values()))
+
     async def default_branch_sha(self, repo: str) -> str:
         return (
             self.repos.get(repo) or RepoInfo(name=repo)
@@ -436,9 +440,23 @@ class FakeForge:
             method=method,
             subject=self._text(subject),
             body=self._text(body),
+            author=self.login,
         )
         self._update_pr(repo, number, state=PrState.MERGED)
         return "m" * 40
+
+    async def update_pr(
+        self, repo: str, number: int, title: PublicText, body: PublicText
+    ) -> None:
+        self._record(
+            "update_pr",
+            repo=repo,
+            number=number,
+            title=self._text(title),
+            body=self._text(body),
+            author=self.login,
+        )
+        self._update_pr(repo, number, title=self._text(title), body=self._text(body))
 
     async def convert_to_draft(self, repo: str, number: int) -> None:
         self._record("convert_to_draft", repo=repo, number=number)

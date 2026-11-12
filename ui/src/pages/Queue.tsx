@@ -140,7 +140,11 @@ export default function QueuePage({ me }: { me: Me }) {
       cell: (p) => (
         <span className="stack" style={{ gap: 2, alignItems: "flex-start" }}>
           <Tier tier={p.tier} />
-          {p.total != null && <span className="small muted num">{p.total.toFixed(1)}</span>}
+          {p.total != null && (
+            <span className="small muted num" title={`${t("Priority")} ${p.total.toFixed(1)}`} aria-label={`${t("Priority")} ${p.total.toFixed(1)}`}>
+              {p.total.toFixed(1)}
+            </span>
+          )}
         </span>
       ),
     },

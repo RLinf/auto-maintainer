@@ -70,6 +70,7 @@ const KIND_LABELS: Record<string, string> = {
   "pr.fix": "Open a fix PR",
   "pr.convert_to_draft": "Convert to draft",
   "pr.close": "Close the PR",
+  "pr.edit": "Edit the PR",
   "issue.label": "Label an issue",
   "issue.comment": "Comment on an issue",
   "lab.run": "Run a lab test",
@@ -1092,6 +1093,205 @@ export function FixButton({
       )}
     >
       {(close) => <FixForm repo={repo} number={number} review={review} onClose={close} />}
+    </Popover>
+  );
+}
+
+/** What merging a PR from its page offers (``GET /api/prs/.../merge-now``). */
+export interface MergeOptions {
+  /** The methods the repository allows; ``null`` when the forge does not say. */
+  methods: MergeMethod[] | null;
+  method: MergeMethod | null;
+  subject: string;
+  body: string;
+  /** Commits of the base branch the PR's branch lacks; ``null`` when unknown. */
+  behind: number | null;
+}
+
+type MergeMethod = "squash" | "merge" | "rebase";
+
+const MERGE_METHOD_LABELS: Record<MergeMethod, string> = {
+  squash: "Squash and merge",
+  merge: "Create a merge commit",
+  rebase: "Rebase and merge",
+};
+
+/** Merge the PR into its base now, as the person who presses it: the press is the
+ *  approval, past the repository's ``pr.merge`` level unless it is off, and without
+ *  the service's merge gate; GitHub decides whether it merges. */
+export function MergeNowButton({
+  repo,
+  number,
+  head,
+  base,
+  conflicting,
+  options,
+  canPush,
+}: {
+  repo: string;
+  number: number;
+  head: string;
+  base: string;
+  conflicting: boolean;
+  options: MergeOptions | undefined;
+  canPush: boolean;
+}) {
+  const t = useT();
+  const toast = useToast();
+  const allowed = options?.methods ?? (["squash", "merge", "rebase"] as MergeMethod[]);
+  const [method, setMethod] = useState<MergeMethod | null>(null);
+  const [subject, setSubject] = useState<string | null>(null);
+  const [body, setBody] = useState<string | null>(null);
+  const chosen = method ?? options?.method ?? allowed[0] ?? null;
+  const merge = useAct(
+    () =>
+      api.post<{ status: string; error: string | null; reason: string | null }>(`/api/prs/${repo}/${number}/merge-now`, {
+        method: chosen,
+        subject: subject ?? options?.subject ?? "",
+        body: body ?? options?.body ?? "",
+        head,
+      }),
+    [["pr"], ["prs"], ["work"]],
+  );
+  return (
+    <Popover
+      align="right"
+      label={t("Merge now")}
+      trigger={(open, toggle) => (
+        <button className={["sm", open ? "on" : ""].filter(Boolean).join(" ")} onClick={toggle} aria-expanded={open}>
+          <Icon name="merge" size={14} />
+          {t("Merge now")}
+        </button>
+      )}
+    >
+      {(close) => (
+        <div className="stack" style={{ gap: 10, padding: 6, width: "min(420px, calc(100vw - 24px))", maxWidth: "100%" }}>
+          <span className="small muted">
+            {t("Merges the PR into")} <code>{base}</code> {t("on GitHub as you, at")} <code>{head.slice(0, 7)}</code>.{" "}
+            {t("The service's merge checks do not apply; GitHub's rules do.")}
+          </span>
+          {conflicting && <span className="small">{t("It conflicts with its base; resolve the conflicts first.")}</span>}
+          {allowed.length === 0 ? (
+            <span className="small">{t("This repository allows no merge method.")}</span>
+          ) : (
+            <>
+              <select value={chosen ?? ""} onChange={(e) => setMethod(e.target.value as MergeMethod)} aria-label={t("Merge method")}>
+                {allowed.map((m) => (
+                  <option key={m} value={m}>
+                    {t(MERGE_METHOD_LABELS[m])}
+                  </option>
+                ))}
+              </select>
+              {chosen !== "rebase" && (
+                <>
+                  <input value={subject ?? options?.subject ?? ""} onChange={(e) => setSubject(e.target.value)} aria-label={t("Commit title")} placeholder={t("Commit title")} />
+                  <textarea rows={6} value={body ?? options?.body ?? ""} onChange={(e) => setBody(e.target.value)} aria-label={t("Commit message")} placeholder={t("Commit message")} />
+                </>
+              )}
+            </>
+          )}
+          <div className="row">
+            <button
+              className="primary right"
+              disabled={merge.isPending || !canPush || !chosen || !options || (chosen !== "rebase" && !(subject ?? options.subject).trim())}
+              title={canPush ? undefined : t("Sign in with GitHub, so the merge comes from you.")}
+              onClick={() =>
+                merge.mutate(undefined, {
+                  onSuccess: (out) => {
+                    close();
+                    if (out.status === "executed") {
+                      toast({ title: t("Merged"), body: `${t("GitHub merged the PR into")} ${base}.`, icon: "check" });
+                    } else if (out.status === "queued" || out.status === "intent") {
+                      toast({ title: t("Merging…"), body: t("The merge goes to GitHub in a moment."), icon: "clock" });
+                    } else {
+                      toast({ title: t("Not merged"), body: out.error || out.reason || out.status, icon: "x" });
+                    }
+                  },
+                })
+              }
+            >
+              {merge.isPending ? t("Merging…") : t("Merge as me")}
+            </button>
+          </div>
+          {!canPush && <ConnectGitHub why={t("Sign in with GitHub, so the merge comes from you.")} />}
+          <ErrorBox error={merge.error} />
+        </div>
+      )}
+    </Popover>
+  );
+}
+
+/** Change the PR's title and description on GitHub, as the person who saves them. */
+export function EditPrButton({
+  repo,
+  number,
+  title,
+  body,
+  canPush,
+}: {
+  repo: string;
+  number: number;
+  title: string;
+  body: string;
+  canPush: boolean;
+}) {
+  const t = useT();
+  const toast = useToast();
+  const [draft, setDraft] = useState({ title, body });
+  const save = useAct(
+    () => api.post<{ status: string; error: string | null; reason: string | null }>(`/api/prs/${repo}/${number}/edit`, draft),
+    [["pr"], ["prs"]],
+  );
+  return (
+    <Popover
+      align="right"
+      label={t("Edit title and description")}
+      trigger={(open, toggle) => (
+        <button
+          className={open ? "on" : ""}
+          onClick={() => {
+            if (!open) setDraft({ title, body });
+            toggle();
+          }}
+          aria-expanded={open}
+          title={t("Edit title and description")}
+        >
+          {t("Edit")}
+        </button>
+      )}
+    >
+      {(close) => (
+        <div className="stack" style={{ gap: 10, padding: 6, width: "min(560px, calc(100vw - 24px))", maxWidth: "100%" }}>
+          <span className="small muted">{t("Saves the PR's title and description on GitHub as you.")}</span>
+          <input value={draft.title} onChange={(e) => setDraft({ ...draft, title: e.target.value })} aria-label={t("Title")} placeholder={t("Title")} />
+          <textarea rows={12} value={draft.body} onChange={(e) => setDraft({ ...draft, body: e.target.value })} aria-label={t("Description")} placeholder={t("Description")} />
+          <div className="row">
+            <button
+              className="primary right"
+              disabled={save.isPending || !canPush || !draft.title.trim() || (draft.title === title && draft.body === body)}
+              title={canPush ? undefined : t("Sign in with GitHub, so the edit comes from you.")}
+              onClick={() =>
+                save.mutate(undefined, {
+                  onSuccess: (out) => {
+                    close();
+                    if (out.status === "executed") {
+                      toast({ title: t("Saved"), body: t("GitHub has the new title and description."), icon: "check" });
+                    } else if (out.status === "queued" || out.status === "intent") {
+                      toast({ title: t("Saving…"), body: t("The new title and description go to GitHub in a moment."), icon: "clock" });
+                    } else {
+                      toast({ title: t("Not saved"), body: out.error || out.reason || out.status, icon: "x" });
+                    }
+                  },
+                })
+              }
+            >
+              {save.isPending ? t("Saving…") : t("Save as me")}
+            </button>
+          </div>
+          {!canPush && <ConnectGitHub why={t("Sign in with GitHub, so the edit comes from you.")} />}
+          <ErrorBox error={save.error} />
+        </div>
+      )}
     </Popover>
   );
 }

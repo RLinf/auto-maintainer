@@ -42,6 +42,8 @@ AS_PERSON = frozenset(
         ActionKind.PR_FIX,
         ActionKind.PR_UPDATE_BRANCH,
         ActionKind.PR_APPROVE,
+        ActionKind.PR_MERGE,
+        ActionKind.PR_EDIT,
         ActionKind.CI_APPROVE_RUN,
         ActionKind.THREAD_RESOLVE,
     }
@@ -52,6 +54,7 @@ ONLY_AS_PERSON = frozenset(
     {
         ActionKind.PR_FIX,
         ActionKind.PR_APPROVE,
+        ActionKind.PR_EDIT,
         ActionKind.CI_APPROVE_RUN,
         ActionKind.THREAD_RESOLVE,
     }

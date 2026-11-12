@@ -43,6 +43,7 @@ from ..domain.actions import (
     MergePayload,
     NotifyPayload,
     NudgePayload,
+    PrEditPayload,
     PrStatePayload,
     RequestReviewersPayload,
     RerunPayload,
@@ -61,6 +62,7 @@ from ..domain.ports import ReviewCommentSpec
 from ..domain.profile import RepoProfile
 from ..domain.records import AuditEntry, ChatMessage, ReviewRecord
 from ..domain.snapshot import Mergeable, PrSnapshot
+from ..policy.leak_guard import mentioned
 from .context import ExecContext
 from .memory_gate import try_merge_memory
 
@@ -463,6 +465,37 @@ async def _merge(
     )
     await x.store.delete_arm(action.repo, pr.number)
     return {"merge_sha": sha, "method": p.method}
+
+
+async def _pr_edit(
+    x: ExecContext,
+    action: Action,
+    profile: RepoProfile | None,
+    pr: PrSnapshot | None,
+    approver: str | None,
+) -> dict[str, Any]:
+    """Set the PR's title and description, as the person who saved them: the
+    executor gives this handler their own writer. Mentions the description already
+    had may stay; a new one passes the leak guard like any public text."""
+    assert profile is not None and pr is not None
+    p = PrEditPayload.model_validate(action.payload)
+    if p.title == pr.title and p.body == pr.body:
+        raise Noop("the title and description are already these")
+    had = mentioned(f"{pr.title}\n{pr.body}")
+    title = await x.public(
+        action, profile, p.title, marker_kind="edit", pr=pr, bare=True, also_mention=had
+    )
+    body = await x.public(
+        action,
+        profile,
+        p.body or " ",
+        marker_kind="edit",
+        pr=pr,
+        bare=True,
+        also_mention=had,
+    )
+    await x.writer.update_pr(action.repo, pr.number, title, body)
+    return {"title": p.title}
 
 
 async def _nudge(
@@ -939,6 +972,7 @@ HANDLERS: dict[ActionKind, HandlerSpec] = {
         _draft_or_close, needs_pr=True, needs_current_head=True
     ),
     ActionKind.PR_CLOSE: HandlerSpec(_draft_or_close, needs_pr=True),
+    ActionKind.PR_EDIT: HandlerSpec(_pr_edit, needs_pr=True),
     ActionKind.ISSUE_LABEL: HandlerSpec(_issue_label),
     ActionKind.ISSUE_COMMENT: HandlerSpec(_issue_comment),
     ActionKind.LAB_RUN: HandlerSpec(_lab_run, needs_pr=True, needs_current_head=True),

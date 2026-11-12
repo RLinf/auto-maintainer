@@ -132,6 +132,11 @@ class ForgeReader(Protocol):
 
     async def default_branch_sha(self, repo: str) -> str: ...
 
+    async def behind_by(self, repo: str, base: str, head: str) -> int | None:
+        """How many commits of branch ``base`` the commit ``head`` lacks; ``None``
+        when the forge cannot compare them."""
+        ...
+
 
 @dataclass(frozen=True)
 class ReviewCommentSpec:
@@ -214,6 +219,12 @@ class ForgeWriter(Protocol):
         body: PublicText,
     ) -> str:
         """Merge and return the merge commit SHA."""
+        ...
+
+    async def update_pr(
+        self, repo: str, number: int, title: PublicText, body: PublicText
+    ) -> None:
+        """Set the PR's title and description."""
         ...
 
     async def convert_to_draft(self, repo: str, number: int) -> None: ...

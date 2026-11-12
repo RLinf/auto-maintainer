@@ -45,6 +45,11 @@ _CJK_RE = re.compile(r"[㐀-䶿一-鿿぀-ヿ가-힯]")
 _SCORE_RE = re.compile(r"\b(score|tier)\s*[:=]\s*\d", re.IGNORECASE)
 
 
+def mentioned(text: str) -> set[str]:
+    """The logins ``text`` mentions, lowercased, outside code and comments."""
+    return {login.lower() for login in _MENTION_RE.findall(_prose(text))}
+
+
 TIER_BLIND = frozenset({ActionKind.REVIEW_POST, ActionKind.REVIEW_UPDATE})
 """Action kinds whose text comes from agents never shown a PR's priority tier or
 score, so a tier name in it is the review's own severity label. Scores stay

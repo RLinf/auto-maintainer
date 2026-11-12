@@ -619,6 +619,17 @@ class GitLabReader:
         )
         return self._person(merged_by) if merged_by else None
 
+    async def behind_by(self, repo: str, base: str, head: str) -> int | None:
+        # ``from...to`` from their merge base: the commits of ``base`` that ``head``
+        # lacks.
+        data = await self._client.get(
+            f"/projects/{project_id(repo)}/repository/compare",
+            params={"from": head, "to": base},
+            allow=OPTIONAL,
+        )
+        commits = (data or {}).get("commits")
+        return len(commits) if isinstance(commits, list) else None
+
     async def default_branch_sha(self, repo: str) -> str:
         branch = await self._default_branch(repo)
         data = await self._client.get(

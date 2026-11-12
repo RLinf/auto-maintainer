@@ -33,6 +33,7 @@ from auto_maintainer.domain.actions import (
     ActionKind,
     ApprovePrPayload,
     LabelPayload,
+    PrEditPayload,
     Provenance,
     make_action,
 )
@@ -41,7 +42,7 @@ from auto_maintainer.domain.memory import profile_path
 from auto_maintainer.domain.permissions import Permission
 from auto_maintainer.domain.records import AgentRunRecord, Job
 from auto_maintainer.domain.settings import UserToken
-from auto_maintainer.domain.snapshot import PrFile, RepoInfo
+from auto_maintainer.domain.snapshot import Mergeable, PrFile, RepoInfo
 from auto_maintainer.profiles.governance import governance_path
 from auto_maintainer.profiles.layers import dump_yaml, parse_yaml
 from auto_maintainer.testing.demo import DEMO_GOVERNANCE, build_demo
@@ -293,6 +294,107 @@ async def test_a_person_approves_a_pr_only_as_themselves(demo) -> None:
             number=7,
             head_sha="a" * 40,
             discriminator="direct",
+        )
+    )
+    proposal = await h.store.proposal_for_action(record.action.id)
+    assert proposal is not None
+    with pytest.raises(ApprovalError):
+        await h.service.pipeline.approve(proposal.id, "maria")
+
+
+async def test_a_person_merges_a_pr_from_its_page_only_as_themselves(demo) -> None:
+    """Merging from the PR page: the press is the approval, so it runs at the default
+    ``shadow`` but not at ``off``; it merges as the person, by a method the
+    repository allows, at the head they saw, once GitHub says it merges cleanly."""
+    h, app = demo
+    h.forge.add_repo(RepoInfo(name=REPO, merge_methods=["squash", "rebase"]))
+    pr = make_pr(number=7, mergeable=Mergeable.UNKNOWN)
+    h.forge.put_pr(pr)
+    await h.store.save_snapshot(pr)
+    url = f"/api/prs/{REPO}/7/merge-now"
+    squash = {"method": "squash", "subject": "fix: x (#7)", "head": "a" * 40}
+    async with _as(app, "maria") as maria:
+        options = (await maria.get(url)).json()
+        assert options["methods"] == ["squash", "rebase"]
+        assert options["method"] == "squash", "the profile's method, when allowed"
+        assert options["subject"].endswith("(#7)")
+        assert (await maria.post(url, json=squash)).status_code == 403, "no sign-in"
+        await h.service.a.user_tokens.set("maria", UserToken(token="t"))
+        unknown = await maria.post(url, json=squash)
+        assert unknown.status_code == 409, "GitHub has not said it merges cleanly"
+        h.forge.put_pr(pr.model_copy(update={"mergeable": Mergeable.MERGEABLE}))
+        merge = {**squash, "method": "merge"}
+        assert (await maria.post(url, json=merge)).status_code == 409, "not allowed"
+        moved = {**squash, "head": "b" * 40}
+        assert (await maria.post(url, json=moved)).status_code == 409
+        await _levels(h, pr_merge="off")
+        off = (await maria.post(url, json=squash)).json()
+        assert off["status"] == "denied", "a repository can turn merging off"
+        await _levels(h, pr_merge="shadow")
+        out = (await maria.post(url, json={**squash, "body": "* fix"})).json()
+        assert out["status"] in {"queued", "executed"}, out
+        await h.settle()
+    [merged] = h.forge.writes_of("merge")
+    assert (merged["author"], merged["method"]) == ("maria", "squash")
+    assert (merged["subject"], merged["body"], merged["sha"]) == (
+        "fix: x (#7)",
+        "* fix",
+        "a" * 40,
+    )
+
+
+async def test_the_pr_page_offers_to_merge_the_base_only_into_a_branch_behind_it(
+    demo,
+) -> None:
+    h, app = demo
+    behind = make_pr(number=8, sha="c" * 40, behind_base=True)
+    current = make_pr(number=9, sha="d" * 40)
+    for pr in (behind, current):
+        h.forge.put_pr(pr)
+        await h.store.save_snapshot(pr)
+    async with _as(app, "walt") as walt:
+        assert (await walt.get(f"/api/prs/{REPO}/8/merge-now")).json()["behind"] == 1
+        assert (await walt.get(f"/api/prs/{REPO}/9/merge-now")).json()["behind"] == 0
+
+
+async def test_a_person_edits_a_prs_title_and_description_only_as_themselves(
+    demo,
+) -> None:
+    h, app = demo
+    h.forge.put_pr(make_pr(number=7, body="Fixes it.\n\ncc @bob"))
+    url = f"/api/prs/{REPO}/7/edit"
+    edit = {"title": "fix(core): skip empty batches", "body": "Skips them.\n\ncc @bob"}
+    async with _as(app, "maria") as maria:
+        assert (await maria.post(url, json=edit)).status_code == 403, "no sign-in"
+        await h.service.a.user_tokens.set("maria", UserToken(token="t"))
+        await _levels(h, pr_edit="off")
+        assert (await maria.post(url, json=edit)).json()["status"] == "denied"
+        await _levels(h, pr_edit="shadow")
+        out = (await maria.post(url, json=edit)).json()
+        assert out["status"] in {"queued", "executed"}, out
+        await h.settle()
+        [written] = h.forge.writes_of("update_pr")
+        assert written["author"] == "maria", "as the person, never the service"
+        assert written["body"].endswith("cc @bob"), "a mention it already had stays"
+        assert h.forge.prs[(REPO, 7)].title == edit["title"]
+        new = {**edit, "body": "Skips them. @carol"}
+        failed = (await maria.post(url, json=new)).json()
+        await h.settle()
+        record = await h.store.get_action(failed["action"])
+        assert record is not None and record.status != "executed", (
+            "a new mention passes the leak guard like any public text"
+        )
+        assert len(h.forge.writes_of("update_pr")) == 1
+
+    record = await h.service.pipeline.submit(
+        make_action(
+            ActionKind.PR_EDIT,
+            REPO,
+            PrEditPayload(title="x"),
+            number=7,
+            head_sha="a" * 40,
+            discriminator="direct",
+            draft_for="maria",
         )
     )
     proposal = await h.store.proposal_for_action(record.action.id)

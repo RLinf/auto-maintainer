@@ -19,6 +19,7 @@ policy:
   pr.nudge: {level: shadow}
   pr.convert_to_draft: {level: shadow}
   pr.close: {level: shadow}
+  pr.edit: {level: shadow}            # a person saves a PR's title and description; only ever as them
   pr.fix: {level: shadow}             # drafted for whoever asked; opened as them
   lab.reproduce: {level: shadow}      # a person's request runs once they approve it; raised, reviews reproduce on their own
   lab.review: {level: auto}           # a review tests the PR on a machine the repository turned on; writes nothing to it

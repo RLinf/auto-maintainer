@@ -279,6 +279,17 @@ class GitLabWriter:
             or data.get("sha")
         )
 
+    async def update_pr(
+        self, repo: str, number: int, title: PublicText, body: PublicText
+    ) -> None:
+        await self._client.put(
+            self._mr(repo, number),
+            {
+                "title": _public(title, repo, "title"),
+                "description": _public(body, repo, "body"),
+            },
+        )
+
     async def convert_to_draft(self, repo: str, number: int) -> None:
         mr = await self._client.get(self._mr(repo, number))
         title = str(mr.get("title") or "")

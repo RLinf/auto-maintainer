@@ -34,7 +34,7 @@ import { Icon } from "../icons";
 import { Markdown } from "../markdown";
 import { CommentOnDiff, parseDiff, usePrDiff } from "../diffview";
 import { DataTable, ListToolbar, useList, type Column } from "../list";
-import { ApproveButton, FixForm, MergeBaseButton, MergeBaseForm, type InlineComment } from "../proposal";
+import { ApproveButton, EditPrButton, FixForm, MergeBaseButton, MergeBaseForm, MergeNowButton, type InlineComment, type MergeOptions } from "../proposal";
 import { ReproduceForm } from "../reproduce";
 import { failedChecks, FixCiButton, FixCiForm } from "../fixCi";
 import { PrPeopleCards } from "../assignees";
@@ -81,6 +81,11 @@ export default function PrPage({ me }: { me: Me }) {
   const arm = useAct(() => api.post(`${base}/merge`), keys);
   const disarm = useAct(() => api.del(`${base}/merge`), keys);
   const d = detail.data;
+  const mergeNow = useQuery({
+    queryKey: ["pr", full, number, "merge-now"],
+    queryFn: () => api.get<MergeOptions>(`${base}/merge-now`),
+    enabled: d?.pr.state === "OPEN",
+  });
 
   const tabs = [
     { id: "overview", label: t("Overview") },
@@ -259,6 +264,7 @@ export default function PrPage({ me }: { me: Me }) {
                 canPost={canPush}
               />
             )}
+            {pr.state === "OPEN" && <EditPrButton repo={full} number={pr.number} title={pr.title} body={pr.body} canPush={canPush} />}
             <a className="button" href={pr.url} target="_blank" rel="noreferrer" title={openOnForge}>
               <Icon name="external" size={14} />
               <span className="hide-narrow">{openOnForge}</span>
@@ -329,7 +335,8 @@ export default function PrPage({ me }: { me: Me }) {
             title={t("Merge")}
             aside={
               <span className="row" style={{ gap: 6 }}>
-                {pr.state === "OPEN" && (
+                {/* Merging the base is offered only into a branch that lacks some of it. */}
+                {pr.state === "OPEN" && (pr.mergeable === "CONFLICTING" || (mergeNow.data && mergeNow.data.behind !== 0)) && (
                   <MergeBaseButton
                     repo={full}
                     number={pr.number}
@@ -338,6 +345,17 @@ export default function PrPage({ me }: { me: Me }) {
                     canPush={canPush}
                     size="sm"
                     quiet={pr.mergeable !== "CONFLICTING"}
+                  />
+                )}
+                {pr.state === "OPEN" && !pr.is_draft && (
+                  <MergeNowButton
+                    repo={full}
+                    number={pr.number}
+                    head={pr.head_sha}
+                    base={pr.base_ref}
+                    conflicting={pr.mergeable === "CONFLICTING"}
+                    options={mergeNow.data}
+                    canPush={canPush}
                   />
                 )}
                 {d.arm ? (

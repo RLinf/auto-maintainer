@@ -140,11 +140,14 @@ class ExecContext:
         runtime: str | None = None,
         approver: str | None = None,
         bare: bool = False,
+        also_mention: set[str] | frozenset[str] = frozenset(),
     ) -> PublicText:
         """Wrap ``body`` with the marker and footer and pass it through the leak guard.
 
-        ``bare`` skips the marker and footer, for inline review comments and merge
-        messages.
+        ``bare`` skips the marker and footer, for inline review comments, merge
+        messages, and a PR's title and description. ``also_mention`` lets the text
+        keep mentions of these logins besides the PR's author and code owners: those
+        a PR's description already had when a person edits it.
         """
         if bare:
             text = body.strip()
@@ -156,7 +159,7 @@ class ExecContext:
             approval = f", approved by {approver}" if approver else ""
             footer = profile.comments.footer.format(runtime=name, approval=approval)
             text = f"{marker}\n\n{body.strip()}\n\n<sub>{footer}</sub>"
-        allowed: set[str] = set()
+        allowed: set[str] = set(also_mention)
         if pr is not None:
             allowed.add(pr.author)
             allowed.update(await self.code_owners(profile, pr.paths))
