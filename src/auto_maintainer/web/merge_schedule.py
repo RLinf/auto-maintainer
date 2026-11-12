@@ -89,6 +89,11 @@ class CiStartBody(BaseModel):
     approvals: int | None = Field(default=None, ge=0, le=20)
 
 
+class BlockingBody(BaseModel):
+    roles: list[str] = Field(max_length=50)
+    """The label roles whose label holds a PR's merge back."""
+
+
 class ReadyBody(BaseModel):
     ready: list[ReadyCondition] | None
     """``None`` for every condition the merge rules hold a PR to."""
@@ -302,6 +307,8 @@ def build_router() -> APIRouter:
                 "hygiene": [s.id for s in profile.checks if s.blocking and s.enabled],
                 "ready": list(ready_conditions(profile)),
                 "ready_set": profile.merge.schedule.ready is not None,
+                "blocking_roles": profile.merge.blocking_roles,
+                "label_roles": dict(sorted(profile.labels.roles.items())),
             },
             "ci_start": {
                 **start.model_dump(mode="json"),
@@ -598,6 +605,40 @@ def build_router() -> APIRouter:
                 if body.ready is not None
                 else "the merge rules hold"
             ),
+        )
+
+    @r.put("/{repo:path}/blocking")
+    async def set_blocking(
+        request: Request,
+        repo: str,
+        body: BlockingBody,
+        user: User = Depends(current_user),
+    ) -> dict[str, Any]:
+        """Set which labels hold a PR's merge back (``merge.blocking_roles``, by
+        their roles): a profile change, through the gate."""
+        service = service_of(request)
+        repo = _repo(repo)
+        await require_view(service, user, repo)
+        profile = await service.profiles.active(repo)
+        if profile is None:
+            raise HTTPException(409, f"{repo} has no approved profile yet")
+        unknown = [r for r in body.roles if r not in profile.labels.roles]
+        if unknown:
+            raise HTTPException(
+                422, f"{repo} gives no label to {', '.join(sorted(unknown))}"
+            )
+        roles = list(dict.fromkeys(body.roles))
+
+        def change(layer: dict[str, Any]) -> None:
+            _section(layer, "merge")["blocking_roles"] = roles
+
+        labels = [profile.labels.roles[r] for r in roles]
+        return await _save_layer(
+            service,
+            user,
+            repo,
+            change,
+            "merge: held back by " + (", ".join(labels) if labels else "no label"),
         )
 
     @r.post("/{repo:path}/investigate")

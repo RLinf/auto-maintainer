@@ -112,6 +112,8 @@ interface MergeView {
     hygiene: string[];
     ready: string[];
     ready_set: boolean;
+    blocking_roles: string[];
+    label_roles: Record<string, string>;
   };
   ci_start: CiStart;
   draft: Draft | null;
@@ -546,6 +548,7 @@ function RulesCard({ v }: { v: MergeView }) {
   const toast = useToast();
   const r = v.rules;
   const [editing, setEditing] = useState(false);
+  const [editingLabels, setEditingLabels] = useState(false);
   const [picked, setPicked] = useState<string[]>(r.ready);
   useEffect(() => setPicked(r.ready), [r.ready.join(",")]);
   const save = useAct((ready: string[] | null) => api.put<Saved>(`/api/merge-schedule/${v.repo}/ready`, { ready }), [["merge-schedule"]]);
@@ -603,7 +606,15 @@ function RulesCard({ v }: { v: MergeView }) {
           )}
         </div>
         <div className="stack" style={{ gap: 6 }}>
-          <strong className="small">{t("Merges after its CI when")}</strong>
+          <div className="row" style={{ gap: 8 }}>
+            <strong className="small">{t("Merges after its CI when")}</strong>
+            {v.can_arrange && !editingLabels && (
+              <button className="sm ghost right" onClick={() => setEditingLabels(true)}>
+                {t("Edit")}
+              </button>
+            )}
+          </div>
+          {editingLabels && <BlockingEditor v={v} onDone={() => setEditingLabels(false)} />}
           <ul className="merge-rules">
             {checks.length > 0 && (
               <Yes on>
@@ -620,6 +631,7 @@ function RulesCard({ v }: { v: MergeView }) {
                 {conditionText(c, r, t)}
               </Yes>
             ))}
+            {r.blocking_labels.length === 0 && <li className="small muted">{t("No label holds the merge back")}</li>}
             <Yes on={r.up_to_date || r.update_branch}>{t("Up to date with the base: the service merges it in before CI runs")}</Yes>
             <li className="small muted">
               {t("Merges with")} {r.method}
@@ -632,6 +644,47 @@ function RulesCard({ v }: { v: MergeView }) {
       </div>
       {r.notes && <Markdown className="md merge-notes" text={r.notes} />}
     </Section>
+  );
+}
+
+function BlockingEditor({ v, onDone }: { v: MergeView; onDone: () => void }) {
+  const t = useT();
+  const toast = useToast();
+  const roles = Object.entries(v.rules.label_roles);
+  const [picked, setPicked] = useState<string[]>(v.rules.blocking_roles);
+  const save = useAct((r: string[]) => api.put<Saved>(`/api/merge-schedule/${v.repo}/blocking`, { roles: r }), [["merge-schedule"]]);
+  return (
+    <div className="stack merge-draft" style={{ gap: 6 }}>
+      <span className="small muted">{t("Hold the merge back while a PR has one of these labels:")}</span>
+      {roles.length === 0 && <span className="small muted">{t("The profile gives no labels to roles.")}</span>}
+      {roles.map(([role, label]) => (
+        <label key={role} className="row small" style={{ gap: 8 }}>
+          <input type="checkbox" checked={picked.includes(role)} onChange={(e) => setPicked(e.target.checked ? [...picked, role] : picked.filter((x) => x !== role))} />
+          <span className="mono">{label}</span>
+          <span className="muted">({role})</span>
+        </label>
+      ))}
+      <div className="row" style={{ gap: 8 }}>
+        <button className="sm ghost right" onClick={onDone}>
+          {t("Cancel")}
+        </button>
+        <button
+          className="sm primary"
+          disabled={save.isPending}
+          onClick={() =>
+            save.mutate(picked, {
+              onSuccess: (out) => {
+                toast({ title: out.applied ? t("Saved") : t("Proposed to the maintainers"), icon: out.applied ? "check" : "inbox" });
+                onDone();
+              },
+            })
+          }
+        >
+          {t("Save")}
+        </button>
+      </div>
+      <ErrorBox error={save.error} />
+    </div>
   );
 }
 

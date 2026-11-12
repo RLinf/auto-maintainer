@@ -2393,6 +2393,9 @@ const zh: Record<string, string> = {
   "Optional checks (may stay unpassed for a merge)": "可选检查（合并时可不通过）",
   "Saving also sets what a PR must meet to be scheduled, as the draft says:": "保存时也会按草稿设置 PR 的调度条件：",
   "CI passed, waiting to meet the merge rules": "CI 已通过，等待满足合并规则",
+  "No label holds the merge back": "没有标签会阻止合并",
+  "Hold the merge back while a PR has one of these labels:": "PR 带有以下任一标签时暂不合并：",
+  "The profile gives no labels to roles.": "配置中没有为角色指定标签。",
 };
 
 const LangContext = createContext<{ lang: Lang; setLang: (l: Lang) => void }>({ lang: "zh", setLang: () => {} });

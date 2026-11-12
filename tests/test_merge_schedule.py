@@ -840,3 +840,40 @@ def test_an_agents_draft_keeps_only_what_the_repository_has() -> None:
     assert kept.optional_checks == ["DCO"]
     assert kept.gate_jobs == ["check-changes"]
     assert len(dropped) == 3
+
+
+async def test_a_maintainer_chooses_which_labels_hold_a_merge_back(
+    harness: Harness, tmp_path: Path
+) -> None:
+    h = harness
+    app = create_app(h.service, data_dir=tmp_path, allow_dev_login=True)
+    async with _as(app, "maria") as maria:
+        view = (await maria.get(f"/api/merge-schedule/{REPO}/view")).json()
+        assert view["rules"]["label_roles"]["ci_gate"] == "run-ci"
+        out = (
+            await maria.put(
+                f"/api/merge-schedule/{REPO}/blocking", json={"roles": ["ci_gate"]}
+            )
+        ).json()
+        assert out["applied"], out
+        view = (await maria.get(f"/api/merge-schedule/{REPO}/view")).json()
+        assert view["rules"]["blocking_labels"] == ["run-ci"]
+        out = (
+            await maria.put(f"/api/merge-schedule/{REPO}/blocking", json={"roles": []})
+        ).json()
+        assert out["applied"], out
+        view = (await maria.get(f"/api/merge-schedule/{REPO}/view")).json()
+        assert view["rules"]["blocking_labels"] == []
+        bad = await maria.put(
+            f"/api/merge-schedule/{REPO}/blocking", json={"roles": ["nonsense"]}
+        )
+        assert bad.status_code == 422
+    async with _as(app, "bob") as bob:
+        proposed = (
+            await bob.put(
+                f"/api/merge-schedule/{REPO}/blocking",
+                json={"roles": ["ci_gate"]},
+            )
+        ).json()
+        assert proposed["applied"] is False, proposed
+        assert proposed["change"]["state"] == "open", "a proposal for the maintainers"

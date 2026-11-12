@@ -231,10 +231,40 @@ async def test_after_a_ci_action_the_pr_is_read_again_as_its_runs_start(
         await refresh(repo, number)
 
     h.service._refresh_pr = counted
-    h.service.ci_settle_seconds = (0.3, 0.5)
+    h.service.settle_seconds = (0.3, 0.5)
     async with _as(app, "walt") as walt:
         await walt.post(f"/api/prs/{REPO}/43/ci")  # adds the CI gate label
         await h.settle()
         assert reads.count(43) == 1, "at once"
         await asyncio.sleep(0.8)
     assert reads.count(43) == 3, "and twice more while the runs start"
+
+
+async def test_after_an_approval_the_pr_is_read_again_as_the_forge_counts_it(
+    demo,
+) -> None:
+    """GitHub counts an approval in the PR's review decision a moment after the
+    call returns: the PR is read again on a schedule, so the Merge scheduling page
+    sees it schedulable without waiting for the next poll."""
+    import asyncio
+
+    from auto_maintainer.domain.settings import UserToken
+
+    h, app = demo
+    reads: list[int] = []
+    refresh = h.service._refresh_pr
+
+    async def counted(repo: str, number: int) -> None:
+        reads.append(number)
+        await refresh(repo, number)
+
+    h.service._refresh_pr = counted
+    h.service.settle_seconds = (0.3, 0.5)
+    await h.service.a.user_tokens.set("walt", UserToken(token="w"))
+    async with _as(app, "walt") as walt:
+        out = await walt.post(f"/api/prs/{REPO}/43/approve", json={})
+        assert out.status_code == 200, out.text
+        await h.settle()
+        assert reads.count(43) == 1, "at once"
+        await asyncio.sleep(0.8)
+    assert reads.count(43) == 3, "and twice more while the forge catches up"
