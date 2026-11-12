@@ -641,6 +641,28 @@ class PersonalAgents(Protocol):
     async def all_machines(self) -> dict[str, LabMachine]: ...
 
 
+class ScopeGrant(Protocol):
+    """Adding scopes to the service's forge sign-in: a device flow its account
+    approves on the forge (``forges/github/auth.py:ScopeRequest``)."""
+
+    code: str | None
+    url: str | None
+
+    async def start(self, wait: float = 30) -> dict[str, str]:
+        """Start it; the one-time code and the page to enter it on."""
+        ...
+
+    async def wait(self) -> bool:
+        """Whether the account approved, once it ends."""
+        ...
+
+    def state(self) -> str:
+        """``pending``, ``done``, or ``failed``."""
+        ...
+
+    def cancel(self) -> None: ...
+
+
 class UserTokens(Protocol):
     """Signed-in maintainers' own GitHub tokens, on the host only (``UserToken``)."""
 

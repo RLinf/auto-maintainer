@@ -58,6 +58,7 @@ from .domain.ports import (
     Notifier,
     PersonalAgents,
     Sandbox,
+    ScopeGrant,
     SecretStore,
     ServiceUpdater,
     Store,
@@ -127,6 +128,10 @@ QUOTA_FRESH_SECONDS = 30
 and again does not run the CLI every time."""
 
 
+SCOPE_REQUEST_GAP = timedelta(minutes=30)
+"""How long after asking for a scope the service waits before it asks again on its
+own; the owner may ask again at any time."""
+
 SETTLE_SECONDS = (10.0, 30.0, 90.0)
 """Seconds after an action that wrote to a PR at which the service reads it again:
 the forge shows some effects only a moment after the write returns (an approval in
@@ -165,6 +170,10 @@ class Adapters:
     """Rebuilds the agent runtimes for new settings; supplied by the composition root."""
     user_tokens: UserTokens | None = None
     """Signed-in maintainers' own GitHub tokens, for posting reviews as them."""
+    grant_scopes: Callable[[str | None, list[str]], ScopeGrant] | None = None
+    """A request adding scopes to the service's sign-in on ``repo``'s forge."""
+    forget_token: Callable[[str | None], None] | None = None
+    """Read the service's sign-in on ``repo``'s forge again at its next use."""
     writer_for_user: (
         Callable[[str, UserToken], Awaitable[ForgeWriter | None]] | None
     ) = None
@@ -303,6 +312,8 @@ class Service:
         """Set after a deploy; ``am serve`` then exits for its supervisor to restart it."""
         self._confirming: asyncio.Task[None] | None = None
         self._polls: dict[str, asyncio.Task[None]] = {}
+        self._scope_grant: ScopeGrant | None = None
+        self._scope_record: dict[str, Any] | None = None
         self._checks: dict[str, asyncio.Task[None]] = {}
         """Full reads of every open PR of a repository a person asked for."""
         """Polls started because a repository's approved profile changed, by repository."""
@@ -375,6 +386,7 @@ class Service:
             signed_in=self.can_post_as,
         )
         self.info = ServiceInfo(
+            started_at=adapters.clock.now(),
             login=settings.login,
             identities=settings.identities | {settings.login},
             routing=settings.routing,
@@ -798,7 +810,86 @@ class Service:
         )
         await self.actuator.drain()
 
+    def scope_request(self) -> dict[str, Any] | None:
+        """The latest request to add scopes to the service's forge sign-in, as the
+        dashboard shows it to the owner (``request_scopes``)."""
+        if self._scope_record is None:
+            return None
+        grant = self._scope_grant
+        state = grant.state() if grant is not None else self._scope_record["state"]
+        return {**self._scope_record, "state": state}
+
+    async def request_scopes(
+        self, repo: str | None, scopes: list[str], by: str
+    ) -> dict[str, Any]:
+        """Ask for ``scopes`` on the service's sign-in on ``repo``'s forge: a device
+        flow whose one-time code the dashboard shows the service's owner, who enters
+        it on the forge as the service's account. Once they approve, the service reads
+        its sign-in again and wakes the PRs a missing scope held back. One request at
+        a time; the GitHub CLI takes no other account's credentials."""
+        if self.a.grant_scopes is None:
+            raise RuntimeError("this forge's sign-in takes no added scopes here")
+        if self._scope_grant is not None and self._scope_grant.state() == "pending":
+            assert self._scope_record is not None
+            return self._scope_record
+        grant = self.a.grant_scopes(repo, scopes)
+        shown = await grant.start()
+        self._scope_grant = grant
+        self._scope_record = {
+            "scopes": scopes,
+            "code": shown["code"],
+            "url": shown["url"],
+            "login": self.settings.login,
+            "repo": repo,
+            "by": by,
+            "started_at": self.clock.now().isoformat(),
+            "state": "pending",
+        }
+        self.tell_dashboards(EventKind.SERVICE_CHANGED)
+
+        async def granted() -> None:
+            ok = await grant.wait()
+            if self._scope_record is not None:
+                self._scope_record["state"] = "done" if ok else "failed"
+            if ok:
+                if self.a.forget_token is not None:
+                    self.a.forget_token(repo)
+                # The sign-in changed: what a missing scope held back tries again.
+                self.info.started_at = self.clock.now()
+                await self._wake_blocked(repo)
+            self.tell_dashboards(EventKind.SERVICE_CHANGED)
+
+        task = asyncio.create_task(granted(), name="scope-grant")
+        self._install_tasks.add(task)
+        task.add_done_callback(self._install_tasks.discard)
+        return self._scope_record
+
+    async def _wake_blocked(self, repo: str | None) -> None:
+        """Wake the scheduled PRs a refused merge holds back, so they try again."""
+        repos = [repo] if repo else [r.repo for r in await self.store.list_repos()]
+        for name in repos:
+            for arm in await self.store.list_arms(name):
+                raw = await self.store.get_state(f"merge-schedule:{name}#{arm.number}")
+                if isinstance(raw, dict) and raw.get("phase") == "blocked":
+                    await self.bus.publish(
+                        Event(kind=EventKind.MERGE_QUEUE, repo=name, number=arm.number)
+                    )
+
     async def _settings_event(self, event: Event) -> None:
+        if event.kind == EventKind.SCOPE_NEEDED:
+            scopes = [str(x) for x in event.payload.get("scopes") or []]
+            last = self._scope_record
+            recent = (
+                last is not None
+                and (self.clock.now() - datetime.fromisoformat(str(last["started_at"])))
+                < SCOPE_REQUEST_GAP
+            )
+            if scopes and not recent:
+                try:
+                    await self.request_scopes(event.repo, scopes, "service")
+                except Exception:
+                    log.exception("asking for the %s scope failed", ", ".join(scopes))
+            return
         if (
             event.kind == EventKind.ACTION_EXECUTED
             and event.repo

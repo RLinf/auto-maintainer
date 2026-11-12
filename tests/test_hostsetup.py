@@ -618,6 +618,14 @@ if [ "$1 $2" = "auth login" ]; then
   echo "$TOKEN" > "$GH_CONFIG_DIR/hosts"
   exit 0
 fi
+if [ "$1 $2" = "auth refresh" ]; then
+  echo "$@" > "$GH_CONFIG_DIR/refresh-args"
+  echo "! First copy your one-time code: WXYZ-9876"
+  echo "Press Enter to open https://github.com/login/device in your browser..."
+  while [ ! -f "$GH_CONFIG_DIR/approve-scope" ]; do sleep 0.05; done
+  echo "$TOKEN-with-workflow" > "$GH_CONFIG_DIR/hosts"
+  exit 0
+fi
 if [ "$1 $2" = "auth token" ]; then cat "$GH_CONFIG_DIR/hosts" 2>/dev/null || exit 1; fi
 """
 
@@ -989,3 +997,35 @@ async def test_stopping_the_server_stops_a_sign_in_in_progress(
     s._login.cancel = lambda: cancelled.append(True)
     s.cancel()
     assert cancelled == [True]
+
+
+async def test_a_github_sign_in_asks_for_the_workflow_scope(
+    tmp_path: Path, fake_gh
+) -> None:
+    login = GhLogin(tmp_path / "gh")
+    shown = await login.start()
+    assert shown["code"] == "ABCD-1234"
+    args = (tmp_path / "gh" / "args").read_text()
+    assert "--scopes=workflow" in args
+    login.cancel()
+
+
+async def test_the_services_sign_in_gets_a_scope_added_and_read_again(
+    tmp_path: Path, fake_gh
+) -> None:
+    from auto_maintainer.forges.github.auth import ScopeRequest
+
+    folder = tmp_path / "svc-gh"
+    folder.mkdir()
+    (folder / "hosts").write_text(TOKEN + "\n")
+    tokens = StaticTokenProvider(None, gh_config_dir=str(folder))
+    assert await tokens.token() == TOKEN
+    grant = ScopeRequest("github.com", str(folder), ["workflow"])
+    shown = await grant.start()
+    assert shown == {"code": "WXYZ-9876", "url": "https://github.com/login/device"}
+    assert "--scopes workflow" in (folder / "refresh-args").read_text()
+    assert grant.state() == "pending"
+    (folder / "approve-scope").write_text("")
+    assert await grant.wait() is True and grant.state() == "done"
+    tokens.forget()
+    assert await tokens.token() == TOKEN + "-with-workflow"

@@ -1462,28 +1462,116 @@ async def test_a_pr_whose_ci_ran_again_and_passed_leaves_the_failure_lane(
     assert [w["number"] for w in h.forge.writes_of("merge")] == [42]
 
 
-async def test_a_refused_merge_stays_in_the_failure_lane_with_what_to_do(
+async def test_a_merge_refused_for_a_scope_waits_blocked_without_the_turn(
     harness: Harness,
 ) -> None:
     h = harness
     h.forge.put_pr(_ready(42, "a" * 40, _ci(42, "success")))
+    h.forge.put_pr(_ready(43, "c" * 40, _ci(43, "success")))
     merge = h.forge.merge
+    merge_and_move = None
 
-    async def refuse(*args, **kwargs):  # type: ignore[no-untyped-def]
-        raise RuntimeError(
-            "GitHub API error 403: refusing to allow an OAuth App to create or "
-            "update workflow `.github/workflows/ci.yml` without `workflow` scope"
-        )
+    async def refuse_42(repo, number, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if number == 42:
+            raise RuntimeError(
+                "GitHub API error 403: refusing to allow an OAuth App to create or "
+                "update workflow `.github/workflows/ci.yml` without `workflow` scope"
+            )
+        return await merge(repo, number, *args, **kwargs)
 
-    h.forge.merge = refuse  # type: ignore[method-assign]
+    h.forge.merge = refuse_42  # type: ignore[method-assign]
     await _schedule(h, 42)
+    await _schedule(h, 43)
     await h.settle()
     state = await _phase(h, 42)
-    assert state.phase == "failed" and "workflow scope" in state.detail
-    assert not state.failed_on_ci
-    # Its CI passed already: that does not bring it back to fail again.
+    assert state.phase == "blocked" and "workflow scope" in state.detail
+    assert state.blocked_on == "workflow_scope"
+    # Not in the failure lane, and the next PR took the turn and merged.
+    assert [w["number"] for w in h.forge.writes_of("merge")] == [43]
+    # Checks finishing do not lift a missing scope: it waits.
     h.forge.merge = merge  # type: ignore[method-assign]
     await h.emit(Event(kind=EventKind.CHECKS_COMPLETED, repo=REPO, number=42))
     await h.settle()
-    assert (await _phase(h, 42)).phase == "failed"
-    assert not h.forge.writes_of("merge")
+    assert (await _phase(h, 42)).phase == "blocked"
+    # The service starts again, with a sign-in that has the scope: it merges.
+    h.clock.advance(minutes=5)
+    h.service.info.started_at = h.clock.now()
+    await h.emit(Event(kind=EventKind.PR_RECONCILED, repo=REPO, number=42))
+    await h.settle()
+    assert [w["number"] for w in h.forge.writes_of("merge")] == [43, 42]
+    del merge_and_move
+
+
+class FakeGrant:
+    """A scope request the test approves."""
+
+    code = "ABCD-1234"
+    url = "https://github.com/login/device"
+
+    def __init__(self) -> None:
+        import asyncio
+
+        self.approved = asyncio.Event()
+        self._state = "pending"
+
+    async def start(self, wait: float = 30) -> dict[str, str]:
+        return {"code": self.code, "url": self.url}
+
+    async def wait(self) -> bool:
+        await self.approved.wait()
+        self._state = "done"
+        return True
+
+    def state(self) -> str:
+        return self._state
+
+    def cancel(self) -> None:
+        pass
+
+
+async def test_a_missing_scope_is_asked_for_and_the_merge_goes_once_granted(
+    harness: Harness,
+) -> None:
+    import asyncio
+
+    h = harness
+    grants: list[FakeGrant] = []
+    forgotten: list[str | None] = []
+
+    def grant_scopes(repo, scopes):  # type: ignore[no-untyped-def]
+        assert scopes == ["workflow"]
+        grants.append(FakeGrant())
+        return grants[-1]
+
+    h.service.a.grant_scopes = grant_scopes
+    h.service.a.forget_token = forgotten.append
+    h.forge.put_pr(_ready(42, "a" * 40, _ci(42, "success")))
+    merge = h.forge.merge
+    signed = {"workflow": False}
+
+    async def maybe_refuse(repo, number, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if not signed["workflow"]:
+            raise RuntimeError(
+                "GitHub API error 403: refusing to allow an OAuth App to create or "
+                "update workflow `.github/workflows/ci.yml` without `workflow` scope"
+            )
+        return await merge(repo, number, *args, **kwargs)
+
+    h.forge.merge = maybe_refuse  # type: ignore[method-assign]
+    await _schedule(h, 42)
+    await h.settle()
+    assert (await _phase(h, 42)).phase == "blocked"
+    [grant] = grants
+    asked = h.service.scope_request()
+    assert asked and asked["code"] == "ABCD-1234" and asked["state"] == "pending"
+    # The owner approves on GitHub; the sign-in now has the scope.
+    signed["workflow"] = True
+    h.clock.advance(minutes=1)
+    grant.approved.set()
+    for _ in range(50):
+        if h.service.scope_request()["state"] == "done":
+            break
+        await asyncio.sleep(0.01)
+    await h.settle()
+    assert forgotten == [REPO]
+    assert [w["number"] for w in h.forge.writes_of("merge")] == [42]

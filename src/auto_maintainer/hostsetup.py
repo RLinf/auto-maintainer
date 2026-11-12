@@ -81,6 +81,12 @@ async def _run_gh(args: list[str]) -> tuple[int, str]:
     return result.exit_code, result.stdout.strip()
 
 
+GH_SCOPES = ("workflow",)
+"""Scopes a GitHub CLI sign-in asks for beside its defaults (``repo``, ``read:org``,
+``gist``): GitHub refuses to merge, or merge the base into, a PR that changes a
+workflow file for a sign-in without ``workflow``."""
+
+
 class GhLogin:
     """``gh auth login --web`` run for a browser: GitHub's device flow, in which the
     person enters a one-time code on github.com and authorizes the GitHub CLI.
@@ -139,6 +145,8 @@ class GhLogin:
             "https",
             "--web",
             "--skip-ssh-key",
+            # Merging or updating a PR that changes a workflow file needs it.
+            *(f"--scopes={scope}" for scope in GH_SCOPES),
             *(["--insecure-storage"] if self.throwaway else []),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,

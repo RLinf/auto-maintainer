@@ -96,6 +96,18 @@ async def build_service(cfg: HostConfig, dev: bool = False) -> Service:
         at = endpoints[forges.forge_of(repo)] if repo else home
         return await at.token(repo)
 
+    def grant_scopes(repo: str | None, scopes: list[str]) -> Any:
+        """A request adding ``scopes`` to the service's sign-in on ``repo``'s forge."""
+        at = endpoints[forges.forge_of(repo)] if repo else home
+        if at.grant_scopes is None:
+            raise RuntimeError(f"{at.site.id} cannot add scopes to its sign-in here")
+        return at.grant_scopes(scopes)
+
+    def forget_token(repo: str | None) -> None:
+        at = endpoints[forges.forge_of(repo)] if repo else home
+        if at.forget_token is not None:
+            at.forget_token()
+
     def remote_of(repo: str) -> tuple[str, str]:
         ref = forges.parse_repo(repo)
         at = endpoints[ref.forge]
@@ -284,6 +296,8 @@ async def build_service(cfg: HostConfig, dev: bool = False) -> Service:
         secrets=FileSecretStore(CONFIG_DIR / "provider-keys.json"),
         reconfigure=reconfigure,
         user_tokens=user_tokens,
+        grant_scopes=grant_scopes,
+        forget_token=forget_token,
         installer=AgentInstaller(data),
         people=people,
         writer_for_user=writer_for_user,

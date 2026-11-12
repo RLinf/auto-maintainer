@@ -22,9 +22,13 @@ down-scoped; agents work from checkouts the service makes instead.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
+import re
 import shutil
 from typing import Protocol
+
+from ... import subproc
 
 API_URL = "https://api.github.com"
 API_VERSION = "2022-11-28"
@@ -94,6 +98,12 @@ class StaticTokenProvider:
     async def readonly_token(self, repo: str | None = None) -> str | None:
         return None
 
+    def forget(self) -> None:
+        """Drop the token read before, so the next call reads the sign-in again
+        (after a scope was added to it). An explicit token stays."""
+        if self._env_var is not None or self._gh_env is not None:
+            self._token = None
+
     async def _from_gh(self) -> str:
         binary = shutil.which(self._gh)
         if not binary:
@@ -108,3 +118,84 @@ class StaticTokenProvider:
         )
         out, _ = await proc.communicate()
         return out.decode().strip() if proc.returncode == 0 else ""
+
+
+class ScopeRequest:
+    """Adding scopes to the GitHub CLI sign-in in ``gh_config_dir``: ``gh auth
+    refresh``'s device flow, in which the signed-in account enters a one-time code on
+    the forge and approves. The GitHub CLI refuses credentials of another account."""
+
+    CODE = re.compile(r"\b([A-Z0-9]{4}-[A-Z0-9]{4})\b")
+    URL = re.compile(r"(https://\S+/login/device)")
+    TIMEOUT = 900.0
+    """A device code lives fifteen minutes."""
+
+    def __init__(self, host: str, gh_config_dir: str | None, scopes: list[str]) -> None:
+        self.host = host
+        self.gh_config_dir = gh_config_dir
+        self.scopes = scopes
+        self.code: str | None = None
+        self.url: str | None = None
+        self.result: subproc.ProcResult | None = None
+        self._shown = asyncio.Event()
+        self._task: asyncio.Task[None] | None = None
+
+    async def start(self, wait: float = 30) -> dict[str, str]:
+        """Start the request; the one-time code and the page to enter it on."""
+        binary = shutil.which("gh")
+        if binary is None:
+            raise AuthError("the GitHub CLI is not installed on this host")
+        env = {
+            **os.environ,
+            "GH_PROMPT_DISABLED": "1",
+            "BROWSER": "true",
+            "NO_COLOR": "1",
+            **({"GH_CONFIG_DIR": self.gh_config_dir} if self.gh_config_dir else {}),
+        }
+        argv = [binary, "auth", "refresh", "--hostname", self.host]
+        for scope in self.scopes:
+            argv += ["--scopes", scope]
+
+        async def on_line(line: str) -> None:
+            self.code = self.code or (
+                m.group(1) if (m := self.CODE.search(line)) else None
+            )
+            self.url = self.url or (
+                m.group(1) if (m := self.URL.search(line)) else None
+            )
+            if self.code and self.url:
+                self._shown.set()
+
+        async def run() -> None:
+            self.result = await subproc.run(
+                argv, env=env, stdin="\n", timeout=self.TIMEOUT, on_line=on_line
+            )
+            self._shown.set()
+
+        self._task = asyncio.create_task(run())
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(self._shown.wait(), wait)
+        if not (self.code and self.url):
+            self.cancel()
+            tail = (self.result.stderr or self.result.stdout) if self.result else ""
+            raise AuthError(
+                "the GitHub CLI did not start a scope request: "
+                + " ".join(tail.strip().splitlines()[-2:])
+            )
+        return {"code": self.code, "url": self.url}
+
+    async def wait(self) -> bool:
+        """Whether the account approved, once the request ends."""
+        if self._task is not None:
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._task
+        return bool(self.result and self.result.ok)
+
+    def state(self) -> str:
+        if self._task is None or not self._task.done():
+            return "pending"
+        return "done" if self.result and self.result.ok else "failed"
+
+    def cancel(self) -> None:
+        if self._task is not None and not self._task.done():
+            self._task.cancel()

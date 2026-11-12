@@ -2464,6 +2464,18 @@ const zh: Record<string, string> = {
   "Run its CI on its turn though it is not ready; it merges once the merge rules hold": "尽管尚未满足条件，轮到它时也运行 CI；满足合并规则后合并",
   "Scheduled by hand": "已手动调度",
   "Schedule anyway": "仍然调度",
+  "Merge blocked": "合并受阻",
+  "Try its merge again now": "立即再次尝试合并",
+  "Give the service's GitHub sign-in the workflow scope": "为服务的 GitHub 登录授予 workflow 权限",
+  "signed in to GitHub as": "以 GitHub 账号登录：",
+  "enter this code, and approve:": "输入此代码并批准：",
+  "The PRs it blocks merge once you approve; the service reads its sign-in again by itself.": "批准后，被阻塞的 PR 会自动合并；服务会自行重新读取登录。",
+  "The service's GitHub sign-in waits for its owner to approve the workflow scope.": "服务的 GitHub 登录正在等待其所有者批准 workflow 权限。",
+  "The service's GitHub sign-in has the workflow scope now.": "服务的 GitHub 登录现已拥有 workflow 权限。",
+  "A merge waits for the workflow scope": "有合并在等待 workflow 权限",
+  "The last request was not approved in time.": "上一次请求未及时批准。",
+  "GitHub merges a PR that changes a workflow file only for a sign-in with the workflow scope.": "只有拥有 workflow 权限的登录才能合并修改工作流文件的 PR。",
+  "Ask for the workflow scope": "申请 workflow 权限",
 };
 
 const LangContext = createContext<{ lang: Lang; setLang: (l: Lang) => void }>({ lang: "zh", setLang: () => {} });

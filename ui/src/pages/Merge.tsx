@@ -19,7 +19,7 @@ import { openJob } from "../openJob";
 import { RepoTabs, useRepoScope } from "../repoScope";
 import { Skeleton, useToast } from "../ui";
 
-type Phase = "queued" | "updating" | "starting" | "running" | "rerunning" | "diagnosing" | "approval" | "merging" | "failed" | "held" | "merged";
+type Phase = "queued" | "updating" | "starting" | "running" | "rerunning" | "diagnosing" | "approval" | "merging" | "blocked" | "failed" | "held" | "merged";
 
 interface CiSummary {
   state: string;
@@ -159,6 +159,7 @@ interface MergeView {
   flaky: Flaky;
   draft: Draft | null;
   rules_job: { id: string; status: string } | null;
+  scope_request: { scopes: string[]; login: string; state: string; started_at: string; owner: boolean; code?: string; url?: string } | null;
   scheduled: Scheduled[];
   failed: Scheduled[];
   candidates: Row[];
@@ -180,6 +181,7 @@ const PHASE: Record<Phase, { label: string; cls: string }> = {
   diagnosing: { label: "Diagnosing failures", cls: "job-running" },
   approval: { label: "CI passed, waiting to meet the merge rules", cls: "status-warn" },
   merging: { label: "Merging", cls: "job-running" },
+  blocked: { label: "Merge blocked", cls: "status-warn" },
   failed: { label: "Failed", cls: "status-bad" },
   held: { label: "Held back", cls: "status-warn" },
   merged: { label: "Merged", cls: "job-done" },
@@ -246,6 +248,7 @@ export default function MergePage() {
         <TurnOn v={v} />
       ) : (
         <div className="stack" style={{ gap: 18 }}>
+          <ScopeBanner v={v} />
           <Controls v={v} />
           <ScheduleSection v={v} />
           {v.failed.length > 0 && <FailureLane v={v} />}
@@ -400,6 +403,7 @@ function ScheduleSection({ v }: { v: MergeView }) {
   const t = useT();
   const toast = useToast();
   const order = useAct((numbers: number[]) => api.put(`/api/merge-schedule/${v.repo}/order`, { numbers }), [["merge-schedule"]]);
+  const retry = useAct((n: number) => api.post(`/api/merge-schedule/${v.repo}/${n}/retry`), [["merge-schedule"]]);
   const remove = useAct((n: number) => api.del(`/api/merge-schedule/${v.repo}/${n}`), [["merge-schedule"]]);
   const move = (i: number, by: number) => {
     const numbers = v.scheduled.map((s) => s.number);
@@ -423,7 +427,7 @@ function ScheduleSection({ v }: { v: MergeView }) {
                   <PrLink repo={v.repo} row={s} />
                   <span className="row merge-meta">
                     <span className={`pill ${p.cls}`}>{t(p.label)}</span>
-                    {s.detail && <span className="small muted clamp1">{t(s.detail)}</span>}
+                    {s.detail && <span className={`small muted ${s.phase === "blocked" ? "" : "clamp1"}`}>{t(s.detail)}</span>}
                     {s.since && (
                       <span className="small muted">
                         <When at={s.since} />
@@ -448,6 +452,11 @@ function ScheduleSection({ v }: { v: MergeView }) {
                 <WatchButton job={s.job} busy={s.phase === "diagnosing"} />
                 {v.can_arrange && (
                   <div className="row merge-actions">
+                    {s.phase === "blocked" && (
+                      <button className="sm" disabled={retry.isPending} title={t("Try its merge again now")} onClick={() => retry.mutate(s.number)}>
+                        {t("Retry")}
+                      </button>
+                    )}
                     <button className="sm ghost" aria-label={t("Move up")} title={t("Move up")} disabled={i === 0 || order.isPending} onClick={() => move(i, -1)}>
                       ↑
                     </button>
@@ -464,7 +473,7 @@ function ScheduleSection({ v }: { v: MergeView }) {
           })}
         </ol>
       )}
-      <ErrorBox error={order.error || remove.error} />
+      <ErrorBox error={order.error || remove.error || retry.error} />
     </Section>
   );
 }
@@ -1370,5 +1379,60 @@ function FlakyCard({ v }: { v: MergeView }) {
         <ErrorBox error={patterns.error} />
       </div>
     </Section>
+  );
+}
+
+/** A merge blocked on a scope the service's GitHub sign-in lacks: its owner approves
+ * the scope on GitHub with a one-time code, as the service's account, and the blocked
+ * PRs merge. */
+function ScopeBanner({ v }: { v: MergeView }) {
+  const t = useT();
+  const toast = useToast();
+  const ask = useAct(() => api.post(`/api/merge-schedule/${v.repo}/scope`), [["merge-schedule"]]);
+  const blocked = v.scheduled.some((s) => s.phase === "blocked" && /workflow scope/.test(s.detail));
+  const r = v.scope_request;
+  if (r?.state === "pending" && r.code && r.url) {
+    return (
+      <section className="card merge-controls" style={{ borderColor: "var(--warn)" }}>
+        <span className="stack" style={{ gap: 6 }}>
+          <strong className="small">{t("Give the service's GitHub sign-in the workflow scope")}</strong>
+          <span className="small">
+            {t("Open")}{" "}
+            <a href={r.url} target="_blank" rel="noreferrer">
+              {r.url}
+            </a>{" "}
+            {t("signed in to GitHub as")} <strong>{r.login}</strong>, {t("enter this code, and approve:")}{" "}
+            <code className="mono" style={{ fontSize: 16 }}>
+              {r.code}
+            </code>
+          </span>
+          <span className="small muted">{t("The PRs it blocks merge once you approve; the service reads its sign-in again by itself.")}</span>
+        </span>
+      </section>
+    );
+  }
+  if (r?.state === "pending") {
+    return <span className="small merge-finding">{t("The service's GitHub sign-in waits for its owner to approve the workflow scope.")}</span>;
+  }
+  if (!blocked) return r?.state === "done" ? <span className="small muted">{t("The service's GitHub sign-in has the workflow scope now.")}</span> : null;
+  return (
+    <section className="card merge-controls" style={{ borderColor: "var(--warn)" }}>
+      <span className="stack" style={{ gap: 6, flex: 1 }}>
+        <strong className="small">{t("A merge waits for the workflow scope")}</strong>
+        <span className="small muted">
+          {r?.state === "failed" ? `${t("The last request was not approved in time.")} ` : ""}
+          {t("GitHub merges a PR that changes a workflow file only for a sign-in with the workflow scope.")}
+        </span>
+      </span>
+      {r?.owner !== false && (
+        <button
+          className="sm primary"
+          disabled={ask.isPending}
+          onClick={() => ask.mutate(undefined, { onError: (e) => toast({ title: t("Not started"), body: String((e as Error).message), icon: "x" }) })}
+        >
+          {t("Ask for the workflow scope")}
+        </button>
+      )}
+    </section>
   );
 }

@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, ClassVar, Protocol
 
@@ -167,6 +168,9 @@ class ServiceInfo:
     """Test machines from the service settings, by name; changed in place."""
     lab_socket: Path | None = None
     """Where a reproduction's agent reaches its session (``labs/sessions.py``)."""
+    started_at: datetime | None = None
+    """When this process of the service started: its forge sign-in is read then, so
+    a refusal for a missing scope may pass after a later start."""
 
 
 class LabSessionControl(Protocol):

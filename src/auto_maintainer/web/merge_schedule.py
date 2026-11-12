@@ -361,6 +361,19 @@ def _section(layer: dict[str, Any], *path: str) -> dict[str, Any]:
     return node
 
 
+async def _scope_view(service: Service, user: User) -> dict[str, Any] | None:
+    """The latest request to add a scope to the service's sign-in: its one-time code
+    only for the service's owner, who approves it as the service's account."""
+    found = service.scope_request()
+    if found is None:
+        return None
+    owner = (await service.service_gate(user.login)).allowed
+    shown = {k: found[k] for k in ("scopes", "login", "state", "started_at")}
+    if owner and found["state"] == "pending":
+        shown |= {"code": found["code"], "url": found["url"]}
+    return {**shown, "owner": owner}
+
+
 async def _maintainer(service: Service, user: User, repo: str) -> None:
     if not await is_maintainer(service, user, repo):
         raise HTTPException(403, f"only {repo}'s maintainers arrange its merges")
@@ -515,6 +528,7 @@ def build_router() -> APIRouter:
             if isinstance(draft, dict)
             else None,
             "rules_job": rules_job,
+            "scope_request": await _scope_view(service, user),
             "scheduled": scheduled,
             "failed": failed,
             "candidates": candidates,
@@ -1076,6 +1090,24 @@ def build_router() -> APIRouter:
         return await _save_layer(
             service, user, repo, change, f"ci: {len(body.patterns)} own flake patterns"
         )
+
+    @r.post("/{repo:path}/scope")
+    async def request_scope(
+        request: Request, repo: str, user: User = Depends(current_user)
+    ) -> dict[str, Any]:
+        """Ask for the workflow scope on the service's sign-in, as its owner: a
+        one-time code to enter on the forge as the service's account."""
+        service = service_of(request)
+        repo = _repo(repo)
+        await require_view(service, user, repo)
+        decision = await service.service_gate(user.login)
+        if not decision.allowed:
+            raise HTTPException(403, decision.reason)
+        try:
+            await service.request_scopes(repo, ["workflow"], user.login)
+        except Exception as e:
+            raise HTTPException(409, str(e)) from e
+        return await _scope_view(service, user) or {}
 
     @r.post("/{repo:path}/investigate")
     async def investigate(

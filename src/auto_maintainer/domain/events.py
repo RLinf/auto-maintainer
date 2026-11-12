@@ -68,6 +68,9 @@ class EventKind(StrEnum):
     MERGE_DISARMED = "merge.disarmed"
     MERGE_QUEUE = "merge.queue"
     """The merge queue gave this PR its turn; wakes its merge job."""
+    SCOPE_NEEDED = "forge.scope_needed"
+    """The forge refused a write for a scope the service's sign-in lacks; the
+    service asks its owner to add it (``Service.request_scopes``)."""
     MEMORY_CHANGED = "memory.changed"
     CODE_CHANGED = "code.changed"
     ACTION_EXECUTED = "action.executed"

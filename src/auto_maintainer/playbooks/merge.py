@@ -105,6 +105,16 @@ WAIT_KINDS = [
     EventKind.MERGE_QUEUE,
 ]
 WAIT_SECONDS = 6 * 3600
+BLOCK_LIFTERS = frozenset(
+    {
+        EventKind.PR_REVIEW_SUBMITTED,
+        EventKind.CHECKS_COMPLETED,
+        EventKind.PR_UPDATED,
+        EventKind.PR_LABELED,
+    }
+)
+"""Changes to a PR after which a merge the forge refused (not for a scope) is
+tried again: what refused it may have changed with them."""
 MERGED_KEY = "merge-schedule-merged:{repo}"
 MERGED_KEPT = 30
 """How many merges the page lists under Merged lately."""
@@ -204,8 +214,12 @@ class MergePlaybook(Playbook):
             )
         state = await load_state(ctx, repo, number)
         if event.kind == EventKind.ACTION_FAILED:
-            why = await self._our_failure(ctx, event, arm)
-            if why:
+            failed = await self._our_failure(ctx, event, arm)
+            if failed:
+                kind, why, scope = failed
+                if kind in (ActionKind.PR_MERGE, ActionKind.PR_UPDATE_BRANCH):
+                    # Not its CI's fault: it stays in the order, without the turn.
+                    return await self._block(ctx, profile, pr, arm, state, why, scope)
                 return await self._fail(ctx, profile, pr, arm, state, why)
         if not same_commit(arm.sha, pr.head_sha):
             moved = await self._new_head(ctx, profile, pr, arm, state, event)
@@ -215,6 +229,29 @@ class MergePlaybook(Playbook):
         info = await ctx.forge.get_repo(repo)
         gate = await gate_for(ctx, profile, info, pr, arm)
         wait = Wait(kinds=WAIT_KINDS, seconds=WAIT_SECONDS, reason="merge schedule")
+        if state.phase == "blocked" and same_commit(state.sha, pr.head_sha):
+            started = ctx.service.started_at
+            again = (
+                state.retry
+                or (
+                    started is not None
+                    and state.since is not None
+                    and state.since < started
+                )
+                or (
+                    state.blocked_on != "workflow_scope" and event.kind in BLOCK_LIFTERS
+                )
+            )
+            if not again:
+                return PlaybookResult(
+                    wait=wait.model_copy(
+                        update={"seconds": 3600, "reason": "merge blocked"}
+                    ),
+                    result={"phase": "blocked"},
+                )
+            state.retry = False
+            state.phase = "queued"
+            state.detail = "trying its merge again"
         if state.phase == "failed" and same_commit(state.sha, pr.head_sha):
             ran = ci_view(pr, profile.label_for("ci_gate"), profile.ci.start).state
             if (
@@ -356,7 +393,7 @@ class MergePlaybook(Playbook):
                 MergePayload(
                     method=method, subject=subject, body=body, armed_by=arm.armed_by
                 ),
-                "merge",
+                f"merge:{state.merge_attempts}" if state.merge_attempts else "merge",
                 "the merge gate holds",
             )
             await self._set(ctx, profile, info, pr, state, "merging", "merging")
@@ -966,7 +1003,7 @@ class MergePlaybook(Playbook):
         await ctx.store.set_state(
             state_key(pr.repo, pr.number), state.model_dump(mode="json")
         )
-        if wake and (was_active or phase in ("failed", "held", "approval")):
+        if wake and (was_active or phase in ("failed", "held", "approval", "blocked")):
             return await self._wake(ctx, profile, info, pr.repo, pr.number)
         return []
 
@@ -1029,11 +1066,48 @@ class MergePlaybook(Playbook):
             events=events, result={"done": "merged" if merged else "left the schedule"}
         )
 
+    async def _block(
+        self,
+        ctx: PlaybookContext,
+        profile: RepoProfile,
+        pr: PrSnapshot,
+        arm: MergeArm,
+        state: ScheduleState,
+        why: str,
+        scope: bool,
+    ) -> PlaybookResult:
+        """Keep the PR in the order, blocked, after the forge refused its merge or
+        base merge, and pass the turn on: it tries again once a maintainer retries
+        it, or after the service starts again (a new sign-in) when a scope was
+        missing, or when the PR changes otherwise."""
+        state.blocked_on = "workflow_scope" if scope else "refused"
+        state.merge_attempts += 1
+        info = await ctx.forge.get_repo(pr.repo)
+        events = await self._set(
+            ctx, profile, info, pr, state, "blocked", why, wake=True
+        )
+        if scope:
+            # The service asks its owner to add the scope to its sign-in.
+            events.append(
+                Event(
+                    kind=EventKind.SCOPE_NEEDED,
+                    repo=pr.repo,
+                    payload={"scopes": ["workflow"], "number": pr.number},
+                )
+            )
+        return PlaybookResult(
+            actions=[self._tell(pr, arm, "merge.blocked", why)],
+            events=events,
+            wait=Wait(kinds=WAIT_KINDS, seconds=3600, reason="merge blocked"),
+            result={"phase": "blocked", "why": why},
+        )
+
     async def _our_failure(
         self, ctx: PlaybookContext, event: Event, arm: MergeArm
-    ) -> str | None:
-        """Why a step the schedule took for this PR failed, or ``None`` when the
-        failed action was not one of them."""
+    ) -> tuple[ActionKind, str, bool] | None:
+        """The kind of a step the schedule took for this PR that failed, why, and
+        whether the forge refused it for a scope its sign-in lacks; ``None`` when
+        the failed action was not one of the schedule's."""
         record_ = await ctx.store.get_action(str(event.payload.get("action_id") or ""))
         if record_ is None or record_.action.provenance.scheduled_by != arm.armed_by:
             return None
@@ -1042,18 +1116,29 @@ class MergePlaybook(Playbook):
         if "workflow" in error and ("scope" in error or "OAuth App" in error):
             # GitHub lets no sign-in without the workflow scope write a change to a
             # workflow file: a merge or base merge of a PR that has one.
+            act = "merge" if kind == ActionKind.PR_MERGE else "merge the base into"
+            if record_.post_as:
+                # A person's own sign-in: only they can sign in again, with it.
+                return (
+                    kind,
+                    f"GitHub refused to {act} it as {record_.post_as}: a workflow "
+                    f"file changes, and {record_.post_as}'s dashboard sign-in lacks "
+                    "the workflow scope. They sign in to the dashboard again (it "
+                    "asks for the scope now) and retry it",
+                    False,
+                )
             return (
-                f"GitHub refused to {'merge' if kind == ActionKind.PR_MERGE else 'update'} "
-                "it: it changes a workflow file, and the GitHub sign-in that "
-                f"{'merged' if kind == ActionKind.PR_MERGE else 'updated'} it lacks the "
-                "workflow scope. Add the scope to that sign-in (gh auth refresh -s "
-                "workflow) and retry, or merge it on GitHub"
+                kind,
+                f"GitHub refused to {act} it: a workflow file changes, and the "
+                "service's GitHub sign-in lacks the workflow scope. The service "
+                "asks its owner to add it; once approved, it merges",
+                True,
             )
         if kind == ActionKind.PR_UPDATE_BRANCH:
-            return f"merging the base in failed: {error}"
+            return kind, f"merging the base in failed: {error}", False
         if kind == ActionKind.PR_MERGE:
-            return f"the forge refused the merge: {error}"
-        return f"{kind} failed: {error}"
+            return kind, f"the forge refused the merge: {error}", False
+        return kind, f"{kind} failed: {error}", False
 
     async def _new_head(
         self,

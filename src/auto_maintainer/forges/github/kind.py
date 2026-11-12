@@ -22,7 +22,7 @@ import httpx
 from ...domain.forges import ForgeCapabilities, ForgeInfo, ForgeTerms
 from ..base import ForgeEndpoints, ForgeKind, ForgeSite
 from .account import ACCOUNT
-from .auth import StaticTokenProvider
+from .auth import ScopeRequest, StaticTokenProvider
 from .ci import GitHubActionsCi
 from .client import GitHubClient
 from .proxy import GitHubReadProxy
@@ -98,6 +98,10 @@ async def build(site: ForgeSite) -> ForgeEndpoints:
         read_proxy=GitHubReadProxy(
             socket, lambda: tokens.token(None), api_host=api_host
         ),
+        grant_scopes=lambda scopes: ScopeRequest(
+            site.host, site.cli_config_dir, scopes
+        ),
+        forget_token=tokens.forget,
     )
 
 

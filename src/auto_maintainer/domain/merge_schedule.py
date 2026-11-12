@@ -51,6 +51,7 @@ Phase = Literal[
     "diagnosing",
     "approval",
     "merging",
+    "blocked",
     "failed",
     "held",
     "merged",
@@ -103,6 +104,13 @@ class ScheduleState(BaseModel):
     """``<sha>:<why>`` for each stall an agent looked into, so it looks once."""
     finding: str = ""
     """What that agent found."""
+    merge_attempts: int = 0
+    """Merges the forge refused at this head: each new attempt is an action of its
+    own (``Action.idempotency_key``)."""
+    blocked_on: str = ""
+    """For ``blocked``: why the forge refused its merge or base merge;
+    ``workflow_scope`` when the service's sign-in lacks the workflow scope, which
+    only a new sign-in, read at the next start, can change."""
     failed_on_ci: bool = False
     """It went to the failure lane because its CI failed (not a refused merge or
     base merge, nor a conflict): CI that runs again at the same head brings it

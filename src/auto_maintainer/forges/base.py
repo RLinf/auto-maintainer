@@ -71,6 +71,11 @@ class ForgeEndpoints:
     """A writer acting as a person with their token: ``(token, login)``."""
     read_proxy: Any = None
     """The agents' read-only door to this forge, run alongside the service."""
+    grant_scopes: Callable[[list[str]], Any] | None = None
+    """A request adding scopes to the service's sign-in (``ScopeGrant``), where the
+    forge's CLI can make one."""
+    forget_token: Callable[[], None] | None = None
+    """Drop the token read before, so the sign-in is read again."""
 
 
 @dataclass(frozen=True)
