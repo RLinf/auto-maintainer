@@ -16,12 +16,16 @@
 """Merge scheduling (design 5.5): which scheduled PRs act now, and what each is doing.
 
 A scheduled PR is an armed one (``MergeArm``), placed in the repository's order by
-its ``position``. When PRs must be up to date with the base before they merge, a
-merge puts every other PR behind again, so scheduled PRs take turns (``serial``):
-one merges the base, runs its CI, and merges, then the next. Otherwise several run
-their CI at once (``merge.schedule.parallel``). A PR that is doing something
-(``ACTIVE``) keeps its turn, so its CI is not wasted; the next turn goes down the
-order, skipping PRs in the failure lane or held back by something else.
+its ``position``. A PR is ready to schedule once it is ready to run its CI
+(``candidate_items``); it merges once its CI passed and its reviewers approved
+(``MERGE_ITEMS``), and waits for them without a turn (the ``approval`` phase).
+
+When PRs must be up to date with the base before they merge, a merge puts every
+other PR behind again, so scheduled PRs take turns (``serial``): one merges the
+base, runs its CI, and merges, then the next. Otherwise several run their CI at once
+(``merge.schedule.parallel``). A PR that is doing something (``ACTIVE``) keeps its
+turn, so its CI is not wasted; the next turn goes down the order, skipping PRs in
+the failure lane, waiting for approvals, or held back by something else.
 """
 
 from __future__ import annotations
@@ -41,6 +45,7 @@ Phase = Literal[
     "starting",
     "running",
     "rerunning",
+    "approval",
     "merging",
     "failed",
     "held",
@@ -61,7 +66,11 @@ UPDATES_PER_TURN = 3
 """How often a PR merges the base during one turn before the base is taken to move
 too fast for it (people merging by hand while it runs)."""
 
-NOT_CANDIDATE_ITEMS = ("armed", "up_to_date", "not_paused", "no_freeze")
+MERGE_ITEMS = ("approvals", "threads_resolved")
+"""Gate items a PR meets by the time it merges, not before its CI runs: reviewers
+often approve once its CI passed. A scheduled PR whose CI passed waits for them in
+the ``approval`` phase, without a turn."""
+NOT_CANDIDATE_ITEMS = ("armed", "up_to_date", "not_paused", "no_freeze", *MERGE_ITEMS)
 CI_ITEM_PREFIXES = ("check:", "workflow:")
 
 
@@ -127,8 +136,10 @@ def next_position(arms: list[MergeArm], now: datetime) -> float:
 
 
 def candidate_items(gate: GateResult) -> list[GateItem]:
-    """The merge gate's items that decide whether a PR is ready to schedule: all but
-    being armed, its CI, being up to date, and a pause or freeze."""
+    """The merge gate's items that decide whether a PR is ready to schedule, that
+    is, ready to run its CI and then merge: all but being armed, its CI, being up to
+    date, a pause or freeze, and the review items it meets by its merge
+    (``MERGE_ITEMS``)."""
     return [
         i
         for i in gate.items
@@ -139,6 +150,11 @@ def candidate_items(gate: GateResult) -> list[GateItem]:
 def holding_back(gate: GateResult) -> list[GateItem]:
     """What keeps a PR from being a candidate; empty for a candidate."""
     return [i for i in candidate_items(gate) if not i.ok]
+
+
+def awaiting_review(gate: GateResult) -> list[GateItem]:
+    """The review items (``MERGE_ITEMS``) that still keep a PR from merging."""
+    return [i for i in gate.items if i.name in MERGE_ITEMS and not i.ok]
 
 
 def turns(

@@ -64,6 +64,7 @@ from ..domain.merge_schedule import (
     UPDATES_PER_TURN,
     WAITING,
     ScheduleState,
+    awaiting_review,
     holding_back,
     only_base_merged,
     ordered,
@@ -142,6 +143,13 @@ def _same_schedule(ctx: PlaybookContext, arm: MergeArm) -> bool:
         return datetime.fromisoformat(str(at)) == arm.armed_at
     except ValueError:
         return True
+
+
+def _waiting_for(items: list) -> str:
+    """What a PR whose CI passed still waits for, in one line."""
+    return "; ".join(
+        i.name.replace("_", " ") + (f": {i.detail}" if i.detail else "") for i in items
+    )
 
 
 async def load_state(ctx: PlaybookContext, repo: str, number: int) -> ScheduleState:
@@ -246,6 +254,17 @@ class MergePlaybook(Playbook):
                 wait=wait.model_copy(update={"reason": paused[0].name}),
                 result={"phase": "queued", "failing": [paused[0].name]},
             )
+        waiting = awaiting_review(gate)
+        if state.phase == "approval" and waiting:
+            # Its CI passed; it takes a turn again once its reviewers approve, so it
+            # neither holds the turn nor merges the base in while it waits.
+            await self._set(
+                ctx, profile, info, pr, state, "approval", _waiting_for(waiting)
+            )
+            return PlaybookResult(
+                wait=wait.model_copy(update={"reason": "waiting for approvals"}),
+                result={"phase": "approval"},
+            )
 
         one = serial(info, profile)
         async with self._locks.setdefault(repo, asyncio.Lock()):
@@ -256,7 +275,7 @@ class MergePlaybook(Playbook):
                 for a in arms
                 if a.number != number
             }
-            if state.phase in ("held", "failed", "merged"):
+            if state.phase in ("held", "failed", "merged", "approval"):
                 state.phase = "queued"
             states[number] = state
             allowed = turns(order, states, one, profile.merge.schedule.parallel)
@@ -444,6 +463,27 @@ class MergePlaybook(Playbook):
                 )
             return await self._failed_ci(ctx, profile, info, pr, arm, state, wait, step)
         pending = [i for i in gate.items if not i.ok and i.pending]
+        waiting = awaiting_review(gate)
+        if view.state == "passed" and waiting and not pending:
+            # CI passed; the reviewers have not approved yet. The turn passes on.
+            text = _waiting_for(waiting)
+            events = await self._set(
+                ctx, profile, info, pr, state, "approval", text, wake=True
+            )
+            return PlaybookResult(
+                actions=[
+                    self._tell(
+                        pr,
+                        arm,
+                        "merge.approval",
+                        f"CI passed at {short_sha(pr.head_sha)}; it merges once "
+                        f"its reviewers approve ({text})",
+                    )
+                ],
+                events=events,
+                wait=wait.model_copy(update={"reason": "waiting for approvals"}),
+                result={"phase": "approval"},
+            )
         if view.state == "running":
             state.running_since = state.running_since or now
             limit, since = start.run_minutes, state.running_since
@@ -785,7 +825,7 @@ class MergePlaybook(Playbook):
         await ctx.store.set_state(
             state_key(pr.repo, pr.number), state.model_dump(mode="json")
         )
-        if wake and (was_active or phase in ("failed", "held")):
+        if wake and (was_active or phase in ("failed", "held", "approval")):
             return await self._wake(ctx, profile, info, pr.repo, pr.number)
         return []
 
@@ -905,7 +945,7 @@ class MergePlaybook(Playbook):
                 state.phase = "queued"
             state.updates = 0
             return arm
-        if spot is None and event.kind != EventKind.JOB_TIMEOUT:
+        if approved and spot is None and event.kind != EventKind.JOB_TIMEOUT:
             return PlaybookResult(
                 wait=Wait(
                     kinds=WAIT_KINDS,
@@ -913,22 +953,18 @@ class MergePlaybook(Playbook):
                     reason="waiting for the follow-up spot-check",
                 )
             )
+        # The maintainer scheduled the code they saw; new code waits for them.
         await ctx.store.delete_arm(pr.repo, pr.number)
         left = await self._leave(ctx, profile, pr.repo, pr.number)
-        body = (
-            f"New commits arrived after {arm.armed_by} scheduled this merge at "
-            f"`{short_sha(arm.sha)}`, so it is unscheduled. Schedule it again at "
-            f"`{short_sha(pr.head_sha)}` when it is ready."
-        )
         return PlaybookResult(
             actions=[
-                make_action(
-                    ActionKind.COMMENT_UPSERT,
-                    pr.repo,
-                    CommentUpsertPayload(purpose="merge", body=body),
-                    number=pr.number,
-                    head_sha=pr.head_sha,
-                    discriminator="disarmed",
+                self._tell(
+                    pr,
+                    arm,
+                    "merge.unscheduled",
+                    f"new commits arrived after it was scheduled at "
+                    f"{short_sha(arm.sha)}, so it is unscheduled; schedule it again "
+                    f"at {short_sha(pr.head_sha)} when it is ready",
                 )
             ],
             events=left.events,

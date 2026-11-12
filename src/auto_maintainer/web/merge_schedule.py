@@ -290,6 +290,7 @@ def build_router() -> APIRouter:
                     if (label := profile.label_for(role))
                 ],
                 "notes": profile.merge.schedule.notes,
+                "hygiene": [s.id for s in profile.checks if s.blocking and s.enabled],
             },
             "ci_start": {
                 **start.model_dump(mode="json"),

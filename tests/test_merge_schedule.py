@@ -149,37 +149,45 @@ def test_a_running_pr_keeps_its_turn_and_waiting_ones_follow_the_order() -> None
     assert turns(order, states, True, 3) == [41]
 
 
-def test_a_pr_is_ready_by_the_forges_review_rules_too() -> None:
+def test_a_pr_runs_its_ci_before_the_approvals_it_needs_to_merge() -> None:
     from auto_maintainer.domain.merge_gate import evaluate_merge_gate
+    from auto_maintainer.domain.merge_schedule import awaiting_review
     from auto_maintainer.domain.profile import RepoProfile
 
     profile = RepoProfile(repo=REPO)
+    info = RepoInfo(name=REPO, required_approvals=1, requires_code_owner_reviews=True)
+
+    def gate(pr):  # type: ignore[no-untyped-def]
+        return evaluate_merge_gate(
+            pr, profile, info, None, {"bob": Permission.WRITE}, set(), {}, False, T0
+        )
+
+    # Approved by a writer, but GitHub still waits for a code owner: ready to run CI,
+    # not yet to merge.
     pr = make_pr(
         reviews=[Review(id=1, author="bob", state=ReviewEventState.APPROVED)],
         review_decision="REVIEW_REQUIRED",
     )
-    info = RepoInfo(name=REPO, required_approvals=1, requires_code_owner_reviews=True)
-    gate = evaluate_merge_gate(
-        pr, profile, info, None, {"bob": Permission.WRITE}, set(), {}, False, T0
-    )
-    back = [i for i in candidate_items(gate) if not i.ok]
-    assert [i.name for i in back] == ["approvals"]
-    assert "a code owner's" in back[0].detail
+    assert [i for i in candidate_items(gate(pr)) if not i.ok] == []
+    [waits] = awaiting_review(gate(pr))
+    assert waits.name == "approvals" and "a code owner's" in waits.detail
     assert all(
-        not i.name.startswith(("check:", "workflow:")) for i in candidate_items(gate)
+        not i.name.startswith(("check:", "workflow:"))
+        for i in candidate_items(gate(pr))
     )
-    ok = evaluate_merge_gate(
-        pr.model_copy(update={"review_decision": "APPROVED"}),
-        profile,
-        info,
-        None,
-        {"bob": Permission.WRITE},
-        set(),
-        {},
-        False,
-        T0,
+    # A reviewer asking for changes, or a draft, holds it back before its CI.
+    asked = pr.model_copy(
+        update={
+            "reviews": [
+                Review(id=2, author="bob", state=ReviewEventState.CHANGES_REQUESTED)
+            ]
+        }
     )
-    assert not [i for i in candidate_items(ok) if not i.ok]
+    assert [i.name for i in candidate_items(gate(asked)) if not i.ok] == [
+        "no_changes_requested"
+    ]
+    draft = pr.model_copy(update={"is_draft": True})
+    assert "not_draft" in [i.name for i in candidate_items(gate(draft)) if not i.ok]
 
 
 def test_only_a_base_merge_by_the_scheduler_keeps_the_schedule() -> None:
@@ -397,6 +405,64 @@ async def test_a_real_failure_goes_to_the_failure_lane_and_the_next_pr_goes(
     assert [w["number"] for w in h.forge.writes_of("merge")] == [43]
 
 
+async def test_a_pr_waits_for_approvals_after_its_ci_without_holding_the_turn(
+    harness: Harness,
+) -> None:
+    h = harness
+    unapproved = _ready(42, "a" * 40, _ci(42, "success")).model_copy(
+        update={"reviews": []}
+    )
+    h.forge.put_pr(unapproved)
+    h.forge.put_pr(_ready(43, "c" * 40, _ci(43, "success")))
+    merge = h.forge.merge
+
+    async def merge_and_move_main(repo, number, *args, **kwargs):  # type: ignore[no-untyped-def]
+        out = await merge(repo, number, *args, **kwargs)
+        for (r, n), pr in list(h.forge.prs.items()):
+            if r == repo and n != number and pr.state == PrState.OPEN:
+                h.forge.put_pr(pr.model_copy(update={"behind_base": True}))
+        return out
+
+    h.forge.merge = merge_and_move_main  # type: ignore[method-assign]
+    await _schedule(h, 42)
+    await _schedule(h, 43)
+    await h.settle()
+    # 42's CI passed but nobody approved it: 43 takes the turn and merges.
+    waiting = await _phase(h, 42)
+    assert waiting.phase == "approval" and "approvals" in waiting.detail
+    assert [w["number"] for w in h.forge.writes_of("merge")] == [43]
+    assert not h.forge.writes_of("update_branch"), "it does not chase main meanwhile"
+
+    # Approved now: it takes a turn, merges main in, its CI passes again, it merges.
+    pr = await h.forge.get_pr(REPO, 42)
+    approved = Review(
+        id=8, author="bob", state=ReviewEventState.APPROVED, commit_sha="a" * 40
+    )
+    h.forge.put_pr(pr.model_copy(update={"reviews": [approved]}))
+    await h.emit(Event(kind=EventKind.PR_REVIEW_SUBMITTED, repo=REPO, number=42))
+    await h.settle()
+    assert [w["number"] for w in h.forge.writes_of("update_branch")] == [42]
+    pr = await h.forge.get_pr(REPO, 42)
+    merged_in = Commit(
+        sha="e" * 40, message="Merge branch 'main' into x", author_login="maria"
+    )
+    h.forge.put_pr(
+        pr.model_copy(
+            update={
+                "head_sha": "e" * 40,
+                "behind_base": False,
+                "commits": [*pr.commits, merged_in],
+                "checks": _ci(42, "success", run=4201),
+            }
+        )
+    )
+    await h.emit(
+        Event(kind=EventKind.PR_SYNCHRONIZED, repo=REPO, number=42, sha="e" * 40)
+    )
+    await h.settle()
+    assert [w["number"] for w in h.forge.writes_of("merge")] == [43, 42]
+
+
 async def test_ci_that_does_not_start_is_looked_into_once(harness: Harness) -> None:
     h = harness
     looks: list[str] = []
@@ -565,14 +631,23 @@ async def test_the_page_lists_candidates_and_only_maintainers_schedule(
 ) -> None:
     h = harness
     h.forge.put_pr(_ready(42, "a" * 40, _ci(42, "success")))
-    h.forge.put_pr(make_pr(number=45, sha="9" * 40, title="no reviews yet"))
+    h.forge.put_pr(
+        make_pr(
+            number=45,
+            sha="9" * 40,
+            title="changes asked for",
+            reviews=[
+                Review(id=7, author="bob", state=ReviewEventState.CHANGES_REQUESTED)
+            ],
+        )
+    )
     await h.poll()
     app = create_app(h.service, data_dir=tmp_path, allow_dev_login=True)
     async with _as(app, "bob") as bob:
         view = (await bob.get(f"/api/merge-schedule/{REPO}/view")).json()
         assert [c["number"] for c in view["candidates"]] == [42]
         [waiting] = [r for r in view["not_ready"] if r["number"] == 45]
-        assert any("approvals" in r for r in waiting["reasons"])
+        assert any("changes requested" in r for r in waiting["reasons"])
         assert view["can_arrange"] is False and view["mode"] == "serial"
         refused = await bob.post(
             f"/api/merge-schedule/{REPO}/schedule", json={"number": 42}
@@ -582,7 +657,7 @@ async def test_the_page_lists_candidates_and_only_maintainers_schedule(
         not_ready = await maria.post(
             f"/api/merge-schedule/{REPO}/schedule", json={"number": 45}
         )
-        assert not_ready.status_code == 409 and "approvals" in not_ready.text
+        assert not_ready.status_code == 409 and "changes requested" in not_ready.text
         done = await maria.post(
             f"/api/merge-schedule/{REPO}/schedule", json={"number": 42}
         )

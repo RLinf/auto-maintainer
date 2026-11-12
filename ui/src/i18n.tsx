@@ -2363,6 +2363,18 @@ const zh: Record<string, string> = {
   "merging": "正在合并",
   "has not started": "尚未启动",
   "waiting for a turn": "等待轮到",
+  "CI passed, waiting for approvals": "CI 已通过，等待批准",
+  "Ready to run CI": "可运行 CI",
+  "Schedule one to run its CI; it merges once its reviewers approve and its checks pass.": "调度后运行其 CI；评审者批准且检查通过后合并。",
+  "No PR is ready to run its CI right now.": "目前没有可运行 CI 的 PR。",
+  "Conditions": "条件",
+  "Ready to run CI when": "满足以下条件即可运行 CI",
+  "No reviewer requested changes": "没有评审者请求修改",
+  "None of the labels": "不带以下标签",
+  "The repository's checks pass:": "仓库检查通过：",
+  "Merges after its CI when": "CI 通过后，满足以下条件即合并",
+  "approvals from people with write access": "个有写权限者的批准",
+  "A PR whose CI passed waits for its approvals without holding the turn; once approved, it merges on its next turn, merging the base in and running its CI again first if the base moved.": "CI 已通过的 PR 等待批准时不占用轮次；获批后在下一轮合并，若基准分支已变化，则先合入基准分支并重新运行 CI。",
 };
 
 const LangContext = createContext<{ lang: Lang; setLang: (l: Lang) => void }>({ lang: "zh", setLang: () => {} });

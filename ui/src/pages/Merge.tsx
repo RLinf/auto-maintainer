@@ -19,7 +19,7 @@ import { openJob } from "../openJob";
 import { RepoTabs, useRepoScope } from "../repoScope";
 import { Skeleton, useToast } from "../ui";
 
-type Phase = "queued" | "updating" | "starting" | "running" | "rerunning" | "merging" | "failed" | "held" | "merged";
+type Phase = "queued" | "updating" | "starting" | "running" | "rerunning" | "approval" | "merging" | "failed" | "held" | "merged";
 
 interface CiSummary {
   state: string;
@@ -106,6 +106,7 @@ interface MergeView {
     fork_approval: string | null;
     blocking_labels: string[];
     notes: string;
+    hygiene: string[];
   };
   ci_start: CiStart;
   draft: Draft | null;
@@ -127,6 +128,7 @@ const PHASE: Record<Phase, { label: string; cls: string }> = {
   starting: { label: "Starting CI", cls: "job-running" },
   running: { label: "CI running", cls: "job-running" },
   rerunning: { label: "Rerunning a flake", cls: "job-running" },
+  approval: { label: "CI passed, waiting for approvals", cls: "status-warn" },
   merging: { label: "Merging", cls: "job-running" },
   failed: { label: "Failed", cls: "status-bad" },
   held: { label: "Held back", cls: "status-warn" },
@@ -428,8 +430,8 @@ function Candidates({ v }: { v: MergeView }) {
   }, [["merge-schedule"]]);
   return (
     <Section
-      title={t("Ready to merge")}
-      hint={v.auto ? t("Automatic scheduling adds these as they become ready.") : t("Ready by the repository's rules; their CI runs once scheduled.")}
+      title={t("Ready to run CI")}
+      hint={v.auto ? t("Automatic scheduling adds these as they become ready.") : t("Schedule one to run its CI; it merges once its reviewers approve and its checks pass.")}
       aside={
         v.can_arrange &&
         v.candidates.length > 1 && (
@@ -440,7 +442,7 @@ function Candidates({ v }: { v: MergeView }) {
       }
     >
       {v.candidates.length === 0 ? (
-        <Empty icon="check">{t("No PR is ready to merge right now.")}</Empty>
+        <Empty icon="check">{t("No PR is ready to run its CI right now.")}</Empty>
       ) : (
         <div className="list">
           {v.candidates.map((c) => (
@@ -512,30 +514,49 @@ function RulesCard({ v }: { v: MergeView }) {
   const r = v.rules;
   const checks = [...(r.required_checks ?? []), ...r.required_workflows.map((w) => `${w} (${t("workflow")})`)];
   return (
-    <Section title={t("Ready to merge when")} hint={t("Read from GitHub's branch rules and the repository's profile")}>
-      <ul className="merge-rules">
-        <li className="small">
-          <Icon name="check" size={12} /> {r.approvals} {t("approvals from people with write access, and no changes requested")}
-        </li>
-        <Yes on={r.code_owners}>{t("A code owner of each changed file approves")}</Yes>
-        <Yes on={r.last_push}>{t("Someone other than the last pusher approves the last push")}</Yes>
-        <Yes on={r.threads}>{t("Every review conversation is resolved")}</Yes>
-        <li className="small">
-          <Icon name="check" size={12} /> {t("Not a draft, and no conflict with the base")}
-          {r.blocking_labels.length > 0 && `; ${t("none of the labels")} ${r.blocking_labels.join(", ")}`}
-        </li>
-        {checks.length > 0 && (
-          <li className="small">
-            <Icon name="check" size={12} /> {t("Required checks pass:")} <span className="mono">{checks.join(", ")}</span>
-          </li>
-        )}
-        <Yes on={r.up_to_date || r.update_branch}>{t("Up to date with the base: the service merges it in before CI runs")}</Yes>
-        <li className="small muted">
-          {t("Merges with")} {r.method}
-          {r.methods && ` (${t("allowed")}: ${r.methods.join(", ") || t("none")})`}
-          {r.fork_approval && `; ${t("GitHub holds the workflows of")} ${t(FORK_APPROVAL[r.fork_approval] ?? r.fork_approval)}`}
-        </li>
-      </ul>
+    <Section title={t("Conditions")} hint={t("Read from GitHub's branch rules and the repository's profile")}>
+      <div className="stack" style={{ gap: 14 }}>
+        <div className="stack" style={{ gap: 6 }}>
+          <strong className="small">{t("Ready to run CI when")}</strong>
+          <ul className="merge-rules">
+            <Yes on>{t("Not a draft, and no conflict with the base")}</Yes>
+            <Yes on>{t("No reviewer requested changes")}</Yes>
+            {r.blocking_labels.length > 0 && (
+              <Yes on>
+                {t("None of the labels")} {r.blocking_labels.join(", ")}
+              </Yes>
+            )}
+            {r.hygiene.length > 0 && (
+              <Yes on>
+                {t("The repository's checks pass:")} <span className="mono">{r.hygiene.join(", ")}</span>
+              </Yes>
+            )}
+          </ul>
+        </div>
+        <div className="stack" style={{ gap: 6 }}>
+          <strong className="small">{t("Merges after its CI when")}</strong>
+          <ul className="merge-rules">
+            <Yes on>
+              {r.approvals} {t("approvals from people with write access")}
+            </Yes>
+            <Yes on={r.code_owners}>{t("A code owner of each changed file approves")}</Yes>
+            <Yes on={r.last_push}>{t("Someone other than the last pusher approves the last push")}</Yes>
+            <Yes on={r.threads}>{t("Every review conversation is resolved")}</Yes>
+            {checks.length > 0 && (
+              <Yes on>
+                {t("Required checks pass:")} <span className="mono">{checks.join(", ")}</span>
+              </Yes>
+            )}
+            <Yes on={r.up_to_date || r.update_branch}>{t("Up to date with the base: the service merges it in before CI runs")}</Yes>
+            <li className="small muted">
+              {t("Merges with")} {r.method}
+              {r.methods && ` (${t("allowed")}: ${r.methods.join(", ") || t("none")})`}
+              {r.fork_approval && `; ${t("GitHub holds the workflows of")} ${t(FORK_APPROVAL[r.fork_approval] ?? r.fork_approval)}`}
+            </li>
+          </ul>
+          <span className="small muted">{t("A PR whose CI passed waits for its approvals without holding the turn; once approved, it merges on its next turn, merging the base in and running its CI again first if the base moved.")}</span>
+        </div>
+      </div>
       {r.notes && <Markdown className="md merge-notes" text={r.notes} />}
     </Section>
   );
