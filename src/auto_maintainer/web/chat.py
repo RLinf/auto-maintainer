@@ -41,6 +41,7 @@ from ..domain.actions import (
     LabelPayload,
     MemoryChangePayload,
     NudgePayload,
+    PrStatePayload,
     RequestReviewersPayload,
     RerunPayload,
     make_action,
@@ -221,6 +222,7 @@ class ProposedAction(BaseModel):
         "request_reviewers",
         "comment",
         "nudge",
+        "close",
         "review",
         "change",
         "evaluate",
@@ -242,7 +244,11 @@ class ProposedAction(BaseModel):
     labels: list[str] = Field(default_factory=list)
     run_id: int | None = None
     logins: list[str] = Field(default_factory=list)
-    body: str = ""
+    body: str = Field(
+        default="",
+        description="For kind=comment and kind=nudge: the comment. For kind=close: "
+        "the comment posted before the PR is closed (empty: close without one).",
+    )
     lesson: str = Field(
         default="",
         description="For kind=lesson: a review lesson to remember for this repository. "
@@ -549,7 +555,7 @@ def build_router() -> APIRouter:
                 f"You are the maintainers' assistant for {', '.join(repos) or 'no repositories yet'}. You are talking to {user.login}. "
                 "You cannot act directly: put any change you suggest in `proposals`. "
                 "Each proposal appears as a card under your answer, and they differ in what happens next: actions on a PR "
-                "(label, comment, rerun, ...) and configuration changes wait for the maintainer to approve the card; "
+                "(label, comment, rerun, close with an optional comment, ...) and configuration changes wait for the maintainer to approve the card; "
                 "review and evaluate (score a PR's priority again, or every open PR's when number is empty, with "
                 "the repository's lessons as they are now) start at once; "
                 "change starts at once too: when the person asks for a change to a PR's code, propose kind=change "
@@ -1341,6 +1347,15 @@ async def _propose(service: Any, user: User, p: ProposedAction) -> list[str]:
             ActionKind.PR_NUDGE,
             p.repo,
             NudgePayload(body=p.body),
+            number=pr.number,
+            head_sha=pr.head_sha,
+            discriminator=disc,
+        )
+    elif p.kind == "close":
+        action = make_action(
+            ActionKind.PR_CLOSE,
+            p.repo,
+            PrStatePayload(body=p.body),
             number=pr.number,
             head_sha=pr.head_sha,
             discriminator=disc,
