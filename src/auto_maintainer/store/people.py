@@ -27,9 +27,11 @@
 - ``machines.json``: their own test machines (``LabMachine``, by name), which only
   the work they ask for runs on.
 - ``ssh/``: the SSH key the service made for them (they add its public half to their
-  machines; the private half never leaves this folder, and no agent's container
-  mounts it), their machines' known hosts, and the SSH config the service reaches
-  their machines with: that key alone, no agent, none of the service's own config.
+  machines and their jump hosts; the private half never leaves this folder, and no
+  agent's container mounts it), their machines' known hosts, and the SSH config the
+  service reaches their machines with: that key alone, no agent, none of the
+  service's own config. OpenSSH hands the same config (``-F``) to the ssh it starts
+  for each jump host, so jump hosts are reached the same way.
 
 Nobody else reaches these through the dashboard: every route works on the signed-in
 person's own login.
@@ -225,8 +227,10 @@ class PeopleAgents:
         return (folder / "id_ed25519.pub").read_text(encoding="utf-8").strip()
 
     def _ssh_config(self, login: str) -> Path:
-        """The SSH config for the person's machines: their key alone, their own known
-        hosts, no SSH agent, nothing forwarded."""
+        """The SSH config for the person's machines and their jump hosts: their key
+        alone, their own known hosts, no SSH agent, nothing forwarded, never a
+        prompt. Command-line options reach only the machine itself, so what a jump
+        host must obey is here."""
         folder = self.ssh_dir(login)
         path = folder / "config"
         text = "\n".join(
@@ -241,6 +245,8 @@ class PeopleAgents:
                 "  StrictHostKeyChecking accept-new",
                 "  PasswordAuthentication no",
                 "  KbdInteractiveAuthentication no",
+                "  BatchMode yes",
+                "  ConnectTimeout 30",
                 "",
             ]
         )
@@ -284,7 +290,7 @@ class PeopleAgents:
             else:
                 data[name] = machine.model_dump(
                     mode="json",
-                    exclude={"owner", "ssh_config", "identity_file", "proxy_jump"},
+                    exclude={"owner", "ssh_config", "identity_file"},
                     exclude_none=True,
                 )
             _write(path, data)

@@ -249,6 +249,7 @@ class LabExecutor:
                     Path(machine.ssh_config).parent,
                     user=machine.user,
                     port=machine.port,
+                    proxy_jump=machine.proxy_jump,
                     identity_file=machine.identity_file,
                     config_file=machine.ssh_config,
                 )

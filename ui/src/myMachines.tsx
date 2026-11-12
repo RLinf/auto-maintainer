@@ -18,6 +18,7 @@ interface MyMachine {
   host: string | null;
   user: string | null;
   port: number | null;
+  proxy_jump: string | null;
   description: string;
   workdir: string;
   setup: string;
@@ -89,7 +90,7 @@ function KeyBox({ data }: { data: MyMachines }) {
   if (!data.public_key) return <span className="small muted">{data.key_problem || t("No SSH key yet.")}</span>;
   return (
     <div className="stack" style={{ gap: 6 }}>
-      <span className="small muted">{t("The service reaches your machines with this key of yours. Add it as one line to ~/.ssh/authorized_keys of the login you give for each machine; its private half never leaves this host.")}</span>
+      <span className="small muted">{t("The service reaches your machines, and their jump hosts, with this key of yours. Add it as one line to ~/.ssh/authorized_keys of the login you give for each; its private half never leaves this host.")}</span>
       <div className="row" style={{ gap: 8, alignItems: "flex-start" }}>
         <code className="mono small" style={{ wordBreak: "break-all", flex: 1, minWidth: 0 }}>
           {data.public_key}
@@ -114,6 +115,7 @@ function MachineForm({ initial, onDone }: { initial?: MyMachine; onDone: () => v
   const [host, setHost] = useState(initial?.host ?? "");
   const [user, setUser] = useState(initial?.user ?? "");
   const [port, setPort] = useState(initial?.port ? String(initial.port) : "");
+  const [jump, setJump] = useState(initial?.proxy_jump ?? "");
   const [workdir, setWorkdir] = useState(initial?.workdir ?? "am-labs");
   const [setup, setSetup] = useState(initial?.setup ?? "");
   const [minutes, setMinutes] = useState(String(Math.round((initial?.timeout_seconds ?? 3600) / 60)));
@@ -124,6 +126,7 @@ function MachineForm({ initial, onDone }: { initial?: MyMachine; onDone: () => v
         host: host.trim(),
         user: user.trim() || null,
         port: port ? Number(port) : null,
+        proxy_jump: jump.trim() || null,
         workdir: workdir.trim() || "am-labs",
         setup,
         timeout_seconds: Math.max(1, Number(minutes) || 60) * 60,
@@ -151,6 +154,11 @@ function MachineForm({ initial, onDone }: { initial?: MyMachine; onDone: () => v
           <input value={port} inputMode="numeric" placeholder="22" onChange={(e) => setPort(e.target.value.replace(/\D/g, ""))} />
         </label>
       </div>
+      <label className="stack small" style={{ gap: 2 }}>
+        {t("Jump hosts (optional)")}
+        <input value={jump} placeholder="user@gateway.example.com:2222" onChange={(e) => setJump(e.target.value)} />
+        <span className="muted">{t("Reached first, in order, separated by commas; add your key to each of them too.")}</span>
+      </label>
       <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
         <label className="stack small" style={{ gap: 2, flex: "2 1 200px" }}>
           {t("Work folder")}
@@ -202,7 +210,10 @@ function MachineRow({ m }: { m: MyMachine }) {
       <div className="row" style={{ flexWrap: "wrap", gap: 8 }}>
         <Icon name="server" />
         <strong>{m.name}</strong>
-        <span className="mono muted small">{where}</span>
+        <span className="mono muted small">
+          {where}
+          {m.proxy_jump && ` · ${t("via")} ${m.proxy_jump}`}
+        </span>
         <span className="spacer" />
         <button className="sm" disabled={check.isPending} onClick={() => check.mutate(undefined)}>
           {check.isPending ? t("Checking…") : t("Check")}

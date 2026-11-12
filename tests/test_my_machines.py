@@ -144,3 +144,85 @@ async def test_a_persons_machine_is_reached_with_their_key_alone(
     assert any("owner and ssh_config" in p for p in problems), (
         "the service settings cannot make someone's machine"
     )
+
+
+async def test_a_persons_machine_goes_through_their_jump_hosts(demo) -> None:
+    """Jump hosts of their own are reached the same way: OpenSSH hands the person's
+    config to the ssh it starts for each jump, so their key alone, no agent, and no
+    prompt hold there too. The service's own host is no jump host."""
+    h, app = demo
+    jumps = "gate@203.0.113.8:2222,203.0.113.9"
+    async with _as(app, "maria") as maria:
+        local = await maria.put(
+            "/api/me/machines/gpu-box", json={**MACHINE, "proxy_jump": "127.0.0.1"}
+        )
+        assert local.status_code == 422 and "this host" in local.text
+        added = await maria.put(
+            "/api/me/machines/gpu-box", json={**MACHINE, "proxy_jump": jumps}
+        )
+        assert added.status_code == 200, added.text
+        assert added.json()["machines"][0]["proxy_jump"] == jumps
+    machine = h.service.machines[MINE]
+    assert machine.proxy_jump == jumps
+    config = Path(machine.ssh_config or "").read_text()
+    assert "BatchMode yes" in config, "a jump host never prompts either"
+
+
+async def test_openssh_hands_the_persons_config_to_their_jump_host(
+    tmp_path: Path,
+) -> None:
+    """What makes a jump host safe: the ssh for the jump gets the same ``-F``, so the
+    service's own keys, agent, and config never reach it."""
+    import asyncio
+
+    from auto_maintainer.domain.clock import FixedClock
+    from auto_maintainer.domain.settings import LabMachine
+    from auto_maintainer.labs.executor import LabExecutor
+    from auto_maintainer.store.people import PeopleAgents
+    from auto_maintainer.store.sqlite import SqliteStore
+
+    if shutil.which("ssh") is None:
+        pytest.skip("needs ssh")
+    people = PeopleAgents(tmp_path / "people")
+    await people.ssh_public_key("maria")
+    await people.put_machine(
+        "maria",
+        "gpu-box",
+        LabMachine(host="gpu.invalid", proxy_jump="gate@jump.invalid:2222"),
+    )
+    machines = await people.all_machines()
+    labs = LabExecutor({}, {}, await SqliteStore.open(tmp_path / "am.db"), FixedClock())
+    labs.configure(machines)
+    host = labs.hosts[MINE]
+    assert "ProxyJump=gate@jump.invalid:2222" in host._options
+    proc = await asyncio.create_subprocess_exec(
+        "ssh",
+        "-v",
+        *host._options,
+        "-o",
+        "ConnectTimeout=2",
+        "--",
+        host.host,
+        "true",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, err = await asyncio.wait_for(proc.communicate(), 30)
+    implicit = [
+        line
+        for line in err.decode(errors="replace").splitlines()
+        if "ProxyCommand from ProxyJump" in line
+    ]
+    assert implicit and f"-F {machines[MINE].ssh_config}" in implicit[0]
+
+
+def test_a_persons_machine_names_no_key_of_the_services() -> None:
+    from auto_maintainer.domain.settings import LabMachine, personal_machine_problems
+
+    problems = personal_machine_problems(
+        "box", LabMachine(host="203.0.113.7", identity_file="~/.ssh/id_ed25519")
+    )
+    assert any("no IdentityFile" in p for p in problems)
+    assert not personal_machine_problems(
+        "box", LabMachine(host="203.0.113.7", proxy_jump="gate@203.0.113.8:2222")
+    )

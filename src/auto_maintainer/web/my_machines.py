@@ -18,10 +18,11 @@ are theirs (``web/my_agents.py``).
 A signed-in person with a repository here adds machines of their own: the reviews,
 reproductions, and Fix CI runs they ask for use them first, on any repository they
 work on, and nobody else's work ever does (``domain/labs.py:unusable``). The service
-reaches them over SSH with a key it made for that person (``/api/me/machines`` shows
-its public half, to add to the machine's ``authorized_keys``), with an SSH config of
-their own: that key alone, no SSH agent, none of the service's own SSH config, keys,
-or open connections. Every route works on the signed-in person's own machines.
+reaches them over SSH, through jump hosts of theirs when they name some, with a key it
+made for that person (``/api/me/machines`` shows its public half, to add to the
+machine's and each jump host's ``authorized_keys``), with an SSH config of their own:
+that key alone, no SSH agent, none of the service's own SSH config, keys, or open
+connections. Every route works on the signed-in person's own machines.
 """
 
 from __future__ import annotations
@@ -47,6 +48,9 @@ class MachineForm(BaseModel):
     host: str = Field(min_length=1, max_length=255)
     user: str | None = Field(default=None, max_length=64)
     port: int | None = Field(default=None, ge=1, le=65535)
+    proxy_jump: str | None = Field(default=None, max_length=500)
+    """Jump hosts to go through first: ``[user@]host[:port]``, several separated by
+    commas, each reached with the same key."""
     description: str = Field(default="", max_length=8_000)
     workdir: str = Field(default="am-labs", max_length=500)
     setup: str = Field(default="", max_length=4_000)
@@ -61,6 +65,7 @@ class MachineForm(BaseModel):
             host=self.host.strip(),
             user=(self.user or "").strip() or None,
             port=self.port,
+            proxy_jump=(self.proxy_jump or "").strip() or None,
             description=self.description.strip(),
             workdir=self.workdir.strip() or "am-labs",
             setup=self.setup.strip(),
@@ -69,6 +74,12 @@ class MachineForm(BaseModel):
             max_gpu_memory_mib=self.max_gpu_memory_mib,
             max_gpu_util_pct=self.max_gpu_util_pct,
         )
+
+
+def _host_port(where: str, port: int | None) -> tuple[str, int]:
+    """The host and port of ``[user@]host[:port]``."""
+    name, _, after = where.rsplit("@", 1)[-1].partition(":")
+    return name, int(after) if after.isdigit() else port or 22
 
 
 def _people(service: Service) -> PersonalAgents:
@@ -93,6 +104,7 @@ def _row(login: str, name: str, machine: LabMachine) -> dict[str, Any]:
         "host": machine.host,
         "user": machine.user,
         "port": machine.port,
+        "proxy_jump": machine.proxy_jump,
         "description": machine.description,
         "workdir": machine.workdir,
         "setup": machine.setup,
@@ -143,10 +155,15 @@ def build_router() -> APIRouter:
         problems = personal_machine_problems(name, machine)
         if problems:
             raise HTTPException(422, "; ".join(problems))
-        host = (machine.host or name).rsplit("@", 1)[-1]
-        refused = await refused_host(host, machine.port or 22, "your test machines")
-        if refused:
-            raise HTTPException(422, refused)
+        for where in [machine.host or name, *(machine.proxy_jump or "").split(",")]:
+            if not where.strip():
+                continue
+            host, port = _host_port(
+                where.strip(), machine.port if where == machine.host else None
+            )
+            refused = await refused_host(host, port, "your test machines")
+            if refused:
+                raise HTTPException(422, refused)
         await people.put_machine(user.login, name, machine)
         await service.refresh_machines()
         return await _view(service, user, people)

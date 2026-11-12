@@ -826,7 +826,8 @@ def machine_problems(name: str, machine: LabMachine) -> list[str]:
 
 def personal_machine_problems(name: str, machine: LabMachine) -> list[str]:
     """Why a person's own machine cannot be used as they gave it: as a shared one,
-    reached over SSH directly (no jump host, no key or config of the service's)."""
+    reached over SSH, through jump hosts or not, with the key the service made for
+    them and none of its own."""
     out = [
         p
         for p in machine_problems(
@@ -836,10 +837,10 @@ def personal_machine_problems(name: str, machine: LabMachine) -> list[str]:
     ]
     if machine.transport != "ssh":
         out.append("a machine of your own is reached over SSH")
-    if machine.proxy_jump or machine.identity_file:
+    if machine.identity_file:
         out.append(
-            "a machine of your own is reached directly with the key the service made "
-            "for you: no ProxyJump or IdentityFile"
+            "a machine of your own is reached with the key the service made for you: "
+            "no IdentityFile"
         )
     if machine.repos:
         out.append("a machine of your own serves every repository you work on")
