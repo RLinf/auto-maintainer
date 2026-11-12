@@ -72,7 +72,7 @@ from .base import (
     PlaybookContext,
     PlaybookResult,
     Wait,
-    may_succeed_later,
+    keeps_session,
 )
 from .prompts import (
     pr_block,
@@ -587,7 +587,7 @@ class ReproducePlaybook(Playbook):
             )
         finally:
             await ctx.workspace.release(workdir)
-            keep = answer is not None and not answer.ok and may_succeed_later(answer)
+            keep = keeps_session(ctx, answer)
             closed = None if keep else await ctx.lab_sessions.close(session_id)
         if answer is None or not answer.ok or answer.structured is None:
             raise RuntimeError(

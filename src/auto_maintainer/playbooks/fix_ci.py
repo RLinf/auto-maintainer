@@ -37,7 +37,14 @@ from ..domain.events import Event, EventKind
 from ..domain.ids import short_sha
 from ..domain.records import ActionRecord, CiObservation
 from ..domain.snapshot import PrSnapshot, PrState
-from .base import Playbook, PlaybookContext, PlaybookResult, Wait, may_succeed_later
+from .base import (
+    Playbook,
+    PlaybookContext,
+    PlaybookResult,
+    Wait,
+    keeps_session,
+    may_succeed_later,
+)
 from .fix import DESCRIBE, FixResult
 from .prompts import pr_block, review_skill_block, schema_hint, untrusted
 
@@ -264,7 +271,7 @@ class FixCiPlaybook(Playbook):
                 )
         finally:
             await ctx.workspace.release(workdir)
-            keep = answer is not None and not answer.ok and may_succeed_later(answer)
+            keep = keeps_session(ctx, answer)
             if session_id and ctx.lab_sessions is not None and not keep:
                 closed = await ctx.lab_sessions.close(session_id)
                 commands = list((closed or {}).get("commands") or [])

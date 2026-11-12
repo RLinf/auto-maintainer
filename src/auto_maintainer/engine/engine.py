@@ -196,6 +196,11 @@ class Engine:
                 asyncio.create_task(self._pool_loop(pool, size), name=f"pool:{pool}")
             )
 
+    @property
+    def stopping(self) -> bool:
+        """Whether the service is stopping: the jobs it cancels go back to the queue."""
+        return self._stopping
+
     async def stop(self) -> None:
         """Stop working. Running jobs are cancelled and go back to the queue, so the
         next start (after a deploy, for example) runs them again at once."""

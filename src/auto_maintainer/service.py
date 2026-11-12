@@ -456,6 +456,7 @@ class Service:
             if job.repo
             else frozenset(),
             drafts=self.pipeline,
+            stopping=lambda: self.engine.stopping,
         )
 
     async def user_writer(self, login: str) -> ForgeWriter | None:

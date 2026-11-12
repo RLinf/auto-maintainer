@@ -614,6 +614,71 @@ async def test_a_review_tests_and_reproduces_its_pr_in_its_own_session(demo) -> 
     )
 
 
+async def test_a_restart_keeps_the_reviews_session_for_its_next_run(demo) -> None:
+    """A deploy stops the service while a review's agent works in its session: the
+    session stays, and the review that runs again on the next start resumes in it.
+    A person stopping a review ends its session."""
+    import asyncio
+
+    h, app = demo
+    runner = h.service.a.lab_runner
+    engine = h.service.engine
+    answer = h.runner.handlers["review"]
+    working = asyncio.Event()
+    hold = {42, 44}
+
+    async def review(task: Any) -> Any:
+        number = int(task.prompt.split("PR: #")[1].split(" ")[0])
+        if number in hold:
+            hold.discard(number)
+            working.set()
+            await asyncio.Event().wait()  # works until it is cancelled
+        return answer(task)
+
+    async def job_of(number: int) -> Any:
+        return next(
+            j
+            for j in await h.store.list_jobs()
+            if j.playbook == "review" and j.number == number
+        )
+
+    async def until(number: int, *states: str) -> Any:
+        for _ in range(500):
+            job = await job_of(number)
+            if job.status in states:
+                return job
+            await asyncio.sleep(0.01)
+        raise AssertionError(f"review of #{number} is {job.status}")
+
+    h.runner.on("review", review)
+    async with _as(app, "maria") as maria:
+        await maria.post("/api/reviews", json={"prs": [{"repo": REPO, "number": 42}]})
+    running = asyncio.create_task(h.settle())
+    await asyncio.wait_for(working.wait(), 10)
+    [opened] = runner.reproduced
+    await engine.stop()  # the service stops for a deploy ...
+    running.cancel()  # ... and cancels the review, as its job pool does
+    with contextlib.suppress(asyncio.CancelledError):
+        await running
+    assert runner.closed == [], "the session waits for the review's next run"
+    assert (await job_of(42)).status == JobStatus.QUEUED
+
+    engine.start()  # the next start runs the review again
+    job = await until(42, JobStatus.DONE, JobStatus.FAILED)
+    first, again = [t for t in h.runner.tasks if t.kind == "review"]
+    assert again.lab_session == first.lab_session == f"token-{opened['session']}"
+    assert job.result and job.result["tested_on"] == "gpu-01"
+    assert runner.closed == [opened["session"]]
+
+    working.clear()
+    async with _as(app, "maria") as maria:
+        await maria.post("/api/reviews", json={"prs": [{"repo": REPO, "number": 44}]})
+    await asyncio.wait_for(working.wait(), 10)
+    second = runner.reproduced[-1]
+    await engine.stop_job((await job_of(44)).id, "maria")
+    assert runner.closed[-1] == second["session"], "a person's stop ends it"
+
+
 async def test_a_repository_can_keep_outside_prs_off_its_machine(demo) -> None:
     h, app = demo
     await _review_rule(h, level="auto", conditions={"author": "team"}, otherwise="off")

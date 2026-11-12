@@ -52,7 +52,7 @@ from .base import (
     PlaybookContext,
     PlaybookResult,
     in_scope,
-    may_succeed_later,
+    keeps_session,
 )
 from .feedback import declined_labels, rejections_block, rejections_on
 from .person_notes import load_notes, notes_block
@@ -247,8 +247,8 @@ class ReviewPlaybook(Playbook):
                 result = await self._verify(ctx, result, pr_block(pr, diff), workdir)
         finally:
             await ctx.workspace.release(workdir)
-            # A run that may succeed on the job's next try keeps its session for it.
-            if answer is None or answer.ok or not may_succeed_later(answer):
+            # A run the job's next try (or the next start) picks up keeps its session.
+            if not keeps_session(ctx, answer):
                 await close(ctx, machine)
 
         result.labels = accepted_labels(result.labels, choices, limit)

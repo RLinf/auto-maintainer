@@ -21,6 +21,8 @@ optional wait. The context has no way to write outside the process: it holds a
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar, Protocol
@@ -76,6 +78,19 @@ def may_succeed_later(result: AgentResult) -> bool:
     return result.error_kind in ("timeout", "quota", "crash") or (
         result.error or ""
     ).startswith("no runtime available")
+
+
+def keeps_session(ctx: PlaybookContext, answer: AgentResult | None) -> bool:
+    """Whether a job keeps its session on a test machine once its agent's run is over.
+    When the service stops (a deploy, a restart) it cancels the job, which runs again
+    on the next start and resumes in the session the new process adopts
+    (``LabExecutor.recover_sessions``), so the session stays. So it does after a
+    failure the job's next try may get past (``may_succeed_later``). A person
+    stopping the job, a finished run, or any other failure ends it."""
+    task = asyncio.current_task()
+    if task is not None and task.cancelling():
+        return ctx.stopping()
+    return answer is not None and not answer.ok and may_succeed_later(answer)
 
 
 class PlaybookResult(BaseModel):
@@ -234,6 +249,9 @@ class PlaybookContext:
     """Reproduction sessions on test machines (design 5.10)."""
     governance: GovernanceRecords | None = None
     """The repository's governance record and its skeleton (design 2.6)."""
+    stopping: Callable[[], bool] = lambda: False
+    """Whether the service is stopping: a job it cancels then runs again on the next
+    start, so it keeps what it holds for that run (``keeps_session``)."""
     """Revises the service's own pending drafts, such as a review a reproduction
     finished after."""
     _codeowners: list[OwnerRule] | None = None
