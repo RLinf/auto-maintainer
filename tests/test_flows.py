@@ -938,6 +938,54 @@ async def test_the_chat_agent_scores_every_open_pr_again(
     assert after - before == 2
 
 
+async def test_the_chat_agent_proposes_closing_a_pr_with_a_comment(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """Closing a PR from chat waits on a card; approving it comments, then closes."""
+    import httpx
+
+    from auto_maintainer.web.app import create_app
+
+    await _auto(harness, pr_close="auto")
+    harness.forge.put_pr(_pr())
+    harness.runner.on(
+        "chat",
+        lambda t: {
+            "reply": "It duplicates #43; closing it once you approve.",
+            "proposals": [
+                {
+                    "kind": "close",
+                    "repo": "acme/widget",
+                    "number": 42,
+                    "body": "Closing as a duplicate of #43.",
+                }
+            ],
+        },
+    )
+    app = create_app(harness.service, data_dir=tmp_path, allow_dev_login=True)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as maria:
+        await maria.get("/auth/dev?login=maria")
+        maria.headers["x-am-csrf"] = maria.cookies.get("am_csrf") or ""
+        thread = (await maria.post("/api/chat/threads", json={"text": "hi"})).json()
+        answer = (
+            await maria.post(
+                f"/api/chat/threads/{thread['id']}/messages",
+                json={"text": "close this PR with a comment saying it's a duplicate"},
+            )
+        ).json()
+        await harness.settle()
+        [proposal_id] = answer["proposals"]
+        assert harness.forge.writes_of("close") == [], "nothing runs before approval"
+        out = await maria.post(f"/api/proposals/{proposal_id}/approve", json={})
+        assert out.status_code == 200, out.text
+        await harness.settle()
+    [comment] = harness.forge.writes_of("create_comment")
+    assert "Closing as a duplicate of #43." in comment["body"]
+    assert harness.forge.writes_of("close") == [{"repo": "acme/widget", "number": 42}]
+
+
 async def test_a_review_ranking_findings_p0_to_p3_posts(harness: Harness) -> None:
     """Review guides often rank findings P0 to P3; the review agent never sees the
     PR's priority, so those labels are not its tier and the review posts."""
