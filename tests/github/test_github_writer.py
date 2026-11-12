@@ -167,6 +167,33 @@ async def test_review_update_reply_reviewers_branch(client, router):
     assert reply.called
 
 
+async def test_update_branch_says_why_a_sign_in_without_workflow_scope_fails(
+    client, router
+):
+    refusal = (
+        "refusing to allow an OAuth App to create or update workflow "
+        "`.github/workflows/e2e.yml` without `workflow` scope"
+    )
+    router.put("/repos/acme/widget/pulls/3/update-branch").respond(
+        403, json={"message": refusal}
+    )
+    with pytest.raises(GitHubError) as raised:
+        await GitHubWriter(client).update_branch("acme/widget", 3, "head1")
+    said = str(raised.value)
+    assert raised.value.status == 403
+    assert "change workflow files" in said and "Update branch" in said
+    assert refusal in said, "GitHub's own message stays in the error"
+
+
+async def test_update_branch_passes_other_refusals_through(client, router):
+    router.put("/repos/acme/widget/pulls/3/update-branch").respond(
+        403, json={"message": "Resource not accessible by integration"}
+    )
+    with pytest.raises(GitHubError) as raised:
+        await GitHubWriter(client).update_branch("acme/widget", 3, "head1")
+    assert "workflow" not in str(raised.value)
+
+
 async def test_convert_to_draft_uses_node_id(client, router):
     route = router.post("/graphql").mock(
         side_effect=[
