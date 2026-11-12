@@ -54,7 +54,13 @@ from ..domain.run_ci import ci_view
 from ..domain.snapshot import Mergeable, PrSnapshot, PrState, RepoInfo
 from ..playbooks.auto_schedule import AUTO_COMMAND
 from ..playbooks.ci_rules import COMMAND as CI_RULES
-from ..playbooks.ci_rules import DRAFT_KEY, MAX_PATTERNS, CiRulesDraft, FlakePattern
+from ..playbooks.ci_rules import (
+    DRAFT_KEY,
+    MAX_PATTERNS,
+    CiRulesDraft,
+    FlakePattern,
+    current,
+)
 from ..playbooks.flake_learn import COMMAND as LEARN_COMMAND
 from ..playbooks.flake_learn import SUGGESTIONS
 from ..playbooks.hygiene import hygiene_key
@@ -235,6 +241,16 @@ def _layer_patterns(layer: dict[str, Any]) -> list[dict[str, Any]]:
     ci = layer.get("ci") if isinstance(layer.get("ci"), dict) else {}
     found = ci.get("flake_signatures") if isinstance(ci, dict) else None
     return [p for p in found or [] if isinstance(p, dict)]
+
+
+def draft_of(stored: dict[str, Any], profile: RepoProfile) -> CiRulesDraft:
+    """The agent's stored draft, every setting it does not name (one drafted before
+    the draft named it) taken from the repository's current settings, so saving it
+    changes only what the agent drafted."""
+    now = current(profile).model_dump(mode="json")
+    drafted = stored.get("draft") if isinstance(stored.get("draft"), dict) else {}
+    now.update({k: v for k, v in drafted.items() if k in now})
+    return CiRulesDraft.model_validate(now)
 
 
 async def _own_pattern_ids(service: Service, repo: str) -> set[str]:
@@ -492,7 +508,12 @@ def build_router() -> APIRouter:
                 "gate_label": profile.label_for("ci_gate"),
                 "reruns": profile.ci.rerun.max_per_sha,
             },
-            "draft": draft if isinstance(draft, dict) else None,
+            "draft": {
+                **draft,
+                "draft": draft_of(draft, profile).model_dump(mode="json"),
+            }
+            if isinstance(draft, dict)
+            else None,
             "rules_job": rules_job,
             "scheduled": scheduled,
             "failed": failed,
@@ -956,7 +977,7 @@ def build_router() -> APIRouter:
         stored = await service.store.get_state(DRAFT_KEY.format(repo=repo))
         if profile is None or not isinstance(stored, dict):
             raise HTTPException(404, "there is no draft to save")
-        draft = CiRulesDraft.model_validate(stored.get("draft") or {})
+        draft = draft_of(stored, profile)
         own = await _own_pattern_ids(service, repo)
         inherited = {
             s_.id: s_ for s_ in profile.ci.flake_signatures if s_.id not in own

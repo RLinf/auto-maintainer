@@ -1037,7 +1037,19 @@ const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
 function DraftRules({ v, draft }: { v: MergeView; draft: Draft }) {
   const t = useT();
   const toast = useToast();
-  const d = draft.draft;
+  // A draft from an older version may lack a list: read it as empty, never crash.
+  const raw = draft.draft;
+  const d = {
+    ...raw,
+    ready: raw.ready ?? [],
+    blocking_roles: raw.blocking_roles ?? [],
+    optional_checks: raw.optional_checks ?? [],
+    gate_jobs: raw.gate_jobs ?? [],
+    summary_jobs: raw.summary_jobs ?? [],
+    flake_patterns: raw.flake_patterns ?? [],
+    preserve_trailers: raw.preserve_trailers ?? [],
+    required_workflows: raw.required_workflows ?? [],
+  };
   const r = v.rules;
   const s = v.ci_start;
   const f = v.flaky;
@@ -1118,7 +1130,7 @@ function DraftRules({ v, draft }: { v: MergeView; draft: Draft }) {
           </table>
         )}
         {(s.how || "") !== d.how && d.how && <Markdown className="md merge-notes" text={d.how} />}
-        {draft.dropped.length > 0 && (
+        {(draft.dropped ?? []).length > 0 && (
           <span className="small muted">
             {t("Left out, as the repository does not have them")}: {draft.dropped.join("; ")}
           </span>

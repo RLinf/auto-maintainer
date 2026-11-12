@@ -1395,3 +1395,45 @@ async def test_a_pr_scheduled_by_hand_runs_ci_then_waits_for_the_merge_rules(
     assert row["forced"] and row["phase"] == "approval", row
     assert "approvals" in row["detail"]
     assert not h.forge.writes_of("merge"), "it merges only once the rules hold"
+
+
+async def test_a_draft_from_an_older_version_shows_and_saves_only_what_it_named(
+    harness: Harness, tmp_path: Path
+) -> None:
+    h = harness
+    app = create_app(h.service, data_dir=tmp_path, allow_dev_login=True)
+    async with _as(app, "maria") as maria:
+        out = (
+            await maria.put(
+                f"/api/merge-schedule/{REPO}/flaky",
+                json={
+                    "diagnose": "patterns",
+                    "max_reruns": 3,
+                    "backoff_seconds": 60,
+                    "rerun_unknown": 1,
+                    "root_cause": False,
+                },
+            )
+        ).json()
+        assert out["applied"], out
+        # Drafted before the draft named reruns, labels, or merge methods.
+        await h.store.set_state(
+            f"ci-rules:{REPO}",
+            {
+                "draft": {"how": "CI starts on run-ci.", "gate_label": "run-ci"},
+                "dropped": [],
+                "by": "maria",
+                "at": T0.isoformat(),
+            },
+        )
+        view = (await maria.get(f"/api/merge-schedule/{REPO}/view")).json()
+        drafted = view["draft"]["draft"]
+        assert drafted["blocking_roles"] == view["rules"]["blocking_roles"]
+        assert drafted["max_reruns"] == 3 and drafted["diagnose"] == "patterns"
+        saved = (await maria.post(f"/api/merge-schedule/{REPO}/draft/apply")).json()
+        assert saved["applied"], saved
+    profile = await h.service.profiles.active(REPO)
+    assert profile is not None
+    assert profile.ci.start.how == "CI starts on run-ci."
+    assert profile.ci.rerun.max_per_sha == 3, "what the draft did not name stays"
+    assert profile.ci.diagnose == "patterns" and profile.ci.root_cause is False
