@@ -48,7 +48,9 @@ from auto_maintainer.profiles.layers import dump_yaml, parse_yaml
 from auto_maintainer.testing.demo import DEMO_GOVERNANCE, build_demo
 from auto_maintainer.testing.fakes import make_pr
 from auto_maintainer.testing.harness import Harness
+from auto_maintainer.web.api import visible_repos
 from auto_maintainer.web.app import create_app
+from auto_maintainer.web.auth import User
 
 REPO = "acme/widget"
 
@@ -124,6 +126,28 @@ async def test_members_of_the_record_see_the_repository_with_read_access(demo) -
         assert (await rita.get(f"/api/prs?repo={REPO}")).status_code == 200
     async with _as(app, "olga") as olga:
         assert (await olga.get(f"/api/prs?repo={REPO}")).status_code == 403
+
+
+async def test_a_changed_permission_shows_within_the_cache_time_on_every_repository(
+    tmp_path: Path,
+) -> None:
+    h = await Harness.create(tmp_path)
+    other = "acme/zipper"
+    h.forge.add_repo(RepoInfo(name=other, default_branch_sha="f" * 40))
+    await h.approve_directly(other, "maria")
+    h.forge.set_permission(REPO, "sam", Permission.WRITE)
+    h.forge.set_permission(other, "sam", Permission.READ)
+    sam = User(login="sam")
+    try:
+        assert await visible_repos(h.service, sam) == [REPO]
+        h.forge.set_permission(other, "sam", Permission.WRITE)
+        assert await visible_repos(h.service, sam) == [REPO], "cached for a while"
+        # Each repository's entry expires on its own, so refreshing the first
+        # repository's never keeps the second's old value alive.
+        h.clock.advance(minutes=11)
+        assert await visible_repos(h.service, sam) == [REPO, other]
+    finally:
+        await h.close()
 
 
 async def test_a_reviewer_decides_only_what_they_asked_for(demo) -> None:
