@@ -2163,3 +2163,38 @@ async def test_a_base_merge_refused_for_the_schedulers_scope_waits_for_a_new_sig
     await h.settle()
     assert [w["number"] for w in h.forge.writes_of("update_branch")] == [42]
     del update
+
+
+async def test_waking_a_blocked_base_merge_sends_a_new_update_each_time(
+    harness: Harness,
+) -> None:
+    # RLinf#1844: the woken update reused the refused one's key, so the pipeline
+    # dropped it as a duplicate and the PR sat in "merging main in".
+    h = harness
+    h.forge.put_pr(_ready(42, "a" * 40, _ci(42, "success"), behind_base=True))
+    refusal = (
+        "GitHub API error 403: refusing to allow an OAuth App to create or update "
+        "workflow `.github/workflows/ci-tests.yml` without `workflow` scope"
+    )
+    h.forge.fail_next["update_branch"] = RuntimeError(refusal)
+    await _schedule(h, 42)
+    await h.settle()
+    assert (await _phase(h, 42)).phase == "blocked"
+
+    async def wake() -> None:
+        # A new sign-in wakes what a missing scope held back.
+        h.clock.advance(minutes=5)
+        h.service.info.started_at = h.clock.now()
+        await h.service._wake_blocked(REPO)
+        await h.settle()
+
+    # Woken, it tries again, and GitHub refuses that attempt too.
+    h.forge.fail_next["update_branch"] = RuntimeError(refusal)
+    await wake()
+    assert (await _phase(h, 42)).phase == "blocked"
+    updates = await h.store.list_actions(repo=REPO, kinds=[ActionKind.PR_UPDATE_BRANCH])
+    assert len({u.action.idempotency_key for u in updates}) == 2
+    # Woken again, the third attempt goes through.
+    await wake()
+    assert [w["number"] for w in h.forge.writes_of("update_branch")] == [42]
+    assert (await _phase(h, 42)).phase != "blocked"
