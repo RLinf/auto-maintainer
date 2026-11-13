@@ -2198,3 +2198,24 @@ async def test_waking_a_blocked_base_merge_sends_a_new_update_each_time(
     await wake()
     assert [w["number"] for w in h.forge.writes_of("update_branch")] == [42]
     assert (await _phase(h, 42)).phase != "blocked"
+
+
+async def test_a_standby_host_records_the_schedules_steps_without_taking_them(
+    tmp_path: Path,
+) -> None:
+    h = await Harness.create(
+        tmp_path,
+        layer={"merge": {"enabled": True}, "ci": {"required_workflows": ["CI"]}},
+        standby=True,
+    )
+    try:
+        await h.service.a.user_tokens.set("maria", UserToken(token="m"))
+        h.forge.set_permission(REPO, "bob", Permission.WRITE)
+        h.forge.put_pr(_ready(42, "a" * 40, _ci(42, "success")))
+        await _schedule(h, 42)
+        await h.settle()
+        assert not h.forge.writes_of("merge"), "the serving host merges it"
+        [merge] = await h.store.list_actions(repo=REPO, kinds=[ActionKind.PR_MERGE])
+        assert merge.status == ActionStatus.SHADOWED
+    finally:
+        await h.close()

@@ -125,8 +125,9 @@ class ActionPipeline:
         self.sandbox_repo = sandbox_repo
         self.standby = standby
         """This host stands by for another serving the same repositories (``local.yaml``
-        ``standby``): it records the forge writes it would make on its own and makes
-        only those a person asked for or approved."""
+        ``standby``): it records the forge writes it would make on its own, the merge
+        schedule's steps among them, and makes only those a person asked for or
+        approved."""
 
     def capped(self, repo: str) -> bool:
         """Whether dev mode holds ``repo``'s actions at shadow. A development instance
@@ -286,6 +287,18 @@ class ActionPipeline:
                 kind=DecisionKind.PROPOSE,
                 rule="requested_review",
                 reason=f"draft for {action.draft_for}",
+            )
+        if (
+            self.standby
+            and action.kind in SCHEDULED
+            and action.provenance.scheduled_by
+            and decision.kind != DecisionKind.DENY
+        ):
+            # The host serving the repositories runs their merge schedule; a standby
+            # copy of it records the steps it would take, or both would take them.
+            decision = Decision(
+                kind=DecisionKind.SHADOW,
+                rule="standby records the merge schedule's steps",
             )
         status = {
             DecisionKind.SHADOW: ActionStatus.SHADOWED,
