@@ -16,8 +16,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
+import time
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -32,7 +34,8 @@ from .agents.container import (
     image_tag,
 )
 from .agents.install import AgentInstaller, installs_dir
-from .agents.registry import budgets_of, build_runtimes, merge_configs
+from .agents.registry import ADAPTERS, budgets_of, build_runtimes, merge_configs
+from .agents.retention import prune_agent_files
 from .agents.router import AgentRouter
 from .config import CONFIG_DIR, HostConfig, load_host_config, save_host_config
 from .domain import forges
@@ -277,6 +280,21 @@ async def build_service(cfg: HostConfig, dev: bool = False) -> Service:
         else None
     )
 
+    async def cleanup(keep: frozenset[Path]) -> None:
+        """Remove checkouts nothing uses, old run folders, and the agent CLIs' old
+        sessions in the service's home and in each person's (design 7.3)."""
+        checkouts = await workspace.sweep(keep)
+        homes = [Path.home(), *sorted((data / "people").glob("*/home"))]
+        sessions = [p for cls in ADAPTERS.values() for p in cls.session_paths]
+        files = await asyncio.to_thread(
+            prune_agent_files, data / "runs", homes, sessions, time.time()
+        )
+        log.info(
+            "disk cleanup removed %d checkouts and %d run folders and sessions",
+            checkouts,
+            files,
+        )
+
     adapters = Adapters(
         forge=reader,
         actuator_reader=fresh_reader,
@@ -304,6 +322,7 @@ async def build_service(cfg: HostConfig, dev: bool = False) -> Service:
         publisher_for_user=publisher_for_user,
         background=background,
         agent_sandbox=starter,
+        cleanup=cleanup,
     )
     settings = ServiceSettings(
         login=login,

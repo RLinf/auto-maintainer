@@ -96,6 +96,8 @@ class CodexRuntime(ExecRuntime):
     known_choices = AgentChoices(efforts=["minimal", "low", "medium", "high", "xhigh"])
 
     home_paths = (".codex",)
+    session_paths = (".codex/sessions/*/*/*",)
+    """A day's sessions are in ``sessions/<year>/<month>/<day>``."""
     login_args = ("login", "--device-auth")
     login_marker = ".codex/auth.json"
     """Codex's device login (checked against 0.162.1): it prints a page and a

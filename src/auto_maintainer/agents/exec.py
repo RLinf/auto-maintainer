@@ -547,6 +547,12 @@ class ExecRuntime:
     """The CLI's own login and settings, relative to the home folder, that its
     container mounts (nothing else of the home folder is there)."""
 
+    session_paths: ClassVar[tuple[str, ...]] = ()
+    """Where the CLI keeps old sessions' transcripts and artifacts, as patterns
+    relative to the home folder (``*`` matches within one name), inside its
+    ``home_paths``. The disk cleanup (``agents/retention.py``) removes a match in
+    which nothing changed for ``SESSIONS_KEPT``; nothing else of the home folder."""
+
     login_args: ClassVar[tuple[str, ...]] = ()
     """The arguments that start the CLI's own sign-in on a host without a browser
     (``agents/login.py``); empty for a CLI that has none and runs on a model API."""

@@ -121,6 +121,7 @@ class PiRuntime(ExecRuntime):
     default_name = "pi"
     default_binary = "pi"
     home_paths = (".pi",)
+    session_paths = (".pi/agent/sessions/*/*.jsonl",)
     login_marker = ".pi/agent/auth.json"
     login_options = (
         ("anthropic", "Claude Pro/Max"),

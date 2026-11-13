@@ -50,6 +50,7 @@ class GeminiRuntime(AcpRuntime):
     """Gemini CLI's ACP server."""
 
     home_paths = (".gemini",)
+    session_paths = (".gemini/tmp/*/chats/*",)
     default_name = "gemini"
     default_binary = "gemini"
     default_env_allow = ("GEMINI_*", "GOOGLE_*")

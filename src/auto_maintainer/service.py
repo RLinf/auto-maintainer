@@ -132,6 +132,10 @@ SCOPE_REQUEST_GAP = timedelta(minutes=30)
 """How long after asking for a scope the service waits before it asks again on its
 own; the owner may ask again at any time."""
 
+CONVERSATION_IDLE = timedelta(days=7)
+"""A conversation without a message for this long gives up its working folder; its
+next message starts a new checkout and a new session (``Service.clean_disk``)."""
+
 SETTLE_SECONDS = (10.0, 30.0, 90.0)
 """Seconds after an action that wrote to a PR at which the service reads it again:
 the forge shows some effects only a moment after the write returns (an approval in
@@ -193,6 +197,9 @@ class Adapters:
     agent_sandbox: Any = None
     """The agents' sandbox control (``describe``, ``configure``) for the Settings
     page; ``None`` where the composition root gives none."""
+    cleanup: Callable[[frozenset[Path]], Awaitable[None]] | None = None
+    """Removes what the service no longer needs on disk (old run folders, the agent
+    CLIs' old sessions, checkouts nothing uses), keeping the checkouts it is given."""
 
 
 @dataclass
@@ -434,6 +441,7 @@ class Service:
             builtins={
                 "reconcile": lambda: self.poller.poll_all(reconcile=True),
                 "memory_sync": self.memory_sync,
+                "disk_cleanup": self.clean_disk,
             },
             every_minute=[self.engine.tick],
             poll=lambda: self.poller.poll_all(),
@@ -618,6 +626,30 @@ class Service:
                     )
                 )
         await self.actuator.sweep_memory()
+
+    async def clean_disk(self) -> None:
+        """Keep the data folder's size bounded (design 7.3): a conversation idle for
+        ``CONVERSATION_IDLE`` gives up its working folder (released, and its session
+        forgotten, since a session resumes only where it ran), then ``cleanup``
+        removes what nothing uses, keeping the other conversations' folders."""
+        cutoff = self.clock.now() - CONVERSATION_IDLE
+        keep: set[Path] = set()
+        for thread, active in await self.store.threads_with_workdir():
+            workdir = thread.workdir
+            if workdir is None:
+                continue
+            if active < cutoff and not thread.live_run:
+                # Read again: a turn that began meanwhile keeps its folder.
+                thread = await self.store.get_thread(thread.id) or thread
+            if active >= cutoff or thread.live_run or thread.workdir != workdir:
+                keep.add(Path(workdir))
+                continue
+            await self.a.workspace.release(workdir)
+            thread.workdir = None
+            thread.session = None
+            await self.store.save_thread(thread)
+        if self.a.cleanup is not None:
+            await self.a.cleanup(frozenset(keep))
 
     # -- service settings (design 8.1) ------------------------------------------------
 

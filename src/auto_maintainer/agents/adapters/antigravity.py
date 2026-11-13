@@ -59,6 +59,8 @@ class AntigravityRuntime(AcpRuntime):
     end; seen on a review conversation whose diff was large."""
 
     home_paths = (".gemini",)
+    session_paths = (".gemini/antigravity-cli/brain/*",)
+    """One folder per conversation, holding its artifacts."""
     login_args = ("acp", "--login")
     login_marker = ".gemini/antigravity-cli/antigravity-oauth-token"
     """Antigravity's sign-in with Google (checked against 1.5.3): without a browser
