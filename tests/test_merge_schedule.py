@@ -2006,3 +2006,124 @@ async def test_an_automatic_schedule_never_pushes_a_resolution_by_itself(
     await h.settle()
     [fix] = await h.store.list_actions(repo=REPO, kinds=[ActionKind.PR_FIX])
     assert fix.status == ActionStatus.PROPOSED, "maria never saw this PR"
+
+
+def _rtd(conclusion: str | None) -> CheckRun:
+    """Read the Docs' build of the PR: a commit status, with no run to rerun."""
+    return CheckRun(
+        id=9001,
+        name="docs/readthedocs.org:widget",
+        status=CheckStatus.COMPLETED if conclusion else CheckStatus.IN_PROGRESS,
+        conclusion=CheckConclusion(conclusion) if conclusion else None,
+        details_url="https://app.readthedocs.org/projects/widget/builds/9/",
+    )
+
+
+def _flaky(h: Harness) -> None:
+    """The first look calls the unit job a flake, and the docs build the runner's."""
+
+    def look(task: Any) -> dict[str, Any]:
+        one = {"confidence": 0.9, "explanation": "not the change"}
+        if "readthedocs" in task.prompt and "unit" in task.prompt:
+            return {
+                "jobs": [
+                    {**one, "job": "unit", "category": "flaky"},
+                    {**one, "job": "docs/readthedocs.org:widget", "category": "infra"},
+                ]
+            }
+        return {**one, "category": "flaky"}
+
+    h.runner.on("ci_diagnose", look)
+
+
+async def test_a_finished_runs_flake_is_rerun_while_read_the_docs_still_builds(
+    harness: Harness,
+) -> None:
+    h = harness
+    _flaky(h)
+    h.forge.job_logs[420] = "NCCL timeout on the runner\n"
+    h.forge.put_pr(_ready(42, "a" * 40, [*_ci(42, "failure"), _rtd(None)]))
+    await _schedule(h, 42)
+    await h.settle()
+    assert h.forge.writes_of("rerun_failed_jobs") == [{"repo": REPO, "run_id": 4200}]
+    state = await _phase(h, 42)
+    assert state.phase == "rerunning" and "while the rest of CI runs" in state.detail
+
+
+async def test_a_failed_docs_build_does_not_hold_back_the_others_reruns(
+    harness: Harness,
+) -> None:
+    h = harness
+    # As on RLinf, the branch rules require the docs build.
+    info = h.forge.repos[REPO]
+    h.forge.add_repo(
+        info.model_copy(update={"required_checks": ["docs/readthedocs.org:widget"]})
+    )
+    _flaky(h)
+    h.runner.on("ci_root_cause", lambda t: {"causes": []})
+    h.forge.job_logs[420] = "NCCL timeout on the runner\n"
+    pr = _ready(42, "a" * 40, [*_ci(42, "failure"), _rtd("failure")])
+    h.forge.put_pr(pr)
+    await _schedule(h, 42)
+    await h.settle()
+    assert h.forge.writes_of("rerun_failed_jobs") == [{"repo": REPO, "run_id": 4200}]
+    state = await _phase(h, 42)
+    assert state.phase == "rerunning"
+    assert (
+        "readthedocs" in state.detail and "judged once the reruns end" in state.detail
+    )
+    # The rerun passes; the docs build still fails: now it goes to the failure lane.
+    h.clock.advance(minutes=20)
+    h.forge.put_pr(
+        pr.model_copy(
+            update={
+                "checks": [
+                    _job(421, "unit", "success", 4200, workflow="CI", attempt=2),
+                    _rtd("failure"),
+                ]
+            }
+        )
+    )
+    await h.emit(Event(kind=EventKind.CHECKS_COMPLETED, repo=REPO, number=42))
+    await h.settle()
+    failed = await _phase(h, 42)
+    assert failed.phase == "failed" and "readthedocs" in failed.detail
+    assert len(h.forge.writes_of("rerun_failed_jobs")) == 1
+
+
+async def test_a_real_failure_of_a_finished_run_fails_the_pr_while_others_run(
+    harness: Harness,
+) -> None:
+    h = harness
+    h.runner.on(
+        "ci_diagnose",
+        lambda t: {
+            "category": "pr_caused",
+            "confidence": 0.9,
+            "explanation": "it breaks",
+        },
+    )
+    h.runner.on(
+        "ci_root_cause",
+        lambda t: {
+            "causes": [
+                {
+                    "jobs": ["unit"],
+                    "failing": "tests/test_m.py::test_x",
+                    "origin": "change",
+                    "cause": "The new branch returns None.",
+                    "confidence": 0.8,
+                }
+            ]
+        },
+    )
+    h.forge.job_logs[420] = "FAILED tests/test_m.py::test_x\n"
+    h.forge.put_pr(_ready(42, "a" * 40, [*_ci(42, "failure"), _rtd(None)]))
+    await _schedule(h, 42)
+    await h.settle()
+    assert (await _phase(h, 42)).phase == "failed"
+    # Read the Docs still building does not bring it back out of the failure lane.
+    await h.emit(Event(kind=EventKind.CHECKS_COMPLETED, repo=REPO, number=42))
+    await h.settle()
+    assert (await _phase(h, 42)).phase == "failed"
+    assert not h.forge.writes_of("rerun_failed_jobs")

@@ -92,7 +92,13 @@ from ..domain.profile import RepoProfile
 from ..domain.records import ActionStatus, RootCause
 from ..domain.review import ReviewState
 from ..domain.run_ci import ci_view, latest_checks, rerun_targets
-from ..domain.snapshot import CheckConclusion, PrSnapshot, PrState, RepoInfo
+from ..domain.snapshot import (
+    CheckConclusion,
+    CheckStatus,
+    PrSnapshot,
+    PrState,
+    RepoInfo,
+)
 from ..domain.workflows import never_run
 from .base import Playbook, PlaybookContext, PlaybookResult, Wait
 from .ci_doctor import (
@@ -324,9 +330,13 @@ class MergePlaybook(Playbook):
             state.detail = "trying its merge again"
         if state.phase == "failed" and same_commit(state.sha, pr.head_sha):
             ran = ci_view(pr, profile.label_for("ci_gate"), profile.ci.start).state
+            # Other checks may still run after a run that ended failed it: only the
+            # failed checks running again bring it back.
+            still = {c.id for c in failing_checks(pr, profile)} & set(state.failed_ids)
             if (
                 not state.failed_on_ci
                 or ran not in ("running", "passed")
+                or still
                 or state.retry
             ):
                 return PlaybookResult(
@@ -659,6 +669,34 @@ class MergePlaybook(Playbook):
                 result={"phase": "approval"},
             )
         if view.state == "running":
+            # A workflow run that ended is judged now, whatever else still runs
+            # (another workflow, an outside service's check such as Read the
+            # Docs): its flakes are rerun at once, a real failure fails the PR.
+            unfinished = {
+                c.run_id
+                for c in latest_checks(pr.checks)
+                if c.run_id and c.status != CheckStatus.COMPLETED
+            }
+            ended = [
+                c
+                for c in failing_checks(pr, profile)
+                if c.run_id
+                and c.run_id not in unfinished
+                and c.id not in state.rerun_of
+            ]
+            if ended:
+                return await self._failed_ci(
+                    ctx, profile, info, pr, arm, state, wait, step, checks=ended
+                )
+            asked = {c.id for c in failing_checks(pr, profile)} & set(state.rerun_of)
+            if state.phase == "rerunning" and asked and landing:
+                # A rerun was asked for while the rest runs and has not started yet.
+                return PlaybookResult(
+                    wait=wait.model_copy(
+                        update={"seconds": LANDING_SECONDS, "reason": "rerunning"}
+                    ),
+                    result={"phase": "rerunning"},
+                )
             state.running_since = state.running_since or now
             limit, since = start.run_minutes, state.running_since
             phase, what = "running", "has been running"
@@ -719,10 +757,18 @@ class MergePlaybook(Playbook):
         state: ScheduleState,
         wait: Wait,
         step: Any,
+        checks: list | None = None,
     ) -> PlaybookResult:
-        """Rerun what flaked within the budget; otherwise the failure lane."""
-        checks = failing_checks(pr, profile)
-        if state.retry:
+        """Rerun what flaked within the budget; otherwise the failure lane.
+
+        ``checks`` are the failures of workflow runs that ended while others still
+        run, judged now; ``None`` for every failure once all of CI ended. A failed
+        check of an outside service (no run here to rerun, such as Read the Docs)
+        never holds back the reruns of the others: unless the PR caused it, it is
+        judged once they end."""
+        partial = checks is not None
+        checks = checks if checks is not None else failing_checks(pr, profile)
+        if state.retry and not partial:
             # A maintainer sent it back from the failure lane: run what failed
             # again, past the budget, before judging it anew.
             state.retry = False
@@ -829,6 +875,7 @@ class MergePlaybook(Playbook):
                 )
         stuck = [f for f in failures if f.check.id not in retrying]
         found: tuple[list[RootCause] | None, str] | None = None
+        by_job: dict[str, RootCause] = {}
         if stuck:
             # The first look could not call these flakes: the root cause decides
             # before the failure lane. One the runner or a flake caused is run again
@@ -871,22 +918,38 @@ class MergePlaybook(Playbook):
                         )
                     )
             stuck = [f for f in failures if f.check.id not in retrying]
-        if stuck or not reruns:
+
+        def caused_here(f: Any) -> bool:
+            cause = by_job.get(f.check.name)
+            if cause is not None:
+                return cause.origin in ("change", "base")
+            return f.diagnosis.category == "pr_caused"
+
+        # An outside service's failed check (no run here to rerun) that the PR did
+        # not cause waits for the reruns of the others, and is judged after them.
+        later = [f for f in stuck if not f.check.run_id and not caused_here(f)]
+        if len(later) < len(stuck) or not reruns:
             jobs = ", ".join(f.check.name for f in stuck or failures) or "CI"
             return await self._fail(
                 ctx, profile, pr, arm, state, f"{jobs} failed", failures, found
             )
         await record(ctx, pr, failures, found[0] if found else None)
-        state.rerun_of = [f.check.id for f in failures]
-        await self._set(
-            ctx,
-            profile,
-            info,
-            pr,
-            state,
-            "rerunning",
-            "rerunning " + ", ".join(f.check.name for f in failures),
-        )
+        handled = [f.check.id for f in failures if f.check.id in retrying] + [
+            f.check.id for f in later
+        ]
+        # Until their new attempts replace them, these are not failures to act on
+        # again (a rerun asked for twice would run twice).
+        state.rerun_of = [*state.rerun_of, *handled][-200:] if partial else handled
+        names = ", ".join(f.check.name for f in failures if f.check.id in retrying)
+        detail = f"rerunning {names}"
+        if later:
+            detail += (
+                "; " + ", ".join(f.check.name for f in later) + " cannot be rerun "
+                "from here and is judged once the reruns end"
+            )
+        elif partial:
+            detail += " while the rest of CI runs"
+        await self._set(ctx, profile, info, pr, state, "rerunning", detail)
         return PlaybookResult(actions=reruns, wait=wait, result={"phase": "rerunning"})
 
     async def _look_into(
@@ -1038,6 +1101,7 @@ class MergePlaybook(Playbook):
         actions: list[Action] = []
         state.failed_on_ci = failures is not None
         state.failed_jobs = [f.check.name for f in failures or [] if f.real]
+        state.failed_ids = [f.check.id for f in failures or []]
         state.causes = []
         if failures:
             if found is None:

@@ -137,6 +137,9 @@ class ScheduleState(BaseModel):
     base merge, nor a conflict): CI that runs again at the same head brings it
     back."""
     failed_jobs: list[str] = Field(default_factory=list)
+    failed_ids: list[int] = Field(default_factory=list)
+    """The checks whose failure sent it to the failure lane: it comes back by
+    itself only once none of them still fails (they ran again)."""
     causes: list[str] = Field(default_factory=list)
     """The failure lane's root causes, as the PR author reads them."""
     approval_needed: bool = False
