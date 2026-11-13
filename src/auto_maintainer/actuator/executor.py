@@ -153,7 +153,7 @@ class Actuator:
         pr = None
         running = False  # the handler started, and may have written
         try:
-            if spec.needs_pr:
+            if spec.needs_pr and (action.number is not None or not spec.optional_pr):
                 if action.number is None:
                     raise RuntimeError(f"{action.kind} needs a PR number")
                 pr = await self.x.reader.get_pr(action.repo, action.number)

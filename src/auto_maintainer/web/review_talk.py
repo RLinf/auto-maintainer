@@ -192,7 +192,11 @@ def build_router() -> APIRouter:
 
     async def talk_job(service: Service, user: User, job_id: str) -> Job:
         job = await _job(service, user, job_id)
-        if job.playbook not in TALKS_ON or not job.repo or job.number is None:
+        if (
+            job.playbook not in TALKS_ON
+            or not job.repo
+            or (job.number is None and job.playbook != "fix")
+        ):
             raise HTTPException(
                 404, "only a review, a follow-up, or a fix has a conversation"
             )
@@ -324,7 +328,7 @@ def build_router() -> APIRouter:
         the message goes to the agent at work instead."""
         service = service_of(request)
         job = await talk_job(service, user, job_id)
-        assert job.repo and job.number is not None
+        assert job.repo
         asker = str(_payload(job).get("by") or "")
         if asker.lower() != user.login.lower() and not await is_maintainer(
             service, user, job.repo
@@ -342,6 +346,7 @@ def build_router() -> APIRouter:
             return await _tell(service, user, job, body.text, body.agent)
         if job.playbook == "fix":
             return await _fix_say(request, service, user, job, body)
+        assert job.number is not None
         record = await _draft(service, job)
         if record is None:
             raise HTTPException(
@@ -376,7 +381,7 @@ def build_router() -> APIRouter:
     async def _fix_say(
         request: Request, service: Service, user: User, job: Job, body: TalkBody
     ) -> dict[str, Any]:
-        assert job.repo and job.number is not None
+        assert job.repo
         if job.status in ACTIVE:
             raise HTTPException(
                 409,
@@ -384,9 +389,14 @@ def build_router() -> APIRouter:
                 "cannot read one while it works. Send it once the change is drafted.",
             )
         profile = await service.profiles.active(job.repo)
-        pr = await service.a.forge.get_pr(job.repo, job.number)
-        if profile is None or pr is None:
-            raise HTTPException(409, f"{job.repo}#{job.number} is not available now")
+        pr = (
+            await service.a.forge.get_pr(job.repo, job.number)
+            if job.number is not None
+            else None
+        )
+        if profile is None or (job.number is not None and pr is None):
+            target = f"{job.repo}#{job.number}" if job.number is not None else job.repo
+            raise HTTPException(409, f"{target} is not available now")
         record = await fix_draft(service, job)
         route = _route(
             service,
@@ -403,7 +413,9 @@ def build_router() -> APIRouter:
             thread = await service.store.get_thread(thread_id_of(job)) or ChatThread(
                 id=thread_id_of(job),
                 owner=user.login,
-                title=f"{job.repo}#{job.number}",
+                title=f"{job.repo}#{job.number}"
+                if job.number is not None
+                else job.repo,
                 repo=job.repo,
                 number=job.number,
                 job_id=job.id,
@@ -437,14 +449,14 @@ async def _tell(
 ) -> dict[str, Any]:
     """Bring a reviewer's message to the agent writing the review; the review it
     finishes answers it, and later turns read it in the conversation."""
-    assert job.repo and job.number is not None
+    assert job.repo
     text, removed = redact_secrets(said)
     if not service.a.agents.tell(job.id, user.login, told_block(user.login, text)):
         raise HTTPException(409, "the agent finished this step; send it again")
     thread = await service.store.get_thread(thread_id_of(job)) or ChatThread(
         id=thread_id_of(job),
         owner=user.login,
-        title=f"{job.repo}#{job.number}",
+        title=f"{job.repo}#{job.number}" if job.number is not None else job.repo,
         repo=job.repo,
         number=job.number,
         job_id=job.id,

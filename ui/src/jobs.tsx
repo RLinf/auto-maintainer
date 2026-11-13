@@ -250,11 +250,13 @@ export function WorkRow({ job, me }: { job: AgentJob; me: string }) {
         ) : (
           <span className="t">
             {t(pb.label)}
-            {job.number != null && (
+            {job.number != null ? (
               <span className="muted">
                 {" "}
                 · {job.repo}#{job.number}
               </span>
+            ) : (
+              job.repo && <span className="muted"> · {job.repo}</span>
             )}
           </span>
         )}
@@ -381,13 +383,15 @@ function JobView({ id, onClose }: { id: string; onClose: () => void }) {
         <div className="stack" style={{ gap: 2, minWidth: 0, flex: 1 }}>
           <strong style={{ fontSize: 14.5 }}>
             {pb ? t(pb.label) : t("Agent's work")}
-            {d?.number != null && (
+            {d?.number != null ? (
               <>
                 {" "}
                 <Link to={prPath(d.repo ?? "", d.number)} className="small">
                   {d.repo}#{d.number}
                 </Link>
               </>
+            ) : (
+              d?.repo && <span className="small muted"> {d.repo}</span>
             )}
           </strong>
           {d?.title && <span className="small muted ellipsis">{d.title}</span>}

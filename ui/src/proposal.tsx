@@ -155,6 +155,8 @@ export function ProposalCard({
     setComments(Array.isArray(payload.comments) ? (payload.comments as InlineComment[]) : []);
   }, [payload.body, payload.comments, editing]);
   const isFix = kind === "pr.fix";
+  const isNewPr = isFix && action?.number == null;
+  const isDraftPr = isFix && payload.draft === true;
   // A PR's new title and description are set only by a person, as themselves.
   const isEdit = kind === "pr.edit";
   // A fix, or a merge of the base branch, goes onto the PR's branch or as a PR into
@@ -162,7 +164,7 @@ export function ProposalCard({
   const isMerge = isFix && !!str(payload.merge_ref);
   const cannotPush = proposal.can_push === false;
   const drafted = str(payload.target) || "pr";
-  const [target, setTarget] = useState(cannotPush ? "pr" : drafted);
+  const [target, setTarget] = useState(cannotPush || isNewPr ? "pr" : drafted);
   const changedTarget = isFix && target !== drafted;
   const canAsMe = !!me?.can_post_as_me && AS_ME.has(kind);
   // An edit of a posted review is done by whoever posted it: GitHub lets only the author edit it.
@@ -221,7 +223,9 @@ export function ProposalCard({
       ? isMerge
         ? t("Push the merge as me")
         : t("Push to the PR as me")
-      : t("Open the PR as me")
+      : isDraftPr
+        ? t("Open the draft PR as me")
+        : t("Open the PR as me")
     : kind === "code.update"
       ? t("Push the merge")
       : kind === "lab.reproduce"
@@ -271,7 +275,7 @@ export function ProposalCard({
     <div className="proposal">
       <div className="row">
         {onSelect && !done && decides && <input type="checkbox" aria-label={`Select ${kindLabel(kind)}`} checked={!!selected} onChange={onSelect} />}
-        <strong>{t(kindLabel(kind))}</strong>
+        <strong>{isNewPr ? (isDraftPr ? t("Open a draft PR") : t("Open a PR")) : t(kindLabel(kind))}</strong>
         {action.number != null && (
           <Link to={kind === "code.update" ? "/service" : prPath(action.repo, action.number)} className="small">
             {action.repo}#{action.number}
@@ -385,7 +389,7 @@ export function ProposalCard({
               </Popover>
             )}
           </div>
-          {isFix && (
+          {isFix && !isNewPr && (
             <select value={target} onChange={(e) => setTarget(e.target.value)} aria-label={t("Where the fix goes")}>
               <option value="pr">{t("As a PR into this PR")}</option>
               <option value="branch" disabled={cannotPush} title={cannotPush ? t("You cannot push to this PR's branch: its fork does not let maintainers, or you cannot write to the repository") : undefined}>
@@ -525,11 +529,13 @@ function KindBody({
   if (kind === "pr.fix") {
     const changed = list(payload.files);
     const merge = str(payload.merge_ref);
+    const baseRef = str(payload.base_ref);
     parts.push(
       <div key="fix" className="small muted">
         {merge
           ? `${t("Merges")} ${merge} (${str(payload.merge_sha).slice(0, 7)}) ${t("into the PR's branch")} · ${changed.length} ${t("conflicted files resolved")}`
           : `${changed.length} ${t("files changed")}`}
+        {baseRef ? ` · ${payload.draft === true ? t("draft PR into") : t("into")} ${baseRef}` : ""}
         {str(payload.runtime) ? ` · ${str(payload.runtime)}` : ""}
       </div>,
       editing ? <input key="title" value={title} onChange={(e) => setTitle(e.target.value)} aria-label={t("PR title")} /> : <strong key="title">{str(payload.title)}</strong>,

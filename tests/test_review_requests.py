@@ -1200,3 +1200,193 @@ async def test_in_the_conversation_a_new_title_rides_the_code_or_stands_alone(
         assert edit["action"]["action"]["payload"]["title"] == "feat: batches of one"
         assert "reject it" in alone.json()["text"]
         assert [p["id"] for p in await drafts("pr.fix")] == [fix["id"]], "still waits"
+
+
+@pytest.mark.parametrize("draft_pr", [True, False])
+async def test_chat_change_opens_new_or_draft_pr_against_default_branch(
+    demo, draft_pr: bool
+) -> None:
+    """In chat, ``kind=change`` without a PR number edits a checkout of the target
+    repository's default branch and drafts a ``pr.fix`` action that opens a new PR
+    (or draft PR when asked) against the default branch as the approving maintainer."""
+    h, app = demo
+    asked: list[Any] = []
+
+    def change(task: Any) -> Any:
+        if task.mode == "read_only":
+            return {
+                "title": "docs(skills): add write-doc skill",
+                "summary": "Adds a concise documentation writing skill.",
+            }
+        asked.append(task)
+        skill = Path(task.workdir) / ".agents" / "skills" / "write-doc" / "SKILL.md"
+        skill.parent.mkdir(parents=True, exist_ok=True)
+        if task.activity == "fix_talk":
+            skill.write_text("---\nname: write-doc\n---\nKeep sections brief.\n")
+            return AgentResult(runtime="scripted", ok=True, text="Tightened the skill.")
+        skill.write_text("---\nname: write-doc\n---\nWrite clearly.\n")
+        return AgentResult(runtime="scripted", ok=True, text="Added write-doc skill.")
+
+    def chat(task: Any) -> dict[str, Any]:
+        return {
+            "reply": "Preparing that PR against the default branch now.",
+            "proposals": [
+                {
+                    "kind": "change",
+                    "repo": REPO.upper() if draft_pr else REPO,
+                    "draft": draft_pr,
+                    "request": "Add a write-doc skill under .agents/skills/write-doc/SKILL.md.",
+                }
+            ],
+        }
+
+    h.runner.on("fix", change)
+    h.runner.on("chat", chat)
+    await h.service.a.user_tokens.set("maria", UserToken(token="t"))
+    async with _as(app, "maria") as maria:
+        thread = (await maria.post("/api/chat/threads", json={"text": "hi"})).json()
+        sent = await maria.post(
+            f"/api/chat/threads/{thread['id']}/messages",
+            json={"text": "Open a PR adding the write-doc skill."},
+        )
+        assert sent.status_code == 200, sent.text
+        assert sent.json()["jobs"], "the change starts at once without an open PR"
+        await h.settle()
+
+        [task] = asked
+        assert task.requested_by == "maria" and task.mode == "workspace_write"
+        assert "against `main` of `acme/widget`" in task.prompt
+        assert ("draft pull request" in task.prompt) is draft_pr
+
+        messages = (
+            await maria.get(f"/api/chat/threads/{thread['id']}/messages")
+        ).json()
+        expected_notice = (
+            "The draft PR for acme/widget is ready"
+            if draft_pr
+            else "The PR for acme/widget is ready"
+        )
+        assert any(
+            expected_notice in m["text"] for m in messages if m["role"] == "assistant"
+        )
+
+        [proposal] = [
+            p
+            for p in (await maria.get("/api/proposals")).json()
+            if p["action"]["action"]["kind"] == "pr.fix"
+        ]
+        assert proposal["can_push"] is False
+        assert proposal["requested_by"] == "maria"
+        action = proposal["action"]["action"]
+        assert action["number"] is None
+        assert action["head_sha"] == "d" * 40
+        payload = action["payload"]
+        assert payload["base_ref"] == "main"
+        assert payload["base_sha"] == "d" * 40
+        assert payload["draft"] is draft_pr
+        assert payload["files"] == [".agents/skills/write-doc/SKILL.md"]
+
+        # Without as_me, the service refuses to push or open the PR itself.
+        refused = await maria.post(f"/api/proposals/{proposal['id']}/approve", json={})
+        assert refused.status_code == 409
+
+        # Pushing straight onto the default branch is refused; the proposal returns to pending.
+        direct = await maria.post(
+            f"/api/proposals/{proposal['id']}/approve",
+            json={"as_me": True, "payload": {**payload, "target": "branch"}},
+        )
+        assert direct.status_code == 200, direct.text
+        await h.settle()
+        publisher = h.service.a.publisher
+        assert publisher is not None and publisher.published == []
+        assert h.forge.writes_of("create_pr") == []
+        [proposal] = [
+            p
+            for p in (await maria.get("/api/proposals")).json()
+            if p["id"] == proposal["id"]
+        ]
+        assert proposal["state"] == "pending"
+        assert any("cannot push straight" in w for w in proposal["warnings"])
+
+        # Discussing the new-PR job revises the pending draft while keeping draft and base_ref.
+        job_id = action["provenance"]["job_id"]
+        talk_state = await maria.get(f"/api/jobs/{job_id}/talk")
+        assert talk_state.status_code == 200, talk_state.text
+        revised = await maria.post(
+            f"/api/jobs/{job_id}/talk",
+            json={"text": "Make the skill instructions shorter."},
+        )
+        assert revised.status_code == 200, revised.text
+        assert revised.json()["proposals"] == [proposal["action_id"]]
+        [proposal] = [
+            p
+            for p in (await maria.get("/api/proposals")).json()
+            if p["id"] == proposal["id"]
+        ]
+        payload = proposal["action"]["action"]["payload"]
+        assert payload["draft"] is draft_pr and payload["base_ref"] == "main"
+        assert "Keep sections brief." in payload["patch"]
+
+        ok = await maria.post(
+            f"/api/proposals/{proposal['id']}/approve",
+            json={"as_me": True, "payload": {**payload, "target": "pr"}},
+        )
+        assert ok.status_code == 200, ok.text
+        await h.settle()
+
+    assert publisher is not None
+    [pushed] = publisher.published
+    assert pushed["branch"] == f"am/pr-{action['id'][-6:]}"
+    assert pushed["base"] == "d" * 40
+    assert pushed["author"] == ("maria", "maria@users.noreply.github.com")
+    assert "Signed-off-by: maria" in pushed["message"]
+    [opened] = h.forge.writes_of("create_pr")
+    assert opened["repo"] == REPO
+    assert opened["base"] == "main"
+    assert opened["head"] == pushed["branch"]
+    assert opened["author"] == "maria"
+    assert opened["title"] == "docs(skills): add write-doc skill"
+    assert opened["draft"] is draft_pr
+
+
+async def test_new_pr_change_that_touches_no_files_drafts_nothing(demo) -> None:
+    h, app = demo
+    h.runner.on(
+        "fix",
+        lambda task: AgentResult(
+            runtime="scripted", ok=True, text="The skill already exists."
+        ),
+    )
+    h.runner.on(
+        "chat",
+        lambda task: {
+            "reply": "Checking now.",
+            "proposals": [
+                {
+                    "kind": "change",
+                    "repo": REPO,
+                    "draft": True,
+                    "request": "Add write-doc skill if missing.",
+                }
+            ],
+        },
+    )
+    async with _as(app, "maria") as maria:
+        before = [p["id"] for p in (await maria.get("/api/proposals")).json()]
+        thread = (await maria.post("/api/chat/threads", json={"text": "hi"})).json()
+        await maria.post(
+            f"/api/chat/threads/{thread['id']}/messages",
+            json={"text": "Open a draft PR if write-doc is missing."},
+        )
+        await h.settle()
+        after = (await maria.get("/api/proposals")).json()
+        assert [p["id"] for p in after] == before
+        assert [p for p in after if p["action"]["action"]["kind"] == "pr.fix"] == []
+        messages = (
+            await maria.get(f"/api/chat/threads/{thread['id']}/messages")
+        ).json()
+        assert any(
+            "The agent changed nothing in acme/widget." in m["text"]
+            for m in messages
+            if m["role"] == "assistant"
+        )
