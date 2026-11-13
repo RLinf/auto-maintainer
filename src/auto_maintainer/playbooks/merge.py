@@ -74,6 +74,7 @@ from ..domain.merge_schedule import (
     ACTIVE,
     LANDING_SECONDS,
     RESOLVE_SECONDS,
+    UNKNOWN_READS,
     UPDATES_PER_TURN,
     WAITING,
     ScheduleState,
@@ -95,6 +96,7 @@ from ..domain.run_ci import ci_view, latest_checks, rerun_targets
 from ..domain.snapshot import (
     CheckConclusion,
     CheckStatus,
+    Mergeable,
     PrSnapshot,
     PrState,
     RepoInfo,
@@ -128,7 +130,12 @@ WAIT_KINDS = [
 ]
 RATE_LIMITED = "GitHub's rate limit"
 """How the reason of a step the forge's rate limit refused starts."""
-WAIT_SECONDS = 6 * 3600
+WAIT_SECONDS = 600
+"""How long a scheduled PR's job waits for an event (CI, a review, a push) before it
+reads the PR again anyway: what it waits for can come without one (a conflict
+GitHub works out later, a check reported late), and a read costs no agent."""
+BLOCKED_SECONDS = 900
+"""How often a PR blocked on something only a person mends is looked at again."""
 RATE_LIMIT_SECONDS = 600
 """How long a step the forge's rate limit refused waits before it is taken again,
 when the refusal does not say when the limit resets."""
@@ -326,7 +333,7 @@ class MergePlaybook(Playbook):
             if not again:
                 return PlaybookResult(
                     wait=wait.model_copy(
-                        update={"seconds": 3600, "reason": "merge blocked"}
+                        update={"seconds": BLOCKED_SECONDS, "reason": "merge blocked"}
                     ),
                     result={"phase": "blocked"},
                 )
@@ -479,6 +486,28 @@ class MergePlaybook(Playbook):
             action.provenance.requested_by = arm.armed_by
             return action
 
+        if pr.mergeable == Mergeable.UNKNOWN and state.unknown_reads < UNKNOWN_READS:
+            # GitHub works out whether a PR merges cleanly in the background, after
+            # the base moves; a conflicting PR runs no CI, so CI is not started on a
+            # guess: it is read again in a minute.
+            state.unknown_reads += 1
+            await self._set(
+                ctx,
+                profile,
+                info,
+                pr,
+                state,
+                state.phase if state.phase in ACTIVE else "starting",
+                "waiting for GitHub to work out whether it merges cleanly",
+            )
+            return PlaybookResult(
+                wait=wait.model_copy(
+                    update={"seconds": 60, "reason": "mergeability unknown"}
+                ),
+                result={"phase": state.phase, "mergeable": "unknown"},
+            )
+        if pr.mergeable != Mergeable.UNKNOWN:
+            state.unknown_reads = 0
         if resolvable:
             resolving = await self._resolve(
                 ctx, profile, info, pr, arm, state, wait, resolution
@@ -743,7 +772,13 @@ class MergePlaybook(Playbook):
             else what
         )
         await self._set(ctx, profile, info, pr, state, phase, detail)
-        left = max(60, int((limit - minutes) * 60)) if minutes < limit else WAIT_SECONDS
+        # Read again at the limit, and at least every ``WAIT_SECONDS`` before and
+        # after it: what it waits for may come without an event.
+        left = (
+            max(60, min(WAIT_SECONDS, int((limit - minutes) * 60)))
+            if minutes < limit
+            else WAIT_SECONDS
+        )
         return PlaybookResult(
             actions=actions,
             wait=wait.model_copy(update={"seconds": left, "reason": f"CI {what}"}),
@@ -1309,7 +1344,9 @@ class MergePlaybook(Playbook):
         return PlaybookResult(
             actions=[self._tell(pr, arm, "merge.blocked", why)],
             events=events,
-            wait=Wait(kinds=WAIT_KINDS, seconds=3600, reason="merge blocked"),
+            wait=Wait(
+                kinds=WAIT_KINDS, seconds=BLOCKED_SECONDS, reason="merge blocked"
+            ),
             result={"phase": "blocked", "why": why},
         )
 

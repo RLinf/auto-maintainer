@@ -279,6 +279,10 @@ async def harness(tmp_path: Path) -> AsyncIterator[Harness]:
 
 
 def _ready(number: int, sha: str, checks: list[CheckRun], **kw: Any):
+    from auto_maintainer.domain.snapshot import Mergeable
+
+    # GitHub has worked out whether it merges cleanly, as it has for most PRs.
+    kw.setdefault("mergeable", Mergeable.MERGEABLE)
     return make_pr(
         number=number,
         sha=sha,
@@ -2233,3 +2237,25 @@ async def test_a_standby_host_records_the_schedules_steps_without_taking_them(
         assert merge.status == ActionStatus.SHADOWED
     finally:
         await h.close()
+
+
+async def test_ci_waits_while_github_works_out_whether_the_pr_conflicts(
+    harness: Harness,
+) -> None:
+    from auto_maintainer.domain.snapshot import Mergeable
+
+    h = harness
+    h.forge.put_pr(_ready(42, "a" * 40, [], labels=[], mergeable=Mergeable.UNKNOWN))
+    await _schedule(h, 42)
+    await h.settle()
+    state = await _phase(h, 42)
+    assert "whether it merges cleanly" in state.detail
+    assert not h.forge.writes_of("add_labels"), "no CI started on a guess"
+    # GitHub reports the conflict a moment later: the schedule resolves it instead.
+    _conflicting(h)
+    h.runner.on("fix", _resolving("intro\nours line\ntheirs line\n"))
+    h.clock.advance(minutes=2)
+    await h.emit(Event(kind=EventKind.MERGE_QUEUE, repo=REPO, number=42))
+    await h.settle()
+    assert (await _phase(h, 42)).phase == "resolving"
+    assert not h.forge.writes_of("add_labels")

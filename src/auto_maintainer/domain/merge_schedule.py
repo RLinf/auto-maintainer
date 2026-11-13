@@ -86,6 +86,10 @@ def state_key(repo: str, number: int) -> str:
     return f"merge-schedule:{repo}#{number}"
 
 
+UNKNOWN_READS = 5
+"""How many times, a minute apart, a PR whose mergeability the forge has not worked
+out yet is read again on its turn before the schedule goes on without it."""
+
 RESOLVE_SECONDS = 3600
 """How long the schedule's resolution of a PR's conflict may take, from starting the
 agent to its push showing on the forge, before the schedule takes it to have failed."""
@@ -157,6 +161,9 @@ class ScheduleState(BaseModel):
     transient: int = 0
     """Steps the forge's rate limit refused at this head: each new attempt is an
     action of its own (``Action.idempotency_key``)."""
+    unknown_reads: int = 0
+    """Reads on its turn at which the forge had not yet worked out whether the PR
+    merges cleanly (``Mergeable.UNKNOWN``); after ``UNKNOWN_READS`` it goes on."""
     queued: bool = False
     """Its merge went to the forge's merge queue, which merges it in its own time."""
     blocked_rule: str = ""

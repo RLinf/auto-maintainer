@@ -28,6 +28,7 @@ from auto_maintainer.domain.snapshot import (
     CheckRun,
     CheckStatus,
     Commit,
+    Mergeable,
     PrFile,
     Review,
     ReviewEventState,
@@ -669,6 +670,8 @@ async def test_merge_waits_for_gate_then_merges_with_trailers(harness: Harness) 
     pr = _pr(
         title="fix(core): handle empty batches",
         checks=[running],
+        # GitHub has worked out that it merges cleanly.
+        mergeable=Mergeable.MERGEABLE,
         commits=[
             Commit(sha="c" * 40, message=_signed("fix(core): handle empty batches")),
             Commit(
