@@ -598,7 +598,8 @@ async def approvals_of(
 
 
 async def permission(service: Service, user: User, repo: str) -> Permission:
-    """The user's permission on ``repo``, cached for ten minutes, for viewing only."""
+    """The user's permission on ``repo``, cached for ten minutes per repository, for
+    viewing only."""
     now = service.clock.now()
     record = await service.store.get_user(user.login)
     from ..domain.ports import UserRecord
@@ -607,15 +608,12 @@ async def permission(service: Service, user: User, repo: str) -> Permission:
         record = UserRecord(
             login=user.login, name=user.name, avatar_url=user.avatar_url
         )
-    fresh = (
-        record.permissions_checked_at
-        and now - record.permissions_checked_at < PERMISSION_TTL
-    )
-    if fresh and repo in record.permissions:
+    checked = record.permissions_checked.get(repo)
+    if checked and now - checked < PERMISSION_TTL and repo in record.permissions:
         return Permission(record.permissions[repo])
     perm = await service.a.forge.get_permission(repo, user.login)
     record.permissions[repo] = perm.value
-    record.permissions_checked_at = now
+    record.permissions_checked[repo] = now
     await service.store.save_user(record)
     return perm
 

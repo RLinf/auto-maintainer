@@ -609,7 +609,8 @@ class UserRecord(BaseModel):
     name: str = ""
     avatar_url: str = ""
     permissions: dict[str, str] = Field(default_factory=dict)
-    permissions_checked_at: datetime | None = None
+    # When each entry of ``permissions`` was read from the forge; each expires alone.
+    permissions_checked: dict[str, datetime] = Field(default_factory=dict)
 
 
 class SecretStore(Protocol):
