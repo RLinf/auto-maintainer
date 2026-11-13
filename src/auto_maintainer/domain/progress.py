@@ -95,6 +95,11 @@ def _input_summary(data: dict[str, Any]) -> str:
     return ""
 
 
+def steps_key(job_id: str) -> str:
+    """Where the store keeps a job's steps once an attempt of it ended."""
+    return f"job-steps:{job_id}"
+
+
 def agent_session_key(job_id: str, kind: str) -> str:
     """Where the agent session of a job's unfinished run of ``kind`` is kept: its
     runtime and the CLI's session id, from the moment it has one until the run ends.

@@ -370,6 +370,7 @@ class Engine:
             job.updated_at = self.clock.now()
             await self.store.save_job(job)
             self._changed(job)
+            await self._finished(job)
             return None
 
         submitted = {}
@@ -421,7 +422,26 @@ class Engine:
         self._changed(job)
         for e in result.events:
             await self.bus.publish(e)
+        await self._finished(job)
         return result
+
+    async def _finished(self, job: Job) -> None:
+        """Tell the playbooks that ``job`` ended for good, done or failed."""
+        if job.status not in (JobStatus.DONE, JobStatus.FAILED):
+            return
+        await self.bus.publish(
+            Event(
+                kind=EventKind.JOB_FINISHED,
+                repo=job.repo,
+                number=job.number,
+                payload={
+                    "job": job.id,
+                    "playbook": job.playbook,
+                    "status": job.status.value,
+                },
+                source="engine",
+            )
+        )
 
     async def tick(self) -> None:
         """Requeue expired leases and wake jobs whose wait deadline passed."""

@@ -46,7 +46,13 @@ from ..domain.review import Finding, ReviewResult
 from ..domain.snapshot import PrSnapshot, PrState
 from .base import Playbook, PlaybookContext, PlaybookResult, may_succeed_later
 from .ci_doctor import OUTSIDE_LOGS, outside_logs
-from .prompts import pr_block, review_skill_block, schema_hint, untrusted
+from .prompts import (
+    pr_block,
+    review_skill_block,
+    schema_hint,
+    untrusted,
+    work_lessons_block,
+)
 
 FIX = """You are fixing a pull request for {reviewer}, a maintainer, inside an automated maintainer service. The working directory is a checkout of the PR's head commit.
 - Change the code to {task} and nothing else. Keep the PR author's approach; make the smallest change that does it.
@@ -297,6 +303,7 @@ class FixPlaybook(Playbook):
                         each="" if request else " for each finding",
                     ),
                     review_skill_block(profile, ctx.service.skills_dir, workdir),
+                    work_lessons_block(await ctx.knowledge.agent_lessons(pr.repo)),
                     asked,
                     f"What {by} added: " + untrusted("maintainer.note", note, 2000)
                     if note

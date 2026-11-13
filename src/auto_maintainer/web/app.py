@@ -45,6 +45,7 @@ from . import (
     forge_setup,
     governance,
     jobs,
+    learning,
     merge_schedule,
     my_agents,
     my_machines,
@@ -142,6 +143,7 @@ def create_app(
     app.include_router(review_talk.build_router())
     app.include_router(my_machines.build_router())
     app.include_router(merge_schedule.build_router())
+    app.include_router(learning.build_router())
     app.include_router(governance.build_router())
     app.include_router(people_talk.build_router())
     app.include_router(translate.build_router())

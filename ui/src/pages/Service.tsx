@@ -11,6 +11,7 @@ import { useProposals, useService } from "../data";
 import { useT } from "../i18n";
 import { Icon } from "../icons";
 import { DataTable, useList, type Column } from "../list";
+import { openJob } from "../openJob";
 import { ProposalCard, ServiceMergeBaseButton } from "../proposal";
 import { Skeleton, useToast } from "../ui";
 
@@ -210,6 +211,7 @@ export default function ServicePage() {
           </div>
         </Section>
       )}
+      <LearningSection />
       <h2>{t("History")}</h2>
       <DataTable list={history} columns={columns} empty={t("Nothing yet.")} />
       {v.can_approve && <LogsSection />}
@@ -278,3 +280,161 @@ function LogsSection() {
     </section>
   );
 }
+
+interface Suggestion {
+  id: string;
+  title: string;
+  problem: string;
+  proposal: string;
+  repo: string | null;
+  playbook: string;
+  jobs: string[];
+  count: number;
+  first_at: string;
+  last_at: string;
+  state: "open" | "approved" | "dismissed";
+  decided_by: string | null;
+}
+
+interface PendingLesson {
+  id: string;
+  title: string;
+  description: string;
+  files: Record<string, string | null>;
+  created_at: string;
+}
+
+/** What the agents learned from their own trouble, for the owner: their suggestions
+ * of changes to the service (approving one starts a self-improvement), and the
+ * lessons about the service's tools and test machines that wait for approval. */
+function LearningSection() {
+  const t = useT();
+  const toast = useToast();
+  const q = useQuery({ queryKey: ["learning"], queryFn: () => api.get<{ owner: boolean; suggestions: Suggestion[]; lessons: PendingLesson[] }>("/api/learning") });
+  const [editing, setEditing] = useState<string | null>(null);
+  const [text, setText] = useState("");
+  const approve = useAct((x: { id: string; text: string }) => api.post<{ thread: string }>(`/api/learning/suggestions/${x.id}/approve`, { text: x.text }), [["learning"], ["service"]]);
+  const dismiss = useAct((id: string) => api.post(`/api/learning/suggestions/${id}/dismiss`), [["learning"]]);
+  const accept = useAct((id: string) => api.post(`/api/memory/changes/${id}/approve`), [["learning"]]);
+  const reject = useAct((id: string) => api.post(`/api/memory/changes/${id}/reject`, { reason: "not a lesson to keep" }), [["learning"]]);
+  if (!q.data?.owner) return null;
+  const open = q.data.suggestions.filter((s) => s.state === "open");
+  const decided = q.data.suggestions.filter((s) => s.state !== "open");
+  const lessons = q.data.lessons;
+  return (
+    <Section title={t("What the agents learned")} hint={t("From trouble in their own work: lessons for later runs, and changes they suggest to the service")}>
+      <div className="stack" style={{ gap: 14 }}>
+        <div className="stack" style={{ gap: 8 }}>
+          <strong className="small">{t("Suggested changes to the service")}</strong>
+          {open.length === 0 && <span className="small muted">{t("None waiting.")}</span>}
+          {open.map((s) => (
+            <div key={s.id} className="stack merge-draft" style={{ gap: 6 }}>
+              <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+                <strong className="small">{s.title}</strong>
+                <span className="small muted">
+                  {s.count > 1 ? `${t("met")} ${s.count} ${t("times")} · ` : ""}
+                  {s.playbook}
+                  {s.repo ? ` · ${s.repo}` : ""} · <When at={s.last_at} />
+                </span>
+                {s.jobs.length > 0 && (
+                  <button className="sm ghost right" onClick={() => openJob(s.jobs[s.jobs.length - 1])}>
+                    <Icon name="eye" size={13} />
+                    {t("The work it came from")}
+                  </button>
+                )}
+              </div>
+              <span className="small">
+                <span className="muted">{t("Problem")}:</span> {s.problem}
+              </span>
+              <span className="small">
+                <span className="muted">{t("Proposed change")}:</span> {s.proposal}
+              </span>
+              {editing === s.id ? (
+                <div className="stack" style={{ gap: 6 }}>
+                  <span className="small muted">{t("The change a self-improvement makes, as you approve it; edit it first if you like.")}</span>
+                  <textarea rows={6} value={text} onChange={(e) => setText(e.target.value)} />
+                  <div className="row" style={{ gap: 8 }}>
+                    <button className="sm ghost right" onClick={() => setEditing(null)}>
+                      {t("Cancel")}
+                    </button>
+                    <button
+                      className="sm primary"
+                      disabled={approve.isPending || !text.trim()}
+                      onClick={() =>
+                        approve.mutate(
+                          { id: s.id, text },
+                          {
+                            onSuccess: () => {
+                              setEditing(null);
+                              toast({ title: t("Self-improvement started"), body: t("It opens a PR once its tests pass; the conversation says how it goes."), icon: "sparkles" });
+                            },
+                          },
+                        )
+                      }
+                    >
+                      {t("Start this change")}
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="row" style={{ gap: 8 }}>
+                  <button className="sm ghost" disabled={dismiss.isPending} onClick={() => dismiss.mutate(s.id)}>
+                    {t("Dismiss")}
+                  </button>
+                  <button
+                    className="sm primary right"
+                    onClick={() => {
+                      setEditing(s.id);
+                      setText(`${s.title}\n\nProblem: ${s.problem}\n\nProposed change: ${s.proposal}`);
+                    }}
+                  >
+                    {t("Make this change…")}
+                  </button>
+                </div>
+              )}
+            </div>
+          ))}
+          {decided.length > 0 && (
+            <details>
+              <summary className="small muted">
+                {t("Decided")} ({decided.length})
+              </summary>
+              <ul className="merge-rules" style={{ marginTop: 6 }}>
+                {decided.map((s) => (
+                  <li key={s.id} className="small muted">
+                    {s.title} · {s.state === "approved" ? t("change started by") : t("dismissed by")} {s.decided_by}
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
+        </div>
+        <div className="stack" style={{ gap: 8 }}>
+          <strong className="small">{t("Lessons about the service's tools and test machines, waiting for you")}</strong>
+          {lessons.length === 0 && <span className="small muted">{t("None waiting. A repository's own lessons wait for its maintainers on the Memory page.")}</span>}
+          {lessons.map((c) => (
+            <div key={c.id} className="stack merge-draft" style={{ gap: 6 }}>
+              <span className="small">
+                <strong>{c.title}</strong> <span className="muted">· <When at={c.created_at} /></span>
+              </span>
+              <span className="small" style={{ whiteSpace: "pre-wrap" }}>
+                {c.description}
+              </span>
+              <span className="small muted mono">{Object.keys(c.files).join(", ")}</span>
+              <div className="row" style={{ gap: 8 }}>
+                <button className="sm ghost" disabled={reject.isPending} onClick={() => reject.mutate(c.id)}>
+                  {t("Reject")}
+                </button>
+                <button className="sm primary right" disabled={accept.isPending} onClick={() => accept.mutate(c.id, { onSuccess: () => toast({ title: t("Lesson kept"), body: t("Later agents read it."), icon: "check" }) })}>
+                  {t("Keep this lesson")}
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+        <ErrorBox error={approve.error || dismiss.error || accept.error || reject.error} />
+      </div>
+    </Section>
+  );
+}
+

@@ -58,6 +58,7 @@ from .prompts import (
     schema_hint,
     untrusted,
     without_generated,
+    work_lessons_block,
     writing_block,
 )
 from .requests import FOLLOWUP_STATES, review_key, review_request, starts_review
@@ -176,6 +177,7 @@ class Followup(Playbook):
                     if ctx.requested_by
                     else headless(profile, testing),
                     review_skill_block(profile, ctx.service.skills_dir, workdir),
+                    work_lessons_block(await ctx.knowledge.agent_lessons(pr.repo)),
                     (
                         "This PR was approved earlier; new commits arrived since. Check only whether they introduce "
                         "a regression or a new problem. Report earlier findings only if they apply."

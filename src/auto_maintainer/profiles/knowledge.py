@@ -35,6 +35,19 @@ FLAKES = "ci/flake_signatures.yaml"
 LESSONS = "knowledge/review_lessons.md"
 GLOBAL_FLAKES = "global/ci/flake_signatures.yaml"
 GLOBAL_LESSONS = "global/knowledge/review_lessons.md"
+AGENT_LESSONS = "knowledge/agent_lessons.md"
+"""What the service's agents learned from their own trouble doing work in one
+repository (``playbooks/retrospect.py``), as its maintainers approved it."""
+GLOBAL_AGENT_LESSONS = "global/knowledge/agent_lessons.md"
+"""The same about the service's own tools, as its owner approved it."""
+MACHINE_LESSONS = "global/knowledge/machines/{name}.md"
+"""The same about one test machine, as the service's owner approved it."""
+
+
+def machine_lessons_path(name: str) -> str:
+    """Where the lessons about test machine ``name`` live in the memory repo."""
+    safe = "".join(c if c.isalnum() or c in "-_." else "-" for c in name).strip(".")
+    return MACHINE_LESSONS.format(name=safe or "machine")
 
 
 class Knowledge:
@@ -104,6 +117,38 @@ class Knowledge:
             parts.append(await self._memory.read_text(GLOBAL_LESSONS) or "")
         return "\n\n".join(p.strip() for p in parts if p.strip())
 
+    async def agent_lessons(
+        self, repo: str | None, machines: list[str] | tuple[str, ...] = ()
+    ) -> str:
+        """What the service's agents learned from earlier trouble, as approved: about
+        ``repo``, about each of ``machines``, and about the service's own tools;
+        each part under its own heading, empty when none has any."""
+        parts: list[tuple[str, str]] = []
+        if repo:
+            parts.append(
+                (
+                    f"About work in {repo}",
+                    await self._memory.read_text(f"{repo_dir(repo)}/{AGENT_LESSONS}")
+                    or "",
+                )
+            )
+        for name in machines:
+            parts.append(
+                (
+                    f"About test machine {name}",
+                    await self._memory.read_text(machine_lessons_path(name)) or "",
+                )
+            )
+        parts.append(
+            (
+                "About the service's own tools",
+                await self._memory.read_text(GLOBAL_AGENT_LESSONS) or "",
+            )
+        )
+        return "\n\n".join(
+            f"## {title}\n{_items(text)}" for title, text in parts if _items(text)
+        )
+
     async def memory_index(self, repo: str | None) -> str:
         parts = [await self._memory.read_text("MEMORY.md") or ""]
         if repo:
@@ -111,6 +156,13 @@ class Knowledge:
                 await self._memory.read_text(f"{repo_dir(repo)}/MEMORY.md") or ""
             )
         return "\n\n".join(p.strip() for p in parts if p.strip())
+
+
+def _items(text: str) -> str:
+    """The list items of a lessons file, without its heading."""
+    return "\n".join(
+        line for line in text.splitlines() if line.strip() and not line.startswith("#")
+    ).strip()
 
 
 def dump_stage_goals(goals: list[StageGoal]) -> str:

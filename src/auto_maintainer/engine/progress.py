@@ -37,6 +37,7 @@ from ..domain.progress import (
     JobStep,
     agent_session_key,
     step_from_event,
+    steps_key,
 )
 from ..domain.secrets import redact_secrets
 
@@ -51,7 +52,7 @@ _INDEX = "job-steps:index"
 
 
 def _key(job_id: str) -> str:
-    return f"job-steps:{job_id}"
+    return steps_key(job_id)
 
 
 def _joined(text: str, more: str, limit: int = 4000) -> str:

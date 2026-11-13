@@ -78,6 +78,7 @@ from .prompts import (
     review_skill_path,
     schema_hint,
     untrusted,
+    work_lessons_block,
 )
 from .review_revise import (
     answer_model,
@@ -446,6 +447,7 @@ class ReproducePlaybook(Playbook):
                     public_language=profile.languages.public,
                 ),
                 ASK.format(by=by) if by else "",
+                work_lessons_block(await ctx.knowledge.agent_lessons(pr.repo, [lab])),
                 machine_facts(
                     lab,
                     machine.description if machine else "",

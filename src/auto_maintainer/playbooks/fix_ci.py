@@ -48,7 +48,13 @@ from .base import (
 )
 from .ci_doctor import OUTSIDE_LOGS, failing_checks, outside_logs
 from .fix import DESCRIBE, FixResult
-from .prompts import pr_block, review_skill_block, schema_hint, untrusted
+from .prompts import (
+    pr_block,
+    review_skill_block,
+    schema_hint,
+    untrusted,
+    work_lessons_block,
+)
 
 
 def _read_log(repo: str) -> str:
@@ -217,6 +223,11 @@ class FixCiPlaybook(Playbook):
                     if machine and machine.description.strip()
                     else "",
                     review_skill_block(profile, ctx.service.skills_dir, workdir),
+                    work_lessons_block(
+                        await ctx.knowledge.agent_lessons(
+                            pr.repo, [lab] if token and lab else []
+                        )
+                    ),
                     "Failed CI jobs at the PR's head "
                     f"{short_sha(pr.head_sha)}:\n" + "\n".join(jobs),
                     "The service's diagnosis of them:\n"

@@ -71,6 +71,7 @@ from .prompts import (
     template_block,
     untrusted,
     without_generated,
+    work_lessons_block,
     writing_block,
 )
 from .requests import (
@@ -206,6 +207,11 @@ class ReviewPlaybook(Playbook):
                     if ctx.requested_by
                     else headless(profile, testing),
                     review_skill_block(profile, ctx.service.skills_dir, workdir),
+                    work_lessons_block(
+                        await ctx.knowledge.agent_lessons(
+                            pr.repo, [machine.lab] if machine.lab else []
+                        )
+                    ),
                     skill_format_block(profile)
                     if own_format
                     else template_block(profile),

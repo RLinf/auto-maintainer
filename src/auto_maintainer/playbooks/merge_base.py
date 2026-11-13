@@ -55,7 +55,7 @@ from ..domain.ids import same_commit, short_sha
 from ..domain.merge_schedule import resolve_key
 from ..domain.snapshot import PrSnapshot, PrState
 from .base import Playbook, PlaybookContext, PlaybookResult, may_succeed_later
-from .prompts import no_code_rule, pr_block, untrusted
+from .prompts import no_code_rule, pr_block, untrusted, work_lessons_block
 
 RESOLVE_COMMAND = "resolve_conflicts"
 """The merge schedule's request to resolve a scheduled PR's minor conflicts."""
@@ -223,6 +223,9 @@ class MergeBasePlaybook(Playbook):
                             ),
                             "Files with conflicts:\n"
                             + untrusted("merge.conflicts", listing, 8_000),
+                            work_lessons_block(
+                                await ctx.knowledge.agent_lessons(pr.repo)
+                            ),
                             pr_block(pr),
                         ]
                     ),
@@ -424,6 +427,9 @@ class MergeBasePlaybook(Playbook):
                             ),
                             "Files with conflicts, and their kind:\n"
                             + untrusted("merge.conflicts", listing, 12_000),
+                            work_lessons_block(
+                                await ctx.knowledge.agent_lessons(pr.repo)
+                            ),
                             pr_block(pr),
                         ]
                     ),

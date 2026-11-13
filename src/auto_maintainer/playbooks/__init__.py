@@ -43,6 +43,7 @@ from .quality import (
     QuickQualityPlaybook,
 )
 from .reproduce import ReproducePlaybook
+from .retrospect import Retrospect
 from .review import ReviewPlaybook
 from .review_scan import ReviewScan
 from .self_improve import SelfImprove
@@ -78,6 +79,7 @@ def all_playbooks() -> list[Playbook]:
         MergeBasePlaybook(),
         GovernancePlaybook(),
         ReproducePlaybook(),
+        Retrospect(),
         QualityPlaybook(),
         QuickQualityPlaybook(),
         QuickLearnPlaybook(),

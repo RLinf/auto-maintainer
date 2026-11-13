@@ -60,7 +60,13 @@ from ..domain.records import CiObservation, RootCause
 from ..domain.run_ci import ci_view
 from ..domain.snapshot import CheckRun, PrSnapshot
 from .base import Playbook, PlaybookContext, PlaybookResult, in_scope
-from .prompts import pr_block, schema_hint, untrusted, without_generated
+from .prompts import (
+    pr_block,
+    schema_hint,
+    untrusted,
+    without_generated,
+    work_lessons_block,
+)
 
 _ERROR_RE = re.compile(
     r"(error|failed|failure|exception|traceback|assert|fatal)", re.IGNORECASE
@@ -830,6 +836,7 @@ async def _root_cause(
                 "from them and the checkout. Fetch a job's log only when its excerpt "
                 "cuts off the failure, and never other runs, workflows, or the base "
                 "branch's history; stop reading once you can name the mechanism.",
+                work_lessons_block(await ctx.knowledge.agent_lessons(pr.repo)),
                 *logs,
                 pr_block(pr, diff),
                 schema_hint(RootCauseReport.model_json_schema()),
