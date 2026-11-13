@@ -887,9 +887,12 @@ async def test_checking_all_prs_reads_each_from_the_forge_again(
     h.forge.put_pr(_ready(43, "c" * 40, []))
     await h.poll()
     reads: list[int] = []
+    seen: list[dict[str, int] | None] = []
     refresh = h.service._refresh_pr
 
     async def counted(repo: str, number: int) -> None:
+        # How far the check got, as the page shows it, before each PR is read.
+        seen.append(h.service.check_progress(repo))
         reads.append(number)
         await refresh(repo, number)
 
@@ -905,8 +908,9 @@ async def test_checking_all_prs_reads_each_from_the_forge_again(
         assert again["started"] is False, "one check at a time"
         await h.service._checks[REPO]
         view = (await bob.get(f"/api/merge-schedule/{REPO}/view")).json()
-        assert view["checking"] is False
+        assert view["checking"] is False and view["check_progress"] is None
     assert sorted(reads) == [42, 43]
+    assert seen == [{"done": 0, "total": 2}, {"done": 1, "total": 2}]
     stored = await h.store.get_snapshot(REPO, 42)
     assert stored is not None and stored.review_decision == "APPROVED"
 
@@ -2127,3 +2131,35 @@ async def test_a_real_failure_of_a_finished_run_fails_the_pr_while_others_run(
     await h.settle()
     assert (await _phase(h, 42)).phase == "failed"
     assert not h.forge.writes_of("rerun_failed_jobs")
+
+
+async def test_a_base_merge_refused_for_the_schedulers_scope_waits_for_a_new_sign_in(
+    harness: Harness, tmp_path: Path
+) -> None:
+    h = harness
+    h.forge.put_pr(_ready(42, "a" * 40, _ci(42, "success"), behind_base=True))
+    update = h.forge.update_branch
+    h.forge.fail_next["update_branch"] = RuntimeError(
+        "GitHubError: GitHub API error 403: the base branch's new commits change "
+        "workflow files, and maria's dashboard sign-in may not change workflow files "
+        "(it lacks the workflow scope)"
+    )
+    await _schedule(h, 42)
+    await h.settle()
+    state = await _phase(h, 42)
+    assert state.phase == "blocked" and state.blocked_on == "person_scope"
+    assert "maria's dashboard sign-in lacks the workflow scope" in state.detail
+    assert not h.service.scope_request(), "the service's own sign-in is not the one"
+    # A change to the PR does not mend a sign-in: no attempt, it stays blocked.
+    await h.emit(Event(kind=EventKind.CHECKS_COMPLETED, repo=REPO, number=42))
+    await h.settle()
+    assert (await _phase(h, 42)).phase == "blocked"
+    assert not h.forge.writes_of("update_branch")
+    # maria signs in again and retries: a new attempt goes, as an action of its own.
+    app = create_app(h.service, data_dir=tmp_path, allow_dev_login=True)
+    async with _as(app, "maria") as maria:
+        out = await maria.post(f"/api/merge-schedule/{REPO}/42/retry")
+        assert out.status_code == 200, out.text
+    await h.settle()
+    assert [w["number"] for w in h.forge.writes_of("update_branch")] == [42]
+    del update

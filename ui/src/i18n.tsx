@@ -2481,6 +2481,8 @@ const zh: Record<string, string> = {
   "Diagnosing the selected failures": "正在诊断所选失败",
   "Other checks": "其他检查",
   "Earlier diagnoses": "更早的诊断",
+  "Listing the open PRs…": "正在列出未关闭的 PR…",
+  "PRs read from GitHub again": "已从 GitHub 重新读取的 PR",
   "How it merges": "合并设置",
   "Resolving conflicts": "正在解决冲突",
   "It is read from GitHub again, and the schedule looks at its step again.": "已从 GitHub 重新读取，调度会重新检查它当前的步骤。",

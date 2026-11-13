@@ -217,13 +217,24 @@ class GitHubWriter:
             )
         except GitHubError as e:
             if e.status == 403 and "workflow" in str(e) and "scope" in str(e):
+                whose = (
+                    f"{self._person}'s dashboard sign-in"
+                    if self._person
+                    else "the service's GitHub sign-in"
+                )
+                again = (
+                    f"{self._person} signs in to the dashboard again, which asks "
+                    "for the scope"
+                    if self._person
+                    else "the service's owner adds the scope to its sign-in"
+                )
                 raise GitHubError(
                     403,
-                    "the base branch's new commits change workflow files, and the "
-                    "GitHub sign-in this service holds may not change workflow "
-                    "files (it lacks the workflow scope). Press Update branch on "
-                    "the PR's page on GitHub, or merge the base branch locally and "
-                    f"push. GitHub said: {str(e).split(': ', 1)[-1]}",
+                    "the base branch's new commits change workflow files, and "
+                    f"{whose} may not change workflow files (it lacks the workflow "
+                    f"scope): {again}, or someone presses Update branch on the "
+                    "PR's page on GitHub. GitHub said: "
+                    f"{str(e).split(': ', 1)[-1]}",
                     e.body,
                 ) from e
             raise

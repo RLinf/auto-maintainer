@@ -312,11 +312,14 @@ class Service:
         """Set after a deploy; ``am serve`` then exits for its supervisor to restart it."""
         self._confirming: asyncio.Task[None] | None = None
         self._polls: dict[str, asyncio.Task[None]] = {}
+        """Polls started because a repository's approved profile changed, by repository."""
         self._scope_grant: ScopeGrant | None = None
         self._scope_record: dict[str, Any] | None = None
         self._checks: dict[str, asyncio.Task[None]] = {}
         """Full reads of every open PR of a repository a person asked for."""
-        """Polls started because a repository's approved profile changed, by repository."""
+        self._check_progress: dict[str, dict[str, int]] = {}
+        """How far each of ``_checks`` got: PRs ``done`` of ``total`` (0 while it
+        still lists them)."""
         self.questions = QuestionDesk(
             adapters.store,
             self.bus,
@@ -1309,6 +1312,13 @@ class Service:
         task = self._checks.get(repo)
         return task is not None and not task.done()
 
+    def check_progress(self, repo: str) -> dict[str, int] | None:
+        """How far ``check_prs`` got on ``repo``: PRs ``done`` of ``total`` (0 while
+        it still lists them); ``None`` when no check runs."""
+        if not self.checking_prs(repo):
+            return None
+        return dict(self._check_progress.get(repo) or {"done": 0, "total": 0})
+
     def check_prs(self, repo: str) -> bool:
         """Read every open PR of ``repo`` from the forge again now, in full, one at a
         time in the background: a poll reads in full only the PRs whose update time
@@ -1320,6 +1330,9 @@ class Service:
         if not self.serves(repo) or self.checking_prs(repo):
             return False
 
+        progress = {"done": 0, "total": 0}
+        self._check_progress[repo] = progress
+
         async def check() -> None:
             record = await self.store.get_repo(repo)
             if record is None or not record.active:
@@ -1329,11 +1342,19 @@ class Service:
             except Exception:
                 log.exception("polling %s before checking its PRs failed", repo)
             armed = {a.number for a in await self.store.list_arms(repo)}
+            others = [
+                pr.number
+                for pr in await self.store.list_snapshots(repo)
+                if pr.number not in armed
+            ]
+            progress["total"] = len(armed) + len(others)
+            self.tell_dashboards(EventKind.PR_REFRESHED, repo)
             for number in sorted(armed):
                 await self.check_scheduled(repo, number)
-            for pr in await self.store.list_snapshots(repo):
-                if pr.number not in armed:
-                    await self._refresh_pr(repo, pr.number)
+                progress["done"] += 1
+            for number in others:
+                await self._refresh_pr(repo, number)
+                progress["done"] += 1
 
         self._checks[repo] = asyncio.create_task(check(), name=f"check {repo}")
         return True

@@ -310,13 +310,18 @@ class MergePlaybook(Playbook):
                     and state.since is not None
                     and state.since < started
                 )
+                # Only a new sign-in mends a missing scope, never a change to the PR.
                 or (
-                    state.blocked_on != "workflow_scope" and event.kind in BLOCK_LIFTERS
+                    state.blocked_on not in ("workflow_scope", "person_scope")
+                    and event.kind in BLOCK_LIFTERS
                 )
                 # GitHub's own verdict is read afresh at each wake.
                 or state.blocked_on == "forge_rules"
                 # A base merge refused for a conflict the schedule may resolve.
-                or (resolvable and state.blocked_on != "workflow_scope")
+                or (
+                    resolvable
+                    and state.blocked_on not in ("workflow_scope", "person_scope")
+                )
             )
             if not again:
                 return PlaybookResult(
@@ -572,7 +577,9 @@ class MergePlaybook(Playbook):
             action = step(
                 ActionKind.PR_UPDATE_BRANCH,
                 UpdateBranchPayload(),
-                f"update:{state.updates}",
+                # A retry after the forge refused one is an action of its own.
+                f"update:{state.updates}"
+                + (f":a{state.merge_attempts}" if state.merge_attempts else ""),
                 f"behind {pr.base_ref}, which it must be up to date with",
             )
             await self._set(
@@ -1268,19 +1275,26 @@ class MergePlaybook(Playbook):
         arm: MergeArm,
         state: ScheduleState,
         why: str,
-        scope: bool,
+        scope: bool | str,
     ) -> PlaybookResult:
         """Keep the PR in the order, blocked, after the forge refused its merge or
         base merge, and pass the turn on: it tries again once a maintainer retries
         it, or after the service starts again (a new sign-in) when a scope was
         missing, or when the PR changes otherwise."""
-        state.blocked_on = "workflow_scope" if scope else "refused"
+        # ``scope``: whose sign-in lacked a scope (``service``, ``person``), if any.
+        state.blocked_on = (
+            "person_scope"
+            if scope == "person"
+            else "workflow_scope"
+            if scope
+            else "refused"
+        )
         state.merge_attempts += 1
         info = await ctx.forge.get_repo(pr.repo)
         events = await self._set(
             ctx, profile, info, pr, state, "blocked", why, wake=True
         )
-        if scope:
+        if state.blocked_on == "workflow_scope":
             # The service asks its owner to add the scope to its sign-in.
             events.append(
                 Event(
@@ -1614,24 +1628,24 @@ class MergePlaybook(Playbook):
 
     async def _our_failure(
         self, ctx: PlaybookContext, event: Event, arm: MergeArm
-    ) -> tuple[ActionKind, str, bool] | None:
+    ) -> tuple[ActionKind, str, str] | None:
         """The kind of a step the schedule took for this PR that failed, why, and
-        whether the forge refused it for a scope its sign-in lacks; ``None`` when
-        the failed action was not one of the schedule's."""
+        whose sign-in lacked a scope the forge asked for (``service``, ``person``,
+        or empty); ``None`` when the failed action was not one of the schedule's."""
         record_ = await ctx.store.get_action(str(event.payload.get("action_id") or ""))
         if record_ is None or record_.action.provenance.scheduled_by != arm.armed_by:
             return None
         error = str(event.payload.get("error") or record_.error or "it failed")
         kind = record_.action.kind
         if "RateLimited" in error or "rate limit" in error.lower():
-            return kind, f"{RATE_LIMITED} refused it: {error[:300]}", False
+            return kind, f"{RATE_LIMITED} refused it: {error[:300]}", ""
         if "SAML" in error:
             return (
                 kind,
                 "GitHub refused it: the organization enforces SAML single sign-on, "
                 "and the sign-in that wrote it is not authorized for it. "
                 f"{error[:400]}",
-                False,
+                "",
             )
         if "workflow" in error and ("scope" in error or "OAuth App" in error):
             # GitHub lets no sign-in without the workflow scope write a change to a
@@ -1645,22 +1659,22 @@ class MergePlaybook(Playbook):
                     f"file changes, and {record_.post_as}'s dashboard sign-in lacks "
                     "the workflow scope. They sign in to the dashboard again (it "
                     "asks for the scope now) and retry it",
-                    False,
+                    "person",
                 )
             return (
                 kind,
                 f"GitHub refused to {act} it: a workflow file changes, and the "
                 "service's GitHub sign-in lacks the workflow scope. The service "
                 "asks its owner to add it; once approved, it merges",
-                True,
+                "service",
             )
         if kind == ActionKind.PR_UPDATE_BRANCH:
-            return kind, f"merging the base in failed: {error}", False
+            return kind, f"merging the base in failed: {error}", ""
         if kind == ActionKind.PR_FIX:
-            return kind, f"pushing the schedule's resolution failed: {error}", False
+            return kind, f"pushing the schedule's resolution failed: {error}", ""
         if kind == ActionKind.PR_MERGE:
-            return kind, f"the forge refused the merge: {error}", False
-        return kind, f"{kind} failed: {error}", False
+            return kind, f"the forge refused the merge: {error}", ""
+        return kind, f"{kind} failed: {error}", ""
 
     async def _new_head(
         self,

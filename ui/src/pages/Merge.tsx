@@ -41,6 +41,9 @@ interface Row {
 interface Scheduled extends Row {
   phase: Phase;
   detail: string;
+  /** Why a blocked one is: ``workflow_scope`` (the service's sign-in lacks it),
+   * ``person_scope`` (the scheduler's own sign-in lacks it), ``forge_rules``, ``refused``. */
+  blocked_on?: string;
   since: string | null;
   scheduled_by: string;
   auto: boolean;
@@ -170,6 +173,7 @@ interface MergeView {
   auto_by: string | null;
   paused: boolean;
   checking: boolean;
+  check_progress: { done: number; total: number } | null;
   rules: {
     approvals: number;
     code_owners: boolean | null;
@@ -243,12 +247,20 @@ export default function MergePage() {
     queryKey: ["merge-schedule", scope],
     queryFn: () => api.get<MergeView>(`/api/merge-schedule/${scope}/view`),
     enabled: !!scope,
-    // Faster while every PR is being read again, so the lists follow along.
-    refetchInterval: (query) => (query.state.data?.checking ? 4_000 : 20_000),
+    // Faster while every PR is being read again, so the lists and the count follow along.
+    refetchInterval: (query) => (query.state.data?.checking ? 2_000 : 20_000),
   });
   const v = q.data;
   const check = useAct(() => api.post<{ started: boolean; prs: number }>(`/api/merge-schedule/${scope}/check`), [["merge-schedule"]]);
   const checking = check.isPending || !!v?.checking;
+  const progress = v?.check_progress;
+  const checkLabel = !checking
+    ? t("Check all PRs")
+    : progress && progress.total
+      ? `${t("Checking")} ${progress.done} / ${progress.total}`
+      : progress
+        ? t("Listing the open PRs…")
+        : t("Checking all PRs…");
   return (
     <>
       <PageHead
@@ -256,24 +268,35 @@ export default function MergePage() {
         sub={t("Choose which ready PRs merge and in what order. The service starts their CI the way the repository starts it, reruns what flakes, sets real failures aside with their cause, and merges what passes.")}
         actions={
           v?.enabled && (
-            <button
-              disabled={checking}
-              title={t("Read every open PR from GitHub again now, instead of at the next poll")}
-              onClick={() =>
-                check.mutate(undefined, {
-                  onSuccess: (out) =>
-                    toast({
-                      title: out.started ? `${t("Checking")} ${out.prs} ${t("PRs")}` : t("Already checking"),
-                      body: t("Each PR is read from GitHub again; the lists update as they are read."),
-                      icon: "refresh",
-                    }),
-                  onError: (e) => toast({ title: t("Not started"), body: String((e as Error).message), icon: "x" }),
-                })
-              }
-            >
-              <Icon name="refresh" size={14} />
-              {checking ? t("Checking all PRs…") : t("Check all PRs")}
-            </button>
+            <span className="row" style={{ gap: 10, flexWrap: "nowrap" }}>
+              {checking && progress && progress.total > 0 && (
+                <progress
+                  className="check-progress"
+                  max={progress.total}
+                  value={progress.done}
+                  aria-label={t("PRs read from GitHub again")}
+                  title={`${progress.done} / ${progress.total} ${t("PRs read from GitHub again")}`}
+                />
+              )}
+              <button
+                disabled={checking}
+                title={t("Read every open PR from GitHub again now, instead of at the next poll")}
+                onClick={() =>
+                  check.mutate(undefined, {
+                    onSuccess: (out) =>
+                      toast({
+                        title: out.started ? `${t("Checking")} ${out.prs} ${t("PRs")}` : t("Already checking"),
+                        body: t("Each PR is read from GitHub again; the lists update as they are read."),
+                        icon: "refresh",
+                      }),
+                    onError: (e) => toast({ title: t("Not started"), body: String((e as Error).message), icon: "x" }),
+                  })
+                }
+              >
+                <Icon name="refresh" size={14} />
+                {checkLabel}
+              </button>
+            </span>
           )
         }
       />
@@ -1853,7 +1876,8 @@ function ScopeBanner({ v }: { v: MergeView }) {
   const t = useT();
   const toast = useToast();
   const ask = useAct(() => api.post(`/api/merge-schedule/${v.repo}/scope`), [["merge-schedule"]]);
-  const blocked = v.scheduled.some((s) => s.phase === "blocked" && /workflow scope/.test(s.detail));
+  // Only the service's own sign-in: a person's lacking it signs in to the dashboard again.
+  const blocked = v.scheduled.some((s) => s.phase === "blocked" && s.blocked_on === "workflow_scope");
   const r = v.scope_request;
   if (r?.state === "pending" && r.code && r.url) {
     return (

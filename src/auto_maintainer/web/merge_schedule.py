@@ -517,6 +517,7 @@ def build_router() -> APIRouter:
                 **_row(pr, profile),
                 "phase": state.phase,
                 "detail": state.detail,
+                "blocked_on": state.blocked_on if state.phase == "blocked" else "",
                 "since": state.since.isoformat() if state.since else None,
                 "scheduled_by": arm.armed_by,
                 "auto": arm.auto,
@@ -558,6 +559,7 @@ def build_router() -> APIRouter:
             "auto_by": profile.merge.schedule.auto_by,
             "paused": await service.pipeline.paused(repo),
             "checking": service.checking_prs(repo),
+            "check_progress": service.check_progress(repo),
             "rules": {
                 "approvals": max(profile.merge.approvals, info.required_approvals or 0),
                 "code_owners": info.requires_code_owner_reviews,

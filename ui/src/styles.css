@@ -1172,6 +1172,7 @@ details.pv-section[open] > summary { margin-bottom: 6px; }
 }
 
 /* ---- merge scheduling -------------------------------------------------------------------- */
+.check-progress { width: 140px; height: 6px; accent-color: var(--accent); }
 .merge-controls { display: flex; flex-wrap: wrap; gap: 14px 28px; padding: 14px 18px; align-items: flex-start; }
 .merge-control { display: flex; flex-direction: column; gap: 4px; flex: 1 1 280px; min-width: 0; }
 .merge-auto { flex-direction: row; gap: 10px; align-items: flex-start; cursor: pointer; }
