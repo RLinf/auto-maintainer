@@ -474,6 +474,7 @@ class MergeBasePlaybook(Playbook):
             account,
             answer.runtime,
             kinds,
+            armed=int(arm.armed_at.timestamp()),
         )
         await note("proposed", action_id=action.id)
         return PlaybookResult(
@@ -493,6 +494,7 @@ def _resolution(
     account: str,
     runtime: str | None,
     kinds: dict,
+    armed: int = 0,
 ) -> Action:
     """The schedule's ``pr.fix`` pushing the resolution onto the PR's branch as the
     maintainer who scheduled it: a merge commit only ``only_base_merged`` keeps the
@@ -521,7 +523,8 @@ def _resolution(
         ),
         number=pr.number,
         head_sha=pr.head_sha,
-        discriminator=f"schedule:resolve:{pr.head_sha[:12]}",
+        # One per schedule of the PR: scheduled again, it is resolved anew.
+        discriminator=f"schedule:{armed}:resolve:{pr.head_sha[:12]}",
         rationale=f"merge {base} at {short_sha(merge_sha)} into "
         f"{short_sha(pr.head_sha)}, resolving minor conflicts in "
         f"{len(resolved)} files; scheduled by {by}",

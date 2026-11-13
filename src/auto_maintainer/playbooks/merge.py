@@ -455,8 +455,11 @@ class MergePlaybook(Playbook):
         hints = ActionHints(
             author_is_team=await ctx.author_is_team(pr), changed_paths=pr.paths
         )
-        # Each step the forge's rate limit refused is a new action when taken again.
+        # Each step the forge's rate limit refused is a new action when taken again,
+        # and so is each step of a new schedule of the PR at the same head (its
+        # attempts count afresh): an earlier failed one is never taken for it.
         again = f":t{state.transient}" if state.transient else ""
+        armed = int(arm.armed_at.timestamp())
 
         def step(
             kind: ActionKind, payload: Any, discriminator: str, why: str
@@ -467,7 +470,7 @@ class MergePlaybook(Playbook):
                 payload,
                 number=pr.number,
                 head_sha=pr.head_sha,
-                discriminator=f"schedule:{discriminator}{again}",
+                discriminator=f"schedule:{armed}:{discriminator}{again}",
                 rationale=f"{why}; scheduled by {arm.armed_by}",
                 draft_for=arm.armed_by,
                 hints=hints,

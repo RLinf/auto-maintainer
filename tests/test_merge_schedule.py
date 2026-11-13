@@ -2162,6 +2162,20 @@ async def test_a_base_merge_refused_for_the_schedulers_scope_waits_for_a_new_sig
         assert out.status_code == 200, out.text
     await h.settle()
     assert [w["number"] for w in h.forge.writes_of("update_branch")] == [42]
+    # Behind again, unscheduled, and scheduled anew at the same head: its attempts
+    # count afresh, yet none is taken for one of the earlier schedule's.
+    pr = await h.forge.get_pr(REPO, 42)
+    h.forge.put_pr(pr.model_copy(update={"behind_base": True}))
+    async with _as(app, "maria") as maria:
+        assert (await maria.delete(f"/api/merge-schedule/{REPO}/42")).status_code == 200
+        await h.settle()
+        h.clock.advance(minutes=1)
+        again = await maria.post(
+            f"/api/merge-schedule/{REPO}/schedule", json={"number": 42}
+        )
+        assert again.status_code == 200, again.text
+    await h.settle()
+    assert len(h.forge.writes_of("update_branch")) == 2, "scheduled anew, it tried anew"
     del update
 
 
