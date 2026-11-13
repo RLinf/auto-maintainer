@@ -33,3 +33,10 @@ policy:
   code.merge: {level: propose}
   service.deploy: {level: propose}
   notify: {level: auto}
+merge:
+  schedule:
+    # The schedule resolves a scheduled PR's minor conflicts with its base (docs,
+    # README, install-target lists) on its turn, pushed as the maintainer who
+    # scheduled it (design 5.5). Off where a repository's approved profile predates
+    # it, until its maintainers approve the change.
+    resolve: {enabled: true}

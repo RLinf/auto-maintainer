@@ -35,6 +35,11 @@ mutation($id: ID!) { convertPullRequestToDraft(input: {pullRequestId: $id}) { pu
 _RESOLVE_MUTATION = """
 mutation($id: ID!) { resolveReviewThread(input: {threadId: $id}) { thread { isResolved } } }
 """
+_ENQUEUE_MUTATION = """
+mutation($id: ID!, $sha: GitObjectID!) {
+  enqueuePullRequest(input: {pullRequestId: $id, expectedHeadOid: $sha}) { mergeQueueEntry { id } }
+}
+"""
 _PR_NODE_QUERY = """
 query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) { pullRequest(number: $number) { id } }
@@ -212,13 +217,24 @@ class GitHubWriter:
             )
         except GitHubError as e:
             if e.status == 403 and "workflow" in str(e) and "scope" in str(e):
+                whose = (
+                    f"{self._person}'s dashboard sign-in"
+                    if self._person
+                    else "the service's GitHub sign-in"
+                )
+                again = (
+                    f"{self._person} signs in to the dashboard again, which asks "
+                    "for the scope"
+                    if self._person
+                    else "the service's owner adds the scope to its sign-in"
+                )
                 raise GitHubError(
                     403,
-                    "the base branch's new commits change workflow files, and the "
-                    "GitHub sign-in this service holds may not change workflow "
-                    "files (it lacks the workflow scope). Press Update branch on "
-                    "the PR's page on GitHub, or merge the base branch locally and "
-                    f"push. GitHub said: {str(e).split(': ', 1)[-1]}",
+                    "the base branch's new commits change workflow files, and "
+                    f"{whose} may not change workflow files (it lacks the workflow "
+                    f"scope): {again}, or someone presses Update branch on the "
+                    "PR's page on GitHub. GitHub said: "
+                    f"{str(e).split(': ', 1)[-1]}",
                     e.body,
                 ) from e
             raise
@@ -250,6 +266,18 @@ class GitHubWriter:
                 data,
             )
         return data["sha"]
+
+    async def enqueue_merge(self, repo: str, number: int, sha: str) -> None:
+        """Add the PR at ``sha`` to the merge queue of its base branch, which merges
+        it with the queue's own commit message once the queue's checks pass."""
+        owner, _, name = repo.partition("/")
+        data = await self._client.graphql(
+            _PR_NODE_QUERY, {"owner": owner, "name": name, "number": number}, repo=repo
+        )
+        node_id = data["repository"]["pullRequest"]["id"]
+        await self._client.graphql(
+            _ENQUEUE_MUTATION, {"id": node_id, "sha": sha}, repo=repo
+        )
 
     async def update_pr(
         self, repo: str, number: int, title: PublicText, body: PublicText

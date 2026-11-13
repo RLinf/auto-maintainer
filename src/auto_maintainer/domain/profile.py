@@ -350,6 +350,11 @@ class MergeMessage(_Section):
     preserve_trailers: list[str] = Field(default_factory=lambda: list(DEFAULT_TRAILERS))
     """Commit trailers the squash body keeps from the PR's commits, each distinct
     line once; ``[]`` keeps none."""
+    signoff_from_authors: bool = False
+    """When no commit of the PR carries a ``Signed-off-by`` trailer, sign the squash
+    off in the name of each of its commits' authors (as their commits name them).
+    The line certifies the Developer Certificate of Origin for them, so it is the
+    repository's choice; it applies only where the squash keeps ``Signed-off-by``."""
 
 
 class Freeze(_Section):
@@ -381,6 +386,83 @@ items (``hygiene``: every blocking check). Being up to date and CI are never amo
 them: the schedule merges the base in and runs CI itself."""
 
 
+class ResolveKind(_Section):
+    """A kind of conflict with the base branch that the merge schedule resolves by
+    itself (``ConflictResolution``): the files it covers, and what resolving it
+    means, for the agent that does it."""
+
+    name: str = Field(min_length=1, max_length=40, pattern=r"^[a-z0-9][a-z0-9_-]*$")
+    paths: list[str] = Field(min_length=1, max_length=40)
+    """Glob patterns of the files it covers (``*`` within a folder, ``**`` across
+    folders), matched against the whole path."""
+    description: str = Field(default="", max_length=1000)
+    """Which conflicts in those files are of this kind, and how to resolve them."""
+    enabled: bool = True
+
+
+DEFAULT_RESOLVE_KINDS: tuple[dict[str, Any], ...] = (
+    {
+        "name": "readme",
+        "paths": ["README*", "**/README*"],
+        "description": "README files where each side added or edited a different "
+        "passage: keep what each side wrote.",
+    },
+    {
+        "name": "docs",
+        "paths": ["**/*.md", "**/*.mdx", "**/*.rst"],
+        "description": "Documentation pages where each side added or edited a "
+        "different passage: keep what each side wrote.",
+    },
+    {
+        "name": "install_targets",
+        "paths": [
+            "requirements*.txt",
+            "**/requirements*.txt",
+            "requirements/**",
+            "pyproject.toml",
+            "setup.py",
+            "setup.cfg",
+            "**/install*.sh",
+            "**/environment*.yml",
+            "**/environment*.yaml",
+        ],
+        "description": "Lines that list install targets, packages, or dependencies "
+        "(a requirements file, a dependency list, an install script's list or case "
+        "of targets), where each side only added, removed, or reordered entries: "
+        "keep every entry either side added, in the list's own order and format.",
+    },
+)
+"""Docs, README, and install-target lists: conflicts that change no code's meaning."""
+
+
+class ConflictResolution(_Section):
+    """Conflicts with the base branch that the merge schedule resolves by itself on a
+    PR's turn, with an agent, pushed as the maintainer who scheduled the PR (design
+    5.5): only conflicts whose every file is of an enabled kind, and, with
+    ``union_only``, only resolutions that combine both sides. Any other conflict
+    sends the PR to the failure lane for a person. On through the default profile
+    (``config/defaults/profile.yaml``); off for a profile that does not say, so an
+    approved profile from before it stays as it was until its maintainers approve."""
+
+    enabled: bool = False
+    kinds: list[ResolveKind] = Field(
+        default_factory=lambda: [ResolveKind(**k) for k in DEFAULT_RESOLVE_KINDS]
+    )
+    union_only: bool = True
+    """A resolution writes no word that neither side has, and keeps everything
+    either side added (``domain/conflicts.py:union_problem``); off, the agent's
+    judgment of the kind decides alone."""
+
+    @field_validator("kinds")
+    @classmethod
+    def _unique(cls, value: list[ResolveKind]) -> list[ResolveKind]:
+        names = [k.name for k in value]
+        twice = sorted({n for n in names if names.count(n) > 1})
+        if twice:
+            raise ValueError(f"conflict kinds named twice: {twice}")
+        return value
+
+
 class MergeSchedule(_Section):
     """The repository's merge scheduling (design 5.5)."""
 
@@ -404,6 +486,8 @@ class MergeSchedule(_Section):
     """What the repository asks of a PR before it merges, in plain words, beside the
     rules its forge enforces (the contribution guide's): shown on the Merge
     scheduling page."""
+    resolve: ConflictResolution = Field(default_factory=ConflictResolution)
+    """Conflicts with the base that the schedule resolves by itself."""
 
 
 class Merge(_Section):

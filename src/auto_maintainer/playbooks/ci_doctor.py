@@ -433,6 +433,7 @@ async def record(
                 check_id=f.check.id,
                 check_name=f.check.name,
                 workflow=f.check.workflow,
+                details_url=f.check.details_url,
                 category=f.diagnosis.category,
                 signature=f.sig.id if f.sig else None,
                 confidence=f.diagnosis.confidence,

@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from ..domain.forges import fs_parts, slug
-from ..domain.ports import CommandResult, MergeAttempt, WorkChanges
+from ..domain.ports import CommandResult, ConflictSides, MergeAttempt, WorkChanges
 from ..subproc import run
 
 TokenFn = Callable[[str], Awaitable[str | None]]
@@ -36,6 +36,10 @@ TokenFn = Callable[[str], Awaitable[str | None]]
 _HELPER = "!f() { echo username=$AM_GIT_USER; echo password=$AM_GIT_TOKEN; }; f"
 
 SAFE = ("-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null")
+SIDES_MAX_FILES = 200
+"""Conflicted files whose sides a merge attempt reads, at most."""
+SIDES_MAX_BYTES = 1_000_000
+"""A side larger than this is not read (``ConflictSides``: ``None``)."""
 """Every git command in a checkout runs without hooks or a file-system monitor: both
 run commands that a configuration names."""
 
@@ -423,13 +427,31 @@ class GitWorkspace:
         # would refuse to merge over: merge the PR's own commit as it is.
         await self._in(path, "reset", "-q", "--hard", "HEAD", check=True)
         conflicts = await self._merge(path, merge_sha)
+        sides = {c: await self._sides(path, c) for c in conflicts[:SIDES_MAX_FILES]}
         steering = [c for c in conflicts if is_instruction_path(c)]
         if steering_ref is not None:
             # The agent that resolves the rest works from the default branch's
             # instructions, as every agent does; a conflicted instruction file is
             # not its to resolve (``MergeAttempt.steering``).
             await self._restore_instructions(repo, path, "HEAD", steering_ref)
-        return MergeAttempt(merge_sha=merge_sha, conflicts=conflicts, steering=steering)
+        return MergeAttempt(
+            merge_sha=merge_sha, conflicts=conflicts, sides=sides, steering=steering
+        )
+
+    async def _sides(self, path: Path, name: str) -> ConflictSides:
+        """``name`` as git's index holds it during a conflicted merge: stage 1 the
+        common ancestor's, 2 the worktree's commit (the PR), 3 the merged branch's."""
+
+        async def stage(n: int) -> str | None:
+            shown = await self._in(path, "show", f":{n}:{name}", timeout=120)
+            text = shown.stdout if shown.ok else None
+            if text is None or len(text) > SIDES_MAX_BYTES or "\0" in text:
+                return None
+            return text
+
+        return ConflictSides(
+            base=await stage(1), ours=await stage(2), theirs=await stage(3)
+        )
 
     async def _merge(self, path: Path, sha: str) -> list[str]:
         """Merge ``sha`` into the worktree without committing; the conflicted files.

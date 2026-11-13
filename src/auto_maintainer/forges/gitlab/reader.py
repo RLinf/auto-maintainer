@@ -411,6 +411,7 @@ class GitLabReader:
                 Commit(
                     sha=str(c["id"]),
                     message=str(c.get("message") or ""),
+                    author_name=c.get("author_name"),
                     author_email=c.get("author_email"),
                     committed_at=_time(c.get("committed_date")),
                 )
@@ -528,6 +529,9 @@ class GitLabReader:
             allow=(404,),
             raw=True,
         )
+
+    async def in_merge_queue(self, repo: str, number: int) -> bool | None:
+        return None  # GitLab's merge trains are not read
 
     async def list_dir(self, repo: str, path: str, ref: str | None = None) -> list[str]:
         ref = ref or await self._default_branch(repo)

@@ -458,6 +458,11 @@ async def _merge(
 ) -> dict[str, Any]:
     assert profile is not None and pr is not None and action.head_sha
     p = MergePayload.model_validate(action.payload)
+    if p.queue:
+        # The branch takes merges only through its merge queue, which merges the
+        # PR with the queue's own message once the queue's checks pass.
+        await x.writer.enqueue_merge(action.repo, pr.number, action.head_sha)
+        return {"queued": True, "method": p.method}
     subject = await x.public(
         action, profile, p.subject, marker_kind="merge", pr=pr, bare=True
     )

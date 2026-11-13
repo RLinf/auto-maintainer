@@ -67,17 +67,26 @@ SCHEDULED = frozenset(
         ActionKind.CI_APPROVE_RUN,
         ActionKind.CI_RERUN_FAILED,
         ActionKind.PR_MERGE,
+        ActionKind.PR_FIX,
     }
 )
 """Steps of merge scheduling (design 5.5) that the schedule approves: drafted for
 the maintainer who scheduled the PR (``Provenance.scheduled_by``) and approved as
 them when made, while their arm stands at the action's head. The repository's rule
-still decides on that approval (``off`` refuses it, a pause holds it)."""
-AS_SCHEDULER = frozenset({ActionKind.PR_UPDATE_BRANCH, ActionKind.CI_APPROVE_RUN})
+still decides on that approval (``off`` refuses it, a pause holds it). A ``pr.fix``
+counts only as the schedule's resolution of a conflict with the base: a merge
+commit onto the PR's own branch (``merge_ref``, ``target: branch``)."""
+AS_SCHEDULER = frozenset(
+    {ActionKind.PR_UPDATE_BRANCH, ActionKind.CI_APPROVE_RUN, ActionKind.PR_FIX}
+)
 """Of ``SCHEDULED``, the steps that run with the scheduler's own sign-in when they
 have one: a base merge is a commit, which the service's account never makes, and
-approving a fork's workflows is only ever a person's. Without their sign-in a base
-merge runs as the service and the approval waits for them."""
+approving a fork's workflows, or pushing an agent's resolution of a conflict, is only
+ever a person's. Without their sign-in a base merge runs as the service, and the
+others wait for them."""
+ONLY_THE_SCHEDULER = frozenset({ActionKind.CI_APPROVE_RUN, ActionKind.PR_FIX})
+"""Of ``AS_SCHEDULER``, the steps the schedule approves only with the scheduler's
+own sign-in, and never for a PR automatic scheduling armed unseen."""
 
 
 class ApprovalError(ValueError):
@@ -213,14 +222,19 @@ class ActionPipeline:
             or not action.head_sha
         ):
             return False
+        if action.kind == ActionKind.PR_FIX and not (
+            action.payload.get("merge_ref") and action.payload.get("target") == "branch"
+        ):
+            return False
         arm = await self.store.get_arm(action.repo, action.number)
         return (
             arm is not None
             and arm.armed_by.lower() == who.lower()
             and same_commit(arm.sha, action.head_sha)
             # Automatic scheduling armed it unseen: running a fork's code with the
-            # repository's secrets stays a person's decision.
-            and not (arm.auto and action.kind == ActionKind.CI_APPROVE_RUN)
+            # repository's secrets, or pushing an agent's resolution as someone,
+            # stays a person's decision.
+            and not (arm.auto and action.kind in ONLY_THE_SCHEDULER)
         )
 
     async def _profile_for(self, action: Action) -> RepoProfile | None:
@@ -321,7 +335,7 @@ class ActionPipeline:
                 as_them = action.kind in AS_SCHEDULER and bool(
                     self.signed_in and await self.signed_in(action.draft_for)
                 )
-                if as_them or action.kind != ActionKind.CI_APPROVE_RUN:
+                if as_them or action.kind not in ONLY_THE_SCHEDULER:
                     await self.approve(
                         proposal.id,
                         action.draft_for,

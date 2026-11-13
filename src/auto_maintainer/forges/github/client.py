@@ -253,6 +253,16 @@ class GitHubClient:
             details = _error_details(body)
             if details:
                 message = f"{message} ({details})"
+            sso = resp.headers.get("x-github-sso", "")
+            if sso.startswith("required"):
+                # An organization enforcing SAML single sign-on refused a token
+                # not authorized for it; GitHub says where to authorize it.
+                url = sso.partition("url=")[2].strip()
+                message = (
+                    f"{message}. The organization enforces SAML single sign-on: "
+                    "authorize this sign-in's token for it"
+                    + (f" at {url}" if url else " in GitHub's settings")
+                )
             raise GitHubError(resp.status_code, f"{method} {path}: {message}", body)
 
     # ------------------------------------------------------------------ REST

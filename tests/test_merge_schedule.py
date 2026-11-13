@@ -887,9 +887,12 @@ async def test_checking_all_prs_reads_each_from_the_forge_again(
     h.forge.put_pr(_ready(43, "c" * 40, []))
     await h.poll()
     reads: list[int] = []
+    seen: list[dict[str, int] | None] = []
     refresh = h.service._refresh_pr
 
     async def counted(repo: str, number: int) -> None:
+        # How far the check got, as the page shows it, before each PR is read.
+        seen.append(h.service.check_progress(repo))
         reads.append(number)
         await refresh(repo, number)
 
@@ -905,8 +908,9 @@ async def test_checking_all_prs_reads_each_from_the_forge_again(
         assert again["started"] is False, "one check at a time"
         await h.service._checks[REPO]
         view = (await bob.get(f"/api/merge-schedule/{REPO}/view")).json()
-        assert view["checking"] is False
+        assert view["checking"] is False and view["check_progress"] is None
     assert sorted(reads) == [42, 43]
+    assert seen == [{"done": 0, "total": 2}, {"done": 1, "total": 2}]
     stored = await h.store.get_snapshot(REPO, 42)
     assert stored is not None and stored.review_decision == "APPROVED"
 
@@ -1611,3 +1615,551 @@ async def test_a_person_diagnoses_or_fixes_only_the_failures_they_chose(
     seen = {o.check_name for o in await h.store.list_ci_observations(REPO)}
     assert seen == {"unit"}, "lint was not chosen"
     assert len(looked) == 1 and "E501" not in looked[0]
+
+
+# -- conflicts the schedule resolves, and steps the forge would refuse ------------------
+
+CONFLICTED = "intro\n<<<<<<< HEAD\nours line\n=======\ntheirs line\n>>>>>>> main\n"
+
+
+def _conflicting(h: Harness, path: str = "README.md") -> Any:
+    from auto_maintainer.domain.ports import ConflictSides
+    from auto_maintainer.domain.snapshot import Mergeable
+
+    pr = _ready(42, "a" * 40, _ci(42, "success"), mergeable=Mergeable.CONFLICTING)
+    h.forge.put_pr(pr)
+    h.service.a.workspace.merge_conflicts = {path: CONFLICTED}  # type: ignore[attr-defined]
+    h.service.a.workspace.merge_sides = {  # type: ignore[attr-defined]
+        path: ConflictSides(
+            base="intro\n", ours="intro\nours line\n", theirs="intro\ntheirs line\n"
+        )
+    }
+    return pr
+
+
+def _resolving(text: str) -> Any:
+    from auto_maintainer.domain.agents import AgentResult
+
+    def resolve(task: Any) -> AgentResult:
+        for name in ("README.md", "src/core.py"):
+            target = Path(task.workdir) / name
+            if target.exists():
+                target.write_text(text)
+        return AgentResult(runtime="scripted", ok=True, text="Kept both lines.")
+
+    return resolve
+
+
+async def test_a_minor_conflict_is_resolved_on_its_turn_and_pushed_as_the_scheduler(
+    harness: Harness,
+) -> None:
+    from auto_maintainer.domain.snapshot import Mergeable
+
+    h = harness
+    pr = _conflicting(h)
+    h.runner.on("fix", _resolving("intro\nours line\ntheirs line\n"))
+    await _schedule(h, 42)
+    await h.settle()
+    [fix] = await h.store.list_actions(repo=REPO, kinds=[ActionKind.PR_FIX])
+    assert fix.status == ActionStatus.EXECUTED
+    assert fix.approver == "maria" and fix.post_as == "maria", (
+        "pushed with the scheduler's own sign-in, never as the service"
+    )
+    publisher = await h.service.a.publisher_for_user("maria", None)  # type: ignore[misc]
+    [pushed] = publisher.published
+    assert pushed["message"].startswith("Merge main into #42")
+    assert pushed["resolved"] == {"README.md": "intro\nours line\ntheirs line\n"}
+    assert (await _phase(h, 42)).phase == "resolving"
+
+    # The push lands: the scheduler's merge commit keeps the schedule, and it merges.
+    merged_in = Commit(sha="e" * 40, message=pushed["message"], author_login="maria")
+    h.forge.put_pr(
+        pr.model_copy(
+            update={
+                "head_sha": "e" * 40,
+                "mergeable": Mergeable.MERGEABLE,
+                "commits": [*pr.commits, merged_in],
+                "checks": _ci(42, "success", run=4201),
+            }
+        )
+    )
+    await h.emit(
+        Event(kind=EventKind.PR_SYNCHRONIZED, repo=REPO, number=42, sha="e" * 40)
+    )
+    await h.settle()
+    assert [w["number"] for w in h.forge.writes_of("merge")] == [42]
+
+
+async def test_a_conflict_in_code_goes_to_a_person_without_an_agent(
+    harness: Harness,
+) -> None:
+    h = harness
+    _conflicting(h, path="src/core.py")
+    await _schedule(h, 42)
+    await h.settle()
+    failed = await _phase(h, 42)
+    assert failed.phase == "failed"
+    assert "src/core.py is not of a kind the schedule resolves" in failed.detail
+    assert not [t for t in h.runner.tasks if str(t.kind) == "fix"]
+    assert not await h.store.list_actions(repo=REPO, kinds=[ActionKind.PR_FIX])
+
+
+async def test_a_resolution_that_writes_something_new_is_not_pushed(
+    harness: Harness,
+) -> None:
+    h = harness
+    _conflicting(h)
+    h.runner.on("fix", _resolving("intro\na brand new sentence\n"))
+    await _schedule(h, 42)
+    await h.settle()
+    failed = await _phase(h, 42)
+    assert failed.phase == "failed" and "neither side has" in failed.detail
+    assert not await h.store.list_actions(repo=REPO, kinds=[ActionKind.PR_FIX])
+
+
+async def test_with_resolving_off_a_conflict_goes_to_the_failure_lane(
+    tmp_path: Path,
+) -> None:
+    h = await Harness.create(
+        tmp_path,
+        layer={
+            "merge": {"enabled": True, "schedule": {"resolve": {"enabled": False}}},
+        },
+    )
+    try:
+        await h.service.a.user_tokens.set("maria", UserToken(token="m"))
+        h.forge.set_permission(REPO, "bob", Permission.WRITE)
+        _conflicting(h)
+        await _schedule(h, 42)
+        await h.settle()
+        failed = await _phase(h, 42)
+        assert failed.phase == "failed" and "conflicts with main" in failed.detail
+        assert not [t for t in h.runner.tasks if str(t.kind) == "fix"]
+    finally:
+        await h.close()
+
+
+async def test_a_fork_that_lets_no_maintainer_push_is_blocked_before_trying(
+    harness: Harness,
+) -> None:
+    h = harness
+    h.forge.put_pr(
+        _ready(
+            42,
+            "a" * 40,
+            _ci(42, "success"),
+            behind_base=True,
+            head_repo="alice/widget",
+            maintainer_can_modify=False,
+        )
+    )
+    await _schedule(h, 42)
+    await h.settle()
+    blocked = await _phase(h, 42)
+    assert blocked.phase == "blocked"
+    assert "does not let maintainers push to its branch" in blocked.detail
+    assert not h.forge.writes_of("update_branch")
+
+
+async def test_a_step_the_rate_limit_refused_is_taken_again_after_it_resets(
+    harness: Harness,
+) -> None:
+    h = harness
+    h.forge.put_pr(_ready(42, "a" * 40, _ci(42, "success")))
+    h.forge.fail_next["merge"] = RuntimeError(
+        "GitHubError: API rate limit exceeded for user"
+    )
+    await _schedule(h, 42)
+    await h.settle()
+    state = await _phase(h, 42)
+    assert state.phase != "blocked" and state.not_before is not None
+    assert "rate limit" in state.detail and not h.forge.writes_of("merge")
+    h.clock.advance(minutes=11)
+    await h.emit(Event(kind=EventKind.MERGE_QUEUE, repo=REPO, number=42))
+    await h.settle()
+    assert [w["number"] for w in h.forge.writes_of("merge")] == [42], (
+        "taken again as a new action once the limit reset"
+    )
+
+
+async def test_a_merge_github_still_blocks_is_held_not_forced(
+    harness: Harness,
+) -> None:
+    h = harness
+    h.forge.put_pr(_ready(42, "a" * 40, _ci(42, "success"), merge_state="BLOCKED"))
+    await _schedule(h, 42)
+    await h.settle()
+    held = await _phase(h, 42)
+    assert (
+        held.phase == "blocked"
+        and "GitHub still reports its merge blocked" in held.detail
+    )
+    assert not h.forge.writes_of("merge")
+    # GitHub's verdict clears: the merge goes on its next look.
+    pr = await h.forge.get_pr(REPO, 42)
+    h.forge.put_pr(pr.model_copy(update={"merge_state": "CLEAN"}))
+    await h.emit(Event(kind=EventKind.MERGE_QUEUE, repo=REPO, number=42))
+    await h.settle()
+    assert [w["number"] for w in h.forge.writes_of("merge")] == [42]
+
+
+async def test_a_branch_with_a_merge_queue_gets_the_pr_queued(
+    harness: Harness,
+) -> None:
+    h = harness
+    info = h.forge.repos[REPO]
+    h.forge.add_repo(info.model_copy(update={"merge_queue": True}))
+    h.forge.put_pr(_ready(42, "a" * 40, _ci(42, "success"), merge_state="BLOCKED"))
+    await _schedule(h, 42)
+    await h.settle()
+    assert [w["number"] for w in h.forge.writes_of("enqueue_merge")] == [42]
+    assert not h.forge.writes_of("merge")
+    state = await _phase(h, 42)
+    assert state.phase == "merging" and state.queued
+    assert await h.store.get_arm(REPO, 42) is not None, "the queue merges it later"
+    # The queue lets it go without merging: it is blocked, to be queued again.
+    h.forge.merge_queue[(REPO, 42)] = False
+    await h.emit(Event(kind=EventKind.MERGE_QUEUE, repo=REPO, number=42))
+    await h.settle()
+    assert (await _phase(h, 42)).phase == "blocked"
+
+
+async def test_a_required_check_whose_workflow_skips_the_pr_is_named_at_once(
+    harness: Harness,
+) -> None:
+    h = harness
+    info = h.forge.repos[REPO]
+    h.forge.add_repo(info.model_copy(update={"required_checks": ["build-docs"]}))
+    h.forge.put_file(
+        REPO,
+        ".github/workflows/docs.yml",
+        "on:\n  pull_request:\n    paths: ['docs/**']\njobs:\n  build-docs: {}\n",
+    )
+    h.forge.put_pr(_ready(42, "a" * 40, _ci(42, "success")))
+    await _schedule(h, 42)
+    await h.settle()
+    state = await _phase(h, 42)
+    assert "build-docs never runs for this PR" in state.finding
+    assert not [t for t in h.runner.tasks if str(t.kind) == "ci_diagnose"], (
+        "no agent is asked what the workflow already says"
+    )
+
+
+async def test_the_merge_settings_are_edited_in_place_by_a_maintainer(
+    harness: Harness, tmp_path: Path
+) -> None:
+    h = harness
+    app = create_app(h.service, data_dir=tmp_path, allow_dev_login=True)
+    async with _as(app, "maria") as maria:
+        view = (await maria.get(f"/api/merge-schedule/{REPO}/view")).json()
+        assert [k["name"] for k in view["merging"]["resolve"]["kinds"]] == [
+            "readme",
+            "docs",
+            "install_targets",
+        ]
+        bad = await maria.put(
+            f"/api/merge-schedule/{REPO}/merging", json={"subject": "{nope}"}
+        )
+        assert bad.status_code == 422
+        saved = await maria.put(
+            f"/api/merge-schedule/{REPO}/merging",
+            json={
+                "method": "squash",
+                "signoff_from_authors": True,
+                "required_workflows": ["CI Test"],
+                "arming_who": "maintain",
+                "resolve": {
+                    "enabled": True,
+                    "union_only": True,
+                    "kinds": [
+                        {
+                            "name": "install_targets",
+                            "paths": ["requirements/install.sh"],
+                            "description": "the case of install targets",
+                        }
+                    ],
+                },
+            },
+        )
+        assert saved.status_code == 200 and saved.json()["applied"], saved.text
+    profile = await h.service.profiles.active(REPO)
+    assert profile is not None
+    assert profile.merge.message.signoff_from_authors
+    assert profile.ci.required_workflows == ["CI Test"]
+    assert profile.merge.arming.who == "maintain"
+    assert [k.paths for k in profile.merge.schedule.resolve.kinds] == [
+        ["requirements/install.sh"]
+    ]
+    async with _as(app, "bob") as bob:
+        proposed = await bob.put(
+            f"/api/merge-schedule/{REPO}/merging", json={"enabled": False}
+        )
+        assert proposed.status_code == 200 and not proposed.json()["applied"], (
+            "a writer's change goes to the maintainers"
+        )
+
+
+async def test_checking_one_scheduled_pr_has_the_schedule_look_again(
+    harness: Harness, tmp_path: Path
+) -> None:
+    h = harness
+    h.forge.put_pr(_ready(42, "a" * 40, _ci(42, None)))
+    await _schedule(h, 42)
+    await h.settle()
+    assert (await _phase(h, 42)).phase == "running"
+    pr = await h.forge.get_pr(REPO, 42)
+    h.forge.put_pr(pr.model_copy(update={"checks": _ci(42, "success")}))
+    app = create_app(h.service, data_dir=tmp_path, allow_dev_login=True)
+    async with _as(app, "bob") as bob:
+        out = await bob.post(f"/api/merge-schedule/{REPO}/42/check")
+        assert out.status_code == 200, out.text
+    await h.settle()
+    assert [w["number"] for w in h.forge.writes_of("merge")] == [42]
+
+
+async def test_a_flaky_read_the_docs_build_teaches_a_pattern_from_its_build_log(
+    harness: Harness,
+) -> None:
+    from auto_maintainer.domain.records import CiObservation
+    from auto_maintainer.playbooks.flake_learn import COMMAND, SUGGESTIONS
+
+    h = harness
+    url = "https://app.readthedocs.org/projects/widget/builds/9/"
+    h.forge.status_logs[url] = (
+        "Read the Docs build 9: failed\n$ git fetch origin pull/42/head  (exit 0)\n"
+        "$ git checkout --force abc  (exit 128)\nfatal: unable to read tree (abc)\n"
+    )
+    obs = CiObservation(
+        repo=REPO,
+        number=42,
+        sha="a" * 40,
+        check_id=9,
+        check_name="docs/readthedocs.org:widget",
+        details_url=url,
+        category="unknown",
+        verdict="flaky",
+        verdict_by="maria",
+    )
+    await h.store.add_ci_observation(obs)
+    prompts: list[str] = []
+
+    def learn(task: Any) -> dict[str, Any]:
+        prompts.append(task.prompt)
+        return {
+            "id": "rtd-unreadable-tree",
+            "pattern": r"fatal: unable to read tree",
+            "category": "infra",
+            "description": "Read the Docs fetched a stale pull ref.",
+        }
+
+    h.runner.on("ci_diagnose", learn)
+    await h.emit(
+        Event(
+            kind=EventKind.DASHBOARD_COMMAND,
+            repo=REPO,
+            payload={"command": COMMAND, "observation": obs.id, "by": "maria"},
+        )
+    )
+    await h.settle()
+    assert prompts and "unable to read tree" in prompts[0]
+    [suggested] = await h.store.get_state(SUGGESTIONS.format(repo=REPO))
+    assert suggested["id"] == "rtd-unreadable-tree"
+
+
+def test_an_agents_draft_keeps_only_valid_kinds_of_conflict() -> None:
+    from auto_maintainer.playbooks.ci_rules import (
+        CiRulesDraft,
+        ResolveKindDraft,
+        checked,
+    )
+
+    draft = CiRulesDraft(
+        resolve_kinds=[
+            ResolveKindDraft(name="install_targets", paths=["requirements/install.sh"]),
+            ResolveKindDraft(name="Bad Name!", paths=["x"]),
+            ResolveKindDraft(name="nopaths", paths=[]),
+            ResolveKindDraft(name="install_targets", paths=["setup.py"]),
+        ]
+    )
+    kept, dropped = checked(draft, "", [])
+    assert [k.name for k in kept.resolve_kinds] == ["install_targets"]
+    assert len(dropped) == 3
+
+
+async def test_a_resolution_waits_for_a_scheduler_without_a_sign_in(
+    harness: Harness,
+) -> None:
+    h = harness
+    _conflicting(h)
+    h.runner.on("fix", _resolving("intro\nours line\ntheirs line\n"))
+    await _schedule(h, 42, by="bob")  # bob has no dashboard sign-in to push with
+    await h.settle()
+    [fix] = await h.store.list_actions(repo=REPO, kinds=[ActionKind.PR_FIX])
+    assert fix.status == ActionStatus.PROPOSED and fix.action.draft_for == "bob"
+    state = await _phase(h, 42)
+    assert state.phase == "resolving" and "waits for bob to approve" in state.detail
+
+
+async def test_an_automatic_schedule_never_pushes_a_resolution_by_itself(
+    harness: Harness,
+) -> None:
+    h = harness
+    _conflicting(h)
+    h.runner.on("fix", _resolving("intro\nours line\ntheirs line\n"))
+    await _schedule(h, 42, auto=True)
+    await h.settle()
+    [fix] = await h.store.list_actions(repo=REPO, kinds=[ActionKind.PR_FIX])
+    assert fix.status == ActionStatus.PROPOSED, "maria never saw this PR"
+
+
+def _rtd(conclusion: str | None) -> CheckRun:
+    """Read the Docs' build of the PR: a commit status, with no run to rerun."""
+    return CheckRun(
+        id=9001,
+        name="docs/readthedocs.org:widget",
+        status=CheckStatus.COMPLETED if conclusion else CheckStatus.IN_PROGRESS,
+        conclusion=CheckConclusion(conclusion) if conclusion else None,
+        details_url="https://app.readthedocs.org/projects/widget/builds/9/",
+    )
+
+
+def _flaky(h: Harness) -> None:
+    """The first look calls the unit job a flake, and the docs build the runner's."""
+
+    def look(task: Any) -> dict[str, Any]:
+        one = {"confidence": 0.9, "explanation": "not the change"}
+        if "readthedocs" in task.prompt and "unit" in task.prompt:
+            return {
+                "jobs": [
+                    {**one, "job": "unit", "category": "flaky"},
+                    {**one, "job": "docs/readthedocs.org:widget", "category": "infra"},
+                ]
+            }
+        return {**one, "category": "flaky"}
+
+    h.runner.on("ci_diagnose", look)
+
+
+async def test_a_finished_runs_flake_is_rerun_while_read_the_docs_still_builds(
+    harness: Harness,
+) -> None:
+    h = harness
+    _flaky(h)
+    h.forge.job_logs[420] = "NCCL timeout on the runner\n"
+    h.forge.put_pr(_ready(42, "a" * 40, [*_ci(42, "failure"), _rtd(None)]))
+    await _schedule(h, 42)
+    await h.settle()
+    assert h.forge.writes_of("rerun_failed_jobs") == [{"repo": REPO, "run_id": 4200}]
+    state = await _phase(h, 42)
+    assert state.phase == "rerunning" and "while the rest of CI runs" in state.detail
+
+
+async def test_a_failed_docs_build_does_not_hold_back_the_others_reruns(
+    harness: Harness,
+) -> None:
+    h = harness
+    # As on RLinf, the branch rules require the docs build.
+    info = h.forge.repos[REPO]
+    h.forge.add_repo(
+        info.model_copy(update={"required_checks": ["docs/readthedocs.org:widget"]})
+    )
+    _flaky(h)
+    h.runner.on("ci_root_cause", lambda t: {"causes": []})
+    h.forge.job_logs[420] = "NCCL timeout on the runner\n"
+    pr = _ready(42, "a" * 40, [*_ci(42, "failure"), _rtd("failure")])
+    h.forge.put_pr(pr)
+    await _schedule(h, 42)
+    await h.settle()
+    assert h.forge.writes_of("rerun_failed_jobs") == [{"repo": REPO, "run_id": 4200}]
+    state = await _phase(h, 42)
+    assert state.phase == "rerunning"
+    assert (
+        "readthedocs" in state.detail and "judged once the reruns end" in state.detail
+    )
+    # The rerun passes; the docs build still fails: now it goes to the failure lane.
+    h.clock.advance(minutes=20)
+    h.forge.put_pr(
+        pr.model_copy(
+            update={
+                "checks": [
+                    _job(421, "unit", "success", 4200, workflow="CI", attempt=2),
+                    _rtd("failure"),
+                ]
+            }
+        )
+    )
+    await h.emit(Event(kind=EventKind.CHECKS_COMPLETED, repo=REPO, number=42))
+    await h.settle()
+    failed = await _phase(h, 42)
+    assert failed.phase == "failed" and "readthedocs" in failed.detail
+    assert len(h.forge.writes_of("rerun_failed_jobs")) == 1
+
+
+async def test_a_real_failure_of_a_finished_run_fails_the_pr_while_others_run(
+    harness: Harness,
+) -> None:
+    h = harness
+    h.runner.on(
+        "ci_diagnose",
+        lambda t: {
+            "category": "pr_caused",
+            "confidence": 0.9,
+            "explanation": "it breaks",
+        },
+    )
+    h.runner.on(
+        "ci_root_cause",
+        lambda t: {
+            "causes": [
+                {
+                    "jobs": ["unit"],
+                    "failing": "tests/test_m.py::test_x",
+                    "origin": "change",
+                    "cause": "The new branch returns None.",
+                    "confidence": 0.8,
+                }
+            ]
+        },
+    )
+    h.forge.job_logs[420] = "FAILED tests/test_m.py::test_x\n"
+    h.forge.put_pr(_ready(42, "a" * 40, [*_ci(42, "failure"), _rtd(None)]))
+    await _schedule(h, 42)
+    await h.settle()
+    assert (await _phase(h, 42)).phase == "failed"
+    # Read the Docs still building does not bring it back out of the failure lane.
+    await h.emit(Event(kind=EventKind.CHECKS_COMPLETED, repo=REPO, number=42))
+    await h.settle()
+    assert (await _phase(h, 42)).phase == "failed"
+    assert not h.forge.writes_of("rerun_failed_jobs")
+
+
+async def test_a_base_merge_refused_for_the_schedulers_scope_waits_for_a_new_sign_in(
+    harness: Harness, tmp_path: Path
+) -> None:
+    h = harness
+    h.forge.put_pr(_ready(42, "a" * 40, _ci(42, "success"), behind_base=True))
+    update = h.forge.update_branch
+    h.forge.fail_next["update_branch"] = RuntimeError(
+        "GitHubError: GitHub API error 403: the base branch's new commits change "
+        "workflow files, and maria's dashboard sign-in may not change workflow files "
+        "(it lacks the workflow scope)"
+    )
+    await _schedule(h, 42)
+    await h.settle()
+    state = await _phase(h, 42)
+    assert state.phase == "blocked" and state.blocked_on == "person_scope"
+    assert "maria's dashboard sign-in lacks the workflow scope" in state.detail
+    assert not h.service.scope_request(), "the service's own sign-in is not the one"
+    # A change to the PR does not mend a sign-in: no attempt, it stays blocked.
+    await h.emit(Event(kind=EventKind.CHECKS_COMPLETED, repo=REPO, number=42))
+    await h.settle()
+    assert (await _phase(h, 42)).phase == "blocked"
+    assert not h.forge.writes_of("update_branch")
+    # maria signs in again and retries: a new attempt goes, as an action of its own.
+    app = create_app(h.service, data_dir=tmp_path, allow_dev_login=True)
+    async with _as(app, "maria") as maria:
+        out = await maria.post(f"/api/merge-schedule/{REPO}/42/retry")
+        assert out.status_code == 200, out.text
+    await h.settle()
+    assert [w["number"] for w in h.forge.writes_of("update_branch")] == [42]
+    del update

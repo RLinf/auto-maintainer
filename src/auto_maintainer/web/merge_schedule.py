@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
+from datetime import datetime
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -44,11 +45,12 @@ from ..domain.merge_schedule import (
     ordered,
     position,
     ready_conditions,
+    resolve_key,
     serial,
     skip_key,
     state_key,
 )
-from ..domain.profile import FlakeSignature, ReadyCondition, RepoProfile
+from ..domain.profile import FlakeSignature, ReadyCondition, RepoProfile, ResolveKind
 from ..domain.records import CiObservation, JobStatus
 from ..domain.run_ci import ci_view
 from ..domain.snapshot import Mergeable, PrSnapshot, PrState, RepoInfo
@@ -57,6 +59,7 @@ from ..playbooks.ci_rules import COMMAND as CI_RULES
 from ..playbooks.ci_rules import (
     DRAFT_KEY,
     MAX_PATTERNS,
+    TRAILER,
     CiRulesDraft,
     FlakePattern,
     current,
@@ -85,6 +88,36 @@ class SettingsBody(BaseModel):
     enabled: bool | None = None
     auto: bool | None = None
     parallel: int | None = Field(default=None, ge=1, le=20)
+
+
+class FreezeBody(BaseModel):
+    start: datetime
+    end: datetime
+    reason: str = Field(default="", max_length=300)
+
+
+class ResolveBody(BaseModel):
+    enabled: bool
+    union_only: bool = True
+    kinds: list[ResolveKind] = Field(default_factory=list, max_length=20)
+
+
+class MergingBody(BaseModel):
+    """How the repository's scheduled PRs merge; each field left out stays as it is."""
+
+    enabled: bool | None = None
+    method: Literal["squash", "merge", "rebase"] | None = None
+    subject: str | None = Field(default=None, max_length=200)
+    preserve_trailers: list[str] | None = Field(default=None, max_length=20)
+    signoff_from_authors: bool | None = None
+    update_branch: bool | None = None
+    parallel: int | None = Field(default=None, ge=1, le=20)
+    required_workflows: list[str] | None = Field(default=None, max_length=30)
+    cancelled_is_failure: bool | None = None
+    approvals: int | None = Field(default=None, ge=0, le=20)
+    arming_who: Literal["write", "maintain", "admin", "codeowners"] | None = None
+    freezes: list[FreezeBody] | None = Field(default=None, max_length=50)
+    resolve: ResolveBody | None = None
 
 
 class CiStartBody(BaseModel):
@@ -295,6 +328,14 @@ def _apply_draft(
     message = _section(merge, "message")
     message["subject"] = draft.subject
     message["preserve_trailers"] = draft.preserve_trailers
+    message["signoff_from_authors"] = draft.signoff_from_authors
+    _section(merge, "arming")["who"] = draft.arming_who
+    resolve = plan.get("resolve") if isinstance(plan.get("resolve"), dict) else {}
+    plan["resolve"] = {
+        **resolve,
+        "enabled": draft.resolve_conflicts,
+        "kinds": [k.model_dump() for k in draft.resolve_kinds],
+    }
     plan["parallel"] = draft.parallel
     ci = _section(layer, "ci")
     ci["diagnose"] = draft.diagnose
@@ -374,6 +415,52 @@ async def _scope_view(service: Service, user: User) -> dict[str, Any] | None:
     return {**shown, "owner": owner}
 
 
+def _merging(profile: RepoProfile, info: RepoInfo) -> dict[str, Any]:
+    """How the repository's scheduled PRs merge, for the Merging card, with what the
+    forge's rules mean for the schedule."""
+    merge = profile.merge
+    warnings: list[str] = []
+    base_merges = bool(info.requires_up_to_date) or merge.update_branch
+    if base_merges and info.dismisses_stale_reviews:
+        warnings.append(
+            "GitHub dismisses approvals when new commits arrive here, so each time "
+            "the schedule merges the base into a PR, its approvals are dropped and "
+            "it waits to be approved again."
+        )
+    if base_merges and info.requires_last_push_approval:
+        warnings.append(
+            "GitHub requires the last push to be approved by someone other than who "
+            "pushed it, so after the schedule merges the base in (as the maintainer "
+            "who scheduled the PR), another person approves it again."
+        )
+    if info.merge_queue:
+        warnings.append(
+            "The branch merges only through GitHub's merge queue: the schedule adds "
+            "PRs to the queue, which merges them with its own commit message."
+        )
+    resolve = merge.schedule.resolve
+    return {
+        "enabled": merge.enabled,
+        "method": merge.method,
+        "methods": info.merge_methods,
+        "subject": merge.message.subject,
+        "preserve_trailers": merge.message.preserve_trailers,
+        "signoff_from_authors": merge.message.signoff_from_authors,
+        "update_branch": merge.update_branch,
+        "requires_up_to_date": info.requires_up_to_date,
+        "parallel": merge.schedule.parallel,
+        "required_workflows": profile.ci.required_workflows,
+        "cancelled_is_failure": profile.ci.cancelled_is_failure,
+        "approvals": merge.approvals,
+        "approvals_required": info.required_approvals,
+        "arming_who": merge.arming.who,
+        "freezes": [f.model_dump(mode="json") for f in merge.freezes],
+        "resolve": resolve.model_dump(mode="json"),
+        "merge_queue": info.merge_queue,
+        "warnings": warnings,
+    }
+
+
 async def _maintainer(service: Service, user: User, repo: str) -> None:
     if not await is_maintainer(service, user, repo):
         raise HTTPException(403, f"only {repo}'s maintainers arrange its merges")
@@ -405,7 +492,10 @@ def build_router() -> APIRouter:
                 continue
             if job.playbook == "ci_rules":
                 rules_job = {"id": job.id, "status": job.status}
-            elif job.playbook in ("merge", "ci_doctor") and job.number is not None:
+            elif (
+                job.playbook in ("merge", "ci_doctor", "merge_base")
+                and job.number is not None
+            ):
                 # The live view of the work on the PR; a running one first.
                 was = jobs.get(job.number)
                 if was is None or job.status == JobStatus.RUNNING:
@@ -427,6 +517,7 @@ def build_router() -> APIRouter:
                 **_row(pr, profile),
                 "phase": state.phase,
                 "detail": state.detail,
+                "blocked_on": state.blocked_on if state.phase == "blocked" else "",
                 "since": state.since.isoformat() if state.since else None,
                 "scheduled_by": arm.armed_by,
                 "auto": arm.auto,
@@ -468,6 +559,7 @@ def build_router() -> APIRouter:
             "auto_by": profile.merge.schedule.auto_by,
             "paused": await service.pipeline.paused(repo),
             "checking": service.checking_prs(repo),
+            "check_progress": service.check_progress(repo),
             "rules": {
                 "approvals": max(profile.merge.approvals, info.required_approvals or 0),
                 "code_owners": info.requires_code_owner_reviews,
@@ -495,6 +587,7 @@ def build_router() -> APIRouter:
                 "blocking_roles": profile.merge.blocking_roles,
                 "label_roles": dict(sorted(profile.labels.roles.items())),
             },
+            "merging": _merging(profile, info),
             "flaky": {
                 "diagnose": profile.ci.diagnose,
                 "max_reruns": profile.ci.rerun.max_per_sha,
@@ -662,9 +755,12 @@ def build_router() -> APIRouter:
         state.running_since = None
         state.looked_into = []
         state.finding = ""
+        state.not_before = None
         await service.store.set_state(
             state_key(repo, number), state.model_dump(mode="json")
         )
+        # The schedule tries its resolution of the PR's conflicts again.
+        await service.store.set_state(resolve_key(repo, number), None)
         await service.bus.publish(
             Event(kind=EventKind.MERGE_QUEUE, repo=repo, number=number)
         )
@@ -811,6 +907,99 @@ def build_router() -> APIRouter:
                     )
                 )
         return out
+
+    @r.put("/{repo:path}/merging")
+    async def merging(
+        request: Request,
+        repo: str,
+        body: MergingBody,
+        user: User = Depends(current_user),
+    ) -> dict[str, Any]:
+        """Save how the repository's scheduled PRs merge: the method, the commit
+        message, merging the base in, the workflows that must pass, the approvals
+        the repository asks for, who may schedule, freezes, and which conflicts the
+        schedule resolves by itself. A profile change, through the gate."""
+        service = service_of(request)
+        repo = _repo(repo)
+        await require_view(service, user, repo)
+        info = await service.view_repo(repo)
+        if body.method and info.merge_methods and body.method not in info.merge_methods:
+            raise HTTPException(422, f"{repo} does not allow {body.method} merges")
+        if body.subject is not None:
+            try:
+                body.subject.format(title="t", number=1)
+            except (KeyError, IndexError, ValueError) as e:
+                raise HTTPException(
+                    422, "the subject may name only {title} and {number}"
+                ) from e
+        bad = [t for t in body.preserve_trailers or [] if not TRAILER.match(t)]
+        if bad:
+            raise HTTPException(422, f"not trailer names: {', '.join(bad)}")
+        if any(f.end <= f.start for f in body.freezes or []):
+            raise HTTPException(422, "a freeze must end after it starts")
+
+        def change(layer: dict[str, Any]) -> None:
+            merge = _section(layer, "merge")
+            if body.enabled is not None:
+                merge["enabled"] = body.enabled
+            if body.method is not None:
+                merge["method"] = body.method
+            message = _section(merge, "message")
+            if body.subject is not None:
+                message["subject"] = body.subject.strip() or "{title} (#{number})"
+            if body.preserve_trailers is not None:
+                message["preserve_trailers"] = list(
+                    dict.fromkeys(body.preserve_trailers)
+                )
+            if body.signoff_from_authors is not None:
+                message["signoff_from_authors"] = body.signoff_from_authors
+            if not message:
+                merge.pop("message", None)
+            if body.update_branch is not None:
+                merge["update_branch"] = body.update_branch
+            if body.parallel is not None:
+                _section(merge, "schedule")["parallel"] = body.parallel
+            if body.approvals is not None:
+                merge["approvals"] = body.approvals
+            if body.arming_who is not None:
+                _section(merge, "arming")["who"] = body.arming_who
+            if body.freezes is not None:
+                merge["freezes"] = [f.model_dump(mode="json") for f in body.freezes]
+            if body.resolve is not None:
+                _section(merge, "schedule")["resolve"] = body.resolve.model_dump(
+                    mode="json"
+                )
+            ci = _section(layer, "ci")
+            if body.required_workflows is not None:
+                ci["required_workflows"] = [
+                    w.strip()
+                    for w in dict.fromkeys(body.required_workflows)
+                    if w.strip()
+                ]
+            if body.cancelled_is_failure is not None:
+                ci["cancelled_is_failure"] = body.cancelled_is_failure
+            if not ci:
+                layer.pop("ci", None)
+
+        # ``change`` runs once, inside ``_save_layer``; the summary is built after.
+        return await _save_layer(service, user, repo, change, "merge: how PRs merge")
+
+    @r.post("/{repo:path}/{number:int}/check")
+    async def check_one(
+        request: Request,
+        repo: str,
+        number: int,
+        user: User = Depends(current_user),
+    ) -> dict[str, Any]:
+        """Read a scheduled PR from GitHub again now and have the schedule look at
+        its step again (its CI, approvals, and whether it may merge)."""
+        service = service_of(request)
+        repo = _repo(repo)
+        await require_view(service, user, repo)
+        if await service.store.get_arm(repo, number) is None:
+            raise HTTPException(404, f"#{number} is not scheduled")
+        await service.check_scheduled(repo, number)
+        return {"checked": number}
 
     @r.put("/{repo:path}/ci-start")
     async def ci_start(

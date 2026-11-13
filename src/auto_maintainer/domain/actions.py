@@ -348,6 +348,9 @@ class MergePayload(_Payload):
     subject: str
     body: str = ""
     armed_by: str | None = None
+    queue: bool = False
+    """Add the PR to the forge's merge queue instead of merging it now (a branch
+    that takes merges only through one); the queue merges it."""
 
 
 class PrEditPayload(_Payload):

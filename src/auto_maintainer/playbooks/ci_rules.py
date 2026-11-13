@@ -40,11 +40,11 @@ from collections import Counter
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from ..domain.agents import AgentTask, TaskKind
 from ..domain.events import Event, EventKind
-from ..domain.profile import READY_CONDITIONS, RepoProfile
+from ..domain.profile import READY_CONDITIONS, RepoProfile, ResolveKind
 from ..domain.run_ci import latest_checks
 from ..domain.snapshot import RepoInfo
 from .base import Playbook, PlaybookContext, PlaybookResult, may_succeed_later
@@ -70,7 +70,10 @@ FIELDS = """Fields:
 - `merge_method`: how PRs merge (`squash`, `merge`, or `rebase`), one the repository allows; `subject`: the merge commit's subject, a template with `{title}` and `{number}`; `preserve_trailers`: commit trailers a squash keeps from the PR's commits (such as `Signed-off-by` where commits must be signed off, `Co-authored-by`).
 - `update_branch`: whether a PR merges its base in before it merges even where the branch rules do not require it to be up to date (one at a time then).
 - `parallel`: how many scheduled PRs may run their CI at once when PRs need not be up to date (1 to 20; fewer where CI runs on scarce machines such as GPUs).
-- `required_workflows`: workflows, by name, whose runs must pass before a merge besides the checks the branch rules require; `cancelled_is_failure`: whether a cancelled job counts as a failure rather than as a run that stopped short."""
+- `required_workflows`: workflows, by name, whose runs must pass before a merge besides the checks the branch rules require; `cancelled_is_failure`: whether a cancelled job counts as a failure rather than as a run that stopped short.
+- `resolve_conflicts`: whether the schedule resolves a scheduled PR's minor conflicts with its base by itself (conflicts that change no code's meaning); `resolve_kinds`: which, each a `name` (lowercase, `-` or `_`), `paths` (glob patterns of the files: `*` within a folder, `**` across folders), a `description` (which conflicts in those files count, and how to resolve them), and `enabled`. By default docs, README files, and lists of install targets or dependencies; name the repository's own files where it keeps such lists (its install scripts, requirement files).
+- `signoff_from_authors`: whether a squash signs off in the name of the PR's commit authors when none of its commits is signed off, for a repository whose default branch checks for a sign-off.
+- `arming_who`: who may schedule a PR to merge besides the repository's maintainers' own rules: `write`, `maintain`, `admin`, or `codeowners`."""
 
 INVESTIGATE = """You are finding out how {repo} wants its pull requests merged and its CI handled, for a service that runs the final CI of the PRs its maintainers schedule and merges those that pass. The working directory is a read-only checkout of the default branch `{branch}`. Read `.github/workflows/` (the CI workflows, and the workflows they call) and the contribution guide (`CONTRIBUTING*`, `docs/` pages about contributing, reviewing, or CI), then fill in the fields below from what they say, keeping each current value (given below) where they say nothing. Do not change files, run anything, or fetch anything.
 
@@ -86,6 +89,16 @@ class FlakePattern(BaseModel):
     pattern: str = Field(min_length=1, max_length=500)
     category: Literal["flaky", "infra"] = "flaky"
     description: str = Field(default="", max_length=500)
+
+
+class ResolveKindDraft(BaseModel):
+    """A kind of conflict the schedule resolves, as drafted; ``checked`` keeps only
+    what is a valid ``ResolveKind``."""
+
+    name: str = Field(max_length=80)
+    paths: list[str] = Field(default_factory=list)
+    description: str = Field(default="", max_length=2000)
+    enabled: bool = True
 
 
 class CiRulesDraft(BaseModel):
@@ -115,6 +128,10 @@ class CiRulesDraft(BaseModel):
     parallel: int = Field(default=2, ge=1, le=20)
     required_workflows: list[str] = Field(default_factory=list)
     cancelled_is_failure: bool = False
+    resolve_conflicts: bool = True
+    resolve_kinds: list[ResolveKindDraft] = Field(default_factory=list)
+    signoff_from_authors: bool = False
+    arming_who: Literal["write", "maintain", "admin", "codeowners"] = "write"
 
 
 def current(profile: RepoProfile) -> CiRulesDraft:
@@ -154,6 +171,13 @@ def current(profile: RepoProfile) -> CiRulesDraft:
         parallel=profile.merge.schedule.parallel,
         required_workflows=list(profile.ci.required_workflows),
         cancelled_is_failure=profile.ci.cancelled_is_failure,
+        resolve_conflicts=profile.merge.schedule.resolve.enabled,
+        resolve_kinds=[
+            ResolveKindDraft(**k.model_dump())
+            for k in profile.merge.schedule.resolve.kinds
+        ],
+        signoff_from_authors=profile.merge.message.signoff_from_authors,
+        arming_who=profile.merge.arming.who,
     )
 
 
@@ -278,9 +302,21 @@ def checked(
         for w in draft.required_workflows
         if w not in required_workflows
     ]
+    kinds: list[ResolveKindDraft] = []
+    for k in draft.resolve_kinds:
+        try:
+            valid = ResolveKind.model_validate(k.model_dump())
+        except ValidationError:
+            dropped.append(f"conflict kind {k.name!r}, which is not a valid one")
+            continue
+        if valid.name in {x.name for x in kinds}:
+            dropped.append(f"conflict kind {k.name!r}, named twice")
+            continue
+        kinds.append(ResolveKindDraft(**valid.model_dump()))
     return draft.model_copy(
         update={
             **keep,
+            "resolve_kinds": kinds,
             "merge_method": method,
             "subject": subject,
             "preserve_trailers": trailers,
