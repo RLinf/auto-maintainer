@@ -980,6 +980,28 @@ class SqliteStore:
         )
         return _many(ChatThread, await self._fetch(stmt))
 
+    async def threads_with_workdir(self) -> list[tuple[ChatThread, datetime]]:
+        last = (
+            select(
+                m.chat_messages.c.thread_id,
+                func.max(m.chat_messages.c.created_at).label("at"),
+            )
+            .group_by(m.chat_messages.c.thread_id)
+            .subquery()
+        )
+        rows = await self._fetch(
+            select(m.chat_threads.c.data, m.chat_threads.c.created_at, last.c.at)
+            .outerjoin(last, last.c.thread_id == m.chat_threads.c.id)
+            .where(func.json_extract(m.chat_threads.c.data, "$.workdir").is_not(None))
+        )
+        return [
+            (
+                ChatThread.model_validate_json(r.data),
+                datetime.fromisoformat(r.at or r.created_at),
+            )
+            for r in rows
+        ]
+
     async def add_message(self, message: ChatMessage) -> None:
         await self._exec(
             insert(m.chat_messages).values(

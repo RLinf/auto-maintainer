@@ -445,8 +445,8 @@ Files on the service host:
 ├── releases/<sha>/            code checkouts; current -> releases/<sha>
 ├── memory/                    memory repo clone
 ├── mirrors/<owner>__<repo>.git  bare mirror per target repository; agent worktrees come from it
-├── worktrees/<run-id>/        one per agent run, removed afterwards
-└── runs/<run-id>/             prompt, transcript, structured output
+├── repos/<owner>/<repo>/<checkout>/  agent worktrees: removed after the run, or a conversation's after 7 idle days (7.3)
+└── runs/<run-id>/             prompt, transcript, structured output; removed 7 days after the last change (7.3)
 ```
 
 Agent worktrees come from mirrors the service owns, never from clones that people use. Lab worktrees follow each lab's own paths from its profile. The dashboard listens on every interface (`host: 0.0.0.0`) on port 443 with HTTPS by default; any other `port`, in `local.yaml` or `am serve --port`, serves plain HTTP (`config.serves_https`). With HTTPS, cookies go only over HTTPS; `cookie_secure: true` does the same for plain HTTP behind a TLS reverse proxy (bind `host: 127.0.0.1` behind it). `base_url` is the address browsers use and builds the sign-in links. The service does not run as root, so a host where unprivileged programs may not listen on 443 needs `net.ipv4.ip_unprivileged_port_start` lowered once; `am serve` says how and stops before listening. A host with a certificate of its own, such as one a public authority signed for its name, names it in `tls` (`cert`, `key`). Otherwise the first start makes one (`tls.py`): a private certificate authority in `~/.config/auto-maintainer/tls/` and a server certificate for the host in `base_url`, the host's network address, its name, and the loopback addresses. People install the authority's `ca.crt` once as a trusted root; the setup page and the dashboard offer it at `/tls/ca.crt`, and the log prints its SHA-256 fingerprint to compare. The authority carries name constraints, so a browser that trusts it accepts it only for those addresses, even if its key leaks. Every start renews a server certificate that expires within 30 days, under the same authority. `am tls [ADDRESS...]` makes it again by hand; a new address needs a new authority (`--new-authority`), which everyone installs again. `local.yaml` has `version: 2` since this default; a file without a version keeps the earlier defaults, port 7777 with plain HTTP.
@@ -594,7 +594,7 @@ Network: forge calls honor `HTTPS_PROXY`.
 ### 5.4 Engine
 
 - **Job store.** Jobs are rows with `repo`, `playbook`, `key`, `status`, `attempts`, `payload`, `result`. The key is unique per playbook, so a second event for the same PR and SHA joins the existing job. Jobs survive restarts. A stop (a deploy, `am stop`) cancels the running jobs and puts them back in `queued` without counting the attempt it ended (`Engine.stop`), and on startup any job a crashed process left `running` returns to `queued` before the engine starts, that attempt counted (`Engine.recover`), so unfinished reviews and other work run again at once from fresh reads instead of waiting for their lease to expire; questions their agents left pending are cancelled (`cancel_orphans`).
-- **Scheduler.** Cron triggers from `schedules.yaml` (digest, reconcile, compaction, flake report, doctors), each producing a `schedule.tick` event.
+- **Scheduler.** Cron triggers from `schedules.yaml` (digest, reconcile, compaction, flake report, doctors), each producing a `schedule.tick` event. Built-in housekeeping runs on some of them: `memory_sync`, `reconcile`, and `disk_cleanup` (daily; 7.3).
 - **Worker pools.** Separate concurrency limits for forge I/O, agent runs per runtime, and lab leases, plus a fair share per repository so one busy repository cannot starve the others. The quick quality scores of PRs nobody reviewed yet run in a pool of their own (`quality`, two at a time by default), so the background work never holds up a review someone waits for; a pool the host's settings leave out runs one job at a time. A pool claims a queued job only when it can start it, so a job shown as running runs. In the `agent` pool, the slots (`system.agent_slots`, else `pools.agent`) hold the jobs a person asked for (`Job.asked_by`: a dashboard or conversation request), which go first; the service's own work (scans, scoring, CI diagnosis) takes only slots nobody holds, so a person's request never waits behind it, and while that work finishes more jobs than slots can run. A queued job's view (`web/jobs.py:slot_view`) says how many slots are in use and how many jobs go first.
 - **Waits.** A playbook that returns `wait_for(events, timeout)` parks its job in `waiting` with a subscription (event kinds plus target). A matching event or the timeout re-queues the job, which runs again from fresh reads (4.3).
 - **Retries.** Exponential backoff with a per-playbook limit; a job that exhausts it shows on the dashboard with its last error.
@@ -1075,7 +1075,7 @@ Adapters for Feishu/Lark bots, Slack webhooks, and email. Routes are configured 
 ### 5.15 Observability and audit
 
 - Structured JSON logs with repository, job, run, and action IDs on every line.
-- Agent transcripts stored per run under `runs/<id>/` with a retention period; secrets are scrubbed before writing.
+- Agent transcripts stored per run under `runs/<id>/` for 7 days after the run's last change (7.3); secrets are scrubbed before writing.
 - The audit log is append-only and records every action: decision, actor (service or maintainer), approver, payload hash, external reference.
 - Metrics on `/metrics` (Prometheus format), labeled by repository: jobs by state, agent latency and usage, forge rate limit, proposals waiting, agreement scores.
 
@@ -1255,6 +1255,15 @@ auto-maintainer-memory/                private
 ### 7.3 Host-local files
 
 `~/.config/auto-maintainer/local.yaml` (port, data directory, proxy, operators, lab hosts, host paths, the HTTPS certificate), `gh/` (the GitHub CLI login the service acts as), `tls/` (the private authority and the server certificate for HTTPS, keys mode 0600 in a folder mode 0700; 4.7), `secrets.env` (mode 0600: the webhook secret, IM tokens), and `provider-keys.json` (mode 0600, written atomically: the API keys maintainers set on the Settings page; a key of the same name in `secrets.env` is used when the file has none). The data directory holds the SQLite database, run transcripts, mirrors, worktrees, release checkouts, and the one-time sign-in links (`sign-in-links.json`, mode 0600).
+
+**Disk cleanup.** So the service runs unattended on a small disk, the daily `disk_cleanup` schedule (`Service.clean_disk`) removes what nothing needs any more:
+
+- A conversation's checkout (`ChatThread.workdir`, kept between turns so its session can resume) once the conversation has had no message for 7 days (`CONVERSATION_IDLE`): it is released and the session forgotten, and the next message makes a new checkout and session.
+- Checkouts under `repos/` that this process does not hold and no conversation keeps, made more than a day ago: those a run left when the service stopped under it (`GitWorkspace.sweep`), and their worktree entries in the mirrors.
+- Run folders under `runs/` (each attempt's prompt, transcript, and container home) in which nothing changed for 7 days (`agents/retention.py:RUNS_KEPT`).
+- The agent CLIs' old sessions, in the service's home folder and each person's (`<data>/people/<login>/home`): what each adapter's `session_paths` names inside its `home_paths` (Claude Code's `projects/*/*.jsonl` transcripts, Codex's `sessions/` days, Gemini CLI's chats, Antigravity's `brain/` folders, pi's sessions), once nothing in it changed for 14 days (`SESSIONS_KEPT`). Sign-ins, settings, and anything the patterns do not name stay. On a host without docker the agents use the host user's own home folders, so the same applies to that user's own sessions of those CLIs.
+
+Agents write run folders and their CLIs' home folders, so the cleanup follows no link: a link is never descended into nor taken as a match. The mirrors, the memory repo, the database, and the agent CLIs' installs are not pruned.
 
 **Setup on the web.** Nobody edits these files by hand. When `am serve` starts without `local.yaml`, or cannot reach its forge with the one it has, it serves only the setup page and prints a link with a one-time code (`am setup` prints it again); holding the code proves access to the host. The page (`web/setup.py`, `hostsetup.HostSetup`) asks for:
 

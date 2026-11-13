@@ -6,4 +6,5 @@ stale:      "0 1 * * *"
 drift:      "15 * * * *"
 doctor:     "30 2 * * *"
 memory_sync: "*/5 * * * *"
+disk_cleanup: "45 4 * * *"   # old run folders, idle checkouts, agent CLIs' old sessions
 learn:      "0 3 * * *"

@@ -124,6 +124,13 @@ class ClaudeCodeRuntime(ExecRuntime):
     )
 
     home_paths = (".claude", ".claude.json")
+    session_paths = (
+        ".claude/projects/*/*.jsonl",
+        ".claude/todos/*",
+        ".claude/shell-snapshots/*",
+        ".claude/file-history/*",
+        ".claude/debug/*",
+    )
     login_args = ("auth", "login")
     login_marker = ".claude/.credentials.json"
     """Claude Code's sign-in (checked against 2.1.319): without a browser it prints

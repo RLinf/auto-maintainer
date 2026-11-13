@@ -22,8 +22,10 @@ import base64
 import os
 import shutil
 import tempfile
+import time
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +44,10 @@ SIDES_MAX_BYTES = 1_000_000
 """A side larger than this is not read (``ConflictSides``: ``None``)."""
 """Every git command in a checkout runs without hooks or a file-system monitor: both
 run commands that a configuration names."""
+
+CHECKOUT_DEPTH = 8
+"""How deep under ``repos/`` a checkout may be: the repository's folders
+(``fs_parts``), then the checkout."""
 
 RemoteFn = Callable[[str], tuple[str, str]]
 """A repository's clone address and the user name git presents with its token."""
@@ -349,6 +355,55 @@ class GitWorkspace:
         shutil.rmtree(p, ignore_errors=True)
         if mirror is not None:
             await run(["git", "worktree", "prune"], cwd=mirror)
+
+    def _checkouts(self) -> list[Path]:
+        """Every checkout under ``repos/``: the first folder down each path that
+        holds a ``.git``, reached without following links, at most ``CHECKOUT_DEPTH``
+        folders down."""
+        found: list[Path] = []
+        level = [self.root / "repos"]
+        for _ in range(CHECKOUT_DEPTH):
+            deeper = []
+            for folder in level:
+                try:
+                    entries = list(os.scandir(folder))
+                except OSError:
+                    continue
+                for entry in entries:
+                    if not entry.is_dir(follow_symlinks=False):
+                        continue
+                    path = Path(entry.path)
+                    if os.path.lexists(path / ".git"):
+                        found.append(path)
+                    else:
+                        deeper.append(path)
+            level = deeper
+        return found
+
+    async def sweep(
+        self, keep: Collection[Path], older_than: timedelta = timedelta(days=1)
+    ) -> int:
+        """Remove the checkouts under ``repos/`` that nothing uses: not prepared here
+        and still held (``release`` not called yet), not in ``keep`` (the checkouts
+        conversations keep), and made more than ``older_than`` ago, such as those a
+        run left when the service stopped under it. Returns how many it removed."""
+        held = set(self._steering) | {Path(p) for p in keep}
+        cutoff = time.time() - older_than.total_seconds()
+        removed = 0
+        for path in await asyncio.to_thread(self._checkouts):
+            if path in held:
+                continue
+            try:
+                if path.lstat().st_mtime > cutoff:
+                    continue
+            except OSError:
+                continue
+            await self.release(path)
+            removed += 1
+        if removed:
+            for mirror in sorted((self.root / "mirrors").glob("*.git")):
+                await run(["git", "worktree", "prune"], cwd=mirror)
+        return removed
 
     async def changes(self, path: Any) -> WorkChanges:
         """What changed in the checkout since its commit: the agent's work. The
