@@ -109,6 +109,11 @@ class ForgeReader(Protocol):
         """Entry names in a directory, or an empty list."""
         ...
 
+    async def in_merge_queue(self, repo: str, number: int) -> bool | None:
+        """Whether the PR waits in its base branch's merge queue; ``None`` when the
+        forge has none or does not say."""
+        ...
+
     async def get_pr_diff(self, repo: str, number: int) -> str | None:
         """The PR's unified diff against its base at its current head, or ``None``."""
         ...
@@ -219,6 +224,11 @@ class ForgeWriter(Protocol):
         body: PublicText,
     ) -> str:
         """Merge and return the merge commit SHA."""
+        ...
+
+    async def enqueue_merge(self, repo: str, number: int, sha: str) -> None:
+        """Add the PR at ``sha`` to its base branch's merge queue; forges without
+        one raise ``NotImplementedError``."""
         ...
 
     async def update_pr(
@@ -427,10 +437,22 @@ class Workspace(Protocol):
         ...
 
 
+class ConflictSides(BaseModel):
+    """A conflicted file on each side of a merge: where the two parted (``base``),
+    the PR's (``ours``), and the merged branch's (``theirs``); ``None`` for a side
+    without the file, or a file too large or not text."""
+
+    base: str | None = None
+    ours: str | None = None
+    theirs: str | None = None
+
+
 class MergeAttempt(BaseModel):
     merge_sha: str
     """The commit of the merged branch."""
     conflicts: list[str] = Field(default_factory=list)
+    sides: dict[str, ConflictSides] = Field(default_factory=dict)
+    """Each conflicted file on each side, as git records them before resolving."""
     steering: list[str] = Field(default_factory=list)
     """The conflicted files that steer coding agents (``AGENTS.md``, skills). The
     checkout holds the default branch's version of them, so no agent reads a PR's own

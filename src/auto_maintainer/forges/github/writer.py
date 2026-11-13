@@ -35,6 +35,11 @@ mutation($id: ID!) { convertPullRequestToDraft(input: {pullRequestId: $id}) { pu
 _RESOLVE_MUTATION = """
 mutation($id: ID!) { resolveReviewThread(input: {threadId: $id}) { thread { isResolved } } }
 """
+_ENQUEUE_MUTATION = """
+mutation($id: ID!, $sha: GitObjectID!) {
+  enqueuePullRequest(input: {pullRequestId: $id, expectedHeadOid: $sha}) { mergeQueueEntry { id } }
+}
+"""
 _PR_NODE_QUERY = """
 query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) { pullRequest(number: $number) { id } }
@@ -250,6 +255,18 @@ class GitHubWriter:
                 data,
             )
         return data["sha"]
+
+    async def enqueue_merge(self, repo: str, number: int, sha: str) -> None:
+        """Add the PR at ``sha`` to the merge queue of its base branch, which merges
+        it with the queue's own commit message once the queue's checks pass."""
+        owner, _, name = repo.partition("/")
+        data = await self._client.graphql(
+            _PR_NODE_QUERY, {"owner": owner, "name": name, "number": number}, repo=repo
+        )
+        node_id = data["repository"]["pullRequest"]["id"]
+        await self._client.graphql(
+            _ENQUEUE_MUTATION, {"id": node_id, "sha": sha}, repo=repo
+        )
 
     async def update_pr(
         self, repo: str, number: int, title: PublicText, body: PublicText

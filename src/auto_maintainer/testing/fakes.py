@@ -44,6 +44,7 @@ from ..domain.memory import MemoryChange
 from ..domain.permissions import Permission
 from ..domain.ports import (
     CommandResult,
+    ConflictSides,
     DeployResult,
     GpuStatus,
     MergeAttempt,
@@ -94,6 +95,8 @@ class FakeForge:
         self.path_changers: dict[tuple[str, str], str] = {}
         self.job_logs: dict[int, str] = {}
         self.status_logs: dict[str, str] = {}
+        self.merge_queue: dict[tuple[str, int], bool] = {}
+        """PRs in their base's merge queue (``in_merge_queue``)."""
         self.merged: list[MergedPrSummary] = []
         self.runners: list[RunnerInfo] = []
         self.writes: list[tuple[str, dict[str, Any]]] = []
@@ -179,6 +182,9 @@ class FakeForge:
             + "".join(f"+line {i + 1}\n" for i in range(f.additions))
             for f in pr.files
         )
+
+    async def in_merge_queue(self, repo: str, number: int) -> bool | None:
+        return self.merge_queue.get((repo, number))
 
     async def list_dir(self, repo: str, path: str, ref: str | None = None) -> list[str]:
         prefix = path.rstrip("/") + "/"
@@ -446,6 +452,10 @@ class FakeForge:
         self._update_pr(repo, number, state=PrState.MERGED)
         return "m" * 40
 
+    async def enqueue_merge(self, repo: str, number: int, sha: str) -> None:
+        self._record("enqueue_merge", repo=repo, number=number, sha=sha)
+        self.merge_queue[(repo, number)] = True
+
     async def update_pr(
         self, repo: str, number: int, title: PublicText, body: PublicText
     ) -> None:
@@ -708,6 +718,8 @@ class FakeWorkspace:
         written into the worktree by ``merge``."""
         self.merged: list[str] = []
         self.applied: list[tuple[Path, str]] = []
+        self.merge_sides: dict[str, ConflictSides] = {}
+        """Each conflicted file on each side of the merge, as git would record it."""
 
     async def prepare(
         self, repo: str, number: int | None, sha: str, default_branch: str
@@ -734,7 +746,14 @@ class FakeWorkspace:
             target = Path(path) / name
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(text)
-        return MergeAttempt(merge_sha="d" * 40, conflicts=sorted(self.merge_conflicts))
+        return MergeAttempt(
+            merge_sha="d" * 40,
+            conflicts=sorted(self.merge_conflicts),
+            sides={
+                n: self.merge_sides.get(n, ConflictSides())
+                for n in self.merge_conflicts
+            },
+        )
 
     async def archive(self, path: Any, ref: str, max_bytes: int = 200_000_000) -> str:
         return base64.b64encode(f"code at {ref}".encode()).decode("ascii")

@@ -338,10 +338,42 @@ def evaluate_merge_gate(
     return GateResult(outcome="merge", items=items)
 
 
+def author_signoffs(pr: PrSnapshot) -> list[str]:
+    """``Signed-off-by`` lines in the name of the PR's commit authors, as their
+    commits name them, each once, in the order they first committed: never for a
+    bot, nor for a merge of the base branch (the base's authors signed off their own
+    commits there)."""
+    lines: list[str] = []
+    for c in pr.commits:
+        login = (c.author_login or "").strip()
+        if is_bot(login) or c.subject.startswith(("Merge branch ", "Merge remote-")):
+            continue
+        name = (c.author_name or "").strip() or login
+        email = (c.author_email or "").strip() or (
+            f"{login}@users.noreply.github.com" if login else ""
+        )
+        if (
+            not name
+            or not email
+            or email.lower().endswith("[bot]@users.noreply.github.com")
+        ):
+            continue
+        line = f"Signed-off-by: {name} <{email}>"
+        if line not in lines:
+            lines.append(line)
+    if not lines and pr.author and not is_bot(pr.author):
+        lines.append(
+            f"Signed-off-by: {pr.author} <{pr.author}@users.noreply.github.com>"
+        )
+    return lines
+
+
 def squash_message(pr: PrSnapshot, profile: RepoProfile) -> tuple[str, str]:
-    """The merge subject and body: commit subjects, then preserved trailers."""
-    subject = profile.merge.message.subject.format(title=pr.title, number=pr.number)
-    keep = {t.lower() for t in profile.merge.message.preserve_trailers}
+    """The merge subject and body: commit subjects, then preserved trailers; with
+    ``signoff_from_authors``, the authors' sign-offs when no commit has one."""
+    message = profile.merge.message
+    subject = message.subject.format(title=pr.title, number=pr.number)
+    keep = {t.lower() for t in message.preserve_trailers}
     subjects = [f"* {c.subject}" for c in pr.commits if c.subject]
     trailers: list[str] = []
     for c in pr.commits:
@@ -349,6 +381,12 @@ def squash_message(pr: PrSnapshot, profile: RepoProfile) -> tuple[str, str]:
             line = f"{key}: {value}"
             if key.lower() in keep and line not in trailers:
                 trailers.append(line)
+    if (
+        message.signoff_from_authors
+        and "signed-off-by" in keep
+        and not any(t.lower().startswith("signed-off-by:") for t in trailers)
+    ):
+        trailers = [*author_signoffs(pr), *trailers]
     body = "\n".join(subjects)
     if trailers:
         body = f"{body}\n\n" + "\n".join(trailers) if body else "\n".join(trailers)

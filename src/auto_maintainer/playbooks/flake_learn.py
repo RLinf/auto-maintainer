@@ -107,10 +107,17 @@ class FlakeLearn(Playbook):
         )
         if obs is None or obs.verdict != "flaky":
             return PlaybookResult(result={"skipped": "no flaky verdict to learn from"})
-        log = await ctx.ci.get_job_log(repo, obs.check_id) or ""
+        check = CheckRun(
+            id=obs.check_id,
+            name=obs.check_name,
+            workflow=obs.workflow,
+            run_id=obs.run_id,
+            details_url=obs.details_url,
+        )
+        # A job's log, or the build log of an outside service's check (Read the Docs).
+        log = await ctx.ci.log_of(repo, check) or ""
         if not log.strip():
             return PlaybookResult(result={"skipped": "the job's log is gone"})
-        check = CheckRun(id=obs.check_id, name=obs.check_name, workflow=obs.workflow)
         known = await ctx.knowledge.flake_signatures(repo, profile)
         if match_signature(log, check, known) is not None:
             return PlaybookResult(result={"skipped": "a known pattern matches it"})

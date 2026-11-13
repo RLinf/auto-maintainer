@@ -266,6 +266,9 @@ class CiObservation(BaseModel):
     check_id: int
     check_name: str
     workflow: str | None = None
+    details_url: str | None = None
+    """The failed check's own page: for a commit status an outside service reported
+    (Read the Docs), where its log is read from (``CiReader.log_of``)."""
     category: str
     signature: str | None = None
     confidence: float = 0.0

@@ -45,6 +45,7 @@ from .snapshot import PrSnapshot, RepoInfo
 Phase = Literal[
     "queued",
     "updating",
+    "resolving",
     "starting",
     "running",
     "rerunning",
@@ -57,7 +58,15 @@ Phase = Literal[
     "merged",
 ]
 ACTIVE: frozenset[str] = frozenset(
-    {"updating", "starting", "running", "rerunning", "diagnosing", "merging"}
+    {
+        "updating",
+        "resolving",
+        "starting",
+        "running",
+        "rerunning",
+        "diagnosing",
+        "merging",
+    }
 )
 """Phases in which a PR keeps its turn."""
 WAITING: frozenset[str] = frozenset({"queued"})
@@ -75,6 +84,18 @@ too fast for it (people merging by hand while it runs)."""
 def state_key(repo: str, number: int) -> str:
     """Where the store keeps a scheduled PR's ``ScheduleState``."""
     return f"merge-schedule:{repo}#{number}"
+
+
+RESOLVE_SECONDS = 3600
+"""How long the schedule's resolution of a PR's conflict may take, from starting the
+agent to its push showing on the forge, before the schedule takes it to have failed."""
+
+
+def resolve_key(repo: str, number: int) -> str:
+    """Where the store keeps how the schedule's resolution of a PR's conflicts went:
+    ``sha`` (the head it resolved), ``outcome`` (``started``, ``proposed``, or
+    ``refused``), ``why``, ``action_id``, ``at``."""
+    return f"merge-schedule-resolve:{repo}#{number}"
 
 
 def skip_key(repo: str, number: int) -> str:
@@ -128,6 +149,16 @@ class ScheduleState(BaseModel):
     rerun_of: list[int] = Field(default_factory=list)
     """The failed checks a rerun was asked for: until newer attempts replace them,
     the rerun has not started, and they are not a failure to act on again."""
+    not_before: datetime | None = None
+    """The forge's rate limit refused a step: it is taken again only from then."""
+    transient: int = 0
+    """Steps the forge's rate limit refused at this head: each new attempt is an
+    action of its own (``Action.idempotency_key``)."""
+    queued: bool = False
+    """Its merge went to the forge's merge queue, which merges it in its own time."""
+    blocked_rule: str = ""
+    """The forge's own merge verdict (``PrSnapshot.merge_state``) held back a merge
+    that the service's merge gate allowed, at this head."""
 
 
 def serial(info: RepoInfo, profile: RepoProfile) -> bool:
@@ -209,16 +240,29 @@ def turns(
 def only_base_merged(pr: PrSnapshot, armed_sha: str, updaters: set[str]) -> bool:
     """Whether every commit on ``pr`` after ``armed_sha`` is a merge of its base made
     by one of ``updaters`` (the scheduler, the service): a branch update the
-    schedule asked for, which keeps the schedule. ``pr.commits`` is oldest first."""
+    schedule asked for, or its resolution of a conflict with the base, which keeps
+    the schedule. ``pr.commits`` is oldest first."""
     shas = [c.sha for c in pr.commits]
     if armed_sha not in shas or shas[-1] == armed_sha:
         return False
     after = pr.commits[shas.index(armed_sha) + 1 :]
     who = {u.lower() for u in updaters}
+    # A push made as a person names them by their no-reply address, which the forge
+    # does not always map back to their login.
+    emails = {f"{u}@users.noreply.github.com" for u in who}
     return all(
-        (c.author_login or "").lower() in who
+        (
+            (c.author_login or "").lower() in who
+            or (c.author_email or "").lower() in emails
+        )
         and c.message.startswith(
-            (f"Merge branch '{pr.base_ref}'", "Merge remote-tracking branch")
+            (
+                f"Merge branch '{pr.base_ref}'",
+                "Merge remote-tracking branch",
+                # The schedule's own resolution of a conflict with the base
+                # (``playbooks/merge_base.py``, pushed as the scheduler).
+                f"Merge {pr.base_ref} into #{pr.number}",
+            )
         )
         for c in after
     )

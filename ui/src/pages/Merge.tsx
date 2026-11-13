@@ -19,7 +19,7 @@ import { openJob } from "../openJob";
 import { RepoTabs, useRepoScope } from "../repoScope";
 import { Skeleton, useToast } from "../ui";
 
-type Phase = "queued" | "updating" | "starting" | "running" | "rerunning" | "diagnosing" | "approval" | "merging" | "blocked" | "failed" | "held" | "merged";
+type Phase = "queued" | "updating" | "resolving" | "starting" | "running" | "rerunning" | "diagnosing" | "approval" | "merging" | "blocked" | "failed" | "held" | "merged";
 
 interface CiSummary {
   state: string;
@@ -95,6 +95,10 @@ interface Draft {
     parallel: number;
     required_workflows: string[];
     cancelled_is_failure: boolean;
+    resolve_conflicts: boolean;
+    resolve_kinds: ResolveKind[];
+    signoff_from_authors: boolean;
+    arming_who: string;
   };
   dropped: string[];
   by: string;
@@ -119,6 +123,40 @@ interface Flaky {
   root_cause: boolean;
   patterns: Pattern[];
   suggestions: (Pattern & { from: string; by: string; at: string })[];
+}
+
+interface ResolveKind {
+  name: string;
+  paths: string[];
+  description: string;
+  enabled: boolean;
+}
+
+interface Freeze {
+  start: string;
+  end: string;
+  reason: string;
+}
+
+interface Merging {
+  enabled: boolean;
+  method: string;
+  methods: string[] | null;
+  subject: string;
+  preserve_trailers: string[];
+  signoff_from_authors: boolean;
+  update_branch: boolean;
+  requires_up_to_date: boolean | null;
+  parallel: number;
+  required_workflows: string[];
+  cancelled_is_failure: boolean;
+  approvals: number;
+  approvals_required: number | null;
+  arming_who: string;
+  freezes: Freeze[];
+  resolve: { enabled: boolean; union_only: boolean; kinds: ResolveKind[] };
+  merge_queue: boolean | null;
+  warnings: string[];
 }
 
 interface MergeView {
@@ -157,6 +195,7 @@ interface MergeView {
   };
   ci_start: CiStart;
   flaky: Flaky;
+  merging: Merging;
   draft: Draft | null;
   rules_job: { id: string; status: string } | null;
   scope_request: { scopes: string[]; login: string; state: string; started_at: string; owner: boolean; code?: string; url?: string } | null;
@@ -175,6 +214,7 @@ interface Saved {
 const PHASE: Record<Phase, { label: string; cls: string }> = {
   queued: { label: "Waiting for its turn", cls: "job-waiting" },
   updating: { label: "Merging the base in", cls: "job-running" },
+  resolving: { label: "Resolving conflicts", cls: "job-running" },
   starting: { label: "Starting CI", cls: "job-running" },
   running: { label: "CI running", cls: "job-running" },
   rerunning: { label: "Rerunning a flake", cls: "job-running" },
@@ -258,6 +298,10 @@ export default function MergePage() {
           <div className="merge-grid">
             <RulesCard v={v} />
             <CiStartCard v={v} />
+          </div>
+          <div className="merge-grid">
+            <MergingCard v={v} />
+            <ConflictsCard v={v} />
           </div>
           <FlakyCard v={v} />
           {v.merged.length > 0 && <MergedList v={v} />}
@@ -399,12 +443,35 @@ function CiLine({ ci }: { ci: CiSummary }) {
   );
 }
 
+function useCheckOne(repo: string) {
+  const t = useT();
+  const toast = useToast();
+  const check = useAct((n: number) => api.post(`/api/merge-schedule/${repo}/${n}/check`), [["merge-schedule"]]);
+  return (n: number) =>
+    check.mutate(n, {
+      onSuccess: () => toast({ title: `${t("Checking")} #${n}`, body: t("It is read from GitHub again, and the schedule looks at its step again."), icon: "refresh" }),
+      onError: (e) => toast({ title: t("Not checked"), body: String((e as Error).message), icon: "x" }),
+    });
+}
+
+/** Read one scheduled PR from GitHub again and have the schedule look at its step
+ * again: its CI, its approvals, whether it may merge. */
+function CheckOneButton({ check, number }: { check: (n: number) => void; number: number }) {
+  const t = useT();
+  return (
+    <button className="sm ghost" aria-label={t("Check it now")} title={t("Read it from GitHub again now, and have the schedule look at its CI and merge rules again")} onClick={() => check(number)}>
+      <Icon name="refresh" size={13} />
+    </button>
+  );
+}
+
 function ScheduleSection({ v }: { v: MergeView }) {
   const t = useT();
   const toast = useToast();
   const order = useAct((numbers: number[]) => api.put(`/api/merge-schedule/${v.repo}/order`, { numbers }), [["merge-schedule"]]);
   const retry = useAct((n: number) => api.post(`/api/merge-schedule/${v.repo}/${n}/retry`), [["merge-schedule"]]);
   const remove = useAct((n: number) => api.del(`/api/merge-schedule/${v.repo}/${n}`), [["merge-schedule"]]);
+  const check = useCheckOne(v.repo);
   const move = (i: number, by: number) => {
     const numbers = v.scheduled.map((s) => s.number);
     const j = i + by;
@@ -449,7 +516,8 @@ function ScheduleSection({ v }: { v: MergeView }) {
                   )}
                   {s.finding && <span className="small merge-finding">{s.finding}</span>}
                 </div>
-                <WatchButton job={s.job} busy={s.phase === "diagnosing"} />
+                <WatchButton job={s.job} busy={s.phase === "diagnosing" || s.phase === "resolving"} />
+                <CheckOneButton check={check} number={s.number} />
                 {v.can_arrange && (
                   <div className="row merge-actions">
                     {s.phase === "blocked" && (
@@ -483,6 +551,7 @@ function FailureLane({ v }: { v: MergeView }) {
   const retry = useAct((n: number) => api.post(`/api/merge-schedule/${v.repo}/${n}/retry`), [["merge-schedule"]]);
   const flaky = useAct((n: number) => api.post(`/api/merge-schedule/${v.repo}/${n}/flaky`), [["merge-schedule"]]);
   const remove = useAct((n: number) => api.del(`/api/merge-schedule/${v.repo}/${n}`), [["merge-schedule"]]);
+  const check = useCheckOne(v.repo);
   return (
     <Section title={t("Failure lane")} hint={t("Set aside after their CI really failed; the next PR took the turn.")}>
       <div className="list">
@@ -506,6 +575,7 @@ function FailureLane({ v }: { v: MergeView }) {
               {f.finding && <span className="small merge-finding">{f.finding}</span>}
             </div>
             <WatchButton job={f.job} busy={false} />
+            <CheckOneButton check={check} number={f.number} />
             {v.can_arrange && (
               <div className="row merge-actions">
                 <FixCiButton repo={v.repo} number={f.number} failed={f.failed_jobs.length ? f.failed_jobs : f.ci.failed} canPush={v.signed_in} size="sm" />
@@ -1058,8 +1128,13 @@ function DraftRules({ v, draft }: { v: MergeView; draft: Draft }) {
     flake_patterns: raw.flake_patterns ?? [],
     preserve_trailers: raw.preserve_trailers ?? [],
     required_workflows: raw.required_workflows ?? [],
+    resolve_kinds: raw.resolve_kinds ?? [],
+    resolve_conflicts: raw.resolve_conflicts ?? v.merging.resolve.enabled,
+    signoff_from_authors: raw.signoff_from_authors ?? v.merging.signoff_from_authors,
+    arming_who: raw.arming_who ?? v.merging.arming_who,
   };
   const r = v.rules;
+  const m = v.merging;
   const s = v.ci_start;
   const f = v.flaky;
   const labelOf = (role: string) => r.label_roles[role] ?? role;
@@ -1096,6 +1171,18 @@ function DraftRules({ v, draft }: { v: MergeView; draft: Draft }) {
     { label: t("How many run their CI at once"), was: v.parallel, now: d.parallel, changed: v.parallel !== d.parallel },
     { label: t("Workflows that must pass"), was: list(r.required_workflows), now: list(d.required_workflows), changed: !same(r.required_workflows, d.required_workflows) },
     { label: t("A cancelled job counts as a failure"), was: r.cancelled_is_failure ? t("yes") : t("no"), now: d.cancelled_is_failure ? t("yes") : t("no"), changed: r.cancelled_is_failure !== d.cancelled_is_failure },
+    { label: t("Resolve minor conflicts with the base"), was: m.resolve.enabled ? t("yes") : t("no"), now: d.resolve_conflicts ? t("yes") : t("no"), changed: m.resolve.enabled !== d.resolve_conflicts },
+    {
+      label: t("Kinds of conflict it resolves"),
+      was: list(m.resolve.kinds.filter((k) => k.enabled).map((k) => k.name)),
+      now: list(d.resolve_kinds.filter((k) => k.enabled).map((k) => k.name)),
+      changed: !same(
+        m.resolve.kinds.map((k) => [k.name, k.paths, k.description, k.enabled]),
+        d.resolve_kinds.map((k) => [k.name, k.paths, k.description, k.enabled]),
+      ),
+    },
+    { label: t("Sign off for the authors when no commit is signed off"), was: m.signoff_from_authors ? t("yes") : t("no"), now: d.signoff_from_authors ? t("yes") : t("no"), changed: m.signoff_from_authors !== d.signoff_from_authors },
+    { label: t("Who may schedule"), was: t(WHO[m.arming_who] ?? m.arming_who), now: t(WHO[d.arming_who] ?? d.arming_who), changed: m.arming_who !== d.arming_who },
     { label: t("How CI starts"), was: s.how ? t("described") : "—", now: d.how ? t("described anew, below") : "—", changed: (s.how || "") !== d.how },
     { label: t("Before merging"), was: r.notes || "—", now: d.merge_notes || "—", changed: (r.notes || "") !== d.merge_notes },
   ];
@@ -1164,6 +1251,383 @@ function DraftRules({ v, draft }: { v: MergeView; draft: Draft }) {
         )}
         <ErrorBox error={save.error || discard.error} />
       </div>
+    </Section>
+  );
+}
+
+const WHO: Record<string, string> = {
+  write: "anyone with write access",
+  maintain: "people with maintain access",
+  admin: "admins",
+  codeowners: "code owners of the PR's files",
+};
+
+const METHODS = ["squash", "merge", "rebase"] as const;
+
+const csv = (x: string) =>
+  x
+    .split(/[,\n]/)
+    .map((y) => y.trim())
+    .filter(Boolean);
+
+/** A date-time as a ``datetime-local`` input shows it, in the viewer's time zone. */
+function localInput(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const off = d.getTimezoneOffset() * 60_000;
+  return new Date(d.getTime() - off).toISOString().slice(0, 16);
+}
+
+/** How the repository's scheduled PRs merge: every setting, edited in place. */
+function MergingCard({ v }: { v: MergeView }) {
+  const t = useT();
+  const toast = useToast();
+  const m = v.merging;
+  const [editing, setEditing] = useState(false);
+  const [method, setMethod] = useState(m.method);
+  const [subject, setSubject] = useState(m.subject);
+  const [trailers, setTrailers] = useState(m.preserve_trailers.join(", "));
+  const [signoff, setSignoff] = useState(m.signoff_from_authors);
+  const [updateBranch, setUpdateBranch] = useState(m.update_branch);
+  const [parallel, setParallel] = useState(String(m.parallel));
+  const [approvals, setApprovals] = useState(String(m.approvals));
+  const [workflows, setWorkflows] = useState(m.required_workflows.join(", "));
+  const [cancelled, setCancelled] = useState(m.cancelled_is_failure);
+  const [who, setWho] = useState(m.arming_who);
+  const [freezes, setFreezes] = useState<Freeze[]>(m.freezes);
+  const reset = () => {
+    setMethod(m.method);
+    setSubject(m.subject);
+    setTrailers(m.preserve_trailers.join(", "));
+    setSignoff(m.signoff_from_authors);
+    setUpdateBranch(m.update_branch);
+    setParallel(String(m.parallel));
+    setApprovals(String(m.approvals));
+    setWorkflows(m.required_workflows.join(", "));
+    setCancelled(m.cancelled_is_failure);
+    setWho(m.arming_who);
+    setFreezes(m.freezes);
+  };
+  const save = useAct((body: Record<string, unknown>) => api.put<Saved>(`/api/merge-schedule/${v.repo}/merging`, body), [["merge-schedule"]]);
+  const done = (out: Saved) => {
+    toast({ title: out.applied ? t("Saved") : t("Proposed to the maintainers"), body: out.applied ? undefined : out.reason || undefined, icon: out.applied ? "check" : "inbox" });
+    setEditing(false);
+  };
+  const methods = m.methods?.length ? m.methods : [...METHODS];
+  const yes = (b: boolean) => (b ? t("yes") : t("no"));
+  return (
+    <Section
+      title={t("How it merges")}
+      hint={t("How a scheduled PR merges once its CI passed")}
+      aside={
+        v.can_arrange &&
+        !editing && (
+          <button className="sm ghost" onClick={() => (reset(), setEditing(true))}>
+            {t("Edit")}
+          </button>
+        )
+      }
+    >
+      {m.warnings.length > 0 && (
+        <div className="stack" style={{ gap: 6, marginBottom: 10 }}>
+          {m.warnings.map((w) => (
+            <span key={w} className="small merge-finding" style={{ color: "var(--warn)" }}>
+              <Icon name="alert" size={12} /> {t(w)}
+            </span>
+          ))}
+        </div>
+      )}
+      {editing ? (
+        <div className="stack" style={{ gap: 8 }}>
+          <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+            <label className="stack small" style={{ gap: 2, flex: "0 1 140px" }}>
+              {t("Merge method")}
+              <select value={method} onChange={(e) => setMethod(e.target.value)}>
+                {methods.map((x) => (
+                  <option key={x} value={x}>
+                    {x}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="stack small" style={{ gap: 2, flex: "1 1 200px" }}>
+              {t("Commit subject")}
+              <input className="mono" value={subject} placeholder="{title} (#{number})" onChange={(e) => setSubject(e.target.value)} />
+            </label>
+          </div>
+          <label className="stack small" style={{ gap: 2 }}>
+            {t("Trailers a squash keeps from the PR's commits")}
+            <input className="mono" value={trailers} placeholder="Signed-off-by, Co-authored-by" onChange={(e) => setTrailers(e.target.value)} />
+          </label>
+          <label className="row small" style={{ gap: 8, alignItems: "flex-start", flexWrap: "nowrap" }}>
+            <input type="checkbox" checked={signoff} onChange={(e) => setSignoff(e.target.checked)} />
+            <span style={{ flex: 1 }}>
+              {t("When no commit is signed off, sign the squash off in the name of the PR's commit authors")}
+              <span className="muted"> {t("(the line certifies the Developer Certificate of Origin for them)")}</span>
+            </span>
+          </label>
+          <label className="row small" style={{ gap: 8 }}>
+            <input type="checkbox" checked={updateBranch} onChange={(e) => setUpdateBranch(e.target.checked)} />
+            {t("Merge the base in before CI runs, even where GitHub does not require PRs to be up to date (then one at a time)")}
+          </label>
+          <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+            <label className="stack small" style={{ gap: 2, flex: "1 1 150px" }}>
+              {t("How many run their CI at once (when PRs need not be up to date)")}
+              <input value={parallel} inputMode="numeric" onChange={(e) => setParallel(e.target.value.replace(/\D/g, ""))} />
+            </label>
+            <label className="stack small" style={{ gap: 2, flex: "1 1 150px" }}>
+              {t("Approvals the repository asks for (at least GitHub's)")}
+              <input value={approvals} inputMode="numeric" onChange={(e) => setApprovals(e.target.value.replace(/\D/g, ""))} />
+            </label>
+            <label className="stack small" style={{ gap: 2, flex: "1 1 150px" }}>
+              {t("Who may schedule")}
+              <select value={who} onChange={(e) => setWho(e.target.value)}>
+                {Object.entries(WHO).map(([k, label]) => (
+                  <option key={k} value={k}>
+                    {t(label)}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+          <label className="stack small" style={{ gap: 2 }}>
+            {t("Workflows that must pass, besides the checks GitHub requires")}
+            <input value={workflows} placeholder="CI Test" onChange={(e) => setWorkflows(e.target.value)} />
+          </label>
+          <label className="row small" style={{ gap: 8 }}>
+            <input type="checkbox" checked={cancelled} onChange={(e) => setCancelled(e.target.checked)} />
+            {t("A cancelled job counts as a failure")}
+          </label>
+          <div className="stack" style={{ gap: 6 }}>
+            <span className="small">{t("Merge freezes (nothing merges while one lasts)")}</span>
+            {freezes.map((f, i) => (
+              <div key={i} className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+                <input type="datetime-local" value={localInput(f.start)} onChange={(e) => setFreezes(freezes.map((x, j) => (j === i ? { ...x, start: new Date(e.target.value).toISOString() } : x)))} />
+                <input type="datetime-local" value={localInput(f.end)} onChange={(e) => setFreezes(freezes.map((x, j) => (j === i ? { ...x, end: new Date(e.target.value).toISOString() } : x)))} />
+                <input style={{ flex: "1 1 120px" }} value={f.reason} placeholder={t("Why")} onChange={(e) => setFreezes(freezes.map((x, j) => (j === i ? { ...x, reason: e.target.value } : x)))} />
+                <button className="sm ghost" onClick={() => setFreezes(freezes.filter((_, j) => j !== i))}>
+                  {t("Remove")}
+                </button>
+              </div>
+            ))}
+            <div>
+              <button
+                className="sm ghost"
+                onClick={() => {
+                  const start = new Date();
+                  setFreezes([...freezes, { start: start.toISOString(), end: new Date(start.getTime() + 86_400_000).toISOString(), reason: "" }]);
+                }}
+              >
+                <Icon name="plus" size={13} />
+                {t("Add a freeze")}
+              </button>
+            </div>
+          </div>
+          <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+            <button
+              className="sm ghost"
+              disabled={save.isPending}
+              title={t("Nothing merges through the schedule while it is off; scheduled PRs stay scheduled")}
+              onClick={() => {
+                if (window.confirm(t("Turn merge scheduling off for this repository?"))) save.mutate({ enabled: false }, { onSuccess: done });
+              }}
+            >
+              {t("Turn merge scheduling off")}
+            </button>
+            <button className="sm ghost right" onClick={() => setEditing(false)}>
+              {t("Cancel")}
+            </button>
+            <button
+              className="sm primary"
+              disabled={save.isPending}
+              onClick={() =>
+                save.mutate(
+                  {
+                    method,
+                    subject,
+                    preserve_trailers: csv(trailers),
+                    signoff_from_authors: signoff,
+                    update_branch: updateBranch,
+                    parallel: Math.min(20, Math.max(1, Number(parallel) || m.parallel)),
+                    approvals: Math.min(20, Math.max(0, Number(approvals) || 0)),
+                    required_workflows: csv(workflows),
+                    cancelled_is_failure: cancelled,
+                    arming_who: who,
+                    freezes,
+                  },
+                  { onSuccess: done },
+                )
+              }
+            >
+              {save.isPending ? t("Saving…") : t("Save")}
+            </button>
+          </div>
+          <ErrorBox error={save.error} />
+        </div>
+      ) : (
+        <ul className="merge-rules">
+          <li className="small">
+            {t("Merges with")} <strong>{m.method}</strong>
+            {m.methods && <span className="muted"> ({t("allowed")}: {m.methods.join(", ") || t("none")})</span>}
+            {m.merge_queue && <span className="muted">; {t("through GitHub's merge queue")}</span>}
+          </li>
+          <li className="small">
+            {t("Commit subject")}: <span className="mono">{m.subject}</span>
+          </li>
+          <li className="small">
+            {t("Trailers a squash keeps")}: <span className="mono">{m.preserve_trailers.join(", ") || "—"}</span>
+          </li>
+          <li className="small">
+            {t("Sign off for the authors when no commit is signed off")}: <strong>{yes(m.signoff_from_authors)}</strong>
+          </li>
+          <li className="small">
+            {t("Merges the base in before CI")}: <strong>{m.requires_up_to_date ? t("yes, GitHub requires PRs to be up to date") : m.update_branch ? t("yes, always") : t("only when it is behind and GitHub requires it")}</strong>
+          </li>
+          <li className="small">
+            {t("How many run their CI at once")}: <strong>{m.requires_up_to_date || m.update_branch ? t("one at a time") : m.parallel}</strong>
+          </li>
+          <li className="small">
+            {t("Approvals the repository asks for")}: <strong>{m.approvals}</strong>
+            {m.approvals_required != null && <span className="muted"> ({t("GitHub requires")} {m.approvals_required})</span>}
+          </li>
+          <li className="small">
+            {t("Workflows that must pass")}: <span className="mono">{m.required_workflows.join(", ") || "—"}</span>
+          </li>
+          <li className="small">
+            {t("A cancelled job counts as a failure")}: <strong>{yes(m.cancelled_is_failure)}</strong>
+          </li>
+          <li className="small">
+            {t("Who may schedule")}: <strong>{t(WHO[m.arming_who] ?? m.arming_who)}</strong> <span className="muted">({t("among the repository's maintainers")})</span>
+          </li>
+          <li className="small">
+            {t("Merge freezes")}:{" "}
+            {m.freezes.length === 0 ? (
+              <span className="muted">{t("none")}</span>
+            ) : (
+              m.freezes.map((f) => (
+                <span key={f.start} className="muted">
+                  {new Date(f.start).toLocaleString()} – {new Date(f.end).toLocaleString()}
+                  {f.reason && ` (${f.reason})`};{" "}
+                </span>
+              ))
+            )}
+          </li>
+        </ul>
+      )}
+    </Section>
+  );
+}
+
+/** Which conflicts with the base the schedule resolves by itself, and how. */
+function ConflictsCard({ v }: { v: MergeView }) {
+  const t = useT();
+  const toast = useToast();
+  const r = v.merging.resolve;
+  const [editing, setEditing] = useState(false);
+  const [enabled, setEnabled] = useState(r.enabled);
+  const [union, setUnion] = useState(r.union_only);
+  const [kinds, setKinds] = useState<(ResolveKind & { pathsText: string })[]>([]);
+  const start = () => {
+    setEnabled(r.enabled);
+    setUnion(r.union_only);
+    setKinds(r.kinds.map((k) => ({ ...k, pathsText: k.paths.join(", ") })));
+    setEditing(true);
+  };
+  const save = useAct((body: Record<string, unknown>) => api.put<Saved>(`/api/merge-schedule/${v.repo}/merging`, body), [["merge-schedule"]]);
+  const edit = (i: number, patch: Partial<ResolveKind & { pathsText: string }>) => setKinds(kinds.map((k, j) => (j === i ? { ...k, ...patch } : k)));
+  return (
+    <Section
+      title={t("Conflicts with the base")}
+      hint={t("Which conflicts the schedule resolves by itself on a PR's turn")}
+      aside={
+        v.can_arrange &&
+        !editing && (
+          <button className="sm ghost" onClick={start}>
+            {t("Edit")}
+          </button>
+        )
+      }
+    >
+      {editing ? (
+        <div className="stack" style={{ gap: 8 }}>
+          <label className="row small" style={{ gap: 8 }}>
+            <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
+            {t("Resolve minor conflicts by itself, with an agent, pushed as the maintainer who scheduled the PR")}
+          </label>
+          <label className="row small" style={{ gap: 8 }}>
+            <input type="checkbox" checked={union} onChange={(e) => setUnion(e.target.checked)} />
+            {t("Only resolutions that combine both sides: no word neither side has, nothing either side added dropped")}
+          </label>
+          {kinds.map((k, i) => (
+            <div key={i} className="stack merge-draft" style={{ gap: 6 }}>
+              <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+                <input type="checkbox" checked={k.enabled} aria-label={t("Resolve this kind")} onChange={(e) => edit(i, { enabled: e.target.checked })} />
+                <input className="mono" style={{ flex: "0 1 160px" }} value={k.name} placeholder="docs" onChange={(e) => edit(i, { name: e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, "") })} />
+                <button className="sm ghost right" onClick={() => setKinds(kinds.filter((_, j) => j !== i))}>
+                  {t("Remove")}
+                </button>
+              </div>
+              <label className="stack small" style={{ gap: 2 }}>
+                {t("Files (glob patterns: * within a folder, ** across folders)")}
+                <input className="mono" value={k.pathsText} placeholder="**/*.md, docs/**/*.rst" onChange={(e) => edit(i, { pathsText: e.target.value })} />
+              </label>
+              <label className="stack small" style={{ gap: 2 }}>
+                {t("Which conflicts in them count, and how to resolve them")}
+                <textarea rows={2} value={k.description} onChange={(e) => edit(i, { description: e.target.value })} />
+              </label>
+            </div>
+          ))}
+          <div className="row" style={{ gap: 8 }}>
+            <button className="sm ghost" onClick={() => setKinds([...kinds, { name: "", paths: [], pathsText: "", description: "", enabled: true }])}>
+              <Icon name="plus" size={13} />
+              {t("Add a kind")}
+            </button>
+            <button className="sm ghost right" onClick={() => setEditing(false)}>
+              {t("Cancel")}
+            </button>
+            <button
+              className="sm primary"
+              disabled={save.isPending || kinds.some((k) => !k.name || !csv(k.pathsText).length)}
+              onClick={() =>
+                save.mutate(
+                  { resolve: { enabled, union_only: union, kinds: kinds.map(({ pathsText, ...k }) => ({ ...k, paths: csv(pathsText) })) } },
+                  {
+                    onSuccess: (out) => {
+                      toast({ title: out.applied ? t("Saved") : t("Proposed to the maintainers"), icon: out.applied ? "check" : "inbox" });
+                      setEditing(false);
+                    },
+                  },
+                )
+              }
+            >
+              {t("Save")}
+            </button>
+          </div>
+          <ErrorBox error={save.error} />
+        </div>
+      ) : (
+        <div className="stack" style={{ gap: 8 }}>
+          <span className="small">
+            {r.enabled ? (
+              <>
+                <Icon name="check" size={12} /> {t("On its turn, a scheduled PR that conflicts with the base gets an agent's resolution when every conflicted file is of a kind below; it is pushed as the maintainer who scheduled it. Any other conflict goes to the failure lane for a person.")}
+              </>
+            ) : (
+              <span className="muted">{t("Off: a scheduled PR that conflicts with the base goes to the failure lane for a person.")}</span>
+            )}
+          </span>
+          {r.enabled && <span className="small muted">{r.union_only ? t("Only resolutions that combine both sides are pushed.") : t("The agent's judgment of the kind decides alone.")}</span>}
+          <ul className="merge-rules">
+            {r.kinds.map((k) => (
+              <li key={k.name} className="small" style={{ opacity: k.enabled ? 1 : 0.55 }}>
+                <strong>{k.name}</strong>
+                {!k.enabled && <span className="muted"> ({t("off")})</span>}: <span className="mono">{k.paths.join(", ")}</span>
+                {k.description && <div className="muted">{k.description}</div>}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
     </Section>
   );
 }

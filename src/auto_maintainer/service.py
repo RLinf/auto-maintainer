@@ -1313,8 +1313,10 @@ class Service:
         """Read every open PR of ``repo`` from the forge again now, in full, one at a
         time in the background: a poll reads in full only the PRs whose update time
         changed, and the forge's own verdicts (a review decision) can trail that.
-        Dashboards hear of each PR as it is read. Returns whether a check started;
-        ``False`` when one is already running or the service does not read ``repo``."""
+        Scheduled PRs go first, and each one's merge job then looks at its step
+        again (``check_scheduled``). Dashboards hear of each PR as it is read.
+        Returns whether a check started; ``False`` when one is already running or
+        the service does not read ``repo``."""
         if not self.serves(repo) or self.checking_prs(repo):
             return False
 
@@ -1326,11 +1328,28 @@ class Service:
                 await self.poller.poll_repo(repo)
             except Exception:
                 log.exception("polling %s before checking its PRs failed", repo)
+            armed = {a.number for a in await self.store.list_arms(repo)}
+            for number in sorted(armed):
+                await self.check_scheduled(repo, number)
             for pr in await self.store.list_snapshots(repo):
-                await self._refresh_pr(repo, pr.number)
+                if pr.number not in armed:
+                    await self._refresh_pr(repo, pr.number)
 
         self._checks[repo] = asyncio.create_task(check(), name=f"check {repo}")
         return True
+
+    async def check_scheduled(self, repo: str, number: int) -> None:
+        """Read a scheduled PR from the forge again now, and have its merge job look
+        at its step again: its CI, its approvals, and whether it may merge."""
+        await self._refresh_pr(repo, number)
+        await self.bus.publish(
+            Event(
+                kind=EventKind.MERGE_QUEUE,
+                repo=repo,
+                number=number,
+                payload={"after": "check"},
+            )
+        )
 
     # -- operations used by the dashboard and the CLI ----------------------------------
 

@@ -62,6 +62,8 @@ class RepoInfo(_Model):
     requires_thread_resolution: bool | None = None
     """The default branch waits until every review conversation is resolved;
     ``None`` when unreadable."""
+    merge_queue: bool | None = None
+    """The default branch takes merges only through the forge's merge queue."""
     fork_approval: str | None = None
     """Whose workflow runs from forks wait for a maintainer to approve them, in
     GitHub's terms (``first_time_contributors_new_to_github``,
@@ -80,6 +82,7 @@ class Commit(_Model):
     sha: str
     message: str = ""
     author_login: str | None = None
+    author_name: str | None = None
     author_email: str | None = None
     committed_at: datetime | None = None
     """When it was committed, as the forge reports it (a rebase sets it anew)."""
@@ -245,6 +248,11 @@ class PrSnapshot(_Model):
     checks: list[CheckRun] = Field(default_factory=list)
     mergeable: Mergeable = Mergeable.UNKNOWN
     behind_base: bool | None = None
+    merge_state: str | None = None
+    """The forge's own verdict on merging the PR now, in GitHub's terms
+    (``mergeStateStatus``: ``CLEAN``, ``BLOCKED``, ``BEHIND``, ``DIRTY``,
+    ``UNSTABLE``, ``HAS_HOOKS``, ``DRAFT``, ``UNKNOWN``); ``None`` where the forge
+    gives none."""
     additions: int = 0
     deletions: int = 0
     requested_reviewers: list[str] = Field(default_factory=list)

@@ -279,6 +279,9 @@ class GitLabWriter:
             or data.get("sha")
         )
 
+    async def enqueue_merge(self, repo: str, number: int, sha: str) -> None:
+        raise NotImplementedError("GitLab merge trains are not supported")
+
     async def update_pr(
         self, repo: str, number: int, title: PublicText, body: PublicText
     ) -> None:

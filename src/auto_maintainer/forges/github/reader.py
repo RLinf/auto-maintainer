@@ -97,7 +97,7 @@ fragment PrFields on PullRequest {
   mergeable mergeStateStatus additions deletions
   labels(first: 50) { nodes { name } }
   files(first: 100) { FORWARD nodes { FILE } }
-  commits(last: 100) { nodes { commit { oid message committedDate author { email user { login } } } } }
+  commits(last: 100) { nodes { commit { oid message committedDate author { name email user { login } } } } }
   reviews(last: 50) { BACKWARD nodes { REVIEW } }
   comments(last: 100) { BACKWARD nodes { COMMENT } }
   reviewThreads(last: 50) { BACKWARD nodes { THREAD } }
@@ -352,6 +352,7 @@ def snapshot_from_graphql(repo: str, node: dict[str, Any]) -> PrSnapshot:
                 sha=commit["oid"],
                 message=commit.get("message") or "",
                 author_login=(author.get("user") or {}).get("login"),
+                author_name=author.get("name"),
                 author_email=author.get("email"),
                 committed_at=_dt(commit.get("committedDate")),
             )
@@ -410,6 +411,7 @@ def snapshot_from_graphql(repo: str, node: dict[str, Any]) -> PrSnapshot:
         checks=checks,
         mergeable=Mergeable(node.get("mergeable") or "UNKNOWN"),
         behind_base=_BEHIND.get(node.get("mergeStateStatus") or ""),
+        merge_state=node.get("mergeStateStatus") or None,
         additions=node.get("additions") or 0,
         deletions=node.get("deletions") or 0,
         requested_reviewers=requested,
@@ -546,6 +548,7 @@ class GitHubReader:
             repo=repo,
             allow=(403, 404),
         )
+        queue = False if isinstance(rules, list) else None
         for rule in rules or []:
             params = rule.get("parameters") or {}
             if rule.get("type") == "required_status_checks":
@@ -558,6 +561,8 @@ class GitHubReader:
                     strict = True
                 elif strict is None:
                     strict = False
+            elif rule.get("type") == "merge_queue":
+                queue = True
             elif rule.get("type") == "pull_request":
                 count = int(params.get("required_approving_review_count") or 0)
                 approvals = max(approvals or 0, count)
@@ -599,6 +604,7 @@ class GitHubReader:
             dismisses_stale_reviews=stale,
             merge_methods=methods,
             requires_thread_resolution=threads,
+            merge_queue=queue,
             fork_approval=(approval or {}).get("approval_policy"),
         )
 
@@ -842,6 +848,23 @@ class GitHubReader:
             headers={"Accept": "application/vnd.github.diff"},
         )
         return raw.text if raw.status_code == 200 else None
+
+    async def in_merge_queue(self, repo: str, number: int) -> bool | None:
+        owner, _, name = repo.partition("/")
+        try:
+            data = await self._client.graphql(
+                "query($owner: String!, $name: String!, $number: Int!) {"
+                " repository(owner: $owner, name: $name) {"
+                " pullRequest(number: $number) { isInMergeQueue } } }",
+                {"owner": owner, "name": name, "number": number},
+                repo=repo,
+            )
+        except GitHubError:
+            return None
+        found = ((data.get("repository") or {}).get("pullRequest") or {}).get(
+            "isInMergeQueue"
+        )
+        return found if isinstance(found, bool) else None
 
     async def list_dir(self, repo: str, path: str, ref: str | None = None) -> list[str]:
         data = await self._client.get(

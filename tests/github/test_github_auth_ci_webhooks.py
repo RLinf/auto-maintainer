@@ -203,3 +203,23 @@ def test_hint():
     )
     assert hint("push", repo) == ("acme/widget", None)
     assert hint("ping", {"zen": "x"}) is None
+
+
+async def test_a_refusal_for_saml_single_sign_on_says_where_to_authorize(
+    client, router
+):
+    from auto_maintainer.forges.github.client import GitHubError
+
+    router.put("/repos/acme/widget/pulls/7/merge").respond(
+        403,
+        json={"message": "Resource protected by organization SAML enforcement."},
+        headers={
+            "x-github-sso": "required; url=https://github.com/orgs/acme/sso?authorization_request=x"
+        },
+    )
+    with pytest.raises(GitHubError) as e:
+        await client.put(
+            "/repos/acme/widget/pulls/7/merge", repo="acme/widget", json={}
+        )
+    assert "SAML single sign-on" in str(e.value)
+    assert "https://github.com/orgs/acme/sso?authorization_request=x" in str(e.value)

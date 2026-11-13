@@ -873,3 +873,131 @@ def test_priority_ranks_by_tier_before_score() -> None:
         [scored, None, low, pinned], key=lambda e: priority_key(e, DEFAULT_RUBRIC)
     )
     assert ranked == [pinned, scored, low, None]
+
+
+def test_a_resolution_may_only_combine_both_sides() -> None:
+    from auto_maintainer.domain.conflicts import union_problem
+
+    base = 'TARGETS="embodied reason"\n'
+    ours = 'TARGETS="embodied reason agentic"\n'
+    theirs = 'TARGETS="embodied reason diffusion"\n'
+    # Both install targets on one line: no word is new, nothing added is lost.
+    assert (
+        union_problem(
+            base, ours, theirs, 'TARGETS="embodied reason agentic diffusion"\n'
+        )
+        is None
+    )
+    assert "drops diffusion" in str(union_problem(base, ours, theirs, ours))
+    assert "writes wild" in str(
+        union_problem(
+            base, ours, theirs, 'TARGETS="embodied reason agentic diffusion wild"\n'
+        )
+    )
+    assert (
+        union_problem(base, ours, theirs, "<<<<<<< HEAD\n") == "conflict markers remain"
+    )
+    assert union_problem(base, None, theirs, theirs) == "one side deleted the file"
+    # A reStructuredText heading's underline is not a conflict marker.
+    page = "Title\n=======\n"
+    assert union_problem("", page, page + "more\n", page + "more\n") is None
+
+
+def test_a_conflicted_file_is_of_the_first_enabled_kind_its_path_matches() -> None:
+    from auto_maintainer.domain.conflicts import glob_match, kind_of
+
+    kinds = RepoProfile(repo="acme/widget").merge.schedule.resolve.kinds
+    named = {
+        p: (k.name if (k := kind_of(p, kinds)) else None)
+        for p in [
+            "README.md",
+            "docs/source-zh/a.rst",
+            "examples/README.md",
+            "requirements/install.sh",
+            "pyproject.toml",
+            "docs/conf.py",
+            "src/x.py",
+        ]
+    }
+    assert named == {
+        "README.md": "readme",
+        "docs/source-zh/a.rst": "docs",
+        "examples/README.md": "readme",
+        "requirements/install.sh": "install_targets",
+        "pyproject.toml": "install_targets",
+        "docs/conf.py": None,
+        "src/x.py": None,
+    }
+    assert glob_match("docs/**", "docs/a/b.md") and not glob_match(
+        "docs/*", "docs/a/b.md"
+    )
+    off = [k.model_copy(update={"enabled": False}) for k in kinds]
+    assert kind_of("README.md", off) is None
+
+
+def test_a_required_check_whose_workflow_skips_the_pr_never_runs() -> None:
+    from auto_maintainer.domain.workflows import never_run
+
+    files = {
+        "docs.yml": "on:\n  pull_request:\n    paths: ['docs/**', '!docs/drafts/**']\njobs:\n  build-docs: {}\n",
+        "lint.yml": "on: [pull_request]\njobs:\n  lint:\n    name: lint\n",
+        "ci.yml": "on:\n  pull_request:\n    branches: [main]\njobs:\n  unit: {}\n",
+    }
+    assert never_run(files, ["build-docs", "lint", "DCO"], ["src/a.py"], "main") == {
+        "build-docs": "workflow docs.yml: it runs only for PRs that change docs/**, !docs/drafts/**"
+    }
+    assert never_run(files, ["build-docs"], ["docs/a.md"], "main") == {}
+    assert never_run(files, ["build-docs"], ["docs/drafts/a.md"], "main")
+    assert never_run(files, ["unit"], ["src/a.py"], "release/1") == {
+        "unit": "workflow ci.yml: it runs only for PRs into main"
+    }
+
+
+def test_the_squash_signs_off_for_the_authors_only_when_asked_and_none_did() -> None:
+    from auto_maintainer.domain.merge_gate import squash_message
+
+    unsigned = make_pr(
+        commits=[
+            Commit(
+                sha="1" * 40,
+                message="feat: a",
+                author_login="alice",
+                author_name="Alice",
+                author_email="a@x",
+            ),
+            Commit(
+                sha="2" * 40, message="Merge branch 'main' into a", author_login="bob"
+            ),
+            Commit(sha="3" * 40, message="fix: b", author_login="dependabot[bot]"),
+            Commit(sha="4" * 40, message="fix: c", author_login="carol"),
+        ]
+    )
+    plain = RepoProfile(repo="acme/widget")
+    assert "Signed-off-by" not in squash_message(unsigned, plain)[1]
+    asked = RepoProfile.model_validate(
+        {"repo": "acme/widget", "merge": {"message": {"signoff_from_authors": True}}}
+    )
+    _, body = squash_message(unsigned, asked)
+    assert body.endswith(
+        "Signed-off-by: Alice <a@x>\nSigned-off-by: carol <carol@users.noreply.github.com>"
+    ), body
+    signed = unsigned.model_copy(
+        update={
+            "commits": [
+                Commit(sha="5" * 40, message="feat: d\n\nSigned-off-by: Dan <d@x>")
+            ]
+        }
+    )
+    assert squash_message(signed, asked)[1].endswith("Signed-off-by: Dan <d@x>"), (
+        "a sign-off of their own is kept, and none is added"
+    )
+
+
+def test_an_approved_profile_from_before_keeps_resolving_conflicts_off() -> None:
+    """The default profile turns it on, so a repository gets it through a profile
+    change its maintainers approve; a lock that does not name it stays as it was."""
+    from auto_maintainer.testing.harness import load_defaults
+
+    assert not RepoProfile(repo="acme/widget").merge.schedule.resolve.enabled
+    defaults, _, _ = load_defaults()
+    assert defaults["merge"]["schedule"]["resolve"]["enabled"] is True
