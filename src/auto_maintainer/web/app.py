@@ -231,8 +231,10 @@ def create_app(
 
     @app.post("/webhooks/{forge}")
     async def webhook(request: Request, forge: str) -> dict[str, Any]:
-        """A forge's delivery: checked as its kind checks them, it starts a poll of
-        the repository it names, which is trusted for nothing else."""
+        """A forge's delivery: checked as its kind checks them, it asks for a poll of
+        the repository it names, which is trusted for nothing else. It answers at
+        once (a forge gives up on a slow delivery); deliveries during a poll make one
+        more poll after it."""
         check = checks.get(forge)
         if check is None:
             raise HTTPException(404, "webhooks are not enabled")
@@ -255,8 +257,8 @@ def create_app(
         record = await service.store.get_repo(repo)
         if record is None or not record.active:
             return {"ignored": True}
-        events = await service.poller.poll_repo(repo)
-        return {"events": len(events)}
+        started = service.poll_now(repo, again=True)
+        return {"poll": "started" if started else "after the one running"}
 
     install_spa(app)
     return app

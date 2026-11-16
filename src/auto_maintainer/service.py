@@ -265,6 +265,8 @@ class Service:
         self.a = adapters
         self._quotas: dict[str, AgentQuota] = {}
         self._quota_reads: dict[str, asyncio.Future[AgentQuota | None]] = {}
+        self._poll_again: set[str] = set()
+        """Repositories a poll was asked for while one ran (``poll_now``)."""
         self._quota_tried: dict[str, datetime] = {}
         """Each agent's last quota reading (``agent_quota``)."""
         self.logins: dict[str, Any] = {}
@@ -1435,25 +1437,36 @@ class Service:
         runs_on = getattr(self.a.agents, "runs_on", None)
         return (runs_on(route) if callable(runs_on) else None) or route.primary
 
-    def poll_now(self, repo: str) -> bool:
+    def poll_now(self, repo: str, again: bool = False) -> bool:
         """Read ``repo``'s PRs now instead of at the next scheduled poll, in the
         background (a first poll reads every open PR): after its approved profile
-        changed, which a first approval makes active, or when a maintainer asks.
+        changed, which a first approval makes active, when a maintainer asks, or when
+        the forge says something changed (a webhook). With ``again``, a poll asked
+        for while one runs runs once more after it, so a change that came during it
+        is read too.
 
         Returns whether a poll started; ``False`` when one is already running.
         """
         running = self._polls.get(repo)
-        if not self.serves(repo) or (running is not None and not running.done()):
+        if not self.serves(repo):
+            return False
+        if running is not None and not running.done():
+            if again:
+                self._poll_again.add(repo)
             return False
 
         async def poll() -> None:
-            record = await self.store.get_repo(repo)
-            if record is None or not record.active:
-                return
-            try:
-                await self.poller.poll_repo(repo)
-            except Exception:
-                log.exception("polling %s after its profile changed failed", repo)
+            while True:
+                self._poll_again.discard(repo)
+                record = await self.store.get_repo(repo)
+                if record is None or not record.active:
+                    return
+                try:
+                    await self.poller.poll_repo(repo)
+                except Exception:
+                    log.exception("polling %s on request failed", repo)
+                if repo not in self._poll_again:
+                    return
 
         self._polls[repo] = asyncio.create_task(poll(), name=f"poll {repo}")
         return True

@@ -20,6 +20,7 @@ difference, so a missed webhook costs latency, not correctness.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 from collections.abc import Callable
@@ -241,9 +242,21 @@ class Poller:
         self.profiles = profiles
         self.clock = clock
         self.service_login = service_login
+        self._locks: dict[str, asyncio.Lock] = {}
+
+    def _lock(self, repo: str) -> asyncio.Lock:
+        return self._locks.setdefault(repo, asyncio.Lock())
 
     async def poll_repo(self, repo: str, reconcile: bool = False) -> list[Event]:
-        """Poll one repository; with ``reconcile``, also emit ``pr.reconciled`` for every open PR."""
+        """Poll one repository; with ``reconcile``, also emit ``pr.reconciled`` for every open PR.
+
+        Polls of one repository run one at a time, whatever started them (the
+        schedule, a webhook, a person): two at once would both see a change against
+        the same stored snapshot and publish it twice."""
+        async with self._lock(repo):
+            return await self._poll_repo(repo, reconcile)
+
+    async def _poll_repo(self, repo: str, reconcile: bool) -> list[Event]:
         profile = await self.profiles.active(repo)
         prefix = profile.comments.command_prefix if profile else "/am"
         fresh = {p.number: p for p in await self.forge.list_open_prs(repo)}
@@ -303,7 +316,11 @@ class Poller:
     async def poll_pr(self, repo: str, number: int) -> list[Event]:
         """Refresh one PR's snapshot now, as the next poll would, and publish what
         changed; used after the service wrote to it, so the dashboard shows the write
-        without waiting for the poll."""
+        without waiting for the poll. Waits for a poll of its repository running."""
+        async with self._lock(repo):
+            return await self._poll_pr(repo, number)
+
+    async def _poll_pr(self, repo: str, number: int) -> list[Event]:
         profile = await self.profiles.active(repo)
         prefix = profile.comments.command_prefix if profile else "/am"
         fresh = await self.forge.get_pr(repo, number)
