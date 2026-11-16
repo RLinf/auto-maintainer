@@ -706,7 +706,7 @@ class ScriptedRunner:
             runtime=route.primary, ok=True, text=json.dumps(data), structured=data
         )
 
-    async def health(self) -> list[RuntimeHealth]:
+    async def health(self, fresh: bool = False) -> list[RuntimeHealth]:
         return [RuntimeHealth(name="scripted", available=True)]
 
     def bind_questions(self, questions: Any) -> None:

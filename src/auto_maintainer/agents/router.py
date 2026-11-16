@@ -37,6 +37,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import logging
+import time
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -156,6 +157,10 @@ def effective_permissions(route: Route, runtime: AgentRuntime, task: AgentTask) 
     return "bypass"
 
 
+PROBE_SECONDS = 300.0
+"""How long a runtime's answering ``--version`` probe is shown before it runs again."""
+
+
 class AgentRouter:
     """Implements ``AgentRunner`` over a set of runtimes.
 
@@ -182,6 +187,8 @@ class AgentRouter:
         service_code: Path | None = None,
     ) -> None:
         self.runtimes = dict(runtimes)
+        self._probes: dict[str, tuple[Any, float, RuntimeHealth]] = {}
+        """Each runtime's last answering probe, with the runtime and when."""
         self.service_code = service_code
         """The service's own code at the commit it runs, which every run may read
         (mounted read-only, and named in the prompt), so an agent can see how the
@@ -401,11 +408,32 @@ class AgentRouter:
             None,
         )
 
-    async def health(self) -> list[RuntimeHealth]:
-        """Probe every runtime and report its breaker state."""
+    async def health(self, fresh: bool = False) -> list[RuntimeHealth]:
+        """Probe every runtime and report its breaker state. A runtime that answered
+        is not probed again for ``PROBE_SECONDS`` unless ``fresh``: each probe starts
+        its CLI in a container, seconds per page load. A new runtime (new settings)
+        is probed at once, and one that did not answer on every call."""
         names = list(self.runtimes)
+
+        async def probe(name: str) -> RuntimeHealth:
+            runtime = self.runtimes[name]
+            kept = self._probes.get(name)
+            if (
+                not fresh
+                and kept is not None
+                and kept[0] is runtime
+                and time.monotonic() - kept[1] < PROBE_SECONDS
+            ):
+                return kept[2]
+            found = await runtime.probe()
+            if found.available:
+                self._probes[name] = (runtime, time.monotonic(), found)
+            else:
+                self._probes.pop(name, None)
+            return found
+
         probes = await asyncio.gather(
-            *(self.runtimes[n].probe() for n in names), return_exceptions=True
+            *(probe(n) for n in names), return_exceptions=True
         )
         out = []
         for name, probe in zip(names, probes, strict=True):

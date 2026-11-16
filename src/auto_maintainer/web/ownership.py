@@ -33,7 +33,7 @@ from pydantic import BaseModel, Field
 
 from ..domain.forges import forge_of, info_of, parse_person, parse_repo
 from ..domain.permissions import Permission
-from .api import service_of
+from .api import service_of, shows_owner
 from .auth import User, current_user
 
 
@@ -90,7 +90,7 @@ def build_router(
         """The service's repository, its owner, and what the caller may do."""
         service = service_of(request)
         repo = service.settings.code_repo
-        decision = await service.service_gate(user.login)
+        decision = await shows_owner(service, user.login)
         link = None
         if repo:
             ref = parse_repo(repo)

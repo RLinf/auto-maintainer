@@ -1733,5 +1733,5 @@ class _JobRunner:
             task.model_copy(update={"job_id": self._job}), route, output_model
         )
 
-    async def health(self) -> Any:
-        return await self._inner.health()
+    async def health(self, fresh: bool = False) -> Any:
+        return await self._inner.health(fresh)

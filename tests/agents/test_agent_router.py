@@ -482,3 +482,30 @@ async def test_quick_tasks_run_on_an_agents_quick_model() -> None:
         await router.run(task, route)
     await router.run(_task(kind=TaskKind.TRIAGE), Route(primary="a", model="named"))
     assert [t.model for t in a.tasks] == ["fast", None, "fast", "fast", "named"]
+
+
+async def test_a_runtime_that_answered_is_not_probed_on_every_page() -> None:
+    """Each probe starts its CLI in a container, so one that answered is kept a while:
+    asked again only when asked fresh, when the settings make a new runtime, or when
+    it did not answer."""
+    from auto_maintainer.domain.agents import RuntimeHealth
+
+    class Probed:
+        def __init__(self, name: str, available: bool = True) -> None:
+            self.name, self.available, self.probes = name, available, 0
+
+        async def probe(self) -> RuntimeHealth:
+            self.probes += 1
+            return RuntimeHealth(name=self.name, available=self.available)
+
+    up, down = Probed("codex"), Probed("antigravity", available=False)
+    router = AgentRouter({"codex": up, "antigravity": down})  # type: ignore[dict-item]
+    await router.health()
+    await router.health()
+    assert (up.probes, down.probes) == (1, 2), "kept only once it answers"
+    await router.health(fresh=True)
+    assert up.probes == 2
+    again = Probed("codex")
+    router.runtimes["codex"] = again
+    await router.health()
+    assert again.probes == 1, "new settings, a new runtime: probed at once"
