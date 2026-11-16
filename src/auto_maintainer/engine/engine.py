@@ -270,7 +270,22 @@ class Engine:
         self.pools[pool] = max(1, size)
         self._wake.setdefault(pool, asyncio.Event()).set()
 
+    def _shown(self, job: Job) -> bool:
+        """Whether dashboards hear of this change to ``job``. Work in the ``io`` pool
+        (hygiene, scans, drift, the schedulers' ticks) is most of all jobs, and most
+        of it ends with nothing to do: dashboards hear of it only when it ends having
+        done something, so a reconcile pass over every open PR does not reload every
+        open page."""
+        playbook = self.playbooks.get(job.playbook)
+        if playbook is None or playbook.pool != "io":
+            return True
+        return job.status in (JobStatus.DONE, JobStatus.FAILED) and not (
+            job.result or {}
+        ).get("skipped")
+
     def _changed(self, job: Job) -> None:
+        if not self._shown(job):
+            return
         if self.on_change is not None:
             try:
                 self.on_change(job)
@@ -427,7 +442,7 @@ class Engine:
 
     async def _finished(self, job: Job) -> None:
         """Tell the playbooks that ``job`` ended for good, done or failed."""
-        if job.status not in (JobStatus.DONE, JobStatus.FAILED):
+        if job.status not in (JobStatus.DONE, JobStatus.FAILED) or not self._shown(job):
             return
         await self.bus.publish(
             Event(

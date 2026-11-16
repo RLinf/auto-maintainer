@@ -40,6 +40,9 @@ class EventBus:
         self._idle = asyncio.Event()
         self._idle.set()
         self._later: set[asyncio.Task[None]] = set()
+        self.count = 0
+        """How many events have reached the dashboards' streams: a view computed
+        at one count is current until it changes (``web/recent.py``)."""
 
     def later(self, work: Awaitable[None], name: str) -> None:
         """Run ``work`` beside the dispatcher, for a handler's slow step (a read from
@@ -75,6 +78,7 @@ class EventBus:
     def notify(self, event: Event) -> None:
         """Hand ``event`` to the dashboard's event streams only: no handler, no job,
         and no store read. For frequent updates such as a job's progress."""
+        self.count += 1
         for listener in list(self._listeners):
             if listener.qsize() < 1000:
                 listener.put_nowait(event)
@@ -92,6 +96,7 @@ class EventBus:
                         await handler(event)
                     except Exception:
                         log.exception("event handler failed on %s", event.kind)
+                self.count += 1
                 for listener in list(self._listeners):
                     if listener.qsize() < 1000:
                         listener.put_nowait(event)

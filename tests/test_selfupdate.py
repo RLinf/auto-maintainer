@@ -77,6 +77,21 @@ def _updater(
     )
 
 
+async def test_status_reuses_a_recent_fetch_and_a_deploy_fetches_again(
+    repos, tmp_path: Path
+) -> None:
+    _, checkout, other = repos
+    first = _push_change(other, "v2\n")
+    updater = _updater(checkout, tmp_path)
+    assert (await updater.status()).upstream_sha == first
+    second = _push_change(other, "v3\n")
+    # The Service page reads the status on every load: within a minute it is the
+    # last fetch's.
+    assert (await updater.status()).upstream_sha == first
+    assert (await updater.deploy(second)).ok
+    assert (await updater.status()).upstream_sha == second
+
+
 async def test_status_and_deploy(repos, tmp_path: Path) -> None:
     _, checkout, other = repos
     before = git(checkout, "rev-parse", "HEAD")

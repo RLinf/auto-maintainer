@@ -59,6 +59,7 @@ from . import (
 )
 from .dashboard import STATIC, build_id, missing_page
 from .live_turns import LiveTurns
+from .recent import Recent
 from .records import RecordsDoor
 from .records import build_router as records_router
 
@@ -72,6 +73,11 @@ class WebhookCheck:
     secret_env: str = "AM_WEBHOOK_SECRET"
     signature_header: str = "x-hub-signature-256"
     event_header: str = "x-github-event"
+
+
+RECENT_SECONDS = 3.0
+"""How long the PR list and the agents' work are served again unchanged while no
+event or change came in between (``web/recent.py``)."""
 
 
 def create_app(
@@ -122,9 +128,11 @@ def create_app(
     app.state.cookie_secure = cookie_secure
     app.state.records = RecordsDoor(app, data_dir / "sandbox" / "records.sock")
     app.state.live_turns = LiveTurns()
+    app.state.recent = Recent(RECENT_SECONDS, lambda: service.bus.count)
     """The agents' read-only door to this dashboard, started by the first conversation."""
 
     install_csrf(app)
+    install_recent(app)
 
     app.include_router(
         auth.router(api_url, allow_dev_login, links_path, gh_signin, forge_signins)
@@ -269,6 +277,19 @@ def install_authority(app: FastAPI, ca_cert: Path | None) -> None:
             media_type="application/x-x509-ca-cert",
             filename="auto-maintainer-ca.crt",
         )
+
+
+def install_recent(app: FastAPI) -> None:
+    """A request that may have changed something retires every kept answer
+    (``web/recent.py``), once it is done."""
+
+    @app.middleware("http")
+    async def recent_writes(request: Request, call_next: Any) -> Response:
+        try:
+            return await call_next(request)
+        finally:
+            if request.method not in ("GET", "HEAD", "OPTIONS"):
+                request.app.state.recent.wrote()
 
 
 def install_csrf(app: FastAPI) -> None:

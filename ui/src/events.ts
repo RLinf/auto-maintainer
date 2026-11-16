@@ -31,7 +31,9 @@ const INVALIDATES: Record<string, string[][]> = {
   "service.changed": [["agents"], ["agents-usage"], ["service-sign-ins"], ["my-agents"]],
   "question.asked": [["questions"], ["me"]],
   "question.answered": [["questions"], ["me"], ["audit"], ["job"], ["work"]],
-  "job.progress": [["job"], ["work"], ["chat", "steps"]],
+  // An agent's steps: only the views of that work follow at once; lists follow
+  // at most every few seconds (``SLOW``), since agents report a step a second.
+  "job.progress": [["job"], ["chat", "steps"]],
 };
 
 /** Events after which everything on screen loads again (at most once per
@@ -53,8 +55,9 @@ const BROAD = new Set([
 /** Keys refreshed after a burst of events, at most once per ``SLOW_MS``: lists that are
  * costly to reload and change with a job's status rather than with each step. */
 const SLOW: Record<string, string[][]> = {
-  // A finished job may have changed a PR's priority or review state.
-  "job.progress": [["prs"], ["pr"]],
+  "job.progress": [["work"]],
+  // A finished job may have changed a PR's priority, review state, or score.
+  "job.finished": [["work"], ["prs"], ["pr"]],
 };
 const SLOW_MS = 3000;
 

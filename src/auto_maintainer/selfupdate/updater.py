@@ -25,15 +25,22 @@ exits with ``RESTART_EXIT_CODE`` and the supervisor (or systemd) starts it again
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
+import time
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
 from ..domain.ports import CommitInfo, DeployResult, UpdateStatus
 from ..subproc import run
+
+STATUS_FETCH_SECONDS = 60.0
+"""How long ``status`` reuses its last fetch of the branch: the Service page reads the
+status whenever it loads or hears that an action ran, and a fetch from GitHub takes
+seconds. A deploy always fetches."""
 
 RESTART_EXIT_CODE = 75
 """``am serve`` exits with this code to ask its supervisor for a restart."""
@@ -93,10 +100,24 @@ class GitServiceUpdater:
         self.repo = repo
         self.test_command = test_command or DEFAULT_TEST
         self.sync_command = sync_command or ["uv", "sync", "--frozen"]
+        self._fetched_at: float | None = None
+        self._fetching: asyncio.Future[None] | None = None
 
     @property
     def upstream(self) -> str:
         return f"{TRACKING}/{self.branch}"
+
+    async def _recent_fetch(self) -> None:
+        """``upstream`` as fetched within ``STATUS_FETCH_SECONDS``; callers that ask
+        at once share one fetch."""
+        if (
+            self._fetched_at is not None
+            and time.monotonic() - self._fetched_at < STATUS_FETCH_SECONDS
+        ):
+            return
+        if self._fetching is None or self._fetching.done():
+            self._fetching = asyncio.ensure_future(self._fetch())
+        await asyncio.shield(self._fetching)
 
     async def _fetch(self) -> None:
         """The branch of the service's repository, into ``upstream``; the token goes
@@ -131,6 +152,7 @@ class GitServiceUpdater:
                 f"fetching {self.branch} of {self.repo} failed: "
                 f"{result.stderr.strip()[-500:]}"
             )
+        self._fetched_at = time.monotonic()
 
     @property
     def state_file(self) -> Path:
@@ -168,7 +190,7 @@ class GitServiceUpdater:
         except RuntimeError as e:
             return UpdateStatus(running_sha="", error=str(e))
         try:
-            await self._fetch()
+            await self._recent_fetch()
             upstream = await self._git("rev-parse", self.upstream)
             log = await self._git(
                 "log", "--format=%H%x09%an%x09%s", f"HEAD..{self.upstream}"

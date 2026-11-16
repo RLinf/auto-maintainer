@@ -27,7 +27,7 @@ import re
 from datetime import timedelta
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from ..domain.actions import ActionKind, Proposal, ProposalState
@@ -531,7 +531,7 @@ def build_router() -> APIRouter:
         number: int | None = None,
         playbook: str | None = None,
         user: User = Depends(current_user),
-    ) -> list[dict[str, Any]]:
+    ) -> Response:
         """Agent jobs in the user's repositories (or in ``repo``, on PR ``number``, of
         ``playbook``): running ones, then those that ended in the last ``days``, newest
         first; only the user's own unless ``everyone``."""
@@ -541,84 +541,100 @@ def build_router() -> APIRouter:
             visible = {repo}
         else:
             visible = set(await visible_repos(service, user))
-        code_repo = service.settings.code_repo if repo is None else None
-        code_visible: bool | None = None
-        since = service.clock.now() - timedelta(days=max(1, min(days, 90)))
-        if playbook is not None and playbook not in AGENT_PLAYBOOKS:
-            return []
-        playbooks = [playbook] if playbook is not None else list(AGENT_PLAYBOOKS)
-        seen: dict[str, Job] = {}
-        for job in await service.store.list_jobs(
-            list(ACTIVE),
-            repo=repo,
-            limit=500,
-            playbooks=playbooks,
-            number=number,
-        ):
-            seen[job.id] = job
-        for job in await service.store.list_jobs(
-            repo=repo,
-            limit=500,
-            playbooks=playbooks,
-            number=number,
-            updated_since=since,
-        ):
-            seen.setdefault(job.id, job)
-        candidates: list[Job] = []
-        for job in seen.values():
-            if job.repo not in visible:
-                if job.repo != code_repo:
-                    continue
-                if code_visible is None:
-                    code_visible = await may_view(service, user, code_repo)
-                if not code_visible:
-                    continue
-            if job.status not in ACTIVE and job.updated_at < since:
-                continue
-            by = (_payload(job).get("by") or "").lower()
-            if not everyone and by != user.login.lower():
-                continue
-            if (
-                job.playbook == "quick_quality"
-                and number is None
-                and job.status not in ACTIVE
-            ):
-                # Quick scores run for every open PR in the background: a finished
-                # one shows on its PR, not in lists across PRs.
-                continue
-            candidates.append(job)
-        batch = await _work_batch(service, candidates)
-        queued = (
-            await service.store.list_jobs([JobStatus.QUEUED], limit=1000)
-            if any(j.status == JobStatus.QUEUED for j in candidates)
-            else []
+        key = (
+            "work",
+            user.login.lower(),
+            everyone,
+            days,
+            repo,
+            number,
+            playbook,
+            tuple(sorted(visible)),
         )
-        out = []
-        for job in candidates:
-            if (
-                job.playbook == "evaluate"
-                and _first_kind(job) not in ASKED_FOR
-                and not batch.steps_by_job.get(job.id)
+
+        async def compute() -> list[dict[str, Any]]:
+            code_repo = service.settings.code_repo if repo is None else None
+            code_visible: bool | None = None
+            since = service.clock.now() - timedelta(days=max(1, min(days, 90)))
+            if playbook is not None and playbook not in AGENT_PLAYBOOKS:
+                return []
+            playbooks = [playbook] if playbook is not None else list(AGENT_PLAYBOOKS)
+            seen: dict[str, Job] = {}
+            for job in await service.store.list_jobs(
+                list(ACTIVE),
+                repo=repo,
+                limit=500,
+                playbooks=playbooks,
+                number=number,
             ):
-                # Scoring nobody asked for mostly runs no agent (a PR changed a
-                # little, so only its total is recomputed): it shows once an agent
-                # works on it.
-                continue
-            view = await job_view(
-                service, job, me=user.login, queued=queued, batch=batch
+                seen[job.id] = job
+            for job in await service.store.list_jobs(
+                repo=repo,
+                limit=500,
+                playbooks=playbooks,
+                number=number,
+                updated_since=since,
+            ):
+                seen.setdefault(job.id, job)
+            candidates: list[Job] = []
+            for job in seen.values():
+                if job.repo not in visible:
+                    if job.repo != code_repo:
+                        continue
+                    if code_visible is None:
+                        code_visible = await may_view(service, user, code_repo)
+                    if not code_visible:
+                        continue
+                if job.status not in ACTIVE and job.updated_at < since:
+                    continue
+                by = (_payload(job).get("by") or "").lower()
+                if not everyone and by != user.login.lower():
+                    continue
+                if (
+                    job.playbook == "quick_quality"
+                    and number is None
+                    and job.status not in ACTIVE
+                ):
+                    # Quick scores run for every open PR in the background: a finished
+                    # one shows on its PR, not in lists across PRs.
+                    continue
+                candidates.append(job)
+            batch = await _work_batch(service, candidates)
+            queued = (
+                await service.store.list_jobs([JobStatus.QUEUED], limit=1000)
+                if any(j.status == JobStatus.QUEUED for j in candidates)
+                else []
             )
-            if (
-                job.status not in ACTIVE
-                and (job.result or {}).get("handed_to")
-                and view["last_step"] is None
-            ):
-                # Another playbook took the same request (a follow-up for a PR that
-                # has no review yet): that one shows. Any other skip shows its
-                # reason, so a button pressed never seems to do nothing.
-                continue
-            out.append(view)
-        out.sort(key=lambda j: (j["status"] in ACTIVE, j["updated_at"]), reverse=True)
-        return out[:100]
+            out = []
+            for job in candidates:
+                if (
+                    job.playbook == "evaluate"
+                    and _first_kind(job) not in ASKED_FOR
+                    and not batch.steps_by_job.get(job.id)
+                ):
+                    # Scoring nobody asked for mostly runs no agent (a PR changed a
+                    # little, so only its total is recomputed): it shows once an agent
+                    # works on it.
+                    continue
+                view = await job_view(
+                    service, job, me=user.login, queued=queued, batch=batch
+                )
+                if (
+                    job.status not in ACTIVE
+                    and (job.result or {}).get("handed_to")
+                    and view["last_step"] is None
+                ):
+                    # Another playbook took the same request (a follow-up for a PR that
+                    # has no review yet): that one shows. Any other skip shows its
+                    # reason, so a button pressed never seems to do nothing.
+                    continue
+                out.append(view)
+            out.sort(
+                key=lambda j: (j["status"] in ACTIVE, j["updated_at"]), reverse=True
+            )
+            return out[:100]
+
+        return await request.app.state.recent.json(key, compute)
 
     @r.get("/jobs/{job_id}")
     async def get_job(

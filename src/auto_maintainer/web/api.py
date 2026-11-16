@@ -34,7 +34,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any, Literal, TypeVar
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -1543,7 +1543,7 @@ def build_router() -> APIRouter:
         mine: bool = False,
         reviewing: bool = False,
         user: User = Depends(current_user),
-    ) -> list[dict[str, Any]]:
+    ) -> Response:
         """The PRs of the person's repositories. A PR's ``assignees`` are its owners
         and reviewers here, who claimed the role or were assigned it; ``mine`` keeps
         the PRs the person owns, ``reviewing`` those they review. Roles come from
@@ -1554,116 +1554,125 @@ def build_router() -> APIRouter:
         repos_ = [repo] if repo else await visible_repos(service, user)
         if repo:
             await require_view(service, user, repo)
-        on_pr: dict[tuple[str, int], list[PrAssignee]] = {}
-        for a in await service.store.list_assignees(repo):
-            on_pr.setdefault((a.repo, a.number), []).append(a)
-        me = user.login.lower()
-        rows = []
-        for name in repos_:
-            profile = await service.profiles.active(name)
-            if profile is None:
-                continue
-            snapshots = await service.store.list_snapshots(name)
-            if not snapshots:
-                continue
-            ids = service.info.identities | set(profile.people.review_identities)
-            rubric = rubric_of(profile)
-            evaluations = {
-                ev.number: ev for ev in await service.store.list_evaluations(name)
-            }
-            kept: list[tuple[PrSnapshot, Any, Evaluation | None, list[PrAssignee]]] = []
-            own = await service.posted_as_people(name)
-            for pr in snapshots:
-                cls = classify_review_state(
-                    pr,
-                    ids,
-                    profile.comments.legacy_markers,
-                    profile.scope.include_drafts,
-                    own_actions=own,
+        key = ("prs", user.login.lower(), tuple(repos_), tier, state, mine, reviewing)
+
+        async def compute() -> list[dict[str, Any]]:
+            on_pr: dict[tuple[str, int], list[PrAssignee]] = {}
+            for a in await service.store.list_assignees(repo):
+                on_pr.setdefault((a.repo, a.number), []).append(a)
+            me = user.login.lower()
+            rows = []
+            for name in repos_:
+                profile = await service.profiles.active(name)
+                if profile is None:
+                    continue
+                snapshots = await service.store.list_snapshots(name)
+                if not snapshots:
+                    continue
+                ids = service.info.identities | set(profile.people.review_identities)
+                rubric = rubric_of(profile)
+                evaluations = {
+                    ev.number: ev for ev in await service.store.list_evaluations(name)
+                }
+                kept: list[
+                    tuple[PrSnapshot, Any, Evaluation | None, list[PrAssignee]]
+                ] = []
+                own = await service.posted_as_people(name)
+                for pr in snapshots:
+                    cls = classify_review_state(
+                        pr,
+                        ids,
+                        profile.comments.legacy_markers,
+                        profile.scope.include_drafts,
+                        own_actions=own,
+                    )
+                    ev = evaluations.get(pr.number)
+                    assignees = on_pr.get((name, pr.number), [])
+                    if tier and (ev is None or ev.tier != tier):
+                        continue
+                    if state and cls.state != state:
+                        continue
+                    if mine and not holds(assignees, me, "owner"):
+                        continue
+                    if reviewing and not holds(assignees, me, "reviewer"):
+                        continue
+                    kept.append((pr, cls, ev, assignees))
+                if not kept:
+                    continue
+                numbers = [pr.number for pr, _, _, _ in kept]
+                approvers = [
+                    r.author
+                    for pr, _, _, _ in kept
+                    for r in pr.reviews
+                    if r.state == ReviewEventState.APPROVED
+                    and r.author.lower() != pr.author.lower()
+                ]
+                (
+                    activity,
+                    quality,
+                    quicks,
+                    check_states,
+                    info,
+                    perms,
+                ) = await asyncio.gather(
+                    review_activity(service, name),
+                    review_qualities(service, name),
+                    quick_qualities(service.store, name, numbers),
+                    service.store.get_states([checks_key(name, n) for n in numbers]),
+                    service.view_repo(name),
+                    permissions_of(service, name, approvers),
                 )
-                ev = evaluations.get(pr.number)
-                assignees = on_pr.get((name, pr.number), [])
-                if tier and (ev is None or ev.tier != tier):
-                    continue
-                if state and cls.state != state:
-                    continue
-                if mine and not holds(assignees, me, "owner"):
-                    continue
-                if reviewing and not holds(assignees, me, "reviewer"):
-                    continue
-                kept.append((pr, cls, ev, assignees))
-            if not kept:
-                continue
-            numbers = [pr.number for pr, _, _, _ in kept]
-            approvers = [
-                r.author
-                for pr, _, _, _ in kept
-                for r in pr.reviews
-                if r.state == ReviewEventState.APPROVED
-                and r.author.lower() != pr.author.lower()
-            ]
-            (
-                activity,
-                quality,
-                quicks,
-                check_states,
-                info,
-                perms,
-            ) = await asyncio.gather(
-                review_activity(service, name),
-                review_qualities(service, name),
-                quick_qualities(service.store, name, numbers),
-                service.store.get_states([checks_key(name, n) for n in numbers]),
-                service.view_repo(name),
-                permissions_of(service, name, approvers),
-            )
-            owner_rules = _OwnerRules(service, name, profile.people.codeowners)
-            for pr, cls, ev, assignees in kept:
-                rows.append(
-                    {
-                        "repo": name,
-                        "number": pr.number,
-                        "title": pr.title,
-                        "author": pr.author,
-                        "url": pr.url,
-                        "head": pr.head_sha[:7],
-                        "labels": pr.labels,
-                        "draft": pr.is_draft,
-                        "created_at": pr.created_at,
-                        "updated_at": pr.updated_at,
-                        "review_state": cls.state,
-                        "reviewed_sha": (cls.reviewed_sha or "")[:7],
-                        "_rank": priority_key(ev, rubric),
-                        "assignees": [assignee_row(a) for a in assignees],
-                        "progress": await _progress_row(
-                            service,
-                            name,
-                            pr,
-                            assignees,
-                            owner_rules,
-                            checks_data=check_states.get(checks_key(name, pr.number)),
-                            has_checks=True,
-                            info=info,
-                            perms=perms,
-                        ),
-                        "tier": ev.tier if ev else None,
-                        "total": ev.total if ev else None,
-                        "summary": ev.summary if ev else "",
-                        "scores": ev.scores if ev else {},
-                        "review_trigger": profile.review.trigger,
-                        "review_activity": activity.get(pr.number, {}),
-                        "quality": quality[pr.number].model_dump(mode="json")
-                        if pr.number in quality
-                        else None,
-                        "quick_quality": quicks[pr.number].model_dump(mode="json")
-                        if pr.number in quicks
-                        else None,
-                    }
-                )
-        rows.sort(key=lambda x: (x["_rank"], -x["number"]))
-        for row in rows:
-            del row["_rank"]
-        return rows
+                owner_rules = _OwnerRules(service, name, profile.people.codeowners)
+                for pr, cls, ev, assignees in kept:
+                    rows.append(
+                        {
+                            "repo": name,
+                            "number": pr.number,
+                            "title": pr.title,
+                            "author": pr.author,
+                            "url": pr.url,
+                            "head": pr.head_sha[:7],
+                            "labels": pr.labels,
+                            "draft": pr.is_draft,
+                            "created_at": pr.created_at,
+                            "updated_at": pr.updated_at,
+                            "review_state": cls.state,
+                            "reviewed_sha": (cls.reviewed_sha or "")[:7],
+                            "_rank": priority_key(ev, rubric),
+                            "assignees": [assignee_row(a) for a in assignees],
+                            "progress": await _progress_row(
+                                service,
+                                name,
+                                pr,
+                                assignees,
+                                owner_rules,
+                                checks_data=check_states.get(
+                                    checks_key(name, pr.number)
+                                ),
+                                has_checks=True,
+                                info=info,
+                                perms=perms,
+                            ),
+                            "tier": ev.tier if ev else None,
+                            "total": ev.total if ev else None,
+                            "summary": ev.summary if ev else "",
+                            "scores": ev.scores if ev else {},
+                            "review_trigger": profile.review.trigger,
+                            "review_activity": activity.get(pr.number, {}),
+                            "quality": quality[pr.number].model_dump(mode="json")
+                            if pr.number in quality
+                            else None,
+                            "quick_quality": quicks[pr.number].model_dump(mode="json")
+                            if pr.number in quicks
+                            else None,
+                        }
+                    )
+            rows.sort(key=lambda x: (x["_rank"], -x["number"]))
+            for row in rows:
+                del row["_rank"]
+            return rows
+
+        return await request.app.state.recent.json(key, compute)
 
     @r.post("/reviews")
     async def request_reviews(
