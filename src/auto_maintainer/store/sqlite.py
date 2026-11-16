@@ -1023,6 +1023,14 @@ class SqliteStore:
         )
         return _many(ChatThread, await self._fetch(stmt))
 
+    async def answering_threads(self) -> list[ChatThread]:
+        rows = await self._fetch(
+            select(m.chat_threads.c.data).where(
+                func.json_extract(m.chat_threads.c.data, "$.live_run").is_not(None)
+            )
+        )
+        return _many(ChatThread, rows)
+
     async def threads_with_workdir(self) -> list[tuple[ChatThread, datetime]]:
         last = (
             select(

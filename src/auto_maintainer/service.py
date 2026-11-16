@@ -66,7 +66,7 @@ from .domain.ports import (
     Workspace,
 )
 from .domain.profile import Route
-from .domain.records import AuditEntry, Job, RepoRecord
+from .domain.records import AuditEntry, ChatMessage, Job, RepoRecord
 from .domain.secrets import find_secrets, redact_secrets
 from .domain.settings import (
     KEEPS_OWN_PRIMARY,
@@ -580,6 +580,7 @@ class Service:
         await self.reload_settings()
         await self.actuator.reconcile_intents()
         await self.questions.cancel_orphans()
+        await self.end_cut_off_turns()
         await self.engine.recover()
         self._confirming = asyncio.create_task(
             self._confirm_deploy(), name="confirm-deploy"
@@ -587,6 +588,27 @@ class Service:
         self.bus.start()
         self.engine.start()
         self.scheduler.start()
+
+    async def end_cut_off_turns(self) -> None:
+        """A conversation's turn (in chat, about a review or a change, with a person)
+        runs in the dashboard request that took the message, so none outlives the
+        process: each conversation a stopped process left answering says the answer
+        was lost and takes a message again, instead of showing an agent at work
+        that nothing runs."""
+        for thread in await self.store.answering_threads():
+            run = thread.live_run
+            thread.live_run = None
+            await self.store.save_thread(thread)
+            await self.store.add_message(
+                ChatMessage(
+                    thread_id=thread.id,
+                    role="assistant",
+                    text="The service restarted while the agent was answering, so "
+                    "this answer was lost. Send your message again.",
+                    run_id=run,
+                )
+            )
+            log.info("ended turn %s of %s, cut off by a restart", run, thread.id)
 
     async def stop(self) -> None:
         """Stop everything the service runs, waiting until each piece has unwound:

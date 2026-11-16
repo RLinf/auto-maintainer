@@ -135,6 +135,33 @@ async def test_a_reviewer_talks_the_agent_out_of_a_finding(demo) -> None:
         assert (await eve.get(f"/api/jobs/{job['id']}/talk")).status_code == 403
 
 
+async def test_a_turn_a_restart_cut_off_says_so_and_takes_a_message_again(
+    demo,
+) -> None:
+    h, app = demo
+    async with _as(app, "maria") as maria:
+        job = await _reviewed(h, maria, 42)
+        url = f"/api/jobs/{job['id']}/talk"
+        await maria.post(url, json={"text": "Why is F1 a finding?"})
+        # The process stopped while its agent answered the next message: the turn
+        # never cleared the conversation's live run.
+        thread = await h.store.get_thread(f"chat_{job['id']}")
+        assert thread is not None
+        thread.live_run = "run_cut_off"
+        await h.store.save_thread(thread)
+        assert (await maria.get(url)).json()["live_run"] == "run_cut_off"
+
+        await h.service.end_cut_off_turns()  # as the next start does
+        talk = (await maria.get(url)).json()
+        assert talk["live_run"] is None
+        last = talk["messages"][-1]
+        assert last["role"] == "assistant" and last["run_id"] == "run_cut_off"
+        assert "Send your message again" in last["text"]
+        again = (await maria.post(url, json={"text": "Why is F1 a finding?"})).json()
+        assert "boundary at one item" in again["text"]
+        assert (await maria.get(url)).json()["live_run"] is None
+
+
 async def test_a_decided_draft_is_not_revised_and_lessons_are_saved(demo) -> None:
     h, app = demo
     answers = iter(
