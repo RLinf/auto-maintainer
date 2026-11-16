@@ -29,6 +29,7 @@ import pytest
 from auto_maintainer.domain.agents import AgentTask
 from auto_maintainer.domain.events import Event, EventKind
 from auto_maintainer.domain.permissions import Permission
+from auto_maintainer.domain.review_progress import checks_key
 from auto_maintainer.domain.settings import UserToken
 from auto_maintainer.domain.snapshot import ReviewThread, ThreadComment
 from auto_maintainer.testing.demo import build_demo
@@ -179,6 +180,19 @@ async def test_the_periodic_check_skips_what_did_not_change(demo) -> None:
     h.clock.advance(hours=5)
     await h.emit(tick.model_copy(update={"id": "evt_moved"}))
     assert len(asked) == 1, "the commented file did not change since its check"
+    checks = await h.store.get_state(checks_key(REPO, 42))
+    assert checks["T_open"]["head_sha"] == "c" * 40, "its result holds at the new head"
+    assert checks["T_open"]["status"] == "addressed"
+
+    # So the next scan has nothing to take up, and its places go to PRs that changed.
+    h.clock.advance(hours=5)
+    await h.emit(tick.model_copy(update={"id": "evt_after"}))
+    [scan] = [
+        j
+        for j in await h.store.list_jobs(playbooks=["comment_scan"], limit=50)
+        if j.key.endswith(":evt_after")
+    ]
+    assert scan.result == {"checked": [], "due": 0}
 
 
 async def test_a_comment_is_resolved_by_the_person_who_presses_resolve(demo) -> None:

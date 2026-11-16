@@ -137,10 +137,6 @@ class CommentCheckPlaybook(Playbook):
                 if t.id not in known or known[t.id].head_sha != pr.head_sha
             ]
         batch = profile.review.comments.max_comments
-        if not wanted:
-            # The comments a person named are all checked, ``batch`` at a time; on
-            # its own the check reads at most ``batch`` per run.
-            threads = threads[:batch]
         if not threads:
             return PlaybookResult(result={"skipped": "no open comment to check"})
 
@@ -153,6 +149,13 @@ class CommentCheckPlaybook(Playbook):
         checked = dict(known)
         found: list[CommentCheck] = []
         live = {t.id for t in pr.threads}
+
+        async def save() -> None:
+            await ctx.store.set_state(
+                key,
+                {k: v.model_dump(mode="json") for k, v in checked.items() if k in live},
+            )
+
         try:
             diffs: dict[str, dict[str, str]] = {}
 
@@ -165,20 +168,27 @@ class CommentCheckPlaybook(Playbook):
 
             if not wanted:
                 # A comment checked before whose file did not change since keeps
-                # its result.
-                kept = []
+                # its result, now as of this head: otherwise the scan takes the PR
+                # up again on every run, and PRs that did change wait behind it.
+                kept, carried = [], 0
                 for t in threads:
                     old = known.get(t.id)
-                    if old is None:
+                    if old is not None and t.path not in await sections(old.head_sha):
+                        checked[t.id] = old.model_copy(update={"head_sha": pr.head_sha})
+                        carried += 1
+                    else:
                         kept.append(t)
-                        continue
-                    changed = await sections(old.head_sha)
-                    if t.path in changed:
-                        kept.append(t)
-                threads = kept
+                if carried:
+                    await save()
+                # On its own the check reads at most ``batch`` per run; the comments
+                # a person named are all checked, ``batch`` at a time.
+                threads = kept[:batch]
                 if not threads:
                     return PlaybookResult(
-                        result={"skipped": "no commented file changed since its check"}
+                        result={
+                            "skipped": "no commented file changed since its check",
+                            "carried": carried,
+                        }
                     )
 
             for start in range(0, len(threads), batch):
@@ -217,14 +227,7 @@ class CommentCheckPlaybook(Playbook):
                     )
                     found.append(checked[thread.id])
                 # Each batch shows on the dashboard as soon as it is done.
-                await ctx.store.set_state(
-                    key,
-                    {
-                        k: v.model_dump(mode="json")
-                        for k, v in checked.items()
-                        if k in live
-                    },
-                )
+                await save()
         finally:
             await ctx.workspace.release(workdir)
         return PlaybookResult(
