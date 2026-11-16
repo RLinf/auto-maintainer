@@ -63,7 +63,12 @@ from ..domain.actions import (
     make_action,
 )
 from ..domain.agents import AgentAnswer, AgentQuestion, QuestionState, SkillInfo
-from ..domain.approvals import ApprovalStatus, approval_status, approval_summary
+from ..domain.approvals import (
+    ApprovalStatus,
+    approval_status,
+    approval_summary,
+    completeness,
+)
 from ..domain.codeowners import (
     CodeOwnerReport,
     OwnerRule,
@@ -125,6 +130,7 @@ from ..playbooks.quality import (
     quick_qualities,
     quick_quality,
 )
+from ..profiles.gate import GateDecision
 from ..profiles.layers import ProfileError, parse_yaml
 from ..profiles.lock import parse_lock, profile_diff
 from ..profiles.skills import (
@@ -137,6 +143,10 @@ from ..service import Service
 from .auth import User, current_user
 
 PERMISSION_TTL = timedelta(minutes=10)
+"""The oldest kept permission a view shows: past it, the view reads it again first."""
+PERMISSION_REFRESH = timedelta(minutes=7)
+"""From this age a view still shows the kept permission at once, and it is read again
+in the background, so pages people keep open never wait for the forge."""
 
 log = logging.getLogger(__name__)
 T = TypeVar("T")
@@ -229,21 +239,38 @@ SKILLS_TTL = 600.0
 _SKILLS: dict[str, tuple[float, list[SkillInfo]]] = {}
 
 
+_SKILL_READS: dict[str, asyncio.Future[list[SkillInfo]]] = {}
+
+
 async def repo_skills_of(
     service: Service, repo: str, *, refresh: bool = False
 ) -> list[SkillInfo]:
-    """The repository's own skills on its default branch, kept for ``SKILLS_TTL``."""
+    """The repository's own skills on its default branch, never older than
+    ``SKILLS_TTL``: in its last part they are shown at once while they are read again
+    in the background, unless the caller asks to ``refresh``. Views that ask at once
+    share one read."""
     now = time.monotonic()
     kept = _SKILLS.get(repo)
+    if kept and not refresh and now - kept[0] < SKILLS_TTL * 0.7:
+        return kept[1]
+    reading = _SKILL_READS.get(repo)
+    if reading is None:
+
+        async def read() -> list[SkillInfo]:
+            try:
+                found = await repository_skills(service.a.forge, repo)
+            except Exception:
+                log.exception("reading %s's skills failed", repo)
+                return kept[1] if kept else []
+            _SKILLS[repo] = (time.monotonic(), found)
+            return found
+
+        reading = asyncio.ensure_future(read())
+        _SKILL_READS[repo] = reading
+        reading.add_done_callback(lambda _: _SKILL_READS.pop(repo, None))
     if kept and not refresh and now - kept[0] < SKILLS_TTL:
         return kept[1]
-    try:
-        found = await repository_skills(service.a.forge, repo)
-    except Exception:
-        log.exception("reading %s's skills failed", repo)
-        return kept[1] if kept else []
-    _SKILLS[repo] = (now, found)
-    return found
+    return await asyncio.shield(reading)
 
 
 async def review_setup(
@@ -457,9 +484,11 @@ async def _progress_row(
     progress = review_progress(pr, assignees, load_checks(raw))
     owners = code_owner_report(await rules.of(pr.base_ref), pr)
     status = await approvals_of(service, repo, pr, owners, info=info, perms=perms)
+    approval = approval_summary(status, progress)
     return {
         **progress.summary(),
-        "approval": approval_summary(status, progress).model_dump(mode="json"),
+        "approval": approval.model_dump(mode="json"),
+        "completeness": completeness(progress, approval).model_dump(mode="json"),
     }
 
 
@@ -616,8 +645,9 @@ async def approvals_of(
 
 
 async def permission(service: Service, user: User, repo: str) -> Permission:
-    """The user's permission on ``repo``, cached for ten minutes per repository, for
-    viewing only."""
+    """The user's permission on ``repo``, cached for at most ``PERMISSION_TTL`` per
+    repository, for viewing only; one older than ``PERMISSION_REFRESH`` is still
+    shown at once while it is read again in the background."""
     now = service.clock.now()
     record = await service.store.get_user(user.login)
     from ..domain.ports import UserRecord
@@ -627,8 +657,9 @@ async def permission(service: Service, user: User, repo: str) -> Permission:
             login=user.login, name=user.name, avatar_url=user.avatar_url
         )
     checked = record.permissions_checked.get(repo)
-    if checked and now - checked < PERMISSION_TTL and repo in record.permissions:
-        return Permission(record.permissions[repo])
+    kept = Permission(record.permissions[repo]) if repo in record.permissions else None
+    if kept is not None and checked and now - checked < PERMISSION_REFRESH:
+        return kept
     key = (repo, user.login.lower())
     reading = service._permission_reads.get(key)
     if reading is None:
@@ -644,6 +675,10 @@ async def permission(service: Service, user: User, repo: str) -> Permission:
         reading = asyncio.ensure_future(_load())
         service._permission_reads[key] = reading
         reading.add_done_callback(lambda _: service._permission_reads.pop(key, None))
+        # Read: a refresh nobody waits for may fail, and the next view tries again.
+        reading.add_done_callback(lambda f: f.cancelled() or f.exception())
+    if kept is not None and checked and now - checked < PERMISSION_TTL:
+        return kept
     return await asyncio.shield(reading)
 
 
@@ -793,6 +828,49 @@ async def is_maintainer(service: Service, user: User, repo: str) -> bool:
     return decision.allowed
 
 
+async def shows_maintainer(service: Service, user: User, repo: str) -> bool:
+    """Whether a view shows ``user`` the controls of ``repo``'s maintainers:
+    ``is_maintainer``, kept ``VIEW_CHECK_SECONDS`` (``Service.view_cached``), since
+    pages that reload often would otherwise read the person's permission from the
+    forge each time. What they then change goes through the gate, live."""
+    return bool(
+        await service.view_cached(
+            ("maintainer", repo, user.login.lower()),
+            lambda: is_maintainer(service, user, repo),
+            seconds=VIEW_CHECK_SECONDS,
+        )
+    )
+
+
+VIEW_CHECK_SECONDS = 60.0
+"""How long a page shows a kept check of who maintains or owns: a change in the memory
+repo or of the owner drops it at once; one on the forge shows within this."""
+
+
+async def shows_gate(
+    service: Service, user: User, repo: str, profile: RepoProfile | None
+) -> GateDecision:
+    """``ConfigGate.check`` for ``user`` on ``repo``, kept for the views like
+    ``shows_maintainer``: what a page shows about who may configure it. A change
+    itself goes through the gate, live."""
+    return await service.view_cached(
+        ("gate", repo, user.login.lower()),
+        lambda: service.gate.check(repo, user.login, profile, person=True),
+        seconds=VIEW_CHECK_SECONDS,
+    )
+
+
+async def shows_owner(service: Service, login: str) -> GateDecision:
+    """``Service.service_gate`` for ``login``, kept for the views: who sees what the
+    service's owner sees (everyone's usage, the service's log). What the owner then
+    changes goes through the gate, live."""
+    return await service.view_cached(
+        ("service_gate", login.lower()),
+        lambda: service.service_gate(login),
+        seconds=VIEW_CHECK_SECONDS,
+    )
+
+
 def proposal_requester(proposal: Proposal, record: ActionRecord | None) -> str | None:
     """Who asked for a proposal's action: the reviewer a draft is for, or the person
     whose request on the dashboard or in chat produced it; None for the service's
@@ -822,6 +900,51 @@ async def may_decide(
     if maintainer is None:
         maintainer = await is_maintainer(service, user, proposal.repo)
     return maintainer
+
+
+async def owns_pr(service: Service, login: str, repo: str, number: int | None) -> bool:
+    """Whether ``login`` is one of the owners of ``repo#number`` here (``PrAssignee``
+    with the ``owner`` role): who answers for the PR's progress."""
+    if number is None:
+        return False
+    me = login.lower()
+    return any(
+        a.role == "owner" and a.login.lower() == me
+        for a in await service.store.list_assignees(repo, number)
+    )
+
+
+async def may_edit(
+    service: Service,
+    user: User,
+    proposal: Proposal,
+    record: ActionRecord | None,
+    *,
+    maintainer: bool | None = None,
+) -> bool:
+    """Whether ``user`` changes ``proposal``'s draft, by hand or in the conversation
+    about the work that made it: whoever decides it (``may_decide``), and the owners
+    of the PR it is for, who change others' work on their PR. Deciding it stays with
+    the person who asked for it and the repository's maintainers."""
+    if await may_decide(service, user, proposal, record, maintainer=maintainer):
+        return True
+    if record is None or record.action.kind == ActionKind.CODE_UPDATE:
+        return False
+    return await owns_pr(service, user.login, proposal.repo, record.action.number)
+
+
+async def require_edit(service: Service, user: User, proposal: Proposal) -> None:
+    record = await service.store.get_action(proposal.action_id)
+    if record is not None and record.action.kind == ActionKind.CODE_UPDATE:
+        await require_decide(service, user, proposal)
+        return
+    await require_view(service, user, proposal.repo)
+    if not await may_edit(service, user, proposal, record):
+        raise HTTPException(
+            403,
+            f"a maintainer of {proposal.repo}, the person who asked for it, or the "
+            "PR's owner changes this",
+        )
 
 
 async def require_decide(service: Service, user: User, proposal: Proposal) -> None:
@@ -1073,10 +1196,21 @@ def build_router() -> APIRouter:
         repo = _repo(repo)
         await require_view(service, user, repo)
         lock = await service.profiles.lock(repo)
-        state = await service.profiles.refresh(repo)
-        layers = await service.loader.layers(repo)
+        # The candidate and its layers read the repository's own profile file from
+        # the forge: kept a minute for the page, dropped by any change to the memory
+        # repo or the profile (``Service.forget_views``); approving checks live.
+        state = await service.view_cached(
+            ("profile", repo, "state"),
+            lambda: service.profiles.refresh(repo),
+            seconds=60,
+        )
+        layers = await service.view_cached(
+            ("profile", repo, "layers"),
+            lambda: service.loader.layers(repo),
+            seconds=60,
+        )
         current = await service.profiles.active(repo)
-        can = await service.gate.check(repo, user.login, current, person=True)
+        can = await shows_gate(service, user, repo, current)
         return {
             "lock": lock.model_dump(mode="json", by_alias=True) if lock else None,
             "candidate": state.model_dump(mode="json"),
@@ -1245,7 +1379,7 @@ def build_router() -> APIRouter:
         profile = await service.profiles.active(repo)
         if profile is None:
             raise HTTPException(409, f"{repo} has no approved profile yet")
-        gate = await service.gate.check(repo, user.login, profile, person=True)
+        gate = await shows_gate(service, user, repo, profile)
         review = profile.review
         return {
             "repo": repo,
@@ -1327,7 +1461,7 @@ def build_router() -> APIRouter:
         profile = await service.profiles.active(repo)
         if profile is None:
             raise HTTPException(409, f"{repo} has no approved profile yet")
-        gate = await service.gate.check(repo, user.login, profile, person=True)
+        gate = await shows_gate(service, user, repo, profile)
         return {
             "repo": repo,
             **await review_setup(service, repo, profile, refresh=refresh),
@@ -1458,7 +1592,7 @@ def build_router() -> APIRouter:
         out = await agreement_scores(service, repo)
         profile = await service.profiles.active(repo)
         if profile is not None:
-            gate = await service.gate.check(repo, user.login, profile, person=True)
+            gate = await shows_gate(service, user, repo, profile)
             levels = {}
             for kind in ActionKind:
                 if kind.touches_repository:
@@ -1948,6 +2082,7 @@ def build_router() -> APIRouter:
         owners = code_owner_report(rules, pr)
         owner_logins = {o.login.lower() for o in owners.people if not o.team}
         status = await approvals_of(service, repo, pr, owners)
+        summary = approval_summary(status, progress)
         return {
             **progress.model_dump(mode="json", exclude={"reviewers"}),
             "addressed": progress.addressed,
@@ -1963,8 +2098,8 @@ def build_router() -> APIRouter:
                 }
                 for r in progress.reviewers
             ],
-            "can_resolve": await is_maintainer(service, user, repo)
-            or holds(assignees, user.login, "owner"),
+            "can_resolve": holds(assignees, user.login, "owner")
+            or await shows_maintainer(service, user, repo),
             "signed_in": await service.can_post_as(user.login),
             "comment_checks": profile.review.comments.check if profile else None,
             "required_approvals": info.required_approvals if on_default else None,
@@ -1977,7 +2112,8 @@ def build_router() -> APIRouter:
                 "waiting": owners.waiting,
             },
             "approvals": status.model_dump(mode="json"),
-            "approval": approval_summary(status, progress).model_dump(mode="json"),
+            "approval": summary.model_dump(mode="json"),
+            "completeness": completeness(progress, summary).model_dump(mode="json"),
             "head": pr.head_sha,
         }
 
@@ -2885,7 +3021,7 @@ def build_router() -> APIRouter:
             key = who.lower() if who else None
             row = people.setdefault(key, _usage_row(who))
             _add_usage(row, run)
-        everyone = await is_maintainer(service, user, repo)
+        everyone = await shows_maintainer(service, user, repo)
         rows = sorted(
             people.values(),
             key=lambda r_: -(r_["input_tokens"] + r_["output_tokens"]),
@@ -2923,7 +3059,7 @@ def build_router() -> APIRouter:
         runs = await service.store.list_agent_runs(USAGE_RUNS, since=since)
         everything = (
             user.login in service.settings.operators
-            or (await service.service_gate(user.login)).allowed
+            or (await shows_owner(service, user.login)).allowed
         )
         visible: dict[str, bool] = {}
         rows: dict[str, dict[str, Any]] = {}
@@ -2984,7 +3120,7 @@ def build_router() -> APIRouter:
         service = service_of(request)
         since = service.clock.now() - timedelta(days=days)
         runs = await service.store.list_agent_runs(USAGE_RUNS, since=since)
-        gate = await service.service_gate(user.login)
+        gate = await shows_owner(service, user.login)
         everything = gate.allowed or user.login in service.settings.operators
         me = user.login.lower()
         people: dict[str, dict[str, Any]] = {}
@@ -3070,7 +3206,7 @@ def build_router() -> APIRouter:
                 seen.add(a.login.lower())
                 people.append({"login": a.login, "role": None, "areas": []})
         return {
-            "can_assign": await is_maintainer(service, user, repo),
+            "can_assign": await shows_maintainer(service, user, repo),
             "people": people,
         }
 
@@ -3387,6 +3523,9 @@ def build_router() -> APIRouter:
         code_visible: bool | None = None
         code_allowed: bool | None = None
         maintains: dict[str, bool] = {}
+        # The PRs the user owns, per repository: they change others' drafts there.
+        owned: dict[str, set[int]] = {}
+        me = user.login.lower()
         out = []
         for p in await service.store.list_proposals(state, repo):
             record = None
@@ -3397,7 +3536,7 @@ def build_router() -> APIRouter:
                 if record is None or record.action.kind != ActionKind.CODE_UPDATE:
                     continue
                 if code_visible is None:
-                    perm = await service.a.forge.get_permission(code_repo, user.login)
+                    perm = await permission(service, user, code_repo)
                     code_visible = (
                         perm.at_least(Permission.READ)
                         or user.login in service.settings.operators
@@ -3408,13 +3547,22 @@ def build_router() -> APIRouter:
                 record = await service.store.get_action(p.action_id)
             if record is not None and record.action.kind == ActionKind.CODE_UPDATE:
                 if code_allowed is None:
-                    code_allowed, _ = await code_maintainer(service, user)
-                can_decide = code_allowed
+                    code_allowed = (await shows_owner(service, user.login)).allowed
+                can_decide = can_edit = code_allowed
             else:
                 if p.repo not in maintains:
-                    maintains[p.repo] = await is_maintainer(service, user, p.repo)
+                    maintains[p.repo] = await shows_maintainer(service, user, p.repo)
                 can_decide = await may_decide(
                     service, user, p, record, maintainer=maintains[p.repo]
+                )
+                if p.repo not in owned:
+                    owned[p.repo] = {
+                        a.number
+                        for a in await service.store.list_assignees(p.repo)
+                        if a.role == "owner" and a.login.lower() == me
+                    }
+                can_edit = can_decide or (
+                    record is not None and record.action.number in owned[p.repo]
                 )
             out.append(
                 {
@@ -3422,6 +3570,7 @@ def build_router() -> APIRouter:
                     "action": record.model_dump(mode="json") if record else None,
                     "requester": proposal_requester(p, record),
                     "can_decide": can_decide,
+                    "can_edit": can_edit,
                     "can_push": await _can_push(service, user, record)
                     if record is not None and record.action.kind == ActionKind.PR_FIX
                     else None,
@@ -3468,7 +3617,7 @@ def build_router() -> APIRouter:
         proposal = await service.store.get_proposal(proposal_id)
         if proposal is None:
             raise HTTPException(404, "unknown proposal")
-        await require_decide(service, user, proposal)
+        await require_edit(service, user, proposal)
         try:
             proposal = await service.pipeline.save_edits(
                 proposal_id, user.login, body.payload
@@ -3513,9 +3662,9 @@ def build_router() -> APIRouter:
         the owner of the service's repository; anything that looks like a
         credential is removed."""
         service = service_of(request)
-        allowed, why = await code_maintainer(service, user)
-        if not allowed:
-            raise HTTPException(403, why)
+        gate = await shows_owner(service, user.login)
+        if not gate.allowed:
+            raise HTTPException(403, gate.reason)
         path = Path(request.app.state.log_path)
         if not path.exists():
             return {"path": str(path), "lines": [], "kept": False}
@@ -3535,14 +3684,15 @@ def build_router() -> APIRouter:
         repo = service.settings.code_repo
         if repo is None:
             return {"code_repo": None}
-        perm = await service.a.forge.get_permission(repo, user.login)
+        perm = await permission(service, user, repo)
         if not (
             perm.at_least(Permission.READ) or user.login in service.settings.operators
         ):
             raise HTTPException(
                 403, f"you need access to {repo} to see the service's code"
             )
-        allowed, reason = await code_maintainer(service, user)
+        owner = await shows_owner(service, user.login)
+        allowed, reason = owner.allowed, "" if owner.allowed else owner.reason
         status = await service.a.updater.status() if service.a.updater else None
         prs = [
             {
@@ -3558,7 +3708,12 @@ def build_router() -> APIRouter:
                 "self_improvement": pr.head_ref.startswith("am/self/")
                 and pr.head_repo in (None, "", repo),
             }
-            for pr in await service.a.forge.list_open_prs(repo)
+            # Kept half a minute: the page reloads after each action it runs.
+            for pr in await service.view_cached(
+                ("service_prs", repo),
+                lambda: service.a.forge.list_open_prs(repo),
+                seconds=30,
+            )
         ]
         actions = await service.store.list_actions(
             repo=repo,
@@ -3794,7 +3949,7 @@ def build_router() -> APIRouter:
         if change is None:
             raise HTTPException(404, "no such memory change")
         if change.service:
-            if not (await service.service_gate(user.login)).allowed:
+            if not (await shows_owner(service, user.login)).allowed:
                 raise HTTPException(404, "no such memory change")
         elif not change.repos or not set(change.repos) <= set(
             await visible_repos(service, user)
@@ -4023,16 +4178,20 @@ async def agreement_scores(service: Service, repo: str) -> dict[str, Any]:
     shadow = await service.store.list_actions(
         repo=repo, statuses=[ActionStatus.SHADOWED], limit=2000
     )
+    # Each PR's snapshot and the profile once, not once per shadowed action.
+    prs: dict[int, PrSnapshot | None] = {}
+    profile: RepoProfile | None = await service.profiles.active(repo)
     scores: dict[str, dict[str, int]] = {}
     for record in shadow:
         a = record.action
         row = scores.setdefault(str(a.kind), {"matched": 0, "total": 0, "unknown": 0})
-        pr = await service.store.get_snapshot(repo, a.number) if a.number else None
+        if a.number and a.number not in prs:
+            prs[a.number] = await service.store.get_snapshot(repo, a.number)
+        pr = prs.get(a.number) if a.number else None
         if pr is None:
             row["unknown"] += 1
             continue
         if a.kind in (ActionKind.LABEL_APPLY, ActionKind.LABEL_CI_GATE):
-            profile: RepoProfile | None = await service.profiles.active(repo)
             wanted = [
                 *(a.payload.get("labels") or []),
                 *[
@@ -4243,7 +4402,8 @@ async def review_activity(service: Service, repo: str) -> dict[int, dict[str, An
     for job in await service.store.list_jobs(
         repo=repo, limit=500, playbooks=["review", "followup"]
     ):
-        if job.number is None:
+        if job.number is None or job.forked_from:
+            # A person's copy of a review's conversation reviews nothing itself.
             continue
         row = out.setdefault(job.number, {})
         if "job" not in row:

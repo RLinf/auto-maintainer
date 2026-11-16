@@ -19,6 +19,7 @@ reruns flakes, sends real failures to the failure lane, and merges what passes."
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
@@ -554,6 +555,46 @@ async def test_the_repositorys_target_can_be_set_on_the_page(
             f"/api/merge-schedule/{REPO}/ready", json={"ready": ["passes_ci"]}
         )
         assert bad.status_code == 422
+
+
+async def test_the_page_reads_reviewers_permissions_at_once(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """Reviewers' permissions are kept ten minutes for the views; once they run out,
+    the page reads them all in parallel, not one PR's reviewer after another's."""
+    h = harness
+    reviewers = [f"r{i}" for i in range(6)]
+    for i, login in enumerate(reviewers):
+        h.forge.set_permission(REPO, login, Permission.WRITE)
+        pr = _ready(50 + i, f"{i:x}" * 40, [])
+        h.forge.put_pr(
+            pr.model_copy(
+                update={
+                    "reviews": [
+                        r.model_copy(update={"author": login}) for r in pr.reviews
+                    ]
+                }
+            )
+        )
+    await h.poll()
+    read = h.forge.get_permission
+    running = most = 0
+
+    async def slow(repo: str, login: str) -> Permission:
+        nonlocal running, most
+        if login in reviewers:
+            running += 1
+            most = max(most, running)
+            await asyncio.sleep(0.05)
+            running -= 1
+        return await read(repo, login)
+
+    h.forge.get_permission = slow  # type: ignore[method-assign]
+    app = create_app(h.service, data_dir=tmp_path, allow_dev_login=True)
+    async with _as(app, "maria") as maria:
+        view = (await maria.get(f"/api/merge-schedule/{REPO}/view")).json()
+    assert {c["number"] for c in view["candidates"]} == {50 + i for i in range(6)}
+    assert most == len(reviewers)
 
 
 async def test_ci_that_does_not_start_is_looked_into_once(harness: Harness) -> None:

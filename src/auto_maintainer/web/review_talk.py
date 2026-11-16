@@ -28,6 +28,14 @@ an edit by the reviewer who asked; on a review already posted it becomes a
 ``review.update`` draft that edits the posted text, as whoever posted it, once
 approved. Nothing is posted without a decision. Questions the agent asks go to that
 reviewer, on the same view.
+
+The person who asked for the work, the PR's owners, and the repository's maintainers
+talk in the conversation, and their turns change the work's draft (``talk_access``).
+The PR's reviewers talk with the agent too, on a copy of their own (``fork_for``): a
+job that runs nothing, with the conversation so far and a draft for them copied from
+the work's (the review as it stands, posted or not; a change not yet pushed). Their
+turns change only their copy, which they post or push as anyone does their own draft;
+the original stays as it was. Their later messages in the original go to their copy.
 """
 
 from __future__ import annotations
@@ -43,7 +51,9 @@ from pydantic import BaseModel, Field
 from ..domain.actions import (
     ActionKind,
     ActionStatus,
+    FixPrPayload,
     ProposalState,
+    Provenance,
     ReviewPostPayload,
     ReviewUpdatePayload,
 )
@@ -54,7 +64,7 @@ from ..domain.ids import new_id
 from ..domain.labs import first_usable
 from ..domain.memory import SignalKind
 from ..domain.profile import RepoProfile, Route
-from ..domain.records import ActionRecord, ChatMessage, ChatThread, Job
+from ..domain.records import ActionRecord, ChatMessage, ChatThread, Job, JobStatus
 from ..domain.secrets import redact_secrets
 from ..domain.snapshot import PrSnapshot
 from ..playbooks.base import author_is_team
@@ -72,7 +82,7 @@ from ..playbooks.review_revise import (
     task_kind_of,
 )
 from ..service import Service
-from .api import is_maintainer, service_of
+from .api import is_maintainer, service_of, shows_maintainer
 from .auth import User, current_user
 from .chat import (
     ProposedAction,
@@ -187,6 +197,160 @@ async def _checkout(
     return path, info.default_branch
 
 
+UNSHARED = {"by", "agent", "batch", "thread_id"}
+"""What a copy does not take from the work's request: who asked, the agent they chose,
+the batch it ran in, and the conversation to tell when it is done."""
+
+
+def fork_key(job_id: str, login: str) -> str:
+    return f"fork:{job_id}:{login.lower()}"
+
+
+async def talk_access(
+    service: Service, user: User, job: Job, *, live: bool = True
+) -> str:
+    """How ``user`` takes part in ``job``'s conversation: ``talk`` in it, changing
+    the work's draft (who asked for the work, the PR's owners, who answer for it, and
+    the repository's maintainers), ``fork`` (the PR's reviewers: their messages go to
+    a copy of their own), or ``read``. A turn reads it ``live``; a view may show the
+    maintainer check as kept for views."""
+    assert job.repo
+    asker = str(_payload(job).get("by") or "")
+    if asker and asker.lower() == user.login.lower():
+        return "talk"
+    me = user.login.lower()
+    roles = (
+        {
+            a.role
+            for a in await service.store.list_assignees(job.repo, job.number)
+            if a.login.lower() == me
+        }
+        if job.number is not None
+        else set()
+    )
+    if "owner" in roles:
+        return "talk"
+    maintains = is_maintainer if live else shows_maintainer
+    if await maintains(service, user, job.repo):
+        return "talk"
+    return "fork" if roles else "read"
+
+
+async def fork_for(service: Service, user: User, job: Job) -> Job:
+    """``user``'s copy of ``job``'s conversation: the one they have, else a new job
+    holding the conversation so far and a draft for them copied from ``job``'s."""
+    key = fork_key(job.id, user.login)
+    found = await service.store.find_job(job.playbook, key)
+    if found is not None:
+        return found
+    asked = {k: v for k, v in _payload(job).items() if k not in UNSHARED}
+    now = service.clock.now()
+    fork, new = await service.store.upsert_job(
+        Job(
+            playbook=job.playbook,
+            key=key,
+            repo=job.repo,
+            number=job.number,
+            pool=job.pool,
+            status=JobStatus.DONE,
+            events=[
+                {
+                    "id": new_id("evt"),
+                    "kind": str(EventKind.DASHBOARD_COMMAND),
+                    "repo": job.repo,
+                    "number": job.number,
+                    "payload": {
+                        **asked,
+                        "by": user.login,
+                        "forked_from": job.id,
+                        "forked_from_by": _payload(job).get("by"),
+                    },
+                }
+            ],
+            result={"forked_from": job.id},
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    if not new:
+        return fork
+    await _copy_draft(service, job, fork, user.login)
+    original = await service.store.get_thread(thread_id_of(job))
+    messages = await service.store.list_messages(original.id) if original else []
+    thread = ChatThread(
+        id=thread_id_of(fork),
+        owner=user.login,
+        title=f"{job.repo}#{job.number}",
+        repo=job.repo,
+        number=job.number,
+        job_id=fork.id,
+        agent=original.agent if original else None,
+        forked_from=job.id,
+        copied=len(messages),
+    )
+    await service.store.save_thread(thread)
+    for m in messages:
+        # What the original's answers drafted or started stays the original's.
+        await service.store.add_message(
+            m.model_copy(
+                update={
+                    "id": new_id("msg"),
+                    "thread_id": thread.id,
+                    "proposals": [],
+                    "changes": [],
+                    "jobs": [],
+                    "requests": [],
+                }
+            )
+        )
+    return fork
+
+
+async def _copy_draft(service: Service, job: Job, fork: Job, login: str) -> None:
+    """A draft for ``login`` of what ``job`` drafted, as it stands, for ``fork``:
+    a review (a posted one with its waiting edit) whatever became of it; a change
+    unless it was pushed or is being pushed, since the PR has it then."""
+    if job.playbook == "fix":
+        record = await fix_draft(service, job)
+        if record is None or record.status in (
+            ActionStatus.EXECUTED,
+            ActionStatus.INTENT,
+            ActionStatus.QUEUED,
+        ):
+            return
+        payload = (
+            FixPrPayload.model_validate(record.action.payload)
+            .model_copy(update={"requested_by": login})
+            .model_dump(mode="json")
+        )
+        what = "change"
+    else:
+        record = await _draft(service, job)
+        if record is None:
+            return
+        payload = dict(record.action.payload)
+        revision = await _revision(service, record) if _posted(record) else None
+        if revision is not None:
+            waiting = ReviewUpdatePayload.model_validate(revision.action.payload)
+            payload["body"] = waiting.body
+            payload["result"] = waiting.result or payload.get("result")
+        what = "review"
+    action = record.action.model_copy(
+        update={
+            "id": new_id("act"),
+            "created_at": service.clock.now(),
+            "payload": payload,
+            "discriminator": f"fork:{fork.id}",
+            "draft_for": login,
+            "provenance": Provenance(
+                job_id=fork.id, playbook=job.playbook, requested_by=login
+            ),
+            "rationale": f"{login}'s copy of the {what} of #{job.number}",
+        }
+    )
+    await service.pipeline.submit(action, force_propose=True)
+
+
 def build_router() -> APIRouter:
     r = APIRouter(prefix="/api/jobs")
 
@@ -211,9 +375,27 @@ def build_router() -> APIRouter:
         service = service_of(request)
         job = await talk_job(service, user, job_id)
         thread = await service.store.get_thread(thread_id_of(job))
+        access = await talk_access(service, user, job, live=False)
+        mine = (
+            await service.store.find_job(job.playbook, fork_key(job.id, user.login))
+            if access == "fork"
+            else None
+        )
+        shared = {
+            "access": access,
+            "fork": mine.id if mine else None,
+            "forked_from": {
+                "job": job.forked_from,
+                "by": _payload(job).get("forked_from_by"),
+            }
+            if job.forked_from
+            else None,
+            "copied": thread.copied if thread else 0,
+        }
         if job.playbook == "fix":
             record = await fix_draft(service, job)
             return {
+                **shared,
                 "subject": "fix",
                 "thread": thread.id if thread else None,
                 "agent": thread.agent if thread else None,
@@ -244,6 +426,7 @@ def build_router() -> APIRouter:
         )
         revision = await _revision(service, record) if record else None
         return {
+            **shared,
             "subject": "review",
             "thread": thread.id if thread else None,
             "agent": thread.agent if thread else None,
@@ -330,16 +513,35 @@ def build_router() -> APIRouter:
         job = await talk_job(service, user, job_id)
         assert job.repo
         asker = str(_payload(job).get("by") or "")
-        if asker.lower() != user.login.lower() and not await is_maintainer(
-            service, user, job.repo
-        ):
-            # A turn can revise the draft, so it is the asker's or a maintainer's.
-            what = "change" if job.playbook == "fix" else "review"
+        what = "change" if job.playbook == "fix" else "review"
+        access = await talk_access(service, user, job)
+        if access == "read":
+            # A turn can revise the draft, so it is the asker's or a maintainer's;
+            # the PR's owners and reviewers talk on a copy of their own.
             raise HTTPException(
                 403,
-                f"{asker or 'the service'} asked for this {what}; only they and the "
-                f"maintainers of {job.repo} talk to its agent",
+                f"{asker or 'the service'} asked for this {what}; only they, the "
+                f"PR's owners and reviewers, and the maintainers of {job.repo} talk "
+                "to its agent",
             )
+        if access == "fork":
+            if job.status in ACTIVE:
+                raise HTTPException(
+                    409,
+                    f"the agent is still at work on this {what}; once it is done, "
+                    "your messages go to a copy of your own",
+                )
+            if job.playbook != "fix" and await _draft(service, job) is None:
+                raise HTTPException(409, f"this {what} has no draft to talk about")
+            fork = await fork_for(service, user, job)
+            return {**await _say(request, service, user, fork, body), "fork": fork.id}
+        return await _say(request, service, user, job, body)
+
+    async def _say(
+        request: Request, service: Service, user: User, job: Job, body: TalkBody
+    ) -> dict[str, Any]:
+        """A turn in ``job``'s own conversation, for one who talks in it."""
+        assert job.repo
         if body.agent:
             check_agent(service, body.agent)
         if service.a.agents.listening(job.id):
@@ -700,7 +902,7 @@ async def _turn(
     jobs: list[str] = []
     if answer.reproduce and answer.reproduce.strip():
         started, note = await _reproduce(
-            service, user, profile, pr, answer.reproduce.strip()
+            service, user, profile, pr, answer.reproduce.strip(), record.action.id
         )
         jobs += [started] if started else []
         notes.append(note)
@@ -719,11 +921,18 @@ async def _turn(
 
 
 async def _reproduce(
-    service: Service, user: User, profile: RepoProfile, pr: PrSnapshot, focus: str
+    service: Service,
+    user: User,
+    profile: RepoProfile,
+    pr: PrSnapshot,
+    focus: str,
+    review: str,
 ) -> tuple[str | None, str]:
     """Start a reproduction of ``pr`` for ``user``, as the Reproduce button does, on
-    the test machine suited to ``focus`` (the reproduction chooses it), checking it. Returns the
-    request event's id (the jobs API resolves it) and a note for the reply."""
+    the test machine suited to ``focus`` (the reproduction chooses it), checking it;
+    its record goes into ``review``, the draft the conversation is about, so a copy's
+    run never changes the original. Returns the request event's id (the jobs API
+    resolves it) and a note for the reply."""
     if first_usable(service.machines, profile.labs, pr.repo, user.login) is None:
         return None, (
             "No test machine is in use for this repository, so no reproduction "
@@ -738,6 +947,7 @@ async def _reproduce(
             "command": "reproduce",
             "by": user.login,
             "note": focus[:2_000],
+            "review": review,
         },
         source="review-talk",
     )

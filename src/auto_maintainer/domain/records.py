@@ -78,6 +78,15 @@ class Job(BaseModel):
                 return str(by)
         return None
 
+    @property
+    def forked_from(self) -> str | None:
+        """For one person's copy of the conversation about a review, a follow-up, or
+        a change (``web/review_talk.py:fork_for``): the job whose conversation and
+        draft it copied. Such a job runs nothing; it holds that person's turns."""
+        first = self.events[0] if self.events else {}
+        value = (first.get("payload") or {}).get("forked_from")
+        return str(value) if value else None
+
 
 class RepoRecord(BaseModel):
     repo: str
@@ -312,6 +321,11 @@ class ChatThread(BaseModel):
     """For a conversation shared on a repository's page, such as ``people`` for its
     People record: everyone who may see the repository shares it, and it lives on
     that page, not in the owner's list of conversations."""
+    forked_from: str | None = None
+    """For a copy of a review's or a change's conversation: the job whose
+    conversation it copied (``Job.forked_from``)."""
+    copied: int = 0
+    """How many of a copy's first messages were copied from the original."""
     id: str = Field(default_factory=lambda: new_id("chat"))
     created_at: datetime = Field(default_factory=utc_now)
 

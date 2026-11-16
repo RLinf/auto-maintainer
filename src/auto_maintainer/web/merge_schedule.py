@@ -50,6 +50,7 @@ from ..domain.merge_schedule import (
     skip_key,
     state_key,
 )
+from ..domain.permissions import Permission
 from ..domain.profile import FlakeSignature, ReadyCondition, RepoProfile, ResolveKind
 from ..domain.records import CiObservation, JobStatus
 from ..domain.run_ci import ci_view
@@ -70,7 +71,14 @@ from ..playbooks.hygiene import hygiene_key
 from ..playbooks.merge import MERGED_KEY
 from ..profiles.layers import ProfileError, parse_yaml
 from ..service import Service
-from .api import _repo, is_maintainer, permission, require_view, service_of
+from .api import (
+    _repo,
+    is_maintainer,
+    permissions_of,
+    require_view,
+    service_of,
+    shows_maintainer,
+)
 from .auth import User, current_user
 
 
@@ -172,13 +180,17 @@ async def gate_of(
     info: RepoInfo,
     pr: PrSnapshot,
     arm: MergeArm | None,
+    known: dict[str, Permission] | None = None,
 ) -> GateResult:
     """The merge gate for ``pr`` as the merge job reads it, from what the service
-    has: reviewers' permissions cached for the views, the hygiene results kept."""
-    perms = {
-        r.author: await permission(service, User(login=r.author), pr.repo)
-        for r in pr.reviews
-    }
+    has: reviewers' permissions cached for the views (``known``, by lowercase login,
+    when the caller read them for many PRs at once; the rest read in parallel), the
+    hygiene results kept."""
+    known = dict(known or {})
+    missing = [r.author for r in pr.reviews if r.author.lower() not in known]
+    if missing:
+        known.update(await permissions_of(service, pr.repo, missing))
+    perms = {r.author: known[r.author.lower()] for r in pr.reviews}
     hygiene = await service.store.get_state(hygiene_key(pr.repo, pr.number)) or {}
     blocking = {
         r["id"]: r["passed"]
@@ -531,12 +543,20 @@ def build_router() -> APIRouter:
             }
             (failed if state.phase == "failed" else scheduled).append(row)
         candidates, not_ready = [], []
-        for pr in sorted(snaps.values(), key=lambda p: p.number):
-            if pr.number in armed or pr.state != PrState.OPEN:
-                continue
-            if pr.is_draft and not profile.scope.include_drafts:
-                continue
-            gate = await gate_of(service, profile, info, pr, None)
+        unarmed = [
+            pr
+            for pr in sorted(snaps.values(), key=lambda p: p.number)
+            if pr.number not in armed
+            and pr.state == PrState.OPEN
+            and (not pr.is_draft or profile.scope.include_drafts)
+        ]
+        # Every reviewer's permission in one parallel read: once their ten minutes
+        # run out, reading them PR by PR held the page for tens of seconds.
+        known = await permissions_of(
+            service, repo, [r.author for pr in unarmed for r in pr.reviews]
+        )
+        for pr in unarmed:
+            gate = await gate_of(service, profile, info, pr, None, known)
             back = holding_back(gate, ready_conditions(profile))
             row = _row(pr, profile)
             if not back:
@@ -551,7 +571,7 @@ def build_router() -> APIRouter:
         return {
             "repo": repo,
             "enabled": profile.merge.enabled,
-            "can_arrange": await is_maintainer(service, user, repo),
+            "can_arrange": await shows_maintainer(service, user, repo),
             "signed_in": await service.can_post_as(user.login),
             "mode": "serial" if serial(info, profile) else "parallel",
             "parallel": profile.merge.schedule.parallel,

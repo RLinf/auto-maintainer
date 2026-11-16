@@ -36,7 +36,14 @@ from ..domain.permissions import Permission
 from ..domain.secrets import redact_secrets
 from ..profiles.governance import check, governance_path
 from ..service import Service
-from .api import _repo, read_codeowners, require_view, service_of
+from .api import (
+    _repo,
+    permission,
+    read_codeowners,
+    require_view,
+    service_of,
+    shows_gate,
+)
 from .auth import User, current_user
 
 MAX_CHECKED = 60
@@ -62,9 +69,13 @@ async def _codeowners(service: Service, repo: str, path: str | None) -> set[str]
 async def _permissions(
     service: Service, repo: str, logins: list[str]
 ) -> dict[str, Permission]:
+    """Members' permissions on ``repo`` as the views keep them (``api.permission``:
+    read at most every ten minutes, and never waited for when read today), so the
+    People tab does not read the forge once per member on every load."""
+
     async def one(login: str) -> tuple[str, Permission | None]:
         try:
-            return login.lower(), await service.a.forge.get_permission(repo, login)
+            return login.lower(), await permission(service, User(login=login), repo)
         except Exception:  # an unknown login or a forge hiccup leaves it unchecked
             return login.lower(), None
 
@@ -110,11 +121,7 @@ def build_router() -> APIRouter:
                     else [],
                 }
             )
-        gate = (
-            await service.gate.check(repo, user.login, profile, person=True)
-            if profile
-            else None
-        )
+        gate = await shows_gate(service, user, repo, profile) if profile else None
         return {
             "repo": repo,
             "governance": gov.dump(),

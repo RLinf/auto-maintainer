@@ -281,7 +281,7 @@ def install_authority(app: FastAPI, ca_cert: Path | None) -> None:
 
 def install_recent(app: FastAPI) -> None:
     """A request that may have changed something retires every kept answer
-    (``web/recent.py``), once it is done."""
+    (``web/recent.py``) and the profile page's kept candidate, once it is done."""
 
     @app.middleware("http")
     async def recent_writes(request: Request, call_next: Any) -> Response:
@@ -290,6 +290,7 @@ def install_recent(app: FastAPI) -> None:
         finally:
             if request.method not in ("GET", "HEAD", "OPTIONS"):
                 request.app.state.recent.wrote()
+                request.app.state.service.forget_views("profile")
 
 
 def install_csrf(app: FastAPI) -> None:

@@ -124,3 +124,94 @@ async def test_pr_list_batches_approver_permissions_and_negative_codeowners(
         assert perm_calls.count("rev_a") == 1, "deduplicated and cached"
     finally:
         await h.close()
+
+
+async def test_who_maintains_is_kept_for_views_until_the_record_changes(
+    tmp_path: Path,
+) -> None:
+    """Pages show maintainers' controls from a kept check, so a page that reloads often
+    does not read the person's permission from the forge each time; a change to the
+    memory repo (a People record) drops it, so the next page shows the change."""
+    import yaml
+
+    from auto_maintainer.domain.events import Event, EventKind
+    from auto_maintainer.domain.permissions import Permission
+    from auto_maintainer.profiles.governance import governance_path
+    from auto_maintainer.testing.demo import DEMO_GOVERNANCE
+    from auto_maintainer.web.api import shows_maintainer
+    from auto_maintainer.web.auth import User
+
+    h = await build_demo(tmp_path)
+    try:
+        reads: list[str] = []
+        get_permission = h.forge.get_permission
+
+        async def counted(repo: str, login: str) -> Permission:
+            reads.append(login)
+            return await get_permission(repo, login)
+
+        h.forge.get_permission = counted  # type: ignore[method-assign]
+        bob = User(login="bob")
+        assert not await shows_maintainer(h.service, bob, "acme/widget")
+        assert not await shows_maintainer(h.service, bob, "acme/widget")
+        assert reads == ["bob"], "kept for the views"
+
+        [maria] = [m for m in DEMO_GOVERNANCE["members"] if m["login"] == "maria"]
+        record = {
+            **DEMO_GOVERNANCE,
+            "members": [*DEMO_GOVERNANCE["members"], {**maria, "login": "bob"}],
+        }
+        h.memory.files[governance_path("acme/widget")] = yaml.safe_dump(record)
+        assert not await shows_maintainer(h.service, bob, "acme/widget"), "still kept"
+        await h.emit(
+            Event(
+                kind=EventKind.MEMORY_CHANGED, repo="acme/widget", payload={"paths": []}
+            )
+        )
+        await h.settle()
+        assert await shows_maintainer(h.service, bob, "acme/widget")
+    finally:
+        await h.close()
+
+
+async def test_a_kept_permission_is_read_again_before_it_runs_out(
+    tmp_path: Path,
+) -> None:
+    """A view never shows a permission older than ``PERMISSION_TTL``. In its last
+    minutes a view still shows the kept one at once and it is read again in the
+    background, so a page people keep open never waits for the forge; past it, the
+    view reads it first."""
+    from auto_maintainer.domain.permissions import Permission
+    from auto_maintainer.web.api import permission
+    from auto_maintainer.web.auth import User
+
+    h = await build_demo(tmp_path)
+    try:
+        bob = User(login="bob")
+        assert await permission(h.service, bob, "acme/widget") == Permission.WRITE
+        h.forge.set_permission("acme/widget", "bob", Permission.READ)
+        h.clock.advance(minutes=8)
+        release = asyncio.Event()
+        get_permission = h.forge.get_permission
+
+        async def slow(repo: str, login: str) -> Permission:
+            await release.wait()
+            return await get_permission(repo, login)
+
+        h.forge.get_permission = slow  # type: ignore[method-assign]
+        shown = await asyncio.wait_for(permission(h.service, bob, "acme/widget"), 1)
+        assert shown == Permission.WRITE, "the kept one, at once"
+        release.set()
+        for _ in range(20):
+            if not h.service._permission_reads:
+                break
+            await asyncio.sleep(0.01)
+        assert await permission(h.service, bob, "acme/widget") == Permission.READ
+
+        h.forge.set_permission("acme/widget", "bob", Permission.NONE)
+        h.clock.advance(minutes=11)
+        assert await permission(h.service, bob, "acme/widget") == Permission.NONE, (
+            "never older than ten minutes"
+        )
+    finally:
+        await h.close()

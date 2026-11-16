@@ -17,6 +17,7 @@ read from its default branch through the forge, and the service's."""
 
 from __future__ import annotations
 
+import asyncio
 import re
 from pathlib import Path
 
@@ -30,21 +31,33 @@ MAX_SKILLS = 60
 _SERVICE_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
+READS_AT_ONCE = 8
+"""Skill files read from the forge at once: one after another, a repository with
+dozens of skills took tens of seconds over a slow link."""
+
+
 async def repository_skills(
     forge: ForgeReader, repo: str, ref: str | None = None
 ) -> list[SkillInfo]:
     """The repository's own skills on ``ref`` (its default branch when ``None``), in
-    the order a review looks for them."""
-    found: list[SkillInfo] = []
+    the order a review looks for them; the first ``MAX_SKILLS`` folders."""
+    places: list[tuple[str, str]] = []
     for base in REPO_SKILL_FOLDERS:
         for folder in sorted(await forge.list_dir(repo, base, ref)):
-            if len(found) >= MAX_SKILLS:
-                return found
-            path = f"{base}/{folder}/SKILL.md"
-            text = await forge.get_file(repo, path, ref)
-            if text:
-                found.append(parse_skill(text, folder, path))
-    return found
+            places.append((folder, f"{base}/{folder}/SKILL.md"))
+    places = places[:MAX_SKILLS]
+    limit = asyncio.Semaphore(READS_AT_ONCE)
+
+    async def read(path: str) -> str | None:
+        async with limit:
+            return await forge.get_file(repo, path, ref)
+
+    texts = await asyncio.gather(*(read(path) for _, path in places))
+    return [
+        parse_skill(text, folder, path)
+        for (folder, path), text in zip(places, texts, strict=True)
+        if text
+    ]
 
 
 def service_skills(skills_dir: Path) -> list[SkillInfo]:

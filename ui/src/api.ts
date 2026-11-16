@@ -369,6 +369,8 @@ export interface ProposalWithAction extends Proposal {
   requester?: string | null;
   /** Whether the viewer may approve, edit, or reject it: a maintainer, or the person who asked. */
   can_decide?: boolean;
+  /** Whether the viewer may change it: whoever decides it, and the owners of its PR. */
+  can_edit?: boolean;
   /** For a fix or merge: whether the viewer may push to the PR's branch (``null``: unknown). */
   can_push?: boolean | null;
 }
@@ -417,8 +419,23 @@ export interface ApprovalSummary {
   changes_requested: number;
 }
 
+/** How close a PR's review is to done, as one share (``domain/approvals.py:completeness``):
+ * half being reviewed (reviewers asked for it, approvals the branch requires), half its
+ * review threads addressed. */
+export interface Completeness {
+  value: number;
+  review_done: number;
+  review_steps: number;
+  addressed: number;
+  threads: number;
+  waiting_reviewers: string[];
+  approvals_needed: number | null;
+  changes_requested: number;
+}
+
 export interface ProgressSummary {
   approval?: ApprovalSummary;
+  completeness?: Completeness;
   threads: number;
   resolved: number;
   /** Open threads a comment check found addressed in the code. */
@@ -494,6 +511,8 @@ export interface ProgressEvent {
 
 /** ``GET /api/prs/{repo}/{n}/progress``: how the PR's review goes, for its owners. */
 export interface PrProgress {
+  /** How close the review is to done, as the PR's row shows it. */
+  completeness?: Completeness;
   threads: number;
   resolved: number;
   outdated: number;
@@ -1258,6 +1277,9 @@ export interface AgentJob {
   note: string | null;
   /** Jobs started by one request (every PR scored again) share it. */
   batch: string | null;
+  /** For a person's copy of the conversation about a review or a change: the work it
+   * copied, and who asked for that work. */
+  forked_from?: { job: string; by: string | null } | null;
   created_at: string;
   updated_at: string;
   error: string | null;
@@ -1313,6 +1335,16 @@ export interface ReviewTalkState {
   posted: boolean;
   /** The pending edit of the posted review, by action id. */
   revision: string | null;
+  /** How the person takes part: in this conversation (who asked for the work, and
+   * maintainers), on a copy of their own (the PR's other owners and reviewers), or
+   * reading along. */
+  access?: "talk" | "fork" | "read";
+  /** The person's own copy of this conversation, by job id, once they have one. */
+  fork?: string | null;
+  /** For a copy: the work it copied, and who asked for that work. */
+  forked_from?: { job: string; by: string | null } | null;
+  /** For a copy: how many of its first messages came from the original. */
+  copied?: number;
 }
 
 

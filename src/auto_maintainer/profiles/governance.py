@@ -33,6 +33,10 @@ from ..domain.memory import MemoryChange, Tier, repo_dir
 from ..domain.permissions import Permission
 from ..domain.ports import MemoryStore
 
+_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+"""libyaml's safe loader where PyYAML has it: the same safe constructors, several
+times faster on a large record."""
+
 
 def governance_path(repo: str) -> str:
     return f"{repo_dir(repo)}/{GOVERNANCE_FILE}"
@@ -69,6 +73,8 @@ class GovernanceRecords:
 
     memory: MemoryStore
     skeleton_data: dict[str, Any] = field(default_factory=dict)
+    _parsed: dict[str, tuple[str, Any]] = field(default_factory=dict, repr=False)
+    """Each repository's record as last parsed, with the text it was parsed from."""
 
     def skeleton(self, repo: str) -> Governance:
         return Governance.model_validate({**self.skeleton_data, "repo": repo})
@@ -78,13 +84,23 @@ class GovernanceRecords:
         if not text:
             return Loaded(self.skeleton(repo), stored=False)
         try:
-            data = yaml.safe_load(text) or {}
+            data = self._parse(repo, text)
             if not isinstance(data, dict):
                 raise ValueError("the record is not a mapping")
             gov = Governance.model_validate({**data, "repo": repo})
         except (yaml.YAMLError, ValidationError, ValueError) as e:
             return Loaded(self.skeleton(repo), stored=True, error=_short(e))
         return Loaded(gov, stored=True)
+
+    def _parse(self, repo: str, text: str) -> Any:
+        """``text`` as YAML, parsed once while it stays the same: the gate reads the
+        record on every check, and a team's record runs to a hundred kilobytes. Only
+        ``load`` reads it, and validating builds each caller a record of its own."""
+        kept = self._parsed.get(repo)
+        if kept is None or kept[0] != text:
+            kept = (text, yaml.load(text, Loader=_LOADER) or {})
+            self._parsed[repo] = kept
+        return kept[1]
 
     async def maintainers_of(self, repo: str) -> set[str]:
         """Who maintains ``repo`` by its applied record; empty when the record names

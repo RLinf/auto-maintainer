@@ -305,6 +305,16 @@ class SqliteStore:
                 )
             return existing, False
 
+    async def find_job(self, playbook: str, key: str) -> Job | None:
+        return _load(
+            Job,
+            await self._one(
+                select(m.jobs.c.data).where(
+                    m.jobs.c.playbook == playbook, m.jobs.c.key == key
+                )
+            ),
+        )
+
     async def get_job(self, job_id: str) -> Job | None:
         return _load(
             Job, await self._one(select(m.jobs.c.data).where(m.jobs.c.id == job_id))

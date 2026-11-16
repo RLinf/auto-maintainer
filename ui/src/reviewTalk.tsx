@@ -11,6 +11,10 @@
 // reaches the agent at work, and once the job ends a turn may change the files. The
 // pending draft's diff is replaced; when it was already decided, or nothing was
 // drafted, the change becomes a new draft for the person to push as themselves.
+//
+// The person who asked for the work and the repository's maintainers talk in it. The
+// PR's other owners and reviewers talk on a copy of their own: their first message
+// makes it (the conversation so far and a draft of their own), and the page opens it.
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Fragment, useState } from "react";
@@ -45,13 +49,15 @@ export function ReviewTalk({ job, me, active }: { job: AgentJob; me: string; act
   const agent = pickedAgent ?? talk.data?.agent ?? talk.data?.runtime ?? job.agent ?? "";
   const send = useMutation({
     mutationFn: ({ said, chosen }: { said: string; chosen: string | undefined }) =>
-      api.post<ChatMessage>(`/api/jobs/${job.id}/talk`, {
+      api.post<ChatMessage & { fork?: string }>(`/api/jobs/${job.id}/talk`, {
         text: said,
         ...(chosen !== undefined && !listening ? { agent: chosen } : {}),
       }),
-    onSuccess: async () => {
+    onSuccess: async (answer) => {
       await client.invalidateQueries({ queryKey: ["job", job.id, "talk"] });
       setPickedAgent(undefined);
+      // The turn ran on the person's own copy: that is where it goes on.
+      if (answer.fork) openJob(answer.fork);
     },
     onSettled: () => {
       setPendingText("");
@@ -72,7 +78,14 @@ export function ReviewTalk({ job, me, active }: { job: AgentJob; me: string; act
   const waiting = (questions.data ?? []).filter((q) => q.job_id && runs.has(q.job_id));
   const fix = job.playbook === "fix";
   const draft = talk.data?.draft ?? null;
-  const canSend = fix ? listening || !!talk.data?.open : !!draft || listening;
+  const access = talk.data?.access ?? "talk";
+  const forking = access === "fork";
+  const copyOf = talk.data?.forked_from ?? null;
+  const copied = talk.data?.copied ?? 0;
+  const myCopy = talk.data?.fork ?? null;
+  // A copy starts from the work's result, so it waits until the agent is done.
+  const canSend =
+    access === "read" ? false : forking ? !active && (fix ? !!talk.data?.open : !!draft) : fix ? listening || !!talk.data?.open : !!draft || listening;
   const proposals = useProposals();
   const revision = talk.data?.revision ? (proposals.data ?? []).find((p) => p.action_id === talk.data?.revision) : undefined;
   // The service keeps the message as soon as the turn starts; show it once.
@@ -94,7 +107,26 @@ export function ReviewTalk({ job, me, active }: { job: AgentJob; me: string; act
       <span className="kind-chip">
         <Icon name="message" size={13} /> {fix ? t("Talk with the agent about this change") : t("Talk with the agent about this review")}
       </span>
-      {!messages.length && !pendingText && fix && (
+      {copyOf && (
+        <div className="notice row small" style={{ gap: 8, flexWrap: "wrap", alignItems: "center" }} role="note">
+          <span style={{ flex: "1 1 12rem" }}>
+            {(job.by === me
+              ? fix
+                ? t("Your copy of {name}'s change: what changes here stays in this copy, and the original stays as it is.")
+                : t("Your copy of {name}'s review: what changes here stays in this copy, and the original stays as it is.")
+              : fix
+                ? t("{owner}'s copy of {name}'s change: what changes here stays in this copy, and the original stays as it is.")
+                : t("{owner}'s copy of {name}'s review: what changes here stays in this copy, and the original stays as it is.")
+            )
+              .replace("{owner}", job.by ?? "")
+              .replace("{name}", copyOf.by ?? t("the service"))}
+          </span>
+          <button className="ghost sm" onClick={() => openJob(copyOf.job)}>
+            {t("Open the original")}
+          </button>
+        </div>
+      )}
+      {access === "talk" && !messages.length && !pendingText && fix && (
         <span className="small muted">
           {listening
             ? t("The agent is making the change. Tell it what to do or leave out: your message reaches it at work.")
@@ -105,7 +137,7 @@ export function ReviewTalk({ job, me, active }: { job: AgentJob; me: string; act
                 : t("Ask for more changes, or for a different one: they become a new draft for you to push.")}
         </span>
       )}
-      {!messages.length && !pendingText && !fix && (
+      {access === "talk" && !messages.length && !pendingText && !fix && (
         <span className="small muted">
           {listening
             ? t("The agent is writing the review. Tell it what to check or what to leave out: your message reaches it at work, and the review it finishes answers it.")
@@ -118,8 +150,13 @@ export function ReviewTalk({ job, me, active }: { job: AgentJob; me: string; act
                 : t("The conversation opens once the review has a draft.")}
         </span>
       )}
-      {messages.map((m) => (
+      {messages.map((m, i) => (
         <Fragment key={m.id}>
+          {copied > 0 && i === copied && (
+            <span className="small muted" style={{ textAlign: "center", borderTop: "1px dashed var(--border-strong)", paddingTop: 6 }}>
+              {t("Above: the original conversation, as it was when this copy was made")}
+            </span>
+          )}
           {m.role === "user" ? (
             <div className="bubble user">
               <span className="small" style={{ display: "block", opacity: 0.75 }}>
@@ -194,6 +231,25 @@ export function ReviewTalk({ job, me, active }: { job: AgentJob; me: string; act
       )}
       {!fix && draft && !talk.data?.draft_pending && !talk.data?.posted && (
         <span className="small muted">{t("This draft was already decided: the agent still answers, but its revisions are not saved.")}</span>
+      )}
+      {forking && (
+        <div className="row small muted" style={{ gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+          <span style={{ flex: "1 1 12rem" }}>
+            {active
+              ? t("Once the agent is done, your messages go to a copy of your own; what the agent changes there stays in your copy.")
+              : fix
+                ? t("Your messages go to a copy of this change of your own: what the agent changes there is yours to push, and this one stays as it is.")
+                : t("Your messages go to a copy of this review of your own: what the agent changes there is yours to post, and this one stays as it is.")}
+          </span>
+          {myCopy && (
+            <button className="ghost sm" onClick={() => openJob(myCopy)}>
+              {t("Open your copy")}
+            </button>
+          )}
+        </div>
+      )}
+      {access === "read" && (
+        <span className="small muted">{t("Only the person who asked for this, the PR's owners and reviewers, and the repository's maintainers talk with its agent.")}</span>
       )}
       <form
         className="composer"

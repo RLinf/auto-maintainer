@@ -1,11 +1,12 @@
 // How a PR's review goes, for its owners (design 5.13): who reviewed it and how much of
 // each reviewer's feedback is addressed (their review threads resolved), the approvals
-// against what the branch needs, and a timeline of reviews and pushes. The PR list
-// shows the summary in a cell; the PR page shows it all on its Review progress tab.
+// against what the branch needs, and a timeline of reviews and pushes. Home and the PR
+// list show it as one bar, its progress (``Completeness``: reviewed and approved, half;
+// resolved, half); the PR page shows it all on its Review progress tab.
 
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
-import { api, type ApprovalSummary, type CommentItem, type PrProgress, type ProgressEvent, type ProgressSummary, type ReviewerProgress } from "./api";
+import { api, type CommentItem, type Completeness, type PrProgress, type ProgressEvent, type ProgressSummary, type ReviewerProgress } from "./api";
 import { useAliasOf } from "./aliases";
 import { Avatar, Named } from "./avatar";
 import { ApprovalsBlock, OwnerGroups, useApprovalBadge } from "./codeOwners";
@@ -28,83 +29,31 @@ export function AddressedBar({ value, width = 72 }: { value: number | null; widt
   );
 }
 
-/** Where a PR's approvals stand, in short: approvals that count against those
- * required, how many more are needed, and the assigned reviewers who approved. */
-export function ApprovalLine({ a }: { a: ApprovalSummary | undefined }) {
-  const t = useT();
-  const aliasOf = useAliasOf();
-  if (!a) return null;
-  const met = a.needed === 0;
-  const count = a.required != null ? `${a.approved}/${a.required}` : String(a.approved);
-  const title = [
-    `${a.approved} ${t("approvals count")}${a.required != null ? ` / ${a.required} ${t("required")}` : ""}`,
-    a.needed ? `${a.needed} ${t("more needed")}` : met ? t("approvals met") : "",
-    a.owners_waiting ? `${a.owners_waiting} ${t("code-owner parts wait for an owner")}` : "",
-    a.assigned
-      ? `${t("Assigned reviewers")}: ${a.assigned_approved}/${a.assigned} ${t("approved")}` +
-        (a.assigned_waiting.length ? ` (${t("waiting for")} ${a.assigned_waiting.map((l) => aliasOf(l) ?? l).join(", ")})` : "")
-      : "",
+/** What a PR's progress is made of, for its tooltip: reviews, approvals, threads. */
+function completenessTitle(c: Completeness, t: (s: string) => string, aliasOf: (l: string) => string | null | undefined): string {
+  return [
+    `${t("Reviewed")} ${c.review_done}/${c.review_steps}`,
+    c.threads ? `${t("resolved")} ${c.addressed}/${c.threads}` : t("no review threads"),
+    c.approvals_needed ? `${c.approvals_needed} ${t("more approvals needed")}` : "",
+    c.waiting_reviewers.length ? `${t("waiting for")} ${c.waiting_reviewers.map((l) => aliasOf(l) ?? l).join(", ")}` : "",
+    c.changes_requested ? `${c.changes_requested} ${t("asked for changes")}` : "",
   ]
     .filter(Boolean)
     .join(" · ");
-  return (
-    <span className="approval-line" title={title}>
-      <span className={met ? "check-ok" : a.needed ? "check-wait" : undefined}>✓{count}</span>
-      {a.needed ? <span className="check-wait">{a.needed} {t("more needed")}</span> : met ? <span className="check-ok">{t("approvals met")}</span> : null}
-      {a.assigned > 0 && (
-        <span className="muted">
-          {a.assigned_approved}/{a.assigned} {t("assigned approved")}
-        </span>
-      )}
-    </span>
-  );
 }
 
-/** Review progress in one short line: feedback addressed, approvals against those
- * required, changes requested, and how many reviewers reviewed. */
-export function ProgressInline({ p }: { p: ProgressSummary | undefined }) {
+/** A PR's progress as one bar: how close its review is to done, reviews and
+ * approvals and resolved threads together; what it is made of in its tooltip. */
+export function ProgressInline({ p, width = 48 }: { p: ProgressSummary | undefined; width?: number }) {
   const t = useT();
-  if (!p || (!p.reviewed && !p.threads && !p.approval?.needed)) return null;
+  const aliasOf = useAliasOf();
+  const c = p?.completeness;
+  if (!c) return null;
+  const done = c.value >= 1;
   return (
-    <span
-      className="progress-inline small"
-      title={`${p.resolved}/${p.threads} ${t("review threads resolved")}, ${p.fixed} ${t("fixed in the code")} · ${p.reviewed}/${p.reviewers} ${t("reviewed")}`}
-    >
-      {p.threads > 0 && (
-        <>
-          <AddressedBar value={p.addressed} width={40} />
-          <span>{percent(p.addressed)}</span>
-        </>
-      )}
-      <ApprovalLine a={p.approval} />
-      {p.changes_requested > 0 && <span style={{ color: "var(--bad)" }}>✗{p.changes_requested}</span>}
-    </span>
-  );
-}
-
-/** The PR list's cell: feedback addressed, then approvals against those required. */
-export function ProgressCell({ p }: { p: ProgressSummary | undefined }) {
-  const t = useT();
-  if (!p) return <span className="muted small">{t("no review yet")}</span>;
-  const reviewed = p.reviewed > 0 || p.threads > 0;
-  return (
-    <span
-      className="stack small"
-      style={{ gap: 2 }}
-      title={`${p.resolved}/${p.threads} ${t("review threads resolved")}, ${p.fixed} ${t("fixed in the code")} · ${p.reviewed}/${p.reviewers} ${t("reviewed")}`}
-    >
-      {reviewed ? (
-        <span className="row" style={{ gap: 6, flexWrap: "nowrap" }}>
-          <AddressedBar value={p.addressed} width={56} />
-          <span>{p.threads > 0 ? percent(p.addressed) : t("no comments")}</span>
-        </span>
-      ) : (
-        <span className="muted">{t("no review yet")}</span>
-      )}
-      <span style={{ whiteSpace: "nowrap" }}>
-        <ApprovalLine a={p.approval} />
-        {p.changes_requested > 0 && <span style={{ color: "var(--bad)" }}> ✗{p.changes_requested}</span>}
-      </span>
+    <span className="progress-inline small" title={completenessTitle(c, t, aliasOf)}>
+      <AddressedBar value={c.value} width={width} />
+      <span className={done ? "check-ok" : c.changes_requested ? "check-wait" : undefined}>{percent(c.value)}</span>
     </span>
   );
 }
@@ -179,6 +128,18 @@ export function ReviewProgressPanel({ repo, number, me }: { repo: string; number
         }
       >
         <div className="progress-stats">
+          {d.completeness && (
+            <div className="stack" style={{ gap: 4 }}>
+              <span className="small muted">{t("Progress")}</span>
+              <span className="row" style={{ gap: 8 }} title={completenessTitle(d.completeness, t, aliasOf)}>
+                <strong style={{ fontSize: 20 }}>{percent(d.completeness.value)}</strong>
+                <AddressedBar value={d.completeness.value} width={120} />
+              </span>
+              <span className="small muted">
+                {t("Reviewed")} {d.completeness.review_done}/{d.completeness.review_steps} · {t("resolved")} {d.completeness.addressed}/{d.completeness.threads}
+              </span>
+            </div>
+          )}
           <div className="stack" style={{ gap: 4 }}>
             <span className="small muted">{t("Feedback addressed")}</span>
             <span className="row" style={{ gap: 8 }}>

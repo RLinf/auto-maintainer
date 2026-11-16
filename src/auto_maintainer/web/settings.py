@@ -55,7 +55,7 @@ from ..domain.settings import (
 )
 from ..playbooks.prompts import schema_hint
 from ..service import Service
-from .api import service_of, visible_repos
+from .api import service_of, shows_owner, visible_repos
 from .auth import User, current_user
 from .model_apis import ApiForm, ProbeBody, examine, list_models
 
@@ -103,7 +103,7 @@ async def settings_view(service: Service, user: User) -> dict[str, Any]:
         else {}
     )
     system = config.system
-    gate = await service.service_gate(user.login)
+    gate = await shows_owner(service, user.login)
     pending = [
         c
         for c in await service.store.list_memory_changes(MemoryChangeState.OPEN)
@@ -543,7 +543,7 @@ def build_router() -> APIRouter:
         control = service.a.agent_sandbox
         if control is None:
             return {"available": False}
-        decision = await service.service_gate(user.login)
+        decision = await shows_owner(service, user.login)
         return {
             "available": True,
             **control.describe(),

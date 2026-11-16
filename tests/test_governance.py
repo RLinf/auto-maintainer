@@ -35,8 +35,13 @@ from auto_maintainer.domain.governance import (
     with_history,
 )
 from auto_maintainer.domain.permissions import Permission
-from auto_maintainer.profiles.governance import check, governance_path
+from auto_maintainer.profiles.governance import (
+    GovernanceRecords,
+    check,
+    governance_path,
+)
 from auto_maintainer.testing.demo import DEMO_GOVERNANCE, build_demo
+from auto_maintainer.testing.fakes import FakeMemory
 from auto_maintainer.web.app import create_app
 
 REPO = "acme/widget"
@@ -412,3 +417,28 @@ async def test_a_job_from_chat_builds_on_the_waiting_draft_too(demo) -> None:
     assert "which you revise" in task.prompt
     assert pending["id"] != first["changes"][0]
     assert {c["login"] for c in pending["role_changes"]} == {"maria", "bob", "carol"}
+
+
+async def test_the_record_read_is_always_the_stored_one() -> None:
+    """The gate reads the record on every check, so its parse is kept while the text
+    stays the same; a change to the text is read at once, and what one caller does
+    with what it loaded never reaches the next."""
+    path = governance_path("acme/widget")
+    memory = FakeMemory({path: yaml.safe_dump(DEMO_GOVERNANCE)})
+    records = GovernanceRecords(memory)
+    first = await records.load("acme/widget")
+    assert first.error is None and "maria" in first.governance.maintainers()
+    first.governance.members.clear()
+    assert "maria" in await records.maintainers_of("acme/widget")
+
+    changed = {
+        **DEMO_GOVERNANCE,
+        "members": [
+            m for m in DEMO_GOVERNANCE["members"] if m["login"].lower() != "maria"
+        ],
+    }
+    memory.files[path] = yaml.safe_dump(changed)
+    assert "maria" not in await records.maintainers_of("acme/widget")
+    memory.files[path] = "members: [unclosed"
+    broken = await records.load("acme/widget")
+    assert broken.error and broken.stored

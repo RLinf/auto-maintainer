@@ -42,7 +42,14 @@ from ..domain.records import ActionRecord, Job, JobStatus
 from ..domain.snapshot import PrSnapshot
 from ..profiles.layers import ProfileError, parse_yaml
 from ..service import Service
-from .api import may_view, repo_param, require_view, service_of, visible_repos
+from .api import (
+    may_view,
+    repo_param,
+    require_view,
+    service_of,
+    shows_gate,
+    visible_repos,
+)
 from .auth import User, current_user
 
 AGENT_PLAYBOOKS = {
@@ -267,6 +274,9 @@ async def job_view(
         "agent": agent,
         "note": payload.get("note") or None,
         "batch": payload.get("batch"),
+        "forked_from": {"job": job.forked_from, "by": payload.get("forked_from_by")}
+        if job.forked_from
+        else None,
         "created_at": job.created_at.isoformat(),
         "updated_at": job.updated_at.isoformat(),
         "error": job.error,
@@ -377,11 +387,7 @@ def build_router() -> APIRouter:
         service = service_of(request)
         await require_view(service, user, repo_param(repo))
         profile = await service.profiles.active(repo)
-        gate = (
-            await service.gate.check(repo, user.login, profile, person=True)
-            if profile
-            else None
-        )
+        gate = await shows_gate(service, user, repo, profile) if profile else None
         out = []
         for name in offered(service.machines, repo, user.login):
             machine = service.machines[name]

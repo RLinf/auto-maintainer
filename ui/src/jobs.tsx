@@ -417,7 +417,7 @@ function JobView({ id, onClose }: { id: string; onClose: () => void }) {
               </span>
               {d.by && (
                 <span>
-                  · {t("asked by")} {d.by === me?.login ? t("you") : d.by}
+                  · {d.forked_from ? t("copy for") : t("asked by")} {d.by === me?.login ? t("you") : d.by}
                 </span>
               )}
               <span>

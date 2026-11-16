@@ -26,8 +26,10 @@ import httpx
 import pytest
 
 from auto_maintainer.domain.actions import ReviewPostPayload
+from auto_maintainer.domain.agents import AgentResult
 from auto_maintainer.domain.permissions import Permission
 from auto_maintainer.domain.profile import RepoProfile
+from auto_maintainer.domain.records import PrAssignee
 from auto_maintainer.domain.review import FindingStatus, FollowupResult
 from auto_maintainer.playbooks.review_revise import FollowupRevision, apply_revision
 from auto_maintainer.testing.demo import build_demo
@@ -160,6 +162,197 @@ async def test_a_turn_a_restart_cut_off_says_so_and_takes_a_message_again(
         again = (await maria.post(url, json={"text": "Why is F1 a finding?"})).json()
         assert "boundary at one item" in again["text"]
         assert (await maria.get(url)).json()["live_run"] is None
+
+
+async def _role(h: Any, login: str, role: str = "reviewer", number: int = 42) -> None:
+    await h.store.add_assignee(
+        PrAssignee(
+            repo=REPO,
+            number=number,
+            login=login,
+            role=role,
+            kind="assigned",
+            by="maria",
+        )
+    )
+
+
+async def test_a_prs_reviewer_talks_on_a_copy_that_leaves_the_review_as_it_was(
+    demo,
+) -> None:
+    h, app = demo
+    h.forge.set_permission(REPO, "bob", Permission.WRITE)
+    await _role(h, "walt")
+    async with _as(app, "maria") as maria:
+        job = await _reviewed(h, maria, 42)
+        url = f"/api/jobs/{job['id']}/talk"
+        await maria.post(url, json={"text": "Why is F1 a finding?"})
+        draft = (await maria.get(url)).json()["draft"]
+    record = await h.store.get_action(draft)
+    assert record is not None
+    before = record.action.payload
+
+    async with _as(app, "bob") as bob:
+        # Write access alone, without a role on the PR, reads along.
+        assert (await bob.get(url)).json()["access"] == "read"
+        assert (await bob.post(url, json={"text": "Drop F1."})).status_code == 403
+
+    h.clock.advance(minutes=5)  # the copy is the PR's newest job
+    async with _as(app, "walt") as walt:
+        state = (await walt.get(url)).json()
+        assert state["access"] == "fork" and state["fork"] is None
+        dropped = await walt.post(
+            url, json={"text": "test_one_item covers it; please drop F1."}
+        )
+        assert dropped.status_code == 200, dropped.text
+        fork = dropped.json()["fork"]
+        copy = (await walt.get(f"/api/jobs/{fork}/talk")).json()
+        assert copy["access"] == "talk"
+        assert copy["forked_from"] == {"job": job["id"], "by": "maria"}
+        assert copy["copied"] == 2, "maria's question and its answer"
+        assert [m["author"] for m in copy["messages"] if m["role"] == "user"] == [
+            "maria",
+            "walt",
+        ]
+        assert copy["draft"] != draft and copy["draft_pending"]
+        assert dropped.json()["proposals"] == [copy["draft"]], "the copy's draft"
+        turn = h.runner.tasks[-1]
+        assert turn.requested_by == "walt" and "maria: Why is F1 a finding?" in (
+            turn.prompt
+        ), "the conversation so far comes with the copy"
+
+        # Later messages in the original go to the same copy.
+        again = (await walt.post(url, json={"text": "Why is F1 a finding?"})).json()
+        assert again["fork"] == fork
+        assert (await walt.get(url)).json()["fork"] == fork
+        work = (await walt.get(f"/api/work?repo={REPO}&number=42")).json()
+        [mine] = [j for j in work if j["id"] == fork]
+        assert mine["forked_from"] == {"job": job["id"], "by": "maria"}
+
+    kept = await h.store.get_action(draft)
+    assert kept is not None and kept.action.payload == before, (
+        "the original is as it was"
+    )
+    assert "F1" in str(kept.action.payload["result"])
+    copied = await h.store.get_action(copy["draft"])
+    assert copied is not None and copied.action.draft_for == "walt"
+    assert (copied.action.payload["result"] or {})["findings"] == []
+    proposal = await h.store.proposal_for_action(copied.action.id)
+    assert proposal is not None and proposal.requested_by == "walt"
+    async with _as(app, "maria") as maria:
+        original = (await maria.get(url)).json()
+        assert len(original["messages"]) == 2 and original["access"] == "talk"
+        # The PR's list does not take the copy for a review run.
+        [row] = [r for r in (await maria.get("/api/prs")).json() if r["number"] == 42]
+        assert row["review_activity"]["job"]["id"] == job["id"]
+
+
+async def test_a_prs_owner_changes_the_review_someone_else_asked_for(demo) -> None:
+    """The PR's owner answers for it: they change others' work on it in place, in the
+    conversation and by hand, while posting it stays with whoever decides it."""
+    h, app = demo
+    h.forge.set_permission(REPO, "bob", Permission.WRITE)
+    await _role(h, "walt", role="owner")
+    await _role(h, "bob")
+    async with _as(app, "maria") as maria:
+        job = await _reviewed(h, maria, 42)
+        draft = (await maria.get(f"/api/jobs/{job['id']}/talk")).json()["draft"]
+    url = f"/api/jobs/{job['id']}/talk"
+    proposal = await h.store.proposal_for_action(draft)
+    assert proposal is not None
+    async with _as(app, "walt") as walt:
+        assert (await walt.get(url)).json()["access"] == "talk"
+        dropped = await walt.post(
+            url, json={"text": "test_one_item covers it; please drop F1."}
+        )
+        assert dropped.status_code == 200, dropped.text
+        assert "fork" not in dropped.json() and dropped.json()["proposals"] == [draft]
+        [card] = [
+            p
+            for p in (await walt.get("/api/proposals")).json()
+            if p["id"] == proposal.id
+        ]
+        assert card["can_edit"] and not card["can_decide"]
+        record = await h.store.get_action(draft)
+        assert record is not None
+        edited = {**record.action.payload, "body": "Ready: the boundary is covered."}
+        saved = await walt.post(
+            f"/api/proposals/{proposal.id}/edit", json={"payload": edited}
+        )
+        assert saved.status_code == 200, saved.text
+        refused = await walt.post(f"/api/proposals/{proposal.id}/approve", json={})
+        assert refused.status_code == 403, "maria or a maintainer posts it"
+    record = await h.store.get_action(draft)
+    assert record is not None and record.action.payload["body"].startswith("Ready:")
+    assert (record.action.payload["result"] or {})["findings"] == []
+    async with _as(app, "bob") as bob:
+        # A reviewer of the PR changes it only on a copy of their own.
+        assert (await bob.get(url)).json()["access"] == "fork"
+        bob_edit = await bob.post(
+            f"/api/proposals/{proposal.id}/edit", json={"payload": edited}
+        )
+        assert bob_edit.status_code == 403
+
+
+async def test_a_maintainer_changes_the_work_someone_else_asked_for(demo) -> None:
+    h, app = demo
+    await _role(h, "walt", number=43)
+    async with _as(app, "walt") as walt:
+        job = await _reviewed(h, walt, 43)
+    url = f"/api/jobs/{job['id']}/talk"
+    async with _as(app, "maria") as maria:
+        assert (await maria.get(url)).json()["access"] == "talk"
+        dropped = (
+            await maria.post(url, json={"text": "Another test covers it; drop F1."})
+        ).json()
+        draft = (await maria.get(url)).json()["draft"]
+    assert "fork" not in dropped and dropped["proposals"] == [draft]
+
+
+async def test_a_prs_reviewer_changes_a_fix_on_a_copy(demo) -> None:
+    h, app = demo
+
+    def change(task: Any) -> Any:
+        if task.mode == "read_only":
+            return {"title": "docs: batching", "summary": "Docs on batching."}
+        workdir = Path(task.workdir)
+        if task.activity == "fix_talk":
+            (workdir / "WALT.md").write_text("walt's note\n")
+            return AgentResult(runtime="scripted", ok=True, text="Added your note.")
+        (workdir / "BATCHING.md").write_text("Batches of one are fine.\n")
+        return AgentResult(runtime="scripted", ok=True, text="Wrote BATCHING.md.")
+
+    h.runner.on("fix", change)
+    await _role(h, "walt")
+    async with _as(app, "maria") as maria:
+        started = await maria.post(
+            f"/api/prs/{REPO}/42/fix",
+            json={"request": "Document how batches of one behave."},
+        )
+        assert started.status_code == 200, started.text
+        await h.settle()
+        [draft] = [
+            p
+            for p in (await maria.get("/api/proposals")).json()
+            if p["action"]["action"]["kind"] == "pr.fix"
+        ]
+    job = draft["action"]["action"]["provenance"]["job_id"]
+    patch = draft["action"]["action"]["payload"]["patch"]
+    async with _as(app, "walt") as walt:
+        assert (await walt.get(f"/api/jobs/{job}/talk")).json()["access"] == "fork"
+        out = await walt.post(f"/api/jobs/{job}/talk", json={"text": "Add my note."})
+        assert out.status_code == 200, out.text
+        copy = (await walt.get(f"/api/jobs/{out.json()['fork']}/talk")).json()
+    assert copy["subject"] == "fix" and copy["draft_pending"]
+    assert out.json()["proposals"] == [copy["draft"]]
+    copied = await h.store.get_action(copy["draft"])
+    assert copied is not None and copied.action.draft_for == "walt"
+    assert "WALT.md" in copied.action.payload["patch"]
+    assert "BATCHING.md" in copied.action.payload["patch"], "it starts from the change"
+    assert copied.action.payload["requested_by"] == "walt", "only walt pushes it"
+    original = await h.store.get_action(draft["action_id"])
+    assert original is not None and original.action.payload["patch"] == patch
+    assert "WALT.md" not in patch
 
 
 async def test_a_decided_draft_is_not_revised_and_lessons_are_saved(demo) -> None:

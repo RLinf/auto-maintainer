@@ -114,6 +114,7 @@ def build_router(
             raise HTTPException(409, f"{service.settings.owner} owns this service")
         steps.set_owner(user.login)
         service.settings.owner = user.login
+        service.forget_views("service_gate")
         return {"owner": user.login}
 
     @r.post("/transfer")
@@ -129,6 +130,7 @@ def build_router(
         person = await signed_in_admin(service, repo, body.login)
         steps.set_owner(person)
         service.settings.owner = person
+        service.forget_views("service_gate")
         return {"owner": person}
 
     @r.post("/repo")

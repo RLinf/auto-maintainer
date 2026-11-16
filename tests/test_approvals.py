@@ -148,3 +148,68 @@ def test_the_fewest_owners_cover_every_waiting_part() -> None:
     assert fewest_owners([["lin"], ["guo", "lin"], ["Lin", "wang"]]) == 1
     assert fewest_owners([["lin"], ["guo"], ["guo", "wang"]]) == 2
     assert fewest_owners([[], ["lin"]]) == 2, "a part with no owner still waits"
+
+
+def test_one_share_says_how_close_a_pr_is_to_ready() -> None:
+    """Half for being reviewed (each reviewer asked for it who reviewed, each approval
+    the branch requires), half for its review threads addressed."""
+    from datetime import UTC, datetime
+
+    from auto_maintainer.domain.approvals import approval_summary, completeness
+    from auto_maintainer.domain.records import PrAssignee
+    from auto_maintainer.domain.review_progress import review_progress
+    from auto_maintainer.domain.snapshot import ReviewThread, ThreadComment
+
+    team = [
+        PrAssignee(
+            repo="RLinf/RLinf",
+            number=1,
+            login=login,
+            role="reviewer",
+            kind="assigned",
+            by="lin",
+            at=datetime(2026, 11, 1, tzinfo=UTC),
+        )
+        for login in ("zhu", "guo")
+    ]
+
+    def share(pr, info=_info()):  # type: ignore[no-untyped-def]
+        progress = review_progress(pr, team)
+        status = approval_status(pr, info, code_owner_report(RULES, pr), None)
+        return completeness(progress, approval_summary(status, progress))
+
+    untouched = share(_pr())
+    assert untouched.value == 0 and set(untouched.waiting_reviewers) == {"zhu", "guo"}
+
+    def thread(i: int, resolved: bool) -> ReviewThread:
+        return ReviewThread(
+            id=f"T{i}",
+            path="docs/a.md",
+            is_resolved=resolved,
+            comments=[ThreadComment(id=i, author="zhu", body="Fix this.")],
+        )
+
+    asked = Review(
+        id=1, author="zhu", state=ReviewEventState.CHANGES_REQUESTED, commit_sha=HEAD
+    )
+    halfway = share(
+        _pr(asked).model_copy(update={"threads": [thread(1, True), thread(2, False)]})
+    )
+    # Reviewed: neither reviewer done (zhu asks for changes), no approval of two.
+    assert (halfway.review_done, halfway.review_steps) == (0, 4)
+    assert (halfway.addressed, halfway.threads) == (1, 2)
+    assert halfway.value == 0.25 and halfway.changes_requested == 1
+
+    ready = share(
+        _pr(_approve(1, "zhu"), _approve(2, "lin")).model_copy(
+            update={"threads": [thread(1, True), thread(2, True)]}
+        )
+    )
+    # zhu reviewed, guo not yet; both required approvals are in.
+    assert (ready.review_done, ready.review_steps) == (3, 4)
+    assert ready.value == round((3 / 4 + 1) / 2, 4) and ready.waiting_reviewers == [
+        "guo"
+    ]
+
+    no_threads = share(_pr(_approve(1, "zhu"), _approve(2, "guo"), _approve(3, "lin")))
+    assert no_threads.value == 1, "reviewed by all, approved, nothing left to resolve"

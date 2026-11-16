@@ -33,7 +33,7 @@ from pydantic import BaseModel, Field
 from ..domain.ids import check_login
 from ..domain.records import AuditEntry, PersonAlias, clean_alias
 from ..service import Service
-from .api import service_of
+from .api import service_of, shows_owner
 from .auth import User, current_user
 
 
@@ -48,7 +48,7 @@ async def _view(service: Service, user: User) -> dict[str, Any]:
             {"login": a.login, "alias": a.alias, "own": a.own}
             for a in await service.store.list_aliases()
         ],
-        "can_name_others": (await service.service_gate(user.login)).allowed,
+        "can_name_others": (await shows_owner(service, user.login)).allowed,
     }
 
 

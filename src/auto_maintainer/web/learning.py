@@ -32,7 +32,7 @@ from pydantic import BaseModel, Field
 from ..domain.memory import MemoryChangeState
 from ..domain.records import ChatMessage, ChatThread
 from ..domain.retro import SUGGESTIONS_KEY, Suggestion
-from .api import code_maintainer, service_of
+from .api import code_maintainer, service_of, shows_owner
 from .auth import User, current_user
 from .chat import _start_improve
 
@@ -77,8 +77,7 @@ def build_router() -> APIRouter:
         service's tools and machines waiting for approval; empty for anyone but the
         owner."""
         service = service_of(request)
-        allowed, _ = await code_maintainer(service, user)
-        if not allowed:
+        if not (await shows_owner(service, user.login)).allowed:
             return {"owner": False, "suggestions": [], "lessons": []}
         items = await _suggestions(service)
         items.sort(key=lambda s: (s.state != "open", -s.last_at.timestamp()))

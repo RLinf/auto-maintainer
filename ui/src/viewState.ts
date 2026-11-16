@@ -10,7 +10,7 @@ export const PRS_PAGE_REPO_KEY = "am.view.prs.repo";
 export const REPO_KEY = "am.repo";
 export const HOME_ORDER_KEY = "am.home.order";
 
-export const HOME_ORDERS = ["priority", "newest", "oldest", "updated"] as const;
+export const HOME_ORDERS = ["priority", "ready", "newest", "oldest", "updated"] as const;
 export type HomeOrder = (typeof HOME_ORDERS)[number];
 
 const HOME_ORDER_SET: ReadonlySet<string> = new Set(HOME_ORDERS);

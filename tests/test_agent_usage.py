@@ -20,6 +20,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
+import pytest
 
 from auto_maintainer.agents.adapters.antigravity import agy_quota
 from auto_maintainer.agents.adapters.claude_code import claude_quota
@@ -189,5 +190,57 @@ async def test_runs_on_a_persons_own_account_count_against_no_service_budget(
         assert await h.store.agent_usage_since(
             "claude-code", now - timedelta(hours=1)
         ) == (2, 2.0)
+    finally:
+        await h.close()
+
+
+async def test_a_slow_cli_never_holds_the_usage_page(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Antigravity's /usage can take half a minute or time out: the page waits only a
+    moment for a first reading, shows it on a later load, and does not ask a CLI whose
+    read failed again before its time."""
+    import asyncio
+
+    import auto_maintainer.service as service_module
+
+    monkeypatch.setattr(service_module, "QUOTA_WAIT_SECONDS", 0.05)
+    h = await build_demo(tmp_path)
+    try:
+        answer = asyncio.Event()
+
+        class Slow(_Runtime):
+            async def quota(self) -> AgentQuota:
+                await answer.wait()
+                return await super().quota()
+
+        class Broken(_Runtime):
+            async def quota(self) -> AgentQuota:
+                self.asked += 1
+                raise TimeoutError()
+
+        slow, broken = Slow(), Broken()
+        h.runner.runtimes = {"antigravity": slow, "codex": broken}
+        h.runner.ready = lambda name: True
+        first = await asyncio.wait_for(h.service.agent_quota("antigravity"), 1)
+        assert first is None, "not read yet; the page does not wait for it"
+        monkeypatch.setattr(service_module, "QUOTA_WAIT_SECONDS", 5.0)
+        second = await asyncio.wait_for(h.service.agent_quota("antigravity"), 1)
+        assert second is None, "the read is under way: a later view does not wait on it"
+        answer.set()
+        for _ in range(20):
+            if not h.service._quota_reads:
+                break
+            await asyncio.sleep(0.01)
+        later = await h.service.agent_quota("antigravity")
+        assert later is not None and later.buckets[0].remaining == 0.5
+
+        assert await h.service.agent_quota("codex") is None
+        for _ in range(20):
+            if not h.service._quota_reads:
+                break
+            await asyncio.sleep(0.01)
+        assert await h.service.agent_quota("codex") is None
+        assert broken.asked == 1, "a failed read is not tried again at once"
     finally:
         await h.close()

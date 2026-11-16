@@ -85,7 +85,7 @@ export default function QueuePage({ me }: { me: Me }) {
       { id: "tier", label: t("Priority"), value: (p) => (p.tier ? TIER_ORDER.indexOf(p.tier) : null) },
       { id: "quality", label: t("Quality"), value: (p) => shownQuality(p.quality, p.quick_quality, p.head)?.score, descFirst: true },
       { id: "opened", label: t("Opened"), value: (p) => timeOf(p.created_at), descFirst: true },
-      { id: "addressed", label: t("Feedback addressed"), value: (p) => p.progress?.addressed ?? null, descFirst: true },
+      { id: "ready", label: t("Closest to ready"), value: (p) => p.progress?.completeness?.value ?? null, descFirst: true },
       { id: "updated", label: t("Last updated"), value: (p) => timeOf(p.updated_at), descFirst: true },
       { id: "number", label: t("Number"), value: (p) => p.number, descFirst: true },
       { id: "title", label: t("Title"), value: (p) => p.title.toLowerCase() },

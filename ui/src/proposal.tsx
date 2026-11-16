@@ -215,6 +215,51 @@ export function ProposalCard({
   const decides = proposal.can_decide !== false;
   const requester = proposal.requester ?? proposal.requested_by;
   const editable = typeof payload.body === "string" || kind === "lab.reproduce" || (Array.isArray(payload.comments) && comments.length > 0);
+  // The PR's owners change others' drafts on it, though only whoever decides posts.
+  const edits = proposal.can_edit ?? decides;
+  const editControls = editable && (
+    <>
+      {editing && (
+        <button disabled={save.isPending} onClick={() => save.mutate(undefined, { onSuccess: () => setEditing(false) })}>
+          <Icon name="check" size={14} />
+          {save.isPending ? t("Saving…") : t("Save")}
+        </button>
+      )}
+      <button
+        className={editing ? "ghost" : ""}
+        onClick={() => {
+          if (editing) {
+            // Discarding returns to what the draft holds now (saved edits included).
+            setBody(str(payload.body));
+            setTitle(str(payload.title));
+            setScript(str(payload.script));
+            setSetup(str(payload.setup));
+            setComments(Array.isArray(payload.comments) ? (payload.comments as InlineComment[]) : []);
+          }
+          setExpanded(true);
+          setRaw(false);
+          setEditing(!editing);
+        }}
+      >
+        {editing ? t("Discard edits") : t("Edit")}
+      </button>
+    </>
+  );
+  const talkJob = (kind === "review.post" || kind === "pr.fix" || kind === "pr.edit") && action.provenance?.job_id ? action.provenance.job_id : null;
+  const discuss = talkJob && openedJob !== talkJob && (
+    <button
+      className="ghost"
+      title={
+        kind === "pr.fix" || kind === "pr.edit"
+          ? t("Talk with the agent about this change: ask why, or have it change the diff")
+          : t("Talk with the agent about this review: ask why, push back, or have it change the draft")
+      }
+      onClick={() => openJob(talkJob)}
+    >
+      <Icon name="message" size={14} />
+      {t("Discuss")}
+    </button>
+  );
   const findings = ((payload.result as { findings?: unknown[] } | undefined)?.findings ?? []).length;
   const approveLabel = isEdit
     ? t("Set on the PR as me")
@@ -322,13 +367,19 @@ export function ProposalCard({
         </>
       )}
       {!done && !decides && (
-        <span className="small muted">
-          {kind === "code.update"
-            ? t("Only the owner of this service decides this.")
-            : requester
-              ? `${t("A maintainer of the repository, or the person who asked for it, decides this:")} @${requester}.`
-              : t("A maintainer of the repository decides this.")}
-        </span>
+        <div className="row" style={{ gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+          <span className="small muted" style={{ flex: "1 1 12rem" }}>
+            {kind === "code.update"
+              ? t("Only the owner of this service decides this.")
+              : requester
+                ? `${t("A maintainer of the repository, or the person who asked for it, decides this:")} @${requester}.`
+                : t("A maintainer of the repository decides this.")}
+          </span>
+          {/* The PR's owners change others' drafts on it; its reviewers talk with the
+              agent on a copy of their own. */}
+          {edits && editControls}
+          {discuss}
+        </div>
       )}
       {!done && decides && (
         <div className="row">
@@ -398,46 +449,8 @@ export function ProposalCard({
               </option>
             </select>
           )}
-          {editing && (
-            <button disabled={save.isPending} onClick={() => save.mutate(undefined, { onSuccess: () => setEditing(false) })}>
-              <Icon name="check" size={14} />
-              {save.isPending ? t("Saving…") : t("Save")}
-            </button>
-          )}
-          {editable && (
-            <button
-              className={editing ? "ghost" : ""}
-              onClick={() => {
-                if (editing) {
-                  // Discarding returns to what the draft holds now (saved edits included).
-                  setBody(str(payload.body));
-                  setTitle(str(payload.title));
-                  setScript(str(payload.script));
-                  setSetup(str(payload.setup));
-                  setComments(Array.isArray(payload.comments) ? (payload.comments as InlineComment[]) : []);
-                }
-                setExpanded(true);
-                setRaw(false);
-                setEditing(!editing);
-              }}
-            >
-              {editing ? t("Discard edits") : t("Edit")}
-            </button>
-          )}
-          {(kind === "review.post" || kind === "pr.fix" || kind === "pr.edit") && action.provenance?.job_id && openedJob !== action.provenance.job_id && (
-            <button
-              className="ghost"
-              title={
-                kind === "pr.fix" || kind === "pr.edit"
-                  ? t("Talk with the agent about this change: ask why, or have it change the diff")
-                  : t("Talk with the agent about this review: ask why, push back, or have it change the draft")
-              }
-              onClick={() => openJob(action.provenance.job_id as string)}
-            >
-              <Icon name="message" size={14} />
-              {t("Discuss")}
-            </button>
-          )}
+          {editControls}
+          {discuss}
           <RejectButton quiet busy={reject.isPending} onReject={(reason) => reject.mutate(reason)} />
           {kind === "review.post" && action.number != null && findings > 0 && (
             <span className="right">

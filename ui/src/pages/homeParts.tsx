@@ -179,12 +179,27 @@ const STAFFED: Record<Staffed, { label: string; keep: (p: PrRow) => boolean }> =
   "no-reviewers": { label: "No reviewers yet", keep: (p) => !p.assignees.some((a) => a.role === "reviewer") },
 };
 
+type Needed = "" | "first" | "followup";
+
+/** Home's choice of PRs by the review they wait for: a first one, or a follow-up of
+ *  the service's last review (new commits since; after an approval too). */
+const NEEDED: Record<Needed, { label: string; keep: (p: PrRow) => boolean }> = {
+  "": { label: "Any review", keep: () => true },
+  first: { label: "First review", keep: (p) => p.review_state === "NEW_REVIEW" },
+  followup: { label: "Follow-up review", keep: (p) => p.review_state === "FOLLOWUP_REVIEW" || p.review_state === "APPROVED_NEW_COMMITS" },
+};
+
 type ReviewOrder = HomeOrder;
 
+const readiness = (p: PrRow) => p.progress?.completeness?.value ?? 0;
+
 /** The orders Home's PRs to review offers: the repository's priorities (the default),
- *  or time, by when a PR was opened or last updated; PRs without the time go last. */
+ *  how close each is to ready, or time, by when a PR was opened or last updated; PRs
+ *  without the time go last. */
 const REVIEW_ORDERS: Record<ReviewOrder, { label: string; compare: (a: PrRow, b: PrRow) => number }> = {
   priority: { label: "Priority", compare: (a, b) => priorityRank(b) - priorityRank(a) },
+  // The PRs closest to ready first (reviewed, approved, resolved), then by priority.
+  ready: { label: "Closest to ready", compare: (a, b) => readiness(b) - readiness(a) || priorityRank(b) - priorityRank(a) },
   newest: { label: "Newest first", compare: (a, b) => (timeOf(b.created_at) ?? -Infinity) - (timeOf(a.created_at) ?? -Infinity) },
   oldest: { label: "Oldest first", compare: (a, b) => (timeOf(a.created_at) ?? Infinity) - (timeOf(b.created_at) ?? Infinity) },
   updated: { label: "Recently updated", compare: (a, b) => (timeOf(b.updated_at) ?? -Infinity) - (timeOf(a.updated_at) ?? -Infinity) },
@@ -232,6 +247,8 @@ export function ReviewCard({
   const only: "owner" | "reviewer" | null = rawOnly === "owner" || rawOnly === "reviewer" ? rawOnly : null;
   const rawStaffed = params.get("staffed") ?? "";
   const staffed: Staffed = rawStaffed in STAFFED ? (rawStaffed as Staffed) : "";
+  const rawNeed = params.get("need") ?? "";
+  const need: Needed = rawNeed in NEEDED ? (rawNeed as Needed) : "";
   const order = resolveHomeOrder(params);
   const urlOrder = params.get("rorder");
   useEffect(() => {
@@ -241,12 +258,13 @@ export function ReviewCard({
   const setQuery = (v: string) => updateParams({ rq: v || null });
   const setOnly = (v: "owner" | "reviewer" | null) => updateParams({ only: v });
   const setStaffed = (v: Staffed) => updateParams({ staffed: v || null });
+  const setNeed = (v: Needed) => updateParams({ need: v || null });
   const setOrder = (o: ReviewOrder) => {
     writeHomeOrder(o);
     updateParams({ rorder: o });
   };
   const setShowAll = (v: boolean) => updateParams({ rall: v ? "1" : null });
-  const filtering = Boolean(query || only || staffed);
+  const filtering = Boolean(query || only || staffed || need);
   const aliasOf = useAliasOf();
   const words = query.toLowerCase().split(/\s+/).filter(Boolean);
   const searching = words.length > 0;
@@ -254,7 +272,9 @@ export function ReviewCard({
   // filters look through every open PR, not only those waiting for a review.
   const ownedCount = all.filter((p) => holds(p.assignees, me.login, "owner")).length;
   const reviewingCount = all.filter((p) => holds(p.assignees, me.login, "reviewer")).length;
-  const pool = (searching ? all.filter((p) => matches(p, words, aliasOf)) : only ? all : rows).filter((p) => (!only || holds(p.assignees, me.login, only)) && STAFFED[staffed].keep(p));
+  const pool = (searching ? all.filter((p) => matches(p, words, aliasOf)) : only ? all : rows).filter(
+    (p) => (!only || holds(p.assignees, me.login, only)) && STAFFED[staffed].keep(p) && NEEDED[need].keep(p),
+  );
   const sorted = [...pool].sort(REVIEW_ORDERS[order].compare);
   const shown = showAll || searching ? sorted : sorted.slice(0, 8);
   const waiting = new Set(rows.map(prKey));
@@ -282,7 +302,7 @@ export function ReviewCard({
         />
         <h2>{t("Pull requests to review")}</h2>
         <span className="small muted" title={searching ? t("PRs that match, of the open PRs") : undefined}>
-          {searching || only ? `${sorted.length} / ${all.length}` : rows.length}
+          {searching || only ? `${sorted.length} / ${all.length}` : need ? `${sorted.length} / ${rows.length}` : rows.length}
         </span>
         <span className="spacer" />
         <AgentPicker value={who} onChange={setWho} />
@@ -334,8 +354,19 @@ export function ReviewCard({
             </option>
           ))}
         </select>
+        <select value={need} onChange={(e) => setNeed(e.target.value as Needed)} aria-label={t("Review needed")} title={t("Review needed")} style={{ flex: "none", height: 34, width: "auto" }}>
+          {(Object.keys(NEEDED) as Needed[]).map((k) => {
+            const n = rows.filter(NEEDED[k].keep).length;
+            return (
+              <option key={k} value={k}>
+                {t(NEEDED[k].label)}
+                {n ? ` (${n})` : ""}
+              </option>
+            );
+          })}
+        </select>
         {filtering && (
-          <button type="button" className="ghost sm" onClick={() => updateParams({ rq: null, only: null, staffed: null })}>
+          <button type="button" className="ghost sm" onClick={() => updateParams({ rq: null, only: null, staffed: null, need: null })}>
             {t("Reset")}
           </button>
         )}

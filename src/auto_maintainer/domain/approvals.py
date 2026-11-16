@@ -171,3 +171,57 @@ def approval_summary(
         assigned_waiting=[r.login for r in assigned if r not in approved],
         changes_requested=len(status.changes_requested_by),
     )
+
+
+class Completeness(BaseModel):
+    """How close a PR's review is to done, as one share (design 5.13), for its row
+    and for sorting the PRs closest to ready first. Half is whether it is reviewed:
+    each reviewer asked for it (assigned here, or requested on GitHub) who reviewed
+    it, and each approval its branch requires that it has; the other half is its
+    review threads addressed (resolved, or found fixed in the code)."""
+
+    value: float
+    """From 0 (nobody reviewed it yet) to 1 (reviewed, approved, and resolved)."""
+    review_done: int
+    review_steps: int
+    """The reviews asked for plus the approvals the branch requires."""
+    addressed: int
+    threads: int
+    waiting_reviewers: list[str] = Field(default_factory=list)
+    """Reviewers asked for it whose review is still to come: none yet, or their
+    latest asks for changes, which waits for their next one."""
+    approvals_needed: int | None = None
+    changes_requested: int = 0
+
+
+def completeness(progress: ReviewProgress, approval: ApprovalSummary) -> Completeness:
+    """``progress`` and ``approval`` as one ``Completeness``."""
+    asked = [r for r in progress.reviewers if r.assigned or r.requested]
+    done = [
+        r
+        for r in asked
+        if r.verdict and r.verdict != ReviewEventState.CHANGES_REQUESTED.value
+    ]
+    if approval.needed is not None:
+        slots = approval.approved + approval.needed
+        got = approval.approved
+    else:
+        slots = got = 0
+    steps = len(asked) + slots
+    review_done = len(done) + got
+    anyone = progress.threads > 0 or any(r.verdict for r in progress.reviewers)
+    reviewed = review_done / steps if steps else (1.0 if anyone else 0.0)
+    addressed = progress.resolved + progress.fixed
+    resolved = (
+        addressed / progress.threads if progress.threads else (1.0 if anyone else 0.0)
+    )
+    return Completeness(
+        value=round((reviewed + resolved) / 2, 4),
+        review_done=review_done,
+        review_steps=steps,
+        addressed=addressed,
+        threads=progress.threads,
+        waiting_reviewers=[r.login for r in asked if r not in done],
+        approvals_needed=approval.needed,
+        changes_requested=approval.changes_requested,
+    )

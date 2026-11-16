@@ -762,6 +762,10 @@ class Store(Protocol):
         number: int | None = None,
         updated_since: datetime | None = None,
     ) -> list[Job]: ...
+    async def find_job(self, playbook: str, key: str) -> Job | None:
+        """The job of ``playbook`` with ``key``, if there is one."""
+        ...
+
     async def requeue_expired(self, now: datetime) -> int: ...
     async def prune_jobs(self, playbooks: list[str], before: datetime) -> int:
         """Delete the finished (done, failed, cancelled) jobs of ``playbooks`` last

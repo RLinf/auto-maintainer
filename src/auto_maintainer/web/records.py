@@ -47,7 +47,7 @@ from starlette.routing import Route
 
 from ..domain.actions import ActionKind
 from ..domain.secrets import redact_secrets
-from .api import require_view, service_of
+from .api import require_view, service_of, shows_owner
 from .auth import SESSION_COOKIE, User, current_user
 
 log = logging.getLogger(__name__)
@@ -236,7 +236,7 @@ def build_router() -> APIRouter:
         service = service_of(request)
         if (
             user.login not in service.settings.operators
-            and not (await service.service_gate(user.login)).allowed
+            and not (await shows_owner(service, user.login)).allowed
         ):
             raise HTTPException(
                 403, "only operators and the owner of this service read its log"

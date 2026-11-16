@@ -123,6 +123,9 @@ VIEW_CACHE_SECONDS = 300
 """How long whether an agent CLI is signed in is shown before it is asked again."""
 QUOTA_SECONDS = 300
 """How long an agent's quota reading is shown before its CLI is asked again."""
+QUOTA_WAIT_SECONDS = 3.0
+"""How long a page waits for an agent's first quota reading; the CLI may take half a
+minute or time out, and the reading shows on a later load."""
 QUOTA_FRESH_SECONDS = 30
 """The youngest reading a request for a fresh one still gets, so that asking again
 and again does not run the CLI every time."""
@@ -261,6 +264,8 @@ class Service:
     ) -> None:
         self.a = adapters
         self._quotas: dict[str, AgentQuota] = {}
+        self._quota_reads: dict[str, asyncio.Future[AgentQuota | None]] = {}
+        self._quota_tried: dict[str, datetime] = {}
         """Each agent's last quota reading (``agent_quota``)."""
         self.logins: dict[str, Any] = {}
         """Agent sign-ins started from the dashboard, by id (``agents/login.py``)."""
@@ -996,6 +1001,9 @@ class Service:
             return
         if event.kind != EventKind.MEMORY_CHANGED:
             return
+        # A People record or the settings may have changed who maintains or owns,
+        # and a profile change what the profile page shows.
+        self.forget_views("gate", "maintainer", "service_gate", "profile")
         paths = set(event.payload.get("paths") or [])
         if paths & {SETTINGS_PATH, LEGACY_RUNTIMES_PATH, "remote"}:
             await self.reload_settings()
@@ -1242,8 +1250,12 @@ class Service:
         self, name: str, fresh: bool = False, account: str | None = None
     ) -> AgentQuota | None:
         """What agent ``name``'s CLI says is left of ``account``'s limits (the
-        service's own by default); ``None`` when it cannot report them. A reading is
-        kept for ``QUOTA_SECONDS``, or ``QUOTA_FRESH_SECONDS`` when ``fresh``."""
+        service's own by default); ``None`` when it cannot report them, or has not
+        yet. A reading is kept for ``QUOTA_SECONDS``, or ``QUOTA_FRESH_SECONDS`` when
+        ``fresh``. Past that, up to twice that age, a view gets the kept one at once
+        while the CLI is asked again in the background; an older or missing one waits
+        at most ``QUOTA_WAIT_SECONDS`` for the new reading. The CLI is asked at most
+        once per ``QUOTA_SECONDS`` unless ``fresh``, which waits for its answer."""
         read = getattr(self.runtime(name, account), "quota", None)
         if read is None or not self.agent_ready(name):
             return None
@@ -1253,10 +1265,42 @@ class Service:
         age = (now - kept.read_at).total_seconds() if kept else None
         if age is not None and age < (QUOTA_FRESH_SECONDS if fresh else QUOTA_SECONDS):
             return kept
-        found = await read()
-        if found is not None:
-            self._quotas[key] = found.model_copy(update={"read_at": now})
-        return self._quotas.get(key)
+        reading = self._quota_reads.get(key)
+        tried = self._quota_tried.get(key)
+        if (
+            reading is None
+            and not fresh
+            and tried is not None
+            and (now - tried).total_seconds() < QUOTA_SECONDS
+        ):
+            return kept  # the last read failed: not again before its time
+        started = reading is None
+        if reading is None:
+            self._quota_tried[key] = now
+
+            async def ask() -> AgentQuota | None:
+                found = await read()
+                if found is not None:
+                    self._quotas[key] = found.model_copy(
+                        update={"read_at": self.clock.now()}
+                    )
+                return self._quotas.get(key)
+
+            reading = asyncio.ensure_future(ask())
+            self._quota_reads[key] = reading
+            reading.add_done_callback(lambda _: self._quota_reads.pop(key, None))
+            reading.add_done_callback(lambda f: f.cancelled() or f.exception())
+        if fresh:
+            return await asyncio.shield(reading)
+        if kept is not None and age is not None and age < 2 * QUOTA_SECONDS:
+            return kept
+        if not started:
+            return kept  # the view that asked the CLI waited for it; others do not
+        try:
+            return await asyncio.wait_for(asyncio.shield(reading), QUOTA_WAIT_SECONDS)
+        except TimeoutError:
+            # The page says when the kept reading was taken (``AgentQuota.read_at``).
+            return kept
 
     def agent_ready(self, name: str) -> bool:
         """Whether agent ``name`` is enabled and installed on this host; ``True`` for
@@ -1301,14 +1345,14 @@ class Service:
         the forge at most once every ``VIEW_CACHE_SECONDS`` (each PR's progress and
         code owners need them, and the PR list shows many PRs at once). What the
         service acts on reads them live."""
-        return await self._view_cached(
+        return await self.view_cached(
             ("repo", repo), lambda: self.a.forge.get_repo(repo)
         )
 
     async def view_behind(self, repo: str, base: str, head: str) -> int | None:
         """How many commits of branch ``base`` the commit ``head`` lacks, for the
         dashboard's views, kept like ``view_repo``."""
-        return await self._view_cached(
+        return await self.view_cached(
             ("behind", repo, base, head),
             lambda: self.a.forge.behind_by(repo, base, head),
         )
@@ -1316,7 +1360,7 @@ class Service:
     async def view_file(self, repo: str, path: str, ref: str | None) -> str | None:
         """A file of ``repo`` at ``ref`` for the dashboard's views (CODEOWNERS), kept
         like ``view_repo``."""
-        return await self._view_cached(
+        return await self.view_cached(
             ("file", repo, path, ref or ""),
             lambda: self.a.forge.get_file(repo, path, ref),
         )
@@ -1337,14 +1381,24 @@ class Service:
                     return location, parse_codeowners(text)
             return None, []
 
-        return await self._view_cached(
+        return await self.view_cached(
             ("codeowners", repo, path or "", ref or ""), _load
         )
 
-    async def _view_cached(self, key: tuple[str, ...], read: Any) -> Any:
+    def forget_views(self, *kinds: str) -> None:
+        """Drop what ``view_cached`` keeps under keys of these ``kinds`` (their first
+        part), after a change the next view must show."""
+        for key in [k for k in self._views if k and k[0] in kinds]:
+            del self._views[key]
+
+    async def view_cached(
+        self, key: tuple[str, ...], read: Any, seconds: float = VIEW_CACHE_SECONDS
+    ) -> Any:
+        """What ``read`` returns, kept under ``key`` for ``seconds``, for what the
+        dashboard's views show; what the service acts on reads live."""
         now = self.clock.now()
         hit = self._views.get(key)
-        if hit is not None and (now - hit[0]).total_seconds() < VIEW_CACHE_SECONDS:
+        if hit is not None and (now - hit[0]).total_seconds() < seconds:
             return hit[1]
         reading = self._view_reads.get(key)
         if reading is None:
