@@ -1263,7 +1263,9 @@ auto-maintainer-memory/                private
 - Run folders under `runs/` (each attempt's prompt, transcript, and container home) in which nothing changed for 7 days (`agents/retention.py:RUNS_KEPT`).
 - The agent CLIs' old sessions, in the service's home folder and each person's (`<data>/people/<login>/home`): what each adapter's `session_paths` names inside its `home_paths` (Claude Code's `projects/*/*.jsonl` transcripts, Codex's `sessions/` days, Gemini CLI's chats, Antigravity's `brain/` folders, pi's sessions), once nothing in it changed for 14 days (`SESSIONS_KEPT`). Sign-ins, settings, and anything the patterns do not name stay. On a host without docker the agents use the host user's own home folders, so the same applies to that user's own sessions of those CLIs.
 
-Agents write run folders and their CLIs' home folders, so the cleanup follows no link: a link is never descended into nor taken as a match. The mirrors, the memory repo, the database, and the agent CLIs' installs are not pruned.
+- Finished bookkeeping jobs (the `io` pool: hygiene, scans, drift, the schedulers' ticks; thousands a day, most ending unchanged) last updated more than 7 days ago (`JOBS_KEPT`). Each one's key holds its event's id or its day, so none stops a later run once gone; slash commands' jobs, keyed by their comment, stay, and so do agents' jobs.
+
+Agents write run folders and their CLIs' home folders, so the cleanup follows no link: a link is never descended into nor taken as a match. The mirrors, the memory repo, the database's other records, and the agent CLIs' installs are not pruned.
 
 **Setup on the web.** Nobody edits these files by hand. When `am serve` starts without `local.yaml`, or cannot reach its forge with the one it has, it serves only the setup page and prints a link with a one-time code (`am setup` prints it again); holding the code proves access to the host. The page (`web/setup.py`, `hostsetup.HostSetup`) asks for:
 

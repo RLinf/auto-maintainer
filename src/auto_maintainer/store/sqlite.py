@@ -69,6 +69,9 @@ from . import models as m
 M = TypeVar("M", bound=BaseModel)
 
 ACTIVE_JOB_STATES = (JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.WAITING)
+PRUNE_BATCH = 500
+"""Jobs deleted per write in ``prune_jobs``: the store has one writer, which others
+wait for meanwhile."""
 
 
 def ts(value: datetime) -> str:
@@ -384,6 +387,31 @@ class SqliteStore:
                 ).limit(limit)
             ),
         )
+
+    async def prune_jobs(self, playbooks: list[str], before: datetime) -> int:
+        if not playbooks:
+            return 0
+        finished = [s.value for s in JobStatus if s not in ACTIVE_JOB_STATES]
+        ids = (
+            select(m.jobs.c.id)
+            .where(
+                m.jobs.c.playbook.in_(playbooks),
+                m.jobs.c.status.in_(finished),
+                m.jobs.c.updated_at < ts(before),
+            )
+            .limit(PRUNE_BATCH)
+            .scalar_subquery()
+        )
+        total = 0
+        while True:
+            async with self._write, self._engine.begin() as conn:
+                deleted = (
+                    await conn.execute(delete(m.jobs).where(m.jobs.c.id.in_(ids)))
+                ).rowcount
+            total += deleted
+            if deleted < PRUNE_BATCH:
+                return total
+            await asyncio.sleep(0)
 
     async def requeue_expired(self, now: datetime) -> int:
         rows = await self._fetch(

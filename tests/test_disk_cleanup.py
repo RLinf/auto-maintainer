@@ -13,7 +13,8 @@
 # limitations under the License.
 
 """Keeping the data folder's size bounded: conversations' idle checkouts, checkouts
-nothing uses, old run folders, and the agent CLIs' old sessions (design 7.3)."""
+nothing uses, old run folders, the agent CLIs' old sessions, and old bookkeeping jobs
+(design 7.3)."""
 
 from __future__ import annotations
 
@@ -23,9 +24,12 @@ import time
 from datetime import timedelta
 from pathlib import Path
 
+import pytest
+
 from auto_maintainer.agents.registry import ADAPTERS
 from auto_maintainer.agents.retention import prune_agent_files
-from auto_maintainer.domain.records import ChatMessage, ChatThread
+from auto_maintainer.domain.records import ChatMessage, ChatThread, Job, JobStatus
+from auto_maintainer.store import sqlite
 from auto_maintainer.testing.harness import Harness
 from auto_maintainer.workspace.git import GitWorkspace
 
@@ -106,6 +110,46 @@ async def test_an_idle_conversation_gives_up_its_checkout(harness: Harness) -> N
             }
         )
     ]
+
+
+async def test_old_finished_bookkeeping_jobs_leave_the_store(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    h = harness
+    # One job per write, so the deletes go on until none is left.
+    monkeypatch.setattr(sqlite, "PRUNE_BATCH", 1)
+    now = h.clock.now()
+
+    async def job(playbook: str, pool: str, status: JobStatus, days: int) -> str:
+        at = now - timedelta(days=days)
+        saved, _ = await h.store.upsert_job(
+            Job(
+                playbook=playbook,
+                key=f"{playbook}:{status}:{days}",
+                repo="acme/widget",
+                number=42,
+                pool=pool,
+                status=status,
+                created_at=at,
+                updated_at=at,
+            )
+        )
+        return saved.id
+
+    old_hygiene = await job("hygiene", "io", JobStatus.DONE, 8)
+    old_scan = await job("comment_scan", "io", JobStatus.FAILED, 30)
+    kept = {
+        await job("hygiene", "io", JobStatus.DONE, 6),
+        # Still to run, however old.
+        await job("hygiene", "io", JobStatus.WAITING, 30),
+        # A slash command's job is keyed by its comment: it stays.
+        await job("commands", "io", JobStatus.DONE, 30),
+        # Agents' work is history people read.
+        await job("review", "agent", JobStatus.DONE, 30),
+    }
+    await h.service.clean_disk()
+    left = {j.id for j in await h.store.list_jobs(limit=100)}
+    assert kept <= left and not {old_hygiene, old_scan} & left
 
 
 async def test_the_daily_schedule_runs_the_cleanup(harness: Harness) -> None:

@@ -132,6 +132,14 @@ SCOPE_REQUEST_GAP = timedelta(minutes=30)
 """How long after asking for a scope the service waits before it asks again on its
 own; the owner may ask again at any time."""
 
+JOBS_KEPT = timedelta(days=7)
+"""How long a finished bookkeeping job (the ``io`` pool: hygiene, scans, drift, the
+schedulers' ticks; thousands a day, most ending unchanged) stays in the store
+(``Service.clean_disk``). Each such job's key holds its event's id or its day, so
+none stops a later run once gone; a slash command's is its comment's, and stays."""
+
+JOBS_KEPT_ALWAYS = frozenset({"commands"})
+
 CONVERSATION_IDLE = timedelta(days=7)
 """A conversation without a message for this long gives up its working folder; its
 next message starts a new checkout and a new session (``Service.clean_disk``)."""
@@ -632,7 +640,8 @@ class Service:
         """Keep the data folder's size bounded (design 7.3): a conversation idle for
         ``CONVERSATION_IDLE`` gives up its working folder (released, and its session
         forgotten, since a session resumes only where it ran), then ``cleanup``
-        removes what nothing uses, keeping the other conversations' folders."""
+        removes what nothing uses, keeping the other conversations' folders; and
+        finished bookkeeping jobs older than ``JOBS_KEPT`` leave the store."""
         cutoff = self.clock.now() - CONVERSATION_IDLE
         keep: set[Path] = set()
         for thread, active in await self.store.threads_with_workdir():
@@ -651,6 +660,14 @@ class Service:
             await self.store.save_thread(thread)
         if self.a.cleanup is not None:
             await self.a.cleanup(frozenset(keep))
+        bookkeeping = [
+            name
+            for name, playbook in self.engine.playbooks.items()
+            if playbook.pool == "io" and name not in JOBS_KEPT_ALWAYS
+        ]
+        pruned = await self.store.prune_jobs(bookkeeping, self.clock.now() - JOBS_KEPT)
+        if pruned:
+            log.info("removed %d finished bookkeeping jobs", pruned)
 
     # -- service settings (design 8.1) ------------------------------------------------
 
