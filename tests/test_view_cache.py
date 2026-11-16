@@ -52,3 +52,75 @@ async def test_many_views_at_once_read_the_forge_once(tmp_path: Path) -> None:
         assert reads.count("repo") == 2, "read again once it is old"
     finally:
         await h.close()
+
+
+async def test_pr_list_batches_approver_permissions_and_negative_codeowners(
+    tmp_path: Path,
+) -> None:
+    import httpx
+
+    from auto_maintainer.domain.permissions import Permission
+    from auto_maintainer.domain.snapshot import Review, ReviewEventState
+    from auto_maintainer.testing.fakes import make_pr
+    from auto_maintainer.web.app import create_app
+
+    h = await build_demo(tmp_path)
+    try:
+        # Remove CODEOWNERS so the repository has none at any of the four paths.
+        for key in [k for k in h.forge.files if "CODEOWNERS" in k[1]]:
+            del h.forge.files[key]
+        for idx, login in enumerate(("rev_a", "rev_b", "rev_c"), start=100):
+            h.forge.set_permission("acme/widget", login, Permission.WRITE)
+            pr = make_pr(
+                repo="acme/widget",
+                number=idx,
+                reviews=[
+                    Review(
+                        id=idx,
+                        author=login,
+                        state=ReviewEventState.APPROVED,
+                        commit_id="a" * 40,
+                        submitted_at=h.clock.now(),
+                    )
+                ],
+            )
+            h.forge.put_pr(pr)
+            await h.store.save_snapshot(pr)
+
+        file_reads: list[str] = []
+        perm_inflight = 0
+        max_inflight = 0
+        perm_calls: list[str] = []
+        orig_file = h.forge.get_file
+        orig_perm = h.forge.get_permission
+
+        async def counted_file(repo: str, path: str, ref: str | None = None) -> Any:
+            file_reads.append(path)
+            return await orig_file(repo, path, ref)
+
+        async def counted_perm(repo: str, login: str) -> Permission:
+            nonlocal perm_inflight, max_inflight
+            perm_calls.append(login)
+            perm_inflight += 1
+            max_inflight = max(max_inflight, perm_inflight)
+            await asyncio.sleep(0.02)
+            perm_inflight -= 1
+            return await orig_perm(repo, login)
+
+        h.forge.get_file = counted_file  # type: ignore[method-assign]
+        h.forge.get_permission = counted_perm  # type: ignore[method-assign]
+        app = create_app(h.service, data_dir=tmp_path, allow_dev_login=True)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            await client.get("/auth/dev?login=maria")
+            first = await client.get("/api/prs")
+            assert first.status_code == 200
+            reads_after_first = list(file_reads)
+            second = await client.get("/api/prs")
+            assert second.status_code == 200
+        assert max_inflight >= 3, "approvers' expired permissions read in parallel"
+        assert file_reads == reads_after_first, "missing CODEOWNERS is cached"
+        assert perm_calls.count("rev_a") == 1, "deduplicated and cached"
+    finally:
+        await h.close()

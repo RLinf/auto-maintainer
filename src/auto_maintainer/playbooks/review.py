@@ -454,10 +454,14 @@ async def reproduction_record(store: Store, repo: str, number: int) -> str | Non
     plan = LabReproducePayload.model_validate(record.action.payload)
     reports = [
         job
-        for job in await store.list_jobs([JobStatus.DONE], repo=repo, limit=500)
-        if job.playbook == "reproduce"
-        and job.number == number
-        and (job.result or {}).get("conclusion")
+        for job in await store.list_jobs(
+            [JobStatus.DONE],
+            repo=repo,
+            limit=500,
+            playbooks=["reproduce"],
+            number=number,
+        )
+        if (job.result or {}).get("conclusion")
     ]
     conclusion: dict[str, Any] = (
         max(reports, key=lambda j: j.updated_at).result or {} if reports else {}

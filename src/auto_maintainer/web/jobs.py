@@ -30,14 +30,16 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from ..domain.actions import ActionKind, ProposalState
-from ..domain.agents import QuestionState
+from ..domain.actions import ActionKind, Proposal, ProposalState
+from ..domain.agents import AgentQuestion, QuestionState
 from ..domain.events import Event, EventKind
 from ..domain.labs import offered, unusable
 from ..domain.memory import profile_path
 from ..domain.permissions import Permission
 from ..domain.profile import LabBinding
-from ..domain.records import Job, JobStatus
+from ..domain.progress import JobStep
+from ..domain.records import ActionRecord, Job, JobStatus
+from ..domain.snapshot import PrSnapshot
 from ..profiles.layers import ProfileError, parse_yaml
 from ..service import Service
 from .api import may_view, repo_param, require_view, service_of, visible_repos
@@ -120,6 +122,60 @@ async def slot_view(
     return {**slots, "free": free, "ahead": ahead}
 
 
+class _WorkBatch:
+    """Shared reads across the jobs of one ``/work`` listing, so a page of jobs does
+    not query questions, proposals, actions, snapshots, or steps per job."""
+
+    def __init__(
+        self,
+        steps_by_job: dict[str, list[JobStep]],
+        questions_by_job: dict[str, list[AgentQuestion]],
+        proposals_by_action: dict[str, Proposal],
+        actions_by_job: dict[str, list[ActionRecord]],
+        snapshots: dict[tuple[str, int], PrSnapshot | None],
+    ) -> None:
+        self.steps_by_job = steps_by_job
+        self.questions_by_job = questions_by_job
+        self.proposals_by_action = proposals_by_action
+        self.actions_by_job = actions_by_job
+        self.snapshots = snapshots
+        self.default_agents: dict[tuple[str | None, str, str | None], str | None] = {}
+
+
+async def _work_batch(service: Service, jobs: list[Job]) -> _WorkBatch:
+    if not jobs:
+        return _WorkBatch({}, {}, {}, {}, {})
+    steps_by_job = await service.progress.steps_many([j.id for j in jobs])
+    questions_by_job: dict[str, list[AgentQuestion]] = {}
+    for q in await service.store.list_questions(QuestionState.PENDING):
+        if q.job_id:
+            questions_by_job.setdefault(q.job_id, []).append(q)
+    proposals_by_action = {
+        p.action_id: p
+        for p in await service.store.list_proposals(ProposalState.PENDING)
+    }
+    repos = sorted({j.repo for j in jobs if j.repo})
+    earliest = min(j.created_at for j in jobs)
+    actions_by_job: dict[str, list[ActionRecord]] = {}
+    snapshots: dict[tuple[str, int], PrSnapshot | None] = {}
+    for repo_name in repos:
+        for record in await service.store.list_actions(
+            repo=repo_name, since=earliest, limit=2000
+        ):
+            jid = record.action.provenance.job_id
+            if jid:
+                actions_by_job.setdefault(jid, []).append(record)
+        for snap in await service.store.list_snapshots(repo_name, open_only=True):
+            snapshots[(repo_name, snap.number)] = snap
+    return _WorkBatch(
+        steps_by_job,
+        questions_by_job,
+        proposals_by_action,
+        actions_by_job,
+        snapshots,
+    )
+
+
 async def job_view(
     service: Service,
     job: Job,
@@ -127,32 +183,50 @@ async def job_view(
     steps: bool = False,
     me: str | None = None,
     queued: list[Job] | None = None,
+    batch: _WorkBatch | None = None,
 ) -> dict[str, Any]:
     """What the dashboard shows about ``job``."""
     payload = _payload(job)
     by = payload.get("by")
-    found = await service.progress.steps(job.id)
+    found = (
+        batch.steps_by_job.get(job.id, [])
+        if batch is not None
+        else await service.progress.steps(job.id)
+    )
     ran = next((s.runtime for s in found if s.kind == "start"), None)
     # What the agent said when it finished; a job run again keeps its newest run's.
     final = next(
         (s.output for s in reversed(found) if s.kind == "done" and s.output), None
     )
-    questions = [
-        q
-        for q in await service.store.list_questions(QuestionState.PENDING, job.repo)
-        if q.job_id == job.id
-    ]
+    questions = (
+        batch.questions_by_job.get(job.id, [])
+        if batch is not None
+        else [
+            q
+            for q in await service.store.list_questions(QuestionState.PENDING, job.repo)
+            if q.job_id == job.id
+        ]
+    )
     produced = []
     if job.repo:
-        pending = {
-            p.action_id: p
-            for p in await service.store.list_proposals(ProposalState.PENDING, job.repo)
-        }
-        for record in await service.store.list_actions(
-            repo=job.repo, number=job.number, limit=200
-        ):
-            if record.action.provenance.job_id != job.id:
-                continue
+        if batch is not None:
+            pending = batch.proposals_by_action
+            records = batch.actions_by_job.get(job.id, [])
+        else:
+            pending = {
+                p.action_id: p
+                for p in await service.store.list_proposals(
+                    ProposalState.PENDING, job.repo
+                )
+            }
+            records = [
+                r
+                for r in await service.store.list_actions(
+                    repo=job.repo, number=job.number, limit=200
+                )
+                if r.action.provenance.job_id == job.id
+            ]
+        for record in records:
             proposal = pending.get(record.action.id)
             produced.append(
                 {
@@ -163,11 +237,24 @@ async def job_view(
                     "for": record.action.draft_for,
                 }
             )
-    pr = (
-        await service.store.get_snapshot(job.repo, job.number)
-        if job.repo and job.number
-        else None
-    )
+    pr: PrSnapshot | None = None
+    if job.repo and job.number:
+        key = (job.repo, job.number)
+        if batch is not None and key in batch.snapshots:
+            pr = batch.snapshots[key]
+        else:
+            pr = await service.store.get_snapshot(job.repo, job.number)
+            if batch is not None:
+                batch.snapshots[key] = pr
+    agent = payload.get("agent") or ran
+    if not agent:
+        agent_key = (job.repo, job.playbook, (by or "").lower() or None)
+        if batch is not None and agent_key in batch.default_agents:
+            agent = batch.default_agents[agent_key]
+        else:
+            agent = await _default_agent(service, job, by)
+            if batch is not None:
+                batch.default_agents[agent_key] = agent
     out: dict[str, Any] = {
         "id": job.id,
         "playbook": job.playbook,
@@ -177,7 +264,7 @@ async def job_view(
         "title": pr.title if pr else None,
         "by": by,
         "mine": bool(me and by and by.lower() == me.lower()),
-        "agent": payload.get("agent") or ran or await _default_agent(service, job, by),
+        "agent": agent,
         "note": payload.get("note") or None,
         "batch": payload.get("batch"),
         "created_at": job.created_at.isoformat(),
@@ -209,7 +296,9 @@ async def _job(service: Service, user: User, job_id: str) -> Job:
         job = next(
             (
                 j
-                for j in await service.store.list_jobs(limit=500)
+                for j in await service.store.list_jobs(
+                    limit=500, playbooks=list(AGENT_PLAYBOOKS)
+                )
                 if j.events and j.events[0].get("id") == job_id
             ),
             None,
@@ -455,11 +544,28 @@ def build_router() -> APIRouter:
         code_repo = service.settings.code_repo if repo is None else None
         code_visible: bool | None = None
         since = service.clock.now() - timedelta(days=max(1, min(days, 90)))
-        out = []
-        queued = await service.store.list_jobs([JobStatus.QUEUED], limit=1000)
-        for job in await service.store.list_jobs(repo=repo, limit=500):
-            if job.playbook not in AGENT_PLAYBOOKS:
-                continue
+        if playbook is not None and playbook not in AGENT_PLAYBOOKS:
+            return []
+        playbooks = [playbook] if playbook is not None else list(AGENT_PLAYBOOKS)
+        seen: dict[str, Job] = {}
+        for job in await service.store.list_jobs(
+            list(ACTIVE),
+            repo=repo,
+            limit=500,
+            playbooks=playbooks,
+            number=number,
+        ):
+            seen[job.id] = job
+        for job in await service.store.list_jobs(
+            repo=repo,
+            limit=500,
+            playbooks=playbooks,
+            number=number,
+            updated_since=since,
+        ):
+            seen.setdefault(job.id, job)
+        candidates: list[Job] = []
+        for job in seen.values():
             if job.repo not in visible:
                 if job.repo != code_repo:
                     continue
@@ -467,23 +573,10 @@ def build_router() -> APIRouter:
                     code_visible = await may_view(service, user, code_repo)
                 if not code_visible:
                     continue
-            if playbook is not None and job.playbook != playbook:
-                continue
-            if number is not None and job.number != number:
-                continue
             if job.status not in ACTIVE and job.updated_at < since:
                 continue
             by = (_payload(job).get("by") or "").lower()
             if not everyone and by != user.login.lower():
-                continue
-            if (
-                job.playbook == "evaluate"
-                and _first_kind(job) not in ASKED_FOR
-                and not await service.progress.steps(job.id)
-            ):
-                # Scoring nobody asked for mostly runs no agent (a PR changed a
-                # little, so only its total is recomputed): it shows once an agent
-                # works on it.
                 continue
             if (
                 job.playbook == "quick_quality"
@@ -493,7 +586,27 @@ def build_router() -> APIRouter:
                 # Quick scores run for every open PR in the background: a finished
                 # one shows on its PR, not in lists across PRs.
                 continue
-            view = await job_view(service, job, me=user.login, queued=queued)
+            candidates.append(job)
+        batch = await _work_batch(service, candidates)
+        queued = (
+            await service.store.list_jobs([JobStatus.QUEUED], limit=1000)
+            if any(j.status == JobStatus.QUEUED for j in candidates)
+            else []
+        )
+        out = []
+        for job in candidates:
+            if (
+                job.playbook == "evaluate"
+                and _first_kind(job) not in ASKED_FOR
+                and not batch.steps_by_job.get(job.id)
+            ):
+                # Scoring nobody asked for mostly runs no agent (a PR changed a
+                # little, so only its total is recomputed): it shows once an agent
+                # works on it.
+                continue
+            view = await job_view(
+                service, job, me=user.login, queued=queued, batch=batch
+            )
             if (
                 job.status not in ACTIVE
                 and (job.result or {}).get("handed_to")

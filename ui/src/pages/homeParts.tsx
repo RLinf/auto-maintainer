@@ -33,9 +33,9 @@ export function GettingStarted({ repos, prs, automations }: { repos: RepoRow[]; 
   const t = useT();
   const agent = useAgent();
   const navigate = useNavigate();
-  const settings = useSettings();
-  const threads = useQuery({ queryKey: ["chat", "threads"], queryFn: () => api.get<ChatThread[]>("/api/chat/threads") });
   const [hidden, setHidden] = useState(readHidden);
+  const settings = useSettings(!hidden);
+  const threads = useQuery({ queryKey: ["chat", "threads"], queryFn: () => api.get<ChatThread[]>("/api/chat/threads"), enabled: !hidden });
   const reviewed = prs.some((p) => p.review_activity.posted || p.review_activity.draft || p.review_activity.job);
   const pending = repos.find((r) => !r.active);
   const steps: { done: boolean; title: string; body: string; action: string; run: () => void }[] = [

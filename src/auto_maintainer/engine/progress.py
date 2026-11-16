@@ -55,6 +55,16 @@ def _key(job_id: str) -> str:
     return steps_key(job_id)
 
 
+def _parse_steps(raw: Any) -> list[JobStep]:
+    if not raw:
+        return []
+    out = []
+    for item in raw:
+        with contextlib.suppress(ValueError):
+            out.append(JobStep.model_validate(item))
+    return out
+
+
 def _joined(text: str, more: str, limit: int = 4000) -> str:
     """``text`` followed by ``more``, redacted again (a credential can span chunks),
     keeping the last ``limit`` characters."""
@@ -173,6 +183,22 @@ class JobProgress:
         live = self._live.get(job_id)
         return list(live) if live is not None else await self._saved(job_id)
 
+    async def steps_many(self, job_ids: list[str]) -> dict[str, list[JobStep]]:
+        """Each job's steps so far, reading saved ones from the store in one query."""
+        out: dict[str, list[JobStep]] = {}
+        missing: list[str] = []
+        for job_id in job_ids:
+            live = self._live.get(job_id)
+            if live is not None:
+                out[job_id] = list(live)
+            else:
+                missing.append(job_id)
+        if missing:
+            raw_map = await self.store.get_states([_key(jid) for jid in missing])
+            for job_id in missing:
+                out[job_id] = _parse_steps(raw_map.get(_key(job_id)))
+        return out
+
     def changed(self, job_id: str, repo: str | None, number: int | None) -> None:
         """Tell dashboards that the job changed (its steps or its status)."""
         loop = asyncio.get_running_loop()
@@ -206,14 +232,7 @@ class JobProgress:
             self.changed(job_id, repo, number)
 
     async def _saved(self, job_id: str) -> list[JobStep]:
-        raw = await self.store.get_state(_key(job_id))
-        if not raw:
-            return []
-        out = []
-        for item in raw:
-            with contextlib.suppress(ValueError):
-                out.append(JobStep.model_validate(item))
-        return out
+        return _parse_steps(await self.store.get_state(_key(job_id)))
 
     async def _save(self, job_id: str, steps: list[JobStep]) -> None:
         async with self._lock:

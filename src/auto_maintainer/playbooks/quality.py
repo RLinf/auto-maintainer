@@ -420,9 +420,7 @@ async def calibration_block(ctx: PlaybookContext, repo: str) -> str:
     return "\n\n".join(parts)
 
 
-async def quick_quality(store: Store, repo: str, number: int) -> QuickQuality | None:
-    """The latest quick score of ``repo#number``, if any."""
-    raw = await store.get_state(QUICK_STATE.format(repo=repo, number=number))
+def parse_quick_quality(raw: object) -> QuickQuality | None:
     if not raw:
         return None
     try:
@@ -431,6 +429,27 @@ async def quick_quality(store: Store, repo: str, number: int) -> QuickQuality | 
         )
     except ValueError:
         return None
+
+
+async def quick_quality(store: Store, repo: str, number: int) -> QuickQuality | None:
+    """The latest quick score of ``repo#number``, if any."""
+    return parse_quick_quality(
+        await store.get_state(QUICK_STATE.format(repo=repo, number=number))
+    )
+
+
+async def quick_qualities(
+    store: Store, repo: str, numbers: list[int]
+) -> dict[int, QuickQuality]:
+    """The latest quick scores of ``numbers`` in ``repo``, read in one query."""
+    keys = {n: QUICK_STATE.format(repo=repo, number=n) for n in numbers}
+    states = await store.get_states(list(keys.values()))
+    out: dict[int, QuickQuality] = {}
+    for n, key in keys.items():
+        parsed = parse_quick_quality(states.get(key))
+        if parsed is not None:
+            out[n] = parsed
+    return out
 
 
 async def score_quickly(
@@ -514,11 +533,7 @@ def _quick_result(quick: QuickQuality) -> PlaybookResult:
     )
 
 
-async def assessed_quality(
-    store: Store, repo: str, number: int
-) -> QualityAssessment | None:
-    """The quality an agent gave ``repo#number``'s review after it was written, if any."""
-    raw = await store.get_state(QUALITY_STATE.format(repo=repo, number=number))
+def parse_assessed_quality(raw: object) -> QualityAssessment | None:
     if not raw:
         return None
     try:
@@ -527,6 +542,29 @@ async def assessed_quality(
         )
     except ValueError:
         return None
+
+
+async def assessed_quality(
+    store: Store, repo: str, number: int
+) -> QualityAssessment | None:
+    """The quality an agent gave ``repo#number``'s review after it was written, if any."""
+    return parse_assessed_quality(
+        await store.get_state(QUALITY_STATE.format(repo=repo, number=number))
+    )
+
+
+async def assessed_qualities(
+    store: Store, repo: str, numbers: list[int]
+) -> dict[int, QualityAssessment]:
+    """Assessed review qualities of ``numbers`` in ``repo``, read in one query."""
+    keys = {n: QUALITY_STATE.format(repo=repo, number=n) for n in numbers}
+    states = await store.get_states(list(keys.values()))
+    out: dict[int, QualityAssessment] = {}
+    for n, key in keys.items():
+        parsed = parse_assessed_quality(states.get(key))
+        if parsed is not None:
+            out[n] = parsed
+    return out
 
 
 class QualityPlaybook(Playbook):

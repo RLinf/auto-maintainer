@@ -309,7 +309,7 @@ async def _service_record(service: Any, repo: str, number: int) -> str:
         if record.error:
             parts.append(f"error: {record.error}")
         lines.append(" | ".join(parts))
-    jobs = [j for j in await service.store.list_jobs(repo=repo) if j.number == number]
+    jobs = await service.store.list_jobs(repo=repo, number=number)
     for job in sorted(jobs, key=lambda j: j.updated_at)[-RECORD_JOBS:]:
         lines.append(
             f"{job.updated_at:%Y-%m-%d %H:%M} UTC job {job.playbook}: {job.status}"

@@ -757,6 +757,10 @@ class Store(Protocol):
         statuses: list[JobStatus] | None = None,
         repo: str | None = None,
         limit: int = 200,
+        *,
+        playbooks: list[str] | None = None,
+        number: int | None = None,
+        updated_since: datetime | None = None,
     ) -> list[Job]: ...
     async def requeue_expired(self, now: datetime) -> int: ...
 
@@ -938,4 +942,10 @@ class Store(Protocol):
         self, repo: str | None = None, limit: int = 200
     ) -> list[AuditEntry]: ...
     async def get_state(self, key: str) -> Any | None: ...
+    async def get_states(
+        self, keys: list[str] | None = None, *, prefix: str | None = None
+    ) -> dict[str, Any]:
+        """Values stored under ``keys`` or under keys starting with ``prefix``."""
+        ...
+
     async def set_state(self, key: str, value: Any) -> None: ...

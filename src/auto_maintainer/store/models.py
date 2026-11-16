@@ -90,6 +90,8 @@ jobs = Table(
     UniqueConstraint("playbook", "key", name="uq_jobs_playbook_key"),
 )
 Index("ix_jobs_status_pool", jobs.c.status, jobs.c.pool)
+Index("ix_jobs_updated_at", jobs.c.updated_at)
+Index("ix_jobs_playbook_updated_at", jobs.c.playbook, jobs.c.updated_at)
 
 agent_runs = Table(
     "agent_runs",

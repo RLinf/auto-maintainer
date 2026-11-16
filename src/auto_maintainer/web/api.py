@@ -68,8 +68,6 @@ from ..domain.codeowners import (
     CodeOwnerReport,
     OwnerRule,
     code_owner_report,
-    codeowners_locations,
-    parse_codeowners,
 )
 from ..domain.events import Event, EventKind
 from ..domain.forges import all_infos, default_forge
@@ -120,9 +118,11 @@ from ..playbooks.evaluate import haystack, rubric_of
 from ..playbooks.hygiene import hygiene_key
 from ..playbooks.prompts import DEFAULT_QUALITY_GUIDE, DEFAULT_WRITING_GUIDE
 from ..playbooks.quality import (
+    assessed_qualities,
     assessed_quality,
     quick_lessons,
     quick_misses,
+    quick_qualities,
     quick_quality,
 )
 from ..profiles.layers import ProfileError, parse_yaml
@@ -417,11 +417,7 @@ async def read_codeowners(
     """The CODEOWNERS file that governs ``repo`` at ``ref`` (the default branch when
     ``None``): the profile's ``people.codeowners`` when it names one, else the first
     of the forge's places that has one; with its rules, or ``(None, [])``."""
-    for location in [path] if path else list(codeowners_locations(repo)):
-        text = await service.view_file(repo, location, ref)
-        if text:
-            return location, parse_codeowners(text)
-    return None, []
+    return await service.view_codeowners(repo, path, ref)
 
 
 class _OwnerRules:
@@ -445,16 +441,22 @@ async def _progress_row(
     pr: PrSnapshot,
     assignees: list[PrAssignee],
     rules: _OwnerRules,
+    *,
+    checks_data: Any = None,
+    has_checks: bool = False,
+    info: Any = None,
+    perms: dict[str, Permission] | None = None,
 ) -> dict[str, Any]:
     """A PR's review progress for its row: the same numbers its page shows (the
     comment checks' findings counted, approvals by the branch's rules), in short."""
-    progress = review_progress(
-        pr,
-        assignees,
-        load_checks(await service.store.get_state(checks_key(repo, pr.number))),
+    raw = (
+        checks_data
+        if has_checks
+        else await service.store.get_state(checks_key(repo, pr.number))
     )
+    progress = review_progress(pr, assignees, load_checks(raw))
     owners = code_owner_report(await rules.of(pr.base_ref), pr)
-    status = await approvals_of(service, repo, pr, owners)
+    status = await approvals_of(service, repo, pr, owners, info=info, perms=perms)
     return {
         **progress.summary(),
         "approval": approval_summary(status, progress).model_dump(mode="json"),
@@ -579,12 +581,19 @@ async def approvals_view(
 
 
 async def approvals_of(
-    service: Service, repo: str, pr: PrSnapshot, owners: CodeOwnerReport
+    service: Service,
+    repo: str,
+    pr: PrSnapshot,
+    owners: CodeOwnerReport,
+    *,
+    info: Any = None,
+    perms: dict[str, Permission] | None = None,
 ) -> ApprovalStatus:
     """Where ``pr``'s reviews stand against its base branch's review rules, as GitHub
     counts them (``domain/approvals.py``): the rules are known for the default
     branch, and approvers' write access is read for each of them."""
-    info = await service.view_repo(repo)
+    if info is None:
+        info = await service.view_repo(repo)
     branch = info if info.default_branch == pr.base_ref else None
     approvers = {
         r.author
@@ -592,12 +601,16 @@ async def approvals_of(
         if r.state == ReviewEventState.APPROVED
         and r.author.lower() != pr.author.lower()
     }
+    if perms is None and approvers:
+        perms = await permissions_of(service, repo, list(approvers))
     writers = {
         login.lower()
         for login in approvers
-        if (await permission(service, User(login=login), repo)).at_least(
-            Permission.WRITE
-        )
+        if (
+            perms[login.lower()]
+            if perms is not None and login.lower() in perms
+            else await permission(service, User(login=login), repo)
+        ).at_least(Permission.WRITE)
     }
     return approval_status(pr, branch, owners, writers)
 
@@ -616,11 +629,38 @@ async def permission(service: Service, user: User, repo: str) -> Permission:
     checked = record.permissions_checked.get(repo)
     if checked and now - checked < PERMISSION_TTL and repo in record.permissions:
         return Permission(record.permissions[repo])
-    perm = await service.a.forge.get_permission(repo, user.login)
-    record.permissions[repo] = perm.value
-    record.permissions_checked[repo] = now
-    await service.store.save_user(record)
-    return perm
+    key = (repo, user.login.lower())
+    reading = service._permission_reads.get(key)
+    if reading is None:
+
+        async def _load() -> Permission:
+            perm = await service.a.forge.get_permission(repo, user.login)
+            latest = await service.store.get_user(user.login) or record
+            latest.permissions[repo] = perm.value
+            latest.permissions_checked[repo] = service.clock.now()
+            await service.store.save_user(latest)
+            return perm
+
+        reading = asyncio.ensure_future(_load())
+        service._permission_reads[key] = reading
+        reading.add_done_callback(lambda _: service._permission_reads.pop(key, None))
+    return await asyncio.shield(reading)
+
+
+async def permissions_of(
+    service: Service, repo: str, logins: list[str]
+) -> dict[str, Permission]:
+    """Each login's cached permission on ``repo`` (by lowercase login), reading
+    expired ones in parallel."""
+    by_lower: dict[str, str] = {}
+    for login in logins:
+        by_lower.setdefault(login.lower(), login)
+    if not by_lower:
+        return {}
+    resolved = await asyncio.gather(
+        *(permission(service, User(login=login), repo) for login in by_lower.values())
+    )
+    return dict(zip(by_lower.keys(), resolved, strict=True))
 
 
 async def may_view(service: Service, user: User, repo: str) -> bool:
@@ -645,11 +685,13 @@ async def require_view(service: Service, user: User, repo: str) -> None:
 
 
 async def visible_repos(service: Service, user: User) -> list[str]:
-    out = []
-    for record in await service.store.list_repos():
-        if await may_view(service, user, record.repo):
-            out.append(record.repo)
-    return out
+    records = await service.store.list_repos()
+    if not records:
+        return []
+    allowed = await asyncio.gather(
+        *(may_view(service, user, record.repo) for record in records)
+    )
+    return [record.repo for record, ok in zip(records, allowed, strict=True) if ok]
 
 
 def _repo(repo: str) -> str:
@@ -1521,13 +1563,17 @@ def build_router() -> APIRouter:
             profile = await service.profiles.active(name)
             if profile is None:
                 continue
+            snapshots = await service.store.list_snapshots(name)
+            if not snapshots:
+                continue
             ids = service.info.identities | set(profile.people.review_identities)
             rubric = rubric_of(profile)
-            activity = await review_activity(service, name)
-            quality = await review_qualities(service, name)
+            evaluations = {
+                ev.number: ev for ev in await service.store.list_evaluations(name)
+            }
+            kept: list[tuple[PrSnapshot, Any, Evaluation | None, list[PrAssignee]]] = []
             own = await service.posted_as_people(name)
-            owner_rules = _OwnerRules(service, name, profile.people.codeowners)
-            for pr in await service.store.list_snapshots(name):
+            for pr in snapshots:
                 cls = classify_review_state(
                     pr,
                     ids,
@@ -1535,7 +1581,7 @@ def build_router() -> APIRouter:
                     profile.scope.include_drafts,
                     own_actions=own,
                 )
-                ev = await service.store.get_evaluation(name, pr.number)
+                ev = evaluations.get(pr.number)
                 assignees = on_pr.get((name, pr.number), [])
                 if tier and (ev is None or ev.tier != tier):
                     continue
@@ -1545,6 +1591,34 @@ def build_router() -> APIRouter:
                     continue
                 if reviewing and not holds(assignees, me, "reviewer"):
                     continue
+                kept.append((pr, cls, ev, assignees))
+            if not kept:
+                continue
+            numbers = [pr.number for pr, _, _, _ in kept]
+            approvers = [
+                r.author
+                for pr, _, _, _ in kept
+                for r in pr.reviews
+                if r.state == ReviewEventState.APPROVED
+                and r.author.lower() != pr.author.lower()
+            ]
+            (
+                activity,
+                quality,
+                quicks,
+                check_states,
+                info,
+                perms,
+            ) = await asyncio.gather(
+                review_activity(service, name),
+                review_qualities(service, name),
+                quick_qualities(service.store, name, numbers),
+                service.store.get_states([checks_key(name, n) for n in numbers]),
+                service.view_repo(name),
+                permissions_of(service, name, approvers),
+            )
+            owner_rules = _OwnerRules(service, name, profile.people.codeowners)
+            for pr, cls, ev, assignees in kept:
                 rows.append(
                     {
                         "repo": name,
@@ -1562,7 +1636,15 @@ def build_router() -> APIRouter:
                         "_rank": priority_key(ev, rubric),
                         "assignees": [assignee_row(a) for a in assignees],
                         "progress": await _progress_row(
-                            service, name, pr, assignees, owner_rules
+                            service,
+                            name,
+                            pr,
+                            assignees,
+                            owner_rules,
+                            checks_data=check_states.get(checks_key(name, pr.number)),
+                            has_checks=True,
+                            info=info,
+                            perms=perms,
                         ),
                         "tier": ev.tier if ev else None,
                         "total": ev.total if ev else None,
@@ -1573,10 +1655,8 @@ def build_router() -> APIRouter:
                         "quality": quality[pr.number].model_dump(mode="json")
                         if pr.number in quality
                         else None,
-                        "quick_quality": quick.model_dump(mode="json")
-                        if (
-                            quick := await quick_quality(service.store, name, pr.number)
-                        )
+                        "quick_quality": quicks[pr.number].model_dump(mode="json")
+                        if pr.number in quicks
                         else None,
                     }
                 )
@@ -4139,11 +4219,10 @@ async def review_qualities(service: Service, repo: str) -> dict[int, ReviewQuali
     ):
         if record.action.number is not None:
             by_pr.setdefault(record.action.number, []).append(record)
+    assessed = await assessed_qualities(service.store, repo, list(by_pr.keys()))
     out = {}
     for number, records in by_pr.items():
-        quality = review_quality(
-            records, await assessed_quality(service.store, repo, number)
-        )
+        quality = review_quality(records, assessed.get(number))
         if quality is not None:
             out[number] = quality
     return out
@@ -4152,8 +4231,10 @@ async def review_qualities(service: Service, repo: str) -> dict[int, ReviewQuali
 async def review_activity(service: Service, repo: str) -> dict[int, dict[str, Any]]:
     """Per PR: the latest review or follow-up job, a pending draft, and the last posted review."""
     out: dict[int, dict[str, Any]] = {}
-    for job in await service.store.list_jobs(repo=repo, limit=500):
-        if job.playbook not in ("review", "followup") or job.number is None:
+    for job in await service.store.list_jobs(
+        repo=repo, limit=500, playbooks=["review", "followup"]
+    ):
+        if job.number is None:
             continue
         row = out.setdefault(job.number, {})
         if "job" not in row:

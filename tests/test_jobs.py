@@ -381,3 +381,45 @@ async def test_jobs_a_crashed_process_left_running_are_queued_at_start(demo) -> 
     assert again.attempts == 1 and again.lease_until is None
     out = await h.store.get_job("job_spent")
     assert out is not None and out.status == JobStatus.FAILED
+
+
+async def test_background_hygiene_jobs_do_not_hide_recent_agent_work(demo) -> None:
+    from datetime import timedelta
+
+    from auto_maintainer.domain.records import Job
+
+    h, app = demo
+    now = h.clock.now()
+    review_job = Job(
+        id="job_real_review",
+        playbook="review",
+        key="review:acme/widget#42:1",
+        repo=REPO,
+        number=42,
+        pool="agent",
+        status=JobStatus.DONE,
+        events=[
+            {"id": "evt_1", "kind": "dashboard.command", "payload": {"by": "maria"}}
+        ],
+        created_at=now - timedelta(hours=2),
+        updated_at=now - timedelta(hours=1),
+    )
+    await h.store.upsert_job(review_job)
+    # Insert 520 newer hygiene jobs so an unfiltered limit=500 scan would miss review_job.
+    for i in range(520):
+        t = now - timedelta(minutes=30) + timedelta(seconds=i)
+        await h.store.upsert_job(
+            Job(
+                playbook="hygiene",
+                key=f"hygiene:acme/widget#{i}",
+                repo=REPO,
+                number=42,
+                pool="io",
+                status=JobStatus.DONE,
+                created_at=t,
+                updated_at=t,
+            )
+        )
+    async with _as(app, "maria") as maria:
+        work = (await maria.get("/api/work")).json()
+    assert [j["id"] for j in work] == ["job_real_review"]

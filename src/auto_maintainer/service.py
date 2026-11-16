@@ -259,6 +259,7 @@ class Service:
         self._signed_in: dict[tuple[str, str | None], tuple[datetime, bool | None]] = {}
         self._views: dict[tuple[str, ...], tuple[datetime, Any]] = {}
         self._view_reads: dict[tuple[str, ...], asyncio.Future[Any]] = {}
+        self._permission_reads: dict[tuple[str, str], asyncio.Future[Any]] = {}
         self.installs: dict[str, AgentInstall] = {}
         self.latest: dict[str, dict[str, Any]] = {}
         """Per agent CLI the dashboard installs: its latest version (or why it could
@@ -1279,6 +1280,26 @@ class Service:
         return await self._view_cached(
             ("file", repo, path, ref or ""),
             lambda: self.a.forge.get_file(repo, path, ref),
+        )
+
+    async def view_codeowners(
+        self, repo: str, path: str | None, ref: str | None
+    ) -> tuple[str | None, list[Any]]:
+        """The CODEOWNERS path and parsed rules of ``repo`` at ``ref`` for the
+        dashboard's views, kept like ``view_repo`` so a repository without a
+        CODEOWNERS file is probed once per cache window instead of four paths per
+        view."""
+        from .domain.codeowners import codeowners_locations, parse_codeowners
+
+        async def _load() -> tuple[str | None, list[Any]]:
+            for location in [path] if path else list(codeowners_locations(repo)):
+                text = await self.view_file(repo, location, ref)
+                if text:
+                    return location, parse_codeowners(text)
+            return None, []
+
+        return await self._view_cached(
+            ("codeowners", repo, path or "", ref or ""), _load
         )
 
     async def _view_cached(self, key: tuple[str, ...], read: Any) -> Any:

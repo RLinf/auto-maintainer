@@ -32,6 +32,7 @@ from sqlalchemy import (
     event,
     func,
     insert,
+    literal_column,
     or_,
     select,
     update,
@@ -359,15 +360,29 @@ class SqliteStore:
         statuses: list[JobStatus] | None = None,
         repo: str | None = None,
         limit: int = 200,
+        *,
+        playbooks: list[str] | None = None,
+        number: int | None = None,
+        updated_since: datetime | None = None,
     ) -> list[Job]:
         stmt = select(m.jobs.c.data)
         if statuses:
             stmt = stmt.where(m.jobs.c.status.in_([s.value for s in statuses]))
         if repo:
             stmt = stmt.where(m.jobs.c.repo == repo)
+        if playbooks:
+            stmt = stmt.where(m.jobs.c.playbook.in_([str(p) for p in playbooks]))
+        if number is not None:
+            stmt = stmt.where(m.jobs.c.number == number)
+        if updated_since is not None:
+            stmt = stmt.where(m.jobs.c.updated_at >= ts(updated_since))
         return _many(
             Job,
-            await self._fetch(stmt.order_by(m.jobs.c.updated_at.desc()).limit(limit)),
+            await self._fetch(
+                stmt.order_by(
+                    m.jobs.c.updated_at.desc(), literal_column("jobs.rowid").asc()
+                ).limit(limit)
+            ),
         )
 
     async def requeue_expired(self, now: datetime) -> int:
@@ -1146,6 +1161,27 @@ class SqliteStore:
             select(m.service_state.c.value).where(m.service_state.c.key == key)
         )
         return json.loads(row.value) if row else None
+
+    async def get_states(
+        self, keys: list[str] | None = None, *, prefix: str | None = None
+    ) -> dict[str, Any]:
+        if keys is not None and not keys and prefix is None:
+            return {}
+        stmt = select(m.service_state.c.key, m.service_state.c.value)
+        conditions = []
+        if keys:
+            conditions.append(m.service_state.c.key.in_(keys))
+        if prefix is not None:
+            conditions.append(
+                and_(
+                    m.service_state.c.key >= prefix,
+                    m.service_state.c.key < f"{prefix}\uffff",
+                )
+            )
+        if not conditions:
+            return {}
+        stmt = stmt.where(or_(*conditions))
+        return {row.key: json.loads(row.value) for row in await self._fetch(stmt)}
 
     async def set_state(self, key: str, value: Any) -> None:
         await self._upsert(
