@@ -103,6 +103,11 @@ BACKGROUND_ANSWER = (
     "the request is denied. Work from what you can read without it."
 )
 
+QUOTA_READ_SECONDS = 90.0
+"""How long a CLI's ``/usage`` may take: Antigravity's starts in a container, signs
+in, and asks its servers, 15 to over 30 seconds from a host behind a slow link. The
+service reads it in the background (``Service.agent_quota``), so nobody waits on it."""
+
 MAX_ARG_PROMPT_BYTES = 100_000
 """Prompts longer than this are passed through a file; Linux limits one argument to 128 KiB."""
 

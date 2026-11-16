@@ -1280,7 +1280,12 @@ class Service:
 
             async def ask() -> AgentQuota | None:
                 found = await read()
-                if found is not None:
+                last = self._quotas.get(key)
+                # A read that failed (no limits in it) does not replace a good one:
+                # the page shows that one, with when it was read.
+                if found is not None and (
+                    found.buckets or last is None or not last.buckets
+                ):
                     self._quotas[key] = found.model_copy(
                         update={"read_at": self.clock.now()}
                     )

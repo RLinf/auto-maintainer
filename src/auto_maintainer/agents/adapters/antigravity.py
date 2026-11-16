@@ -35,7 +35,7 @@ from typing import Any
 
 from ...domain.agents import AgentQuota, AgentTask, Capabilities, QuotaBucket
 from ..acp import AcpRuntime
-from ..exec import RunFiles
+from ..exec import QUOTA_READ_SECONDS, RunFiles
 
 _LEVELS = {
     "low": "low",
@@ -134,10 +134,14 @@ class AntigravityRuntime(AcpRuntime):
     async def quota(self) -> AgentQuota | None:
         """``agy -p /usage --output-format json`` (checked against 1.5.3): the slash
         command runs no turn and spends no tokens."""
-        out = await self.cli_output("-p", "/usage", "--output-format", "json")
+        out = await self.cli_output(
+            "-p", "/usage", "--output-format", "json", timeout=QUOTA_READ_SECONDS
+        )
         now = datetime.now(UTC)
         if out is None:
-            return AgentQuota(runtime=self.name, read_at=now, note="agy /usage failed")
+            return AgentQuota(
+                runtime=self.name, read_at=now, note="agy /usage did not answer"
+            )
         try:
             data = json.loads(out)
         except ValueError:

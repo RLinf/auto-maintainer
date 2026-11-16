@@ -61,7 +61,15 @@ from ...domain.agents import (
     QuestionOption,
     QuotaBucket,
 )
-from ..exec import Ask, Conversation, ExecRuntime, Invocation, RunFiles, Step
+from ..exec import (
+    QUOTA_READ_SECONDS,
+    Ask,
+    Conversation,
+    ExecRuntime,
+    Invocation,
+    RunFiles,
+    Step,
+)
 from . import loads_object, partial, short
 
 READ_ONLY_TOOLS = ("Read", "Grep", "Glob", "Bash")
@@ -396,7 +404,9 @@ class ClaudeCodeRuntime(ExecRuntime):
     async def quota(self) -> AgentQuota | None:
         """``claude -p /usage --output-format json`` (checked against 2.1.319): the
         slash command runs no turn and spends no tokens; its ``result`` is text."""
-        out = await self.cli_output("-p", "/usage", "--output-format", "json")
+        out = await self.cli_output(
+            "-p", "/usage", "--output-format", "json", timeout=QUOTA_READ_SECONDS
+        )
         now = datetime.now(UTC)
         try:
             text = str(json.loads(out)["result"]) if out else ""

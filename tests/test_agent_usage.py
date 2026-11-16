@@ -244,3 +244,36 @@ async def test_a_slow_cli_never_holds_the_usage_page(
         assert broken.asked == 1, "a failed read is not tried again at once"
     finally:
         await h.close()
+
+
+async def test_a_failed_read_keeps_the_last_good_one(tmp_path: Path) -> None:
+    """A /usage that did not answer leaves the limits read before, with when they
+    were read, rather than showing the failure in their place."""
+    h = await build_demo(tmp_path)
+    try:
+
+        class Flaky:
+            ok = True
+
+            async def quota(self) -> AgentQuota:
+                if self.ok:
+                    return AgentQuota(
+                        runtime="antigravity",
+                        read_at=NOW,
+                        buckets=[QuotaBucket(group="g", name="weekly", remaining=0.5)],
+                    )
+                return AgentQuota(
+                    runtime="antigravity", read_at=NOW, note="agy /usage did not answer"
+                )
+
+        flaky = Flaky()
+        h.runner.runtimes = {"antigravity": flaky}
+        h.runner.ready = lambda name: True
+        first = await h.service.agent_quota("antigravity", fresh=True)
+        assert first is not None and first.buckets
+        flaky.ok = False
+        h.clock.advance(minutes=1)
+        again = await h.service.agent_quota("antigravity", fresh=True)
+        assert again is not None and again.buckets and again.read_at == first.read_at
+    finally:
+        await h.close()
