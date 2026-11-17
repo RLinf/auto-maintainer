@@ -120,6 +120,9 @@ LATEST_MAX_AGE = timedelta(hours=6)
 SIGNED_IN_SECONDS = 60
 VIEW_CACHE_SECONDS = 300
 """How long the dashboard's views reuse a repository's settings and CODEOWNERS."""
+VIEW_STALE_FACTOR = 2
+"""A kept view value up to this many of its windows old is shown at once while it is
+read again behind the view (``Service.view_cached``); an older one is waited for."""
 """How long whether an agent CLI is signed in is shown before it is asked again."""
 QUOTA_SECONDS = 300
 """How long an agent's quota reading is shown before its CLI is asked again."""
@@ -273,6 +276,9 @@ class Service:
         """Agent sign-ins started from the dashboard, by id (``agents/login.py``)."""
         self._signed_in: dict[tuple[str, str | None], tuple[datetime, bool | None]] = {}
         self._views: dict[tuple[str, ...], tuple[datetime, Any]] = {}
+        self._views_dropped = 0
+        """How many times ``forget_views`` dropped kept views: a read that started
+        before a drop keeps nothing, so it cannot bring back what the change retired."""
         self._view_reads: dict[tuple[str, ...], asyncio.Future[Any]] = {}
         self._permission_reads: dict[tuple[str, str], asyncio.Future[Any]] = {}
         self.installs: dict[str, AgentInstall] = {}
@@ -1395,6 +1401,7 @@ class Service:
     def forget_views(self, *kinds: str) -> None:
         """Drop what ``view_cached`` keeps under keys of these ``kinds`` (their first
         part), after a change the next view must show."""
+        self._views_dropped += 1
         for key in [k for k in self._views if k and k[0] in kinds]:
             del self._views[key]
 
@@ -1402,20 +1409,33 @@ class Service:
         self, key: tuple[str, ...], read: Any, seconds: float = VIEW_CACHE_SECONDS
     ) -> Any:
         """What ``read`` returns, kept under ``key`` for ``seconds``, for what the
-        dashboard's views show; what the service acts on reads live."""
+        dashboard's views show; what the service acts on reads live. A value older
+        than ``seconds`` but within ``VIEW_STALE_FACTOR`` windows is shown at once
+        while it is read again, so a page never waits on the forge for what it showed
+        a moment ago; an older one, or none, is waited for."""
         now = self.clock.now()
         hit = self._views.get(key)
-        if hit is not None and (now - hit[0]).total_seconds() < seconds:
+        age = (now - hit[0]).total_seconds() if hit is not None else None
+        if hit is not None and age is not None and age < seconds:
             return hit[1]
         reading = self._view_reads.get(key)
         if reading is None:
             # One read for every view that asks at once.
             reading = asyncio.ensure_future(read())
             self._view_reads[key] = reading
-            reading.add_done_callback(lambda _: self._view_reads.pop(key, None))
-        value = await asyncio.shield(reading)
-        self._views[key] = (now, value)
-        return value
+            dropped = self._views_dropped
+
+            def kept(done: asyncio.Future[Any]) -> None:
+                self._view_reads.pop(key, None)
+                if done.cancelled() or done.exception() is not None:
+                    return  # the next view reads again
+                if self._views_dropped == dropped:
+                    self._views[key] = (now, done.result())
+
+            reading.add_done_callback(kept)
+        if hit is not None and age is not None and age < seconds * VIEW_STALE_FACTOR:
+            return hit[1]
+        return await asyncio.shield(reading)
 
     async def runs_on_for(
         self, route: Route | None, login: str | None, kind: str

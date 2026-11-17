@@ -49,7 +49,40 @@ async def test_many_views_at_once_read_the_forge_once(tmp_path: Path) -> None:
         assert reads == ["repo", "file:.github/CODEOWNERS"]
         h.clock.advance(minutes=6)
         await h.service.view_repo("acme/widget")
+        await asyncio.sleep(0.05)
         assert reads.count("repo") == 2, "read again once it is old"
+        h.clock.advance(minutes=11)
+        await h.service.view_repo("acme/widget")
+        assert reads.count("repo") == 3, "too old to show: waited for"
+    finally:
+        await h.close()
+
+
+async def test_a_page_does_not_wait_for_what_it_showed_a_moment_ago(
+    tmp_path: Path,
+) -> None:
+    """A kept value past its window is shown at once while the forge is read again;
+    a read that began before a change dropped the views keeps nothing."""
+    h = await build_demo(tmp_path)
+    try:
+        first = await h.service.view_repo("acme/widget")
+        get_repo = h.forge.get_repo
+        release = asyncio.Event()
+
+        async def slow_repo(repo: str) -> Any:
+            await release.wait()
+            return await get_repo(repo)
+
+        h.forge.get_repo = slow_repo  # type: ignore[method-assign]
+        h.clock.advance(minutes=6)
+        shown = await asyncio.wait_for(h.service.view_repo("acme/widget"), 1)
+        assert shown is first, "shown at once while it is read again"
+        h.service.forget_views("repo")
+        release.set()
+        await asyncio.sleep(0.05)
+        assert ("repo", "acme/widget") not in h.service._views, (
+            "a read that began before the drop keeps nothing"
+        )
     finally:
         await h.close()
 

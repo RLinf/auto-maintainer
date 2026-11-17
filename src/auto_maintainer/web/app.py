@@ -34,6 +34,7 @@ from fastapi.responses import (
     Response,
 )
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.gzip import GZipMiddleware
 
 from ..domain.forges import check_repo, default_forge
 from ..service import Service
@@ -127,12 +128,13 @@ def create_app(
     app.state.sessions = auth.Sessions(data_dir / ".session_secret")
     app.state.cookie_secure = cookie_secure
     app.state.records = RecordsDoor(app, data_dir / "sandbox" / "records.sock")
+    """The agents' read-only door to this dashboard, started by the first conversation."""
     app.state.live_turns = LiveTurns()
     app.state.recent = Recent(RECENT_SECONDS, lambda: service.bus.count)
-    """The agents' read-only door to this dashboard, started by the first conversation."""
 
     install_csrf(app)
     install_recent(app)
+    install_compression(app)
 
     app.include_router(
         auth.router(api_url, allow_dev_login, links_path, gh_signin, forge_signins)
@@ -326,15 +328,37 @@ def install_csrf(app: FastAPI) -> None:
         return response
 
 
+GZIP_MIN_BYTES = 1024
+"""Answers smaller than this go out as they are: compressing them saves nothing."""
+
+
+def install_compression(app: FastAPI) -> None:
+    """Compress answers for browsers that accept it: the PR list and a PR's page are
+    hundreds of kilobytes of JSON and the dashboard's script a megabyte, which a
+    person far from the host otherwise waits for on every load. The live event
+    stream goes out uncompressed, as Starlette leaves ``text/event-stream``."""
+    app.add_middleware(GZipMiddleware, minimum_size=GZIP_MIN_BYTES, compresslevel=5)
+
+
+class HashedAssets(StaticFiles):
+    """The build's files: each name carries a hash of its content, so a browser keeps
+    them for good instead of asking again on every load."""
+
+    def file_response(self, *args: Any, **kwargs: Any) -> Response:
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        return response
+
+
 def install_spa(app: FastAPI) -> None:
     """Serve the built dashboard: its files, and ``index.html`` for every page route.
 
     ``index.html`` is sent with ``Cache-Control: no-cache``, so a browser asks again
     after every restart or deploy and loads the new build; the files under
-    ``/assets`` carry a content hash in their names and may be cached.
+    ``/assets`` carry a content hash in their names and are kept (``HashedAssets``).
     """
     if (STATIC / "assets").is_dir():
-        app.mount("/assets", StaticFiles(directory=STATIC / "assets"), name="assets")
+        app.mount("/assets", HashedAssets(directory=STATIC / "assets"), name="assets")
 
     @app.get("/{path:path}", include_in_schema=False)
     async def spa(path: str) -> Response:

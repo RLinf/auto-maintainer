@@ -66,6 +66,27 @@ async def test_tabs_asking_at_once_share_one_answer_until_something_changes() ->
     assert (await recent.json(("prs", "maria"), compute)).body == b'{"n":4}'
 
 
+async def test_an_agents_progress_leaves_the_kept_lists_alone() -> None:
+    """Agents report a step a second each; were each step a change, no list would
+    stay kept long enough for the next tab to get it."""
+    from auto_maintainer.engine.bus import EventBus
+
+    bus = EventBus()
+    recent = Recent(60, lambda: bus.count)
+    calls = 0
+
+    async def compute() -> dict[str, int]:
+        nonlocal calls
+        calls += 1
+        return {"n": calls}
+
+    assert (await recent.json(("prs", "maria"), compute)).body == b'{"n":1}'
+    bus.notify(Event(kind=EventKind.JOB_PROGRESS, repo=REPO, payload={"job": "j"}))
+    assert (await recent.json(("prs", "maria"), compute)).body == b'{"n":1}'
+    bus.notify(Event(kind=EventKind.PR_REFRESHED, repo=REPO))
+    assert (await recent.json(("prs", "maria"), compute)).body == b'{"n":2}'
+
+
 async def test_a_failed_answer_is_asked_again() -> None:
     recent = Recent(60, lambda: 0)
     calls = 0
