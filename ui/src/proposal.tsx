@@ -160,6 +160,8 @@ export function ProposalCard({
   const isDraftPr = isFix && payload.draft === true;
   // A PR's new title and description are set only by a person, as themselves.
   const isEdit = kind === "pr.edit";
+  // A fork's held workflows are approved only by a person too, as themselves.
+  const onlyAsMe = isEdit || kind === "ci.approve_run";
   // A fix, or a merge of the base branch, goes onto the PR's branch or as a PR into
   // it; one who cannot push to the branch (a fork that does not let them) opens a PR.
   const isMerge = isFix && !!str(payload.merge_ref);
@@ -172,7 +174,7 @@ export function ProposalCard({
   const reviewAuthor = kind === "review.update" ? str(payload.author) : "";
   const notTheAuthor = !!reviewAuthor && me?.login !== reviewAuthor;
   // A fix is pushed only by a person; the service's own account never pushes to a repository.
-  const postAsMe = isFix || isEdit || !!reviewAuthor || (canAsMe && asMe);
+  const postAsMe = isFix || onlyAsMe || !!reviewAuthor || (canAsMe && asMe);
   const hasComments = Array.isArray(payload.comments) && (payload.comments as unknown[]).length > 0;
   const diff = usePrDiff(action?.repo ?? "", action?.number, expanded && hasComments);
   const files = useMemo(() => (diff.data ? parseDiff(diff.data.diff) : null), [diff.data]);
@@ -387,13 +389,13 @@ export function ProposalCard({
           <div className="split-button">
             <button
               className="primary"
-              disabled={approve.isPending || ((isFix || isEdit || !!reviewAuthor) && !me?.can_post_as_me) || notTheAuthor}
+              disabled={approve.isPending || ((isFix || onlyAsMe || !!reviewAuthor) && !me?.can_post_as_me) || notTheAuthor}
               title={
                 notTheAuthor
                   ? `${t("Only the reviewer who posted it can change it:")} @${reviewAuthor}`
                   : isFix && !me?.can_post_as_me
                     ? t("Sign in with GitHub to open it as yourself.")
-                    : isEdit && !me?.can_post_as_me
+                    : onlyAsMe && !me?.can_post_as_me
                       ? t("Sign in with GitHub to do it as yourself.")
                     : reviewAuthor && !me?.can_post_as_me
                       ? t("Sign in with GitHub to do it as yourself.")
