@@ -33,9 +33,10 @@ from fresh reads:
    them to be idle, when the run needs them (``lab --gpus``). The playbook closes
    the session when the agent is done.
 3. The agent's record goes into the PR's review: the review draft while it waits for
-   a decision, an edit of the review once it was posted, and, for a person's request
-   on a PR with no review, a comment drafted for them. Why a run did not happen is
-   the job's result.
+   a decision, an edit of the review once it was posted (made at once when the
+   service posted it or the review's author asked for the run), and, for a person's
+   request on a PR with no review, a comment drafted for them. Why a run did not
+   happen is the job's result.
 """
 
 from __future__ import annotations
@@ -545,19 +546,23 @@ class ReproducePlaybook(Playbook):
         by: str | None,
         request: Event,
     ) -> Action | None:
-        """An edit of the posted review that adds the reproduction's record, for
-        whoever posted it to approve; ``None`` when the agent could not revise it."""
+        """An edit of the posted review that adds the reproduction's record;
+        ``None`` when the agent could not revise it. Approved at once when the
+        service posted the review or the review's author asked for the reproduction
+        (``pipeline.REVISED_ON_REQUEST``); otherwise it waits for whoever posted it."""
         new_payload = await self._revised_payload(ctx, record, pr, record_text)
         if new_payload is None:
             return None
-        return posted_update_action(
+        action = posted_update_action(
             record,
             new_payload,
             discriminator=f"req:{request.id}:review",
             rationale="add the result of a reproduction to the posted review"
             + (f", asked by {by}" if by else ""),
-            draft_for=by,
+            draft_for=by or record.approver,
         )
+        action.provenance.requested_by = by
+        return action
 
     async def _revise(
         self,

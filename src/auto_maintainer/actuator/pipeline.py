@@ -60,6 +60,13 @@ RUN_ON_REQUEST = frozenset({ActionKind.LAB_REPRODUCE})
 reproduction someone asked for, whose request is its approval. The repository's
 rule still decides on that approval (``off`` refuses it, a pause holds it)."""
 
+REVISED_ON_REQUEST = frozenset({"reproduce"})
+"""Playbooks whose edit of a posted review (``review.update``) runs without a
+separate approval: a reproduction's result goes into the review at once when the
+service posted it (and someone asked for the reproduction or approved the review)
+or when the review's own author asked for it and is signed in. A review someone
+else posted waits for its author."""
+
 SCHEDULED = frozenset(
     {
         ActionKind.PR_UPDATE_BRANCH,
@@ -238,6 +245,28 @@ class ActionPipeline:
             and not (arm.auto and action.kind in ONLY_THE_SCHEDULER)
         )
 
+    async def _revised_on_request(self, action: Action) -> bool:
+        """Whether ``action`` is approved on creation: an edit of a posted review by
+        a ``REVISED_ON_REQUEST`` playbook, when the service posted it (and someone
+        asked for the reproduction or approved the review) or when the review's own
+        author asked for it and is signed in."""
+        if (
+            action.kind != ActionKind.REVIEW_UPDATE
+            or action.provenance.playbook not in REVISED_ON_REQUEST
+            or not action.draft_for
+        ):
+            return False
+        author = action.payload.get("author") or None
+        if author is None:
+            return True
+        who = action.provenance.requested_by
+        return (
+            bool(who)
+            and author.lower() == who.lower()
+            and action.draft_for.lower() == who.lower()
+            and bool(self.signed_in and await self.signed_in(action.draft_for))
+        )
+
     async def _profile_for(self, action: Action) -> RepoProfile | None:
         return await self.profiles.active(action.repo)
 
@@ -342,6 +371,14 @@ class ActionPipeline:
             )
             if action.kind in RUN_ON_REQUEST and action.draft_for:
                 await self.approve(proposal.id, action.draft_for)
+                return await self.store.get_action(action.id) or record
+            if await self._revised_on_request(action):
+                assert action.draft_for
+                await self.approve(
+                    proposal.id,
+                    action.draft_for,
+                    post_as=action.payload.get("author") or None,
+                )
                 return await self.store.get_action(action.id) or record
             if await self._scheduled(action):
                 assert action.draft_for
