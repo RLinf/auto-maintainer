@@ -14,6 +14,7 @@ import { Icon } from "../icons";
 import { ProposalCard, ServiceMergeBaseButton } from "../proposal";
 import { Skeleton, useRememberedView, useTab } from "../ui";
 import { ACTIVE, useWork } from "../jobs";
+import { GuideHello } from "./Guide";
 import { AgentWork, GettingStarted, ReviewCard, useAutomations } from "./homeParts";
 import { ChangeCard } from "./Memory";
 import { QuestionCard } from "./Questions";
@@ -151,9 +152,14 @@ export default function HomePage({ me }: { me: Me }) {
             </Link>
           </p>
         </div>
+        <Link to="/guide/home" className="guide-link" title={t("How this page works")} aria-label={t("How this page works")}>
+          <Icon name="compass" size={15} />
+          <span className="hide-narrow">{t("Guide")}</span>
+        </Link>
       </div>
 
       <RepoTabs names={names} scope={scope} onPick={setScope} count={(repo) => allRows.filter((p) => p.repo === repo && NEEDS_REVIEW.has(p.review_state)).length} />
+      <GuideHello />
       <GettingStarted repos={repoRows} prs={rows} automations={automations} />
       <AgentWork me={me} />
       <ReviewCard rows={needs} all={rows} loading={prs.isLoading} me={me} automations={automations} searchParams={viewParams} />
