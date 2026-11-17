@@ -261,6 +261,13 @@ class RootCause(BaseModel):
         "changed files and lines.",
     )
     fix: str = Field(default="", description="The smallest change that makes it pass.")
+    static: bool = Field(
+        default=False,
+        description="True when a linter, formatter, type checker, or other static "
+        "check reports it: a rule violation that an edit to the lines it names fixes "
+        "without changing what the code does. False for a failing test, build, or "
+        "anything that runs the code.",
+    )
     evidence: list[str] = Field(
         default_factory=list, description="Up to five log lines that show it."
     )

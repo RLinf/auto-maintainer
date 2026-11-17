@@ -24,6 +24,16 @@ its checkout to the machine (``lab --sync``) and runs the failing steps there
 or it knows why not. It never commits, pushes, or posts. The playbook closes the
 session and proposes the diff as a ``pr.fix`` drafted for that person, who pushes it as
 themselves, as for a review's findings.
+
+The merge schedule asks too (``schedule: true``), on a scheduled PR's turn, for the
+maintainer who scheduled it, when every failed job's root cause is a static check's
+finding and the repository lets the schedule fix those (``merge.schedule.fix``). Then
+the agent fixes only what those checks report, asks nobody, and runs no repository
+code; a fix that changes only the files their causes name, in at most
+``max_lines`` lines, is drafted as a ``pr.fix`` onto the PR's branch that the
+pipeline approves as the scheduler (``actuator/pipeline.py:SCHEDULED``). Any other
+fix is proposed to the scheduler as usual. How it went is kept under
+``merge_schedule.fix_key`` for the merge job, which it wakes.
 """
 
 from __future__ import annotations
@@ -31,10 +41,17 @@ from __future__ import annotations
 from typing import Any
 
 from ..domain import forges
-from ..domain.actions import ActionKind, ActionStatus, FixPrPayload, make_action
+from ..domain.actions import (
+    ActionKind,
+    ActionStatus,
+    FixPrPayload,
+    Provenance,
+    make_action,
+)
 from ..domain.agents import AgentTask, TaskKind
 from ..domain.events import Event, EventKind
-from ..domain.ids import short_sha
+from ..domain.ids import same_commit, short_sha
+from ..domain.merge_schedule import fix_key
 from ..domain.profile import RepoProfile
 from ..domain.records import ActionRecord, CiObservation
 from ..domain.snapshot import PrSnapshot, PrState
@@ -87,6 +104,8 @@ ON_MACHINE = """- Test your fix on test machine {lab}, never here: `lab --sync` 
 
 NO_MACHINE = """- Never run the repository's tests, builds, scripts, or the PR's code here: the repository's code runs only on its test machines, and none was chosen. Check what you changed by reading it and with the repository's static linters when it has them, and say which jobs and tests a run should cover."""
 
+SCHEDULED_FIX = """- This fix is for the merge schedule, which pushes it onto the PR's branch as {who} without showing it to anyone first, so the rules above narrow: fix only what the static checks below report (linters, formatters, type checkers), with the smallest edit to the lines they name, keeping what the code does. Change no other line and no other file, never ask anything, and never run the repository's code or tests. A fix that changes another file, or more than {max_lines} lines, is not pushed."""
+
 SESSION_GRACE_SECONDS = 600
 """How much longer than its session the agent's run may take, to finish its account."""
 
@@ -123,6 +142,26 @@ def diagnoses(observations: list[CiObservation], names: set[str]) -> str:
     return "\n".join(lines)
 
 
+def static_files(observations: list[CiObservation], names: set[str]) -> set[str]:
+    """The files that the static checks' findings among the failed jobs ``names``
+    name (``RootCause.static``): all the schedule's own fix may change."""
+    return {
+        c.path
+        for o in observations
+        if o.check_name in names and o.root_cause is not None and o.root_cause.static
+        for c in o.root_cause.culprits
+    }
+
+
+def changed_lines(patch: str) -> int:
+    """Added and removed lines in a ``git diff``."""
+    return sum(
+        1
+        for line in patch.splitlines()
+        if line[:1] in ("+", "-") and not line.startswith(("+++", "---"))
+    )
+
+
 def _request(ctx: PlaybookContext, event: Event) -> Event:
     """The request that started the job: its first event (later ones only wake it)."""
     return Event.model_validate(ctx.job.events[0]) if ctx.job.events else event
@@ -153,15 +192,38 @@ class FixCiPlaybook(Playbook):
         pr = await ctx.forge.get_pr(request.repo, request.number)
         if pr is None or pr.state != PrState.OPEN:
             return PlaybookResult(result={"skipped": "the PR is not open"})
+        scheduled = bool(request.payload.get("schedule"))
+        plan = profile.merge.schedule.fix
+        armed = 0
+        if scheduled:
+            arm = await ctx.store.get_arm(pr.repo, pr.number)
+            tried = await ctx.store.get_state(fix_key(pr.repo, pr.number)) or {}
+            if (
+                arm is None
+                or arm.armed_by.lower() != by.lower()
+                or not same_commit(arm.sha, pr.head_sha)
+                or not same_commit(tried.get("sha"), pr.head_sha)
+                or tried.get("outcome") != "started"
+            ):
+                return PlaybookResult(
+                    result={"skipped": f"{by} does not schedule it at this head"}
+                )
+            armed = int(arm.armed_at.timestamp())
+            if not plan.enabled:
+                return await self._refused(
+                    ctx, pr, "the repository does not let the schedule fix CI"
+                )
         chosen = set(request.payload.get("jobs") or [])
         jobs = failed_jobs(pr, profile, chosen)
         outside = await outside_logs(ctx, pr, profile, chosen)
         if not jobs:
+            if scheduled:
+                return await self._refused(ctx, pr, "no CI job failed at its head")
             return PlaybookResult(result={"skipped": "no CI job failed at its head"})
 
         session_id: str | None = None
         machine_note = ""
-        lab_action = str(request.payload.get("lab_action") or "")
+        lab_action = "" if scheduled else str(request.payload.get("lab_action") or "")
         if lab_action:
             record = await ctx.store.get_action(lab_action)
             if record is not None and record.status in (
@@ -187,9 +249,8 @@ class FixCiPlaybook(Playbook):
             for c in failing_checks(pr, profile)
             if not chosen or c.name in chosen
         }
-        found = diagnoses(
-            await ctx.store.list_ci_observations(pr.repo, sha=pr.head_sha), names
-        )
+        observations = await ctx.store.list_ci_observations(pr.repo, sha=pr.head_sha)
+        found = diagnoses(observations, names)
         info = await ctx.forge.get_repo(pr.repo)
         workdir = await ctx.workspace.prepare(
             pr.repo, pr.number, pr.head_sha, info.default_branch
@@ -214,11 +275,16 @@ class FixCiPlaybook(Playbook):
                 part
                 for part in [
                     FIX_CI.format(
-                        who=f"{by}, a maintainer",
+                        who=f"{by}, the maintainer who scheduled it to merge"
+                        if scheduled
+                        else f"{by}, a maintainer",
                         read_log=_read_log(pr.repo),
                         test=ON_MACHINE.format(lab=lab) if token else NO_MACHINE,
                         public_language=profile.languages.public,
                     ),
+                    SCHEDULED_FIX.format(who=by, max_lines=plan.max_lines)
+                    if scheduled
+                    else "",
                     machine_note,
                     f"The environment and rules of {lab}, from its maintainers; follow "
                     f"them:\n{machine.description.strip()}"
@@ -308,6 +374,8 @@ class FixCiPlaybook(Playbook):
             error = answer.error if answer else "no answer"
             if answer is not None and may_succeed_later(answer):
                 raise RuntimeError(f"the CI fix agent failed: {error}")
+            if scheduled:
+                return await self._refused(ctx, pr, f"the agent failed: {error}")
             return PlaybookResult(failed=f"the CI fix agent failed: {error}")
         ran = [
             f"- `{c.get('command')}`: "
@@ -320,6 +388,13 @@ class FixCiPlaybook(Playbook):
             for c in commands
         ]
         if not changes.files:
+            if scheduled:
+                return await self._refused(
+                    ctx,
+                    pr,
+                    "the agent changed nothing"
+                    + (f": {account[-400:]}" if account else ""),
+                )
             return PlaybookResult(
                 result={
                     "skipped": "the agent changed nothing",
@@ -342,6 +417,59 @@ class FixCiPlaybook(Playbook):
                 f"- {f.id}: {f.reason}" for f in fix.skipped
             ]
         lines += ["", f"For #{pr.number}, from its CI at {short_sha(pr.head_sha)}."]
+        outcome = {
+            "files": changes.files,
+            "fixed": [f.id for f in fix.fixed],
+            "commands": ran,
+            "summary": account[-2000:],
+            **({"tested_on": lab, "commit": pr.head_sha} if ran else {}),
+        }
+        if scheduled:
+            beyond = sorted(set(changes.files) - static_files(observations, names))
+            size = changed_lines(changes.patch)
+            if not beyond and size <= plan.max_lines:
+                lines += [
+                    "",
+                    f"Pushed by the merge schedule for {by}, who scheduled the PR.",
+                ]
+                action = make_action(
+                    ActionKind.PR_FIX,
+                    pr.repo,
+                    FixPrPayload(
+                        title=fix.title.strip()[:120] or f"Fix lint on #{pr.number}",
+                        body="\n".join(lines).strip(),
+                        patch=changes.patch,
+                        base_sha=pr.head_sha,
+                        files=changes.files,
+                        findings=[f.id for f in fix.fixed] or sorted(names),
+                        runtime=answer.runtime,
+                        requested_by=by,
+                        target="branch",
+                        schedule_fix=True,
+                    ),
+                    number=pr.number,
+                    head_sha=pr.head_sha,
+                    # One per schedule of the PR and head.
+                    discriminator=f"schedule:{armed}:fix:{pr.head_sha[:12]}",
+                    rationale=f"fixes what {', '.join(sorted(names))} reports, in "
+                    f"{size} lines; scheduled by {by}",
+                    draft_for=by,
+                    provenance=Provenance(requested_by=by, scheduled_by=by),
+                )
+                await self._noted(ctx, pr, "proposed", action_id=action.id)
+                return PlaybookResult(
+                    actions=[action], events=[self._wake(pr)], result=outcome
+                )
+            why = (
+                f"its fix also changes {', '.join(beyond[:5])}, which the static "
+                "checks do not name"
+                if beyond
+                else f"its fix changes {size} lines, more than the "
+                f"{plan.max_lines} the schedule pushes by itself"
+            )
+            await self._noted(
+                ctx, pr, "refused", f"{why}; it waits for {by} under Approvals"
+            )
         action = make_action(
             ActionKind.PR_FIX,
             pr.repo,
@@ -364,14 +492,46 @@ class FixCiPlaybook(Playbook):
         )
         return PlaybookResult(
             actions=[action],
-            result={
-                "files": changes.files,
-                "fixed": [f.id for f in fix.fixed],
-                "commands": ran,
-                "summary": account[-2000:],
-                **({"tested_on": lab, "commit": pr.head_sha} if ran else {}),
+            events=[self._wake(pr)] if scheduled else [],
+            result=outcome,
+        )
+
+    @staticmethod
+    def _wake(pr: PrSnapshot) -> Event:
+        """Wakes the PR's merge job to read how the schedule's fix went."""
+        return Event(
+            kind=EventKind.MERGE_QUEUE,
+            repo=pr.repo,
+            number=pr.number,
+            payload={"after": "fix"},
+        )
+
+    async def _noted(
+        self,
+        ctx: PlaybookContext,
+        pr: PrSnapshot,
+        outcome: str,
+        why: str = "",
+        action_id: str = "",
+    ) -> None:
+        await ctx.store.set_state(
+            fix_key(pr.repo, pr.number),
+            {
+                "sha": pr.head_sha,
+                "outcome": outcome,
+                "why": why,
+                "action_id": action_id,
+                "at": ctx.clock.now().isoformat(),
+                "job": ctx.job.id,
             },
         )
+
+    async def _refused(
+        self, ctx: PlaybookContext, pr: PrSnapshot, why: str
+    ) -> PlaybookResult:
+        """The schedule's fix is not made: note why and wake the merge job."""
+        await self._noted(ctx, pr, "refused", why)
+        return PlaybookResult(events=[self._wake(pr)], result={"refused": why})
 
     @staticmethod
     def _session(record: ActionRecord | None) -> tuple[str | None, str]:

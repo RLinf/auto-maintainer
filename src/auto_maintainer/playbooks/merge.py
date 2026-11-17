@@ -32,7 +32,9 @@ when the repository allows it (``merge.schedule.resolve``): ``playbooks/merge_ba
 resolves only minor conflicts, as the scheduler, and anything else sends the PR to
 the failure lane. Before a step the forge would refuse, the schedule says why
 instead of trying: a fork whose author lets no maintainer push to it, a merge GitHub
-itself still reports blocked (``PrSnapshot.merge_state``), a required check whose
+itself still reports blocked (``PrSnapshot.merge_state``) when the service's account
+could merge past the rule that blocks it (``RepoInfo.service_bypasses_rules``; one
+that cannot is refused by GitHub, which names the rule), a required check whose
 workflow skips the PR (``domain/workflows.py``). A step the forge's rate limit
 refused is taken again once the limit resets; a branch that merges only through
 GitHub's merge queue is queued.
@@ -52,6 +54,7 @@ from ..domain.actions import (
     ActionHints,
     ActionKind,
     ApproveRunsPayload,
+    CancelRunsPayload,
     CommentUpsertPayload,
     LabelPayload,
     MergePayload,
@@ -72,14 +75,18 @@ from ..domain.merge_gate import (
 )
 from ..domain.merge_schedule import (
     ACTIVE,
+    FIX_SECONDS,
+    FIXES_PER_SCHEDULE,
     LANDING_SECONDS,
     RESOLVE_SECONDS,
     UNKNOWN_READS,
     UPDATES_PER_TURN,
     WAITING,
     ScheduleState,
+    fix_key,
     holding_back,
     left_for_merge,
+    next_position,
     only_base_merged,
     ordered,
     ready_conditions,
@@ -91,8 +98,7 @@ from ..domain.merge_schedule import (
 from ..domain.permissions import Permission
 from ..domain.profile import RepoProfile
 from ..domain.records import ActionStatus, RootCause
-from ..domain.review import ReviewState
-from ..domain.run_ci import ci_view, latest_checks, rerun_targets
+from ..domain.run_ci import ci_view, latest_checks, rerun_targets, unfinished_runs
 from ..domain.snapshot import (
     CheckConclusion,
     CheckStatus,
@@ -258,6 +264,10 @@ class MergePlaybook(Playbook):
                 kind, why, scope = failed
                 if why.startswith(RATE_LIMITED):
                     return await self._later(ctx, profile, pr, state, kind, why)
+                if kind == ActionKind.PR_FIX and await self._is_fix(ctx, event):
+                    # Pushing the schedule's fix failed: a person's turn.
+                    await self._fix_noted(ctx, pr, "refused", why)
+                    return await self._lane(ctx, profile, pr, arm, state, why)
                 if kind == ActionKind.PR_FIX:
                     # Pushing the schedule's resolution failed: a person's turn.
                     await ctx.store.set_state(
@@ -337,6 +347,7 @@ class MergePlaybook(Playbook):
             )
             if not again:
                 return PlaybookResult(
+                    actions=await self._quiet(ctx, profile, info, pr, arm, state),
                     wait=wait.model_copy(
                         update={"seconds": BLOCKED_SECONDS, "reason": "merge blocked"}
                     ),
@@ -345,6 +356,8 @@ class MergePlaybook(Playbook):
             state.retry = False
             state.phase = "queued"
             state.detail = "trying its merge again"
+        if state.phase == "fixing" and same_commit(state.sha, pr.head_sha):
+            return await self._fixing(ctx, profile, info, pr, arm, state, wait)
         if state.phase == "failed" and same_commit(state.sha, pr.head_sha):
             ran = ci_view(pr, profile.label_for("ci_gate"), profile.ci.start).state
             # Other checks may still run after a run that ended failed it: only the
@@ -357,10 +370,13 @@ class MergePlaybook(Playbook):
                 or state.retry
             ):
                 return PlaybookResult(
+                    actions=await self._quiet(ctx, profile, info, pr, arm, state),
                     wait=wait.model_copy(update={"reason": "in the failure lane"}),
                     result={"phase": "failed"},
                 )
-            # Someone ran its CI again (on the forge): it takes a turn again.
+            # Someone ran its CI again (on the forge): it takes a turn again, after
+            # every PR scheduled meanwhile.
+            arm = await self._to_bottom(ctx, arm)
             state.phase = "queued"
             state.detail = "its CI ran again"
         if conflict is not None and not resolvable:
@@ -392,6 +408,9 @@ class MergePlaybook(Playbook):
                 ctx, profile, info, pr, state, "held", detail, wake=True
             )
             return PlaybookResult(
+                actions=await self._quiet(
+                    ctx, profile, info, pr, arm, state, _numbers(events)
+                ),
                 events=events,
                 wait=wait.model_copy(update={"reason": f"held back: {detail}"}),
                 result={"phase": "held", "failing": [i.name for i in back]},
@@ -413,6 +432,7 @@ class MergePlaybook(Playbook):
                 ctx, profile, info, pr, state, "approval", _waiting_for(waiting)
             )
             return PlaybookResult(
+                actions=await self._quiet(ctx, profile, info, pr, arm, state),
                 wait=wait.model_copy(update={"reason": "waiting for approvals"}),
                 result={"phase": "approval"},
             )
@@ -435,6 +455,7 @@ class MergePlaybook(Playbook):
                 detail = f"after #{ahead[0]}" if ahead else "waiting for a turn"
                 await self._set(ctx, profile, info, pr, state, "queued", detail)
                 return PlaybookResult(
+                    actions=await self._quiet(ctx, profile, info, pr, arm, state),
                     wait=wait.model_copy(
                         update={"reason": f"in the merge schedule; {detail}"}
                     ),
@@ -641,6 +662,45 @@ class MergePlaybook(Playbook):
                 actions=[action], wait=wait, result={"phase": "updating"}
             )
 
+        stopped = [
+            c
+            for c in latest_checks(pr.checks)
+            if c.run_id in set(state.cancelled)
+            and c.conclusion == CheckConclusion.CANCELLED
+        ]
+        state.cancelled = []
+        if stopped:
+            # Cancelled while another PR held the turn: run again, past the budget.
+            targets = rerun_targets(stopped)
+            state.rerun_of = [c.id for c in stopped]
+            await self._set(
+                ctx,
+                profile,
+                info,
+                pr,
+                state,
+                "rerunning",
+                "running again the CI the schedule cancelled while another PR "
+                "held the turn",
+            )
+            return PlaybookResult(
+                actions=[
+                    step(
+                        ActionKind.CI_RERUN_FAILED,
+                        RerunPayload(
+                            run_id=t.run_id,
+                            workflow=t.workflow,
+                            attempt=t.attempt,
+                            requested=True,
+                        ),
+                        f"resume:{t.run_id}:{t.attempt or 1}",
+                        "the schedule cancelled it while another PR held the turn",
+                    )
+                    for t in targets
+                ],
+                wait=wait,
+                result={"phase": "rerunning"},
+            )
         view = ci_view(pr, profile.label_for("ci_gate"), profile.ci.start)
         start = profile.ci.start
         if view.state == "gated" and view.label:
@@ -664,15 +724,15 @@ class MergePlaybook(Playbook):
             runs = sorted({c.run_id for c in view.held if c.run_id})
             workflows = sorted({c.workflow or c.name for c in view.held})
             # Proposed to the scheduler either way; the pipeline approves it as them
-            # only on an arm they made by hand, so on an automatic one it waits for
-            # them to approve running a fork's code as themselves.
+            # only on an arm they made by hand at code they saw, so otherwise it
+            # waits for them to approve running a fork's code as themselves.
             action = step(
                 ActionKind.CI_APPROVE_RUN,
                 ApproveRunsPayload(run_ids=runs, workflows=workflows),
                 "approve:" + ",".join(str(r) for r in runs),
                 "GitHub holds its workflows for a maintainer",
             )
-            if arm.auto:
+            if arm.auto or arm.unseen:
                 state.approval_needed = True
                 detail = (
                     "GitHub holds "
@@ -1186,6 +1246,9 @@ class MergePlaybook(Playbook):
             causes, base = found
             await record(ctx, pr, failures, causes)
             state.causes = explained(failures, causes, base)
+            fixing = await self._start_fix(
+                ctx, profile, pr, arm, state, failures, causes
+            )
             if state.causes:
                 actions.append(
                     make_action(
@@ -1206,10 +1269,31 @@ class MergePlaybook(Playbook):
                         ),
                     )
                 )
-        actions.append(self._tell(pr, arm, "merge.failed", why))
+            if fixing is not None:
+                return fixing.model_copy(
+                    update={"actions": [*actions, *fixing.actions]}
+                )
+        return await self._lane(ctx, profile, pr, arm, state, why, actions)
+
+    async def _lane(
+        self,
+        ctx: PlaybookContext,
+        profile: RepoProfile,
+        pr: PrSnapshot,
+        arm: MergeArm,
+        state: ScheduleState,
+        why: str,
+        actions: list[Action] | None = None,
+    ) -> PlaybookResult:
+        """Put the PR in the failure lane, with what ``state`` says failed, and pass
+        the turn on."""
+        actions = [*(actions or []), self._tell(pr, arm, "merge.failed", why)]
         info = await ctx.forge.get_repo(pr.repo)
         events = await self._set(
             ctx, profile, info, pr, state, "failed", why, wake=True
+        )
+        actions += await self._quiet(
+            ctx, profile, info, pr, arm, state, _numbers(events)
         )
         return PlaybookResult(
             actions=actions,
@@ -1218,6 +1302,232 @@ class MergePlaybook(Playbook):
                 kinds=WAIT_KINDS, seconds=WAIT_SECONDS, reason="in the failure lane"
             ),
             result={"phase": "failed", "why": why},
+        )
+
+    async def _quiet(
+        self,
+        ctx: PlaybookContext,
+        profile: RepoProfile,
+        info: RepoInfo,
+        pr: PrSnapshot,
+        arm: MergeArm,
+        state: ScheduleState,
+        taking: list[int] | None = None,
+    ) -> list[Action]:
+        """Where scheduled PRs take turns (``serial``), the step that cancels this
+        PR's unfinished workflow runs while another holds the turn (or takes it now,
+        ``taking``): once that one merges, they test a base that is gone, and they
+        hold CI machines it needs. The runs go into ``state.cancelled``, so its own
+        turn runs them again."""
+        if not serial(info, profile):
+            return []
+        runs = unfinished_runs(pr.checks)
+        if not runs:
+            return []
+        holders = [n for n in taking or [] if n != pr.number]
+        if not holders:
+            for other in ordered(await ctx.store.list_arms(pr.repo)):
+                if other.number == pr.number:
+                    continue
+                if (await load_state(ctx, pr.repo, other.number)).phase in ACTIVE:
+                    holders.append(other.number)
+        if not holders:
+            return []
+        state.cancelled = sorted({*state.cancelled, *runs})
+        await ctx.store.set_state(
+            state_key(pr.repo, pr.number), state.model_dump(mode="json")
+        )
+        return [
+            cancel_runs_action(
+                pr,
+                runs,
+                f"#{holders[0]} holds the merge schedule's turn, and the base moves "
+                "when it merges",
+                by=arm.armed_by,
+                scheduled=int(arm.armed_at.timestamp()),
+            )
+        ]
+
+    async def _to_bottom(self, ctx: PlaybookContext, arm: MergeArm) -> MergeArm:
+        """``arm`` moved after every other PR in its repository's schedule."""
+        others = [
+            a for a in await ctx.store.list_arms(arm.repo) if a.number != arm.number
+        ]
+        moved = arm.model_copy(
+            update={"position": next_position(others, ctx.clock.now())}
+        )
+        await ctx.store.save_arm(moved)
+        return moved
+
+    async def _start_fix(
+        self,
+        ctx: PlaybookContext,
+        profile: RepoProfile,
+        pr: PrSnapshot,
+        arm: MergeArm,
+        state: ScheduleState,
+        failures: list,
+        causes: list[RootCause] | None,
+    ) -> PlaybookResult | None:
+        """Start the schedule's own fix (``merge.schedule.fix``, by
+        ``playbooks/fix_ci``, for the scheduler) when every real failure is a static
+        check's finding, keeping the turn while it runs; ``None`` when it does not
+        fix this one: something else fails, its author lets no maintainer push to it,
+        a fix was tried at this head, or ``FIXES_PER_SCHEDULE`` were pushed."""
+        if not profile.merge.schedule.fix.enabled:
+            return None
+        real = sorted({f.check.name for f in failures if f.real})
+        by_job = {job: c for c in causes or [] for job in c.jobs}
+        if not real or any(
+            (c := by_job.get(name)) is None or not c.static or c.origin == "infra"
+            for name in real
+        ):
+            return None
+        if (
+            pr.head_repo not in (None, "", pr.repo)
+            and pr.maintainer_can_modify is False
+        ):
+            return None
+        tried = await ctx.store.get_state(fix_key(pr.repo, pr.number)) or {}
+        if same_commit(tried.get("sha"), pr.head_sha):
+            return None
+        pushed = [
+            r
+            for r in await ctx.store.list_actions(
+                repo=pr.repo,
+                number=pr.number,
+                kinds=[ActionKind.PR_FIX],
+                since=arm.armed_at,
+            )
+            if r.action.payload.get("schedule_fix")
+        ]
+        if len(pushed) >= FIXES_PER_SCHEDULE:
+            return None
+        await self._fix_noted(ctx, pr, "started")
+        info = await ctx.forge.get_repo(pr.repo)
+        await self._set(
+            ctx,
+            profile,
+            info,
+            pr,
+            state,
+            "fixing",
+            "an agent fixes what " + ", ".join(real) + " reports",
+        )
+        return PlaybookResult(
+            events=[
+                Event(
+                    kind=EventKind.DASHBOARD_COMMAND,
+                    repo=pr.repo,
+                    number=pr.number,
+                    payload={
+                        "command": "fix_ci",
+                        "by": arm.armed_by,
+                        "jobs": real,
+                        "schedule": True,
+                    },
+                )
+            ],
+            wait=Wait(
+                kinds=WAIT_KINDS, seconds=FIX_SECONDS, reason="fixing its static checks"
+            ),
+            result={"phase": "fixing", "jobs": real},
+        )
+
+    async def _fix_noted(
+        self, ctx: PlaybookContext, pr: PrSnapshot, outcome: str, why: str = ""
+    ) -> None:
+        await ctx.store.set_state(
+            fix_key(pr.repo, pr.number),
+            {
+                "sha": pr.head_sha,
+                "outcome": outcome,
+                "why": why,
+                "at": ctx.clock.now().isoformat(),
+            },
+        )
+
+    async def _is_fix(self, ctx: PlaybookContext, event: Event) -> bool:
+        record_ = await ctx.store.get_action(str(event.payload.get("action_id") or ""))
+        return bool(record_ and record_.action.payload.get("schedule_fix"))
+
+    async def _fixing(
+        self,
+        ctx: PlaybookContext,
+        profile: RepoProfile,
+        info: RepoInfo,
+        pr: PrSnapshot,
+        arm: MergeArm,
+        state: ScheduleState,
+        wait: Wait,
+    ) -> PlaybookResult:
+        """Follow the schedule's fix of the PR's static checks at this head until its
+        push shows (a new head, which the schedule keeps as its scheduler's own
+        push), or send the PR to the failure lane with why it was not fixed."""
+        tried = await ctx.store.get_state(fix_key(pr.repo, pr.number)) or {}
+        if not same_commit(tried.get("sha"), pr.head_sha):
+            tried = {}
+        outcome = tried.get("outcome")
+        jobs = ", ".join(state.failed_jobs) or "its static checks"
+        if outcome not in ("started", "proposed"):
+            why = tried.get("why") or "it was not kept"
+            return await self._lane(
+                ctx,
+                profile,
+                pr,
+                arm,
+                state,
+                f"{jobs} failed, and the schedule did not fix it: {why}",
+            )
+        now = ctx.clock.now()
+        began = datetime.fromisoformat(str(tried["at"]))
+        detail = f"an agent fixes what {jobs} reports"
+        pending = False
+        if outcome == "proposed":
+            record_ = await ctx.store.get_action(str(tried.get("action_id") or ""))
+            status = record_.status if record_ else None
+            if status in (ActionStatus.SHADOWED, ActionStatus.DENIED, None):
+                rule = record_.decision.rule if record_ and record_.decision else ""
+                return await self._lane(
+                    ctx,
+                    profile,
+                    pr,
+                    arm,
+                    state,
+                    f"{jobs} failed; the schedule fixed it, but the repository's "
+                    f"pr.fix rule did not let it push the fix ({rule or 'not kept'})",
+                )
+            if status == ActionStatus.PROPOSED:
+                pending = True
+                detail = (
+                    f"its fix of {jobs} waits for {arm.armed_by} to approve it under "
+                    "Approvals, or to sign in to the dashboard so the schedule pushes "
+                    "it as them"
+                )
+            else:
+                detail = f"pushing its fix of {jobs}"
+        spent = (now - began).total_seconds()
+        if spent >= FIX_SECONDS and not pending:
+            return await self._lane(
+                ctx,
+                profile,
+                pr,
+                arm,
+                state,
+                f"{jobs} failed, and the schedule's fix did not land within "
+                f"{FIX_SECONDS // 60} minutes",
+            )
+        await self._set(ctx, profile, info, pr, state, "fixing", detail)
+        return PlaybookResult(
+            wait=wait.model_copy(
+                update={
+                    "seconds": WAIT_SECONDS
+                    if pending
+                    else max(60, int(FIX_SECONDS - spent)),
+                    "reason": "fixing its static checks",
+                }
+            ),
+            result={"phase": "fixing"},
         )
 
     async def _note(
@@ -1528,8 +1838,15 @@ class MergePlaybook(Playbook):
         """Why GitHub's own verdict holds a merge the merge gate allows, or empty:
         a rule the gate does not read (a required deployment, signed commits, push
         restrictions). A failing check the repository lets stay unpassed explains a
-        ``BLOCKED``, and so does a merge queue, which merges in its own time."""
-        if pr.merge_state != "BLOCKED" or info.merge_queue:
+        ``BLOCKED``, and so does a merge queue, which merges in its own time. When
+        the service's account cannot merge past the branch's rules, nothing holds:
+        GitHub refuses a merge a rule blocks and says which, and its ``BLOCKED`` can
+        trail what it enforces."""
+        if (
+            pr.merge_state != "BLOCKED"
+            or info.merge_queue
+            or info.service_bypasses_rules is False
+        ):
             return ""
         optional = {c.lower() for c in profile.ci.start.optional_checks}
         passing = {
@@ -1742,7 +2059,8 @@ class MergePlaybook(Playbook):
         if kind == ActionKind.PR_UPDATE_BRANCH:
             return kind, f"merging the base in failed: {error}", ""
         if kind == ActionKind.PR_FIX:
-            return kind, f"pushing the schedule's resolution failed: {error}", ""
+            what = "fix" if record_.action.payload.get("schedule_fix") else "resolution"
+            return kind, f"pushing the schedule's {what} failed: {error}", ""
         if kind == ActionKind.PR_MERGE:
             return kind, f"the forge refused the merge: {error}", ""
         return kind, f"{kind} failed: {error}", ""
@@ -1757,10 +2075,14 @@ class MergePlaybook(Playbook):
         event: Event,
     ) -> MergeArm | PlaybookResult:
         """The arm at the PR's new head when the schedule keeps it, else the result
-        of unscheduling it. A base merge the schedule asked for keeps it, and so does
-        a push its scheduler approved as themselves on a PR they scheduled by hand
-        (``_scheduler_pushed``); other commits keep it only when the approval
-        survives and the follow-up spot-check finds no regression."""
+        of unscheduling it. New commits keep it: whether approvals survive them is
+        GitHub's to say (``RepoInfo.dismisses_stale_reviews``,
+        ``requires_last_push_approval``), and the merge gate reads that, with CI at
+        the new head. Only a follow-up review at the new head that finds a critical
+        or major problem unschedules it. A base merge the schedule asked for, and a
+        push its scheduler approved as themselves on a PR they scheduled by hand
+        (``_scheduler_pushed``), keep the arm as seen; other commits mark it unseen
+        (``MergeArm.unseen``)."""
         if (
             state.updated_from
             and same_commit(state.updated_from, arm.sha)
@@ -1770,18 +2092,6 @@ class MergePlaybook(Playbook):
             await ctx.store.save_arm(arm)
             state.updated_from = None
             return arm
-        cls = ctx.classify(pr)
-        records = await ctx.store.list_review_records(pr.repo, pr.number)
-        spot = next(
-            (r for r in reversed(records) if same_commit(r.sha, pr.head_sha)), None
-        )
-        approved = cls.state != ReviewState.FOLLOWUP_REVIEW and any(
-            r.state.value == "APPROVED" for r in pr.reviews
-        )
-        clean = spot is not None and not any(
-            f.get("severity") in ("critical", "major")
-            for f in spot.result.get("new_findings", []) or []
-        )
         pushed = await self._scheduler_pushed(ctx, pr, arm)
         if pushed == "pushing" and event.kind != EventKind.JOB_TIMEOUT:
             return PlaybookResult(
@@ -1791,22 +2101,30 @@ class MergePlaybook(Playbook):
                     reason="waiting for the scheduler's push to be recorded",
                 )
             )
-        if (approved and clean) or pushed == "pushed":
-            arm = arm.model_copy(update={"sha": pr.head_sha})
+        records = await ctx.store.list_review_records(pr.repo, pr.number)
+        spot = next(
+            (r for r in reversed(records) if same_commit(r.sha, pr.head_sha)), None
+        )
+        serious = [
+            f
+            for f in (spot.result.get("new_findings", []) if spot else []) or []
+            if f.get("severity") in ("critical", "major")
+        ]
+        if not serious:
+            arm = arm.model_copy(
+                update={
+                    "sha": pr.head_sha,
+                    "unseen": arm.unseen or pushed != "pushed",
+                }
+            )
             await ctx.store.save_arm(arm)
             if state.phase == "failed":
+                # Back from the failure lane, after every PR scheduled meanwhile.
+                arm = await self._to_bottom(ctx, arm)
                 state.phase = "queued"
             state.updates = 0
+            state.cancelled = []
             return arm
-        if approved and spot is None and event.kind != EventKind.JOB_TIMEOUT:
-            return PlaybookResult(
-                wait=Wait(
-                    kinds=WAIT_KINDS,
-                    seconds=2 * 3600,
-                    reason="waiting for the follow-up spot-check",
-                )
-            )
-        # The maintainer scheduled the code they saw; new code waits for them.
         await ctx.store.delete_arm(pr.repo, pr.number)
         left = await self._leave(ctx, profile, pr.repo, pr.number)
         return PlaybookResult(
@@ -1815,13 +2133,14 @@ class MergePlaybook(Playbook):
                     pr,
                     arm,
                     "merge.unscheduled",
-                    f"new commits arrived after it was scheduled at "
-                    f"{short_sha(arm.sha)}, so it is unscheduled; schedule it again "
-                    f"at {short_sha(pr.head_sha)} when it is ready",
+                    f"the follow-up review of {short_sha(pr.head_sha)}, pushed after "
+                    f"it was scheduled at {short_sha(arm.sha)}, found {len(serious)} "
+                    "critical or major problem(s), so it is unscheduled; schedule it "
+                    "again when they are addressed",
                 )
             ],
             events=left.events,
-            result={"done": "unscheduled after a push"},
+            result={"done": "unscheduled after a follow-up review"},
         )
 
     async def _scheduler_pushed(
@@ -1857,6 +2176,44 @@ class MergePlaybook(Playbook):
         if any(r.status == ActionStatus.INTENT for r in theirs):
             return "pushing"
         return None
+
+
+def cancel_runs_action(
+    pr: PrSnapshot,
+    runs: dict[int, str],
+    why: str,
+    *,
+    by: str,
+    scheduled: int | None = None,
+) -> Action:
+    """A ``ci.cancel`` of ``pr``'s unfinished workflow runs ``runs`` (run id to
+    workflow), drafted for ``by``: the merge schedule's step for the PR ``by``
+    scheduled at ``scheduled`` (its arming time), which the schedule approves, or a
+    maintainer's press (``scheduled`` unset)."""
+    action = make_action(
+        ActionKind.CI_CANCEL,
+        pr.repo,
+        CancelRunsPayload(
+            run_ids=sorted(runs),
+            workflows=sorted(set(runs.values())),
+            reason=why[:500],
+        ),
+        number=pr.number,
+        head_sha=pr.head_sha,
+        discriminator=(f"schedule:{scheduled}:" if scheduled is not None else "")
+        + "cancel:"
+        + ",".join(str(r) for r in sorted(runs)),
+        rationale=why,
+        draft_for=by,
+    )
+    action.provenance.requested_by = by
+    if scheduled is not None:
+        action.provenance.scheduled_by = by
+    return action
+
+
+def _numbers(events: list[Event]) -> list[int]:
+    return [e.number for e in events if e.number is not None]
 
 
 async def maintains(

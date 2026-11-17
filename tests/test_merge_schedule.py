@@ -764,12 +764,16 @@ async def test_automatic_scheduling_arms_ready_prs_as_the_maintainer_who_chose_i
 
 
 @pytest.mark.parametrize(
-    ("auto", "pushed_as", "kept"),
+    ("auto", "pushed_as", "seen"),
     [(False, "maria", True), (False, "walt", False), (True, "maria", False)],
 )
-async def test_a_push_the_scheduler_approved_as_themselves_keeps_a_schedule_by_hand(
-    harness: Harness, auto: bool, pushed_as: str, kept: bool
+async def test_new_commits_keep_a_schedule_and_only_the_schedulers_own_keep_it_seen(
+    harness: Harness, auto: bool, pushed_as: str, seen: bool
 ) -> None:
+    """A push after scheduling keeps the PR in the order, as GitHub's own rules let
+    its approvals stand. Code its scheduler did not see (someone else's push, or an
+    arm automatic scheduling made) gets no approval of a fork's held workflows as
+    them: that waits for them."""
     from auto_maintainer.domain.actions import FixPrPayload, make_action
     from auto_maintainer.domain.records import ActionRecord
 
@@ -820,11 +824,222 @@ async def test_a_push_the_scheduler_approved_as_themselves_keeps_a_schedule_by_h
     )
     await h.settle()
     arm = await h.store.get_arm(REPO, 42)
-    moved = arm is not None and arm.sha == "c" * 40
-    assert moved == kept
-    # Kept, the schedule still approves the fork's held workflows as its scheduler.
+    assert arm is not None and arm.sha == "c" * 40, "it stays scheduled"
+    assert arm.unseen == (not seen)
     approved = h.forge.writes_of("approve_workflow_run")
-    assert approved == ([{"repo": REPO, "run_id": 4300, "by": "maria"}] if kept else [])
+    assert approved == ([{"repo": REPO, "run_id": 4300, "by": "maria"}] if seen else [])
+    if not seen:
+        state = await _phase(h, 42)
+        assert state.approval_needed and "until maria approves" in state.detail
+
+
+async def test_a_follow_up_that_finds_a_major_problem_in_new_commits_unschedules(
+    harness: Harness,
+) -> None:
+    from auto_maintainer.domain.records import ReviewRecord
+
+    h = harness
+    pr = _ready(42, "a" * 40, _ci(42, None))
+    h.forge.put_pr(pr)
+    await _schedule(h, 42)
+    await h.settle()
+    await h.store.add_review_record(
+        ReviewRecord(
+            repo=REPO,
+            number=42,
+            sha="c" * 40,
+            kind="followup",
+            action_id="act_f",
+            result={"new_findings": [{"severity": "major", "title": "drops data"}]},
+        )
+    )
+    h.forge.put_pr(
+        pr.model_copy(
+            update={
+                "head_sha": "c" * 40,
+                "commits": [*pr.commits, Commit(sha="c" * 40, message="more")],
+            }
+        )
+    )
+    await h.emit(
+        Event(kind=EventKind.PR_SYNCHRONIZED, repo=REPO, number=42, sha="c" * 40)
+    )
+    await h.settle()
+    assert await h.store.get_arm(REPO, 42) is None
+    [told] = [
+        a
+        for a in await h.store.list_actions(repo=REPO, kinds=[ActionKind.NOTIFY])
+        if a.action.payload.get("event") == "merge.unscheduled"
+    ]
+    assert "1 critical or major problem" in str(told.action.payload)
+
+
+async def test_asked_from_the_merge_page_the_agent_reads_the_prs_schedule(
+    harness: Harness,
+) -> None:
+    from auto_maintainer.web.auth import User
+    from auto_maintainer.web.chat import PageContext, _page_block
+
+    h = harness
+    h.forge.put_pr(_ready(42, "a" * 40, _ci(42, "success"), merge_state="BLOCKED"))
+    await _schedule(h, 42)
+    await h.settle()
+    block = await _page_block(
+        h.service,
+        User(login="maria"),
+        PageContext(page="merge", repo=REPO, number=42),
+        [REPO],
+    )
+    assert "scheduled by maria" in block and "The order" in block
+    assert "Its phase: blocked" in block and "GitHub's own verdict: BLOCKED" in block
+    assert "said: acme/widget#42 (scheduled by maria): GitHub still reports" in block
+    assert "untrusted-data source='merge.steps'" in block
+    other = await _page_block(
+        h.service,
+        User(login="maria"),
+        PageContext(page="pr", repo=REPO, number=42),
+        [REPO],
+    )
+    assert "The order" not in other, "only from the Merge page"
+
+
+def _running(id: int, name: str, run_id: int, workflow: str) -> CheckRun:
+    return _job(id, name, None, run_id, workflow=workflow)
+
+
+def _real_failure(h: Harness) -> None:
+    h.runner.on(
+        "ci_diagnose",
+        lambda t: {"category": "pr_caused", "confidence": 0.9, "explanation": "breaks"},
+    )
+    h.runner.on(
+        "ci_root_cause",
+        lambda t: {
+            "causes": [
+                {
+                    "jobs": ["unit"],
+                    "failing": "tests/test_m.py::test_x",
+                    "origin": "change",
+                    "cause": "The new branch returns None.",
+                    "confidence": 0.9,
+                }
+            ]
+        },
+    )
+
+
+async def test_only_the_pr_whose_turn_it_is_runs_ci_and_one_back_goes_last(
+    harness: Harness,
+) -> None:
+    """Where scheduled PRs must be up to date and take turns, a PR's CI cannot count
+    while another holds the turn: once that one merges, it tests a base that is
+    gone. What still runs of a PR that failed is cancelled as the turn passes on, so
+    is the CI a fix starts in the failure lane, and the fixed PR comes back after
+    every PR scheduled meanwhile, running its CI on its own turn."""
+    h = harness
+    _real_failure(h)
+    h.forge.job_logs[420] = "FAILED tests/test_m.py::test_x\n"
+    first = _ready(
+        42,
+        "a" * 40,
+        [
+            _job(420, "unit", "failure", 4200, workflow="CI"),
+            _running(421, "e2e", 4300, "CI Test"),
+        ],
+    )
+    h.forge.put_pr(first)
+    h.forge.put_pr(_ready(43, "b" * 40, [_running(430, "unit", 4310, "CI")]))
+    await _schedule(h, 42)
+    await _schedule(h, 43)
+    await h.settle()
+    assert (await _phase(h, 42)).phase == "failed"
+    assert (await _phase(h, 43)).phase == "running", "the turn passed on"
+    assert h.forge.writes_of("cancel_run") == [{"repo": REPO, "run_id": 4300}], (
+        "only what still ran of the failed PR"
+    )
+    [cancel] = await h.store.list_actions(repo=REPO, kinds=[ActionKind.CI_CANCEL])
+    assert cancel.approver == "maria" and "#43 holds" in cancel.action.rationale
+
+    # Its author pushes a fix, which starts its CI while #43 holds the turn.
+    h.forge.put_pr(
+        first.model_copy(
+            update={
+                "head_sha": "c" * 40,
+                "commits": [*first.commits, Commit(sha="c" * 40, message="fix")],
+                "checks": [_running(422, "unit", 4400, "CI")],
+            }
+        )
+    )
+    await h.emit(
+        Event(kind=EventKind.PR_SYNCHRONIZED, repo=REPO, number=42, sha="c" * 40)
+    )
+    await h.settle()
+    back = await _phase(h, 42)
+    assert back.phase == "queued" and back.cancelled == [4400]
+    assert {"repo": REPO, "run_id": 4400} in h.forge.writes_of("cancel_run")
+    arms = {a.number: a for a in await h.store.list_arms(REPO)}
+    assert arms[42].position > arms[43].position, "after #43, not where it was"
+
+    # #43 merges; on #42's turn the CI the schedule cancelled runs again.
+    h.forge.put_pr(_ready(43, "b" * 40, _ci(43, "success", run=4310)))
+    h.forge.put_pr(
+        first.model_copy(
+            update={
+                "head_sha": "c" * 40,
+                "commits": [*first.commits, Commit(sha="c" * 40, message="fix")],
+                "checks": [_job(422, "unit", "cancelled", 4400, workflow="CI")],
+            }
+        )
+    )
+    await h.emit(Event(kind=EventKind.CHECKS_COMPLETED, repo=REPO, number=43))
+    await h.settle()
+    assert [w["number"] for w in h.forge.writes_of("merge")] == [43]
+    assert {"repo": REPO, "run_id": 4400} in h.forge.writes_of("rerun_failed_jobs")
+    [resumed] = [
+        r
+        for r in await h.store.list_actions(
+            repo=REPO, number=42, kinds=[ActionKind.CI_RERUN_FAILED]
+        )
+        if r.action.payload["run_id"] == 4400
+    ]
+    assert resumed.action.payload["requested"], "past the rerun budget"
+
+
+async def test_the_page_shows_what_runs_ci_and_a_maintainer_cancels_it(
+    harness: Harness, tmp_path: Path
+) -> None:
+    h = harness
+    h.forge.put_pr(_ready(43, "b" * 40, [_running(430, "unit", 4310, "CI")]))
+    h.forge.put_pr(_ready(44, "d" * 40, [_running(440, "unit", 4500, "CI")]))
+    h.forge.put_pr(_ready(45, "e" * 40, [_running(450, "unit", 4600, "CI")]))
+    await _schedule(h, 43)
+    await _schedule(h, 45)
+    await h.settle()
+    await h.poll()
+    assert (await _phase(h, 43)).phase == "running"
+    app = create_app(h.service, data_dir=tmp_path, allow_dev_login=True)
+    async with _as(app, "maria") as maria:
+        view = (await maria.get(f"/api/merge-schedule/{REPO}/view")).json()
+        rows = {r["number"]: r for r in view["ci_now"]}
+        assert rows[43]["holds_turn"] and rows[43]["scheduled"]
+        assert not rows[44]["scheduled"] and rows[44]["workflows"] == ["CI"]
+        assert view["ci_now"][0]["number"] == 43, "the turn's PR first"
+        held = await maria.post(f"/api/merge-schedule/{REPO}/43/cancel-ci")
+        assert held.status_code == 409, "the turn's CI is the schedule's"
+        out = await maria.post(f"/api/merge-schedule/{REPO}/44/cancel-ci")
+        assert out.status_code == 200 and out.json()["runs"] == [4500], out.text
+        await h.settle()
+        assert {"repo": REPO, "run_id": 4500} in h.forge.writes_of("cancel_run")
+        # Unscheduled while #43 holds the turn, #45's CI is cancelled too.
+        gone = (await maria.delete(f"/api/merge-schedule/{REPO}/45")).json()
+        assert {"repo": REPO, "run_id": 4600} in h.forge.writes_of("cancel_run"), (
+            "#45 waits behind #43, so the schedule cancelled its CI already"
+        )
+        assert gone["cancelled"]["runs"] == [4600], "and so does unscheduling it"
+    async with _as(app, "bob") as bob:
+        assert (
+            await bob.post(f"/api/merge-schedule/{REPO}/44/cancel-ci")
+        ).status_code == 403
 
 
 # -- the page ---------------------------------------------------------------------------
@@ -1864,6 +2079,98 @@ async def test_a_minor_conflict_is_resolved_on_its_turn_and_pushed_as_the_schedu
     assert [w["number"] for w in h.forge.writes_of("merge")] == [42]
 
 
+def _lint_fixer(path: str) -> Any:
+    """The fix agent: edits ``path``, then describes its diff."""
+    from auto_maintainer.domain.agents import AgentResult
+
+    def fix(task: Any) -> Any:
+        if task.mode == "read_only":
+            return {
+                "title": "style: drop the duplicate import",
+                "summary": "AcceleratorType was imported twice.",
+                "fixed": [{"id": "lint", "change": "dropped the second import"}],
+            }
+        (task.workdir / path).parent.mkdir(parents=True, exist_ok=True)
+        (task.workdir / path).write_text("from scheduler import AcceleratorType\n")
+        return AgentResult(runtime="scripted", ok=True, text="lint: one import now")
+
+    return fix
+
+
+@pytest.mark.parametrize(
+    ("path", "pushed"), [("src/m42.py", True), ("setup.py", False)]
+)
+async def test_a_lint_failure_is_fixed_on_its_turn_and_pushed_as_the_scheduler(
+    harness: Harness, path: str, pushed: bool
+) -> None:
+    """A failure every cause of which a static check reports is fixed by the
+    schedule at once, holding the turn, and pushed as its scheduler when the fix
+    changes only the files the checks name; any other fix waits for them."""
+    h = harness
+    h.runner.on(
+        "ci_diagnose",
+        lambda t: {"category": "pr_caused", "confidence": 0.9, "explanation": "F811"},
+    )
+    h.runner.on(
+        "ci_root_cause",
+        lambda t: {
+            "causes": [
+                {
+                    "jobs": ["lint"],
+                    "failing": "ruff",
+                    "origin": "change",
+                    "cause": "AcceleratorType is imported twice.",
+                    "culprits": [{"path": "src/m42.py", "line": 1}],
+                    "fix": "Drop the second import.",
+                    "static": True,
+                    "confidence": 0.9,
+                }
+            ]
+        },
+    )
+    h.runner.on("fix", _lint_fixer(path))
+    h.forge.job_logs[420] = "F811 Redefinition of unused `AcceleratorType`\n"
+    pr = _ready(42, "a" * 40, [_job(420, "lint", "failure", 4200, workflow="CI")])
+    h.forge.put_pr(pr)
+    await _schedule(h, 42)
+    await h.settle()
+    [work, _] = [t for t in h.runner.tasks if str(t.kind) == "fix"]
+    assert "pushes it onto the PR's branch as maria" in work.prompt
+    assert "never ask anything" in work.prompt and work.lab_session is None
+    [fix] = await h.store.list_actions(repo=REPO, kinds=[ActionKind.PR_FIX])
+    if not pushed:
+        assert fix.status == ActionStatus.PROPOSED and fix.action.draft_for == "maria"
+        assert not fix.action.payload.get("schedule_fix")
+        failed = await _phase(h, 42)
+        assert failed.phase == "failed" and "setup.py" in failed.detail
+        assert "waits for maria under Approvals" in failed.detail
+        return
+    assert fix.status == ActionStatus.EXECUTED and fix.post_as == "maria"
+    assert fix.action.payload["target"] == "branch"
+    assert (await _phase(h, 42)).phase == "fixing", "it keeps the turn"
+
+    # The push lands: the scheduler's own push keeps the schedule as seen.
+    h.forge.put_pr(
+        pr.model_copy(
+            update={
+                "head_sha": "c" * 40,
+                "commits": [
+                    *pr.commits,
+                    Commit(sha="c" * 40, message="style", author_login="maria"),
+                ],
+                "checks": [_job(421, "lint", "success", 4201, workflow="CI")],
+            }
+        )
+    )
+    await h.emit(
+        Event(kind=EventKind.PR_SYNCHRONIZED, repo=REPO, number=42, sha="c" * 40)
+    )
+    await h.settle()
+    arm = await h.store.get_arm(REPO, 42)
+    assert arm is None or (arm.sha == "c" * 40 and not arm.unseen)
+    assert [w["number"] for w in h.forge.writes_of("merge")] == [42]
+
+
 async def test_a_conflict_in_code_goes_to_a_person_without_an_agent(
     harness: Harness,
 ) -> None:
@@ -1977,6 +2284,31 @@ async def test_a_merge_github_still_blocks_is_held_not_forced(
     assert [w["number"] for w in h.forge.writes_of("merge")] == [42]
 
 
+async def test_a_merge_github_reports_blocked_is_tried_when_no_rule_can_be_bypassed(
+    harness: Harness,
+) -> None:
+    """GitHub's ``BLOCKED`` can trail what it enforces; when the service's account
+    cannot merge past the branch's rules, GitHub itself refuses a merge a rule holds,
+    and its refusal says which."""
+    h = harness
+    info = h.forge.repos[REPO]
+    h.forge.add_repo(info.model_copy(update={"service_bypasses_rules": False}))
+    h.forge.put_pr(_ready(42, "a" * 40, _ci(42, "success"), merge_state="BLOCKED"))
+    h.forge.put_pr(_ready(43, "b" * 40, _ci(43, "success"), merge_state="BLOCKED"))
+    h.forge.fail_next["merge"] = RuntimeError(
+        "GitHubError: Repository rule violations found: Changes must be made "
+        "through a pull request with 3 approving reviews"
+    )
+    await _schedule(h, 42)
+    await _schedule(h, 43)
+    await h.settle()
+    refused = await _phase(h, 42)
+    assert refused.phase == "blocked" and "3 approving reviews" in refused.detail
+    assert [w["number"] for w in h.forge.writes_of("merge")] == [43], (
+        "the next PR merged though GitHub reported it blocked"
+    )
+
+
 async def test_a_branch_with_a_merge_queue_gets_the_pr_queued(
     harness: Harness,
 ) -> None:
@@ -2053,10 +2385,17 @@ async def test_the_merge_settings_are_edited_in_place_by_a_maintainer(
                         }
                     ],
                 },
+                "fix": {"enabled": False, "max_lines": 12},
             },
         )
         assert saved.status_code == 200 and saved.json()["applied"], saved.text
     profile = await h.service.profiles.active(REPO)
+    assert profile is not None
+    assert view["merging"]["fix"] == {"enabled": True, "max_lines": 40}, "on by default"
+    assert profile.merge.schedule.fix.model_dump() == {
+        "enabled": False,
+        "max_lines": 12,
+    }
     assert profile is not None
     assert profile.merge.message.signoff_from_authors
     assert profile.ci.required_workflows == ["CI Test"]

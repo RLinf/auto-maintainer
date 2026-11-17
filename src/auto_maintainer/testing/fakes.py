@@ -542,6 +542,9 @@ class FakeForge:
     async def rerun_failed_jobs(self, repo: str, run_id: int) -> None:
         self._record("rerun_failed_jobs", repo=repo, run_id=run_id)
 
+    async def cancel_run(self, repo: str, run_id: int) -> None:
+        self._record("cancel_run", repo=repo, run_id=run_id)
+
     async def list_runners(self, repo: str) -> list[RunnerInfo]:
         return self.runners
 

@@ -20,6 +20,7 @@ import json
 from datetime import UTC, datetime
 
 import httpx
+import pytest
 from gh_testutil import load_fixture
 
 from auto_maintainer.domain.permissions import Permission
@@ -612,3 +613,59 @@ def test_commit_statuses_count_as_checks():
     assert preview.conclusion is None and preview.status == CheckStatus.IN_PROGRESS
     again = snapshot_from_graphql("acme/widget", node)
     assert [c.id for c in again.checks] == [c.id for c in pr.checks], "stable ids"
+
+
+@pytest.mark.parametrize(
+    ("bypass", "expected"),
+    [("never", False), ("always", True), ("pull_requests_only", True), (None, None)],
+)
+async def test_whether_the_account_may_merge_past_the_branchs_rulesets(
+    client, router, bypass, expected
+):
+    """A ruleset the account cannot bypass refuses any merge of its that the ruleset
+    blocks, so a merge it tries is safe; one it may bypass, it could merge past."""
+    router.get("/repos/acme/widget").respond(
+        200, json={"default_branch": "main", "permissions": {"admin": True}}
+    )
+    router.get("/repos/acme/widget/branches/main").respond(
+        200, json={"commit": {"sha": "s"}, "protected": False}
+    )
+    router.get("/repos/acme/widget/rules/branches/main").respond(
+        200,
+        json=[
+            {"type": "pull_request", "ruleset_id": 7, "parameters": {}},
+            {"type": "required_status_checks", "ruleset_id": 7, "parameters": {}},
+        ],
+    )
+    ruleset = router.get("/repos/acme/widget/rulesets/7").respond(
+        200,
+        json={"id": 7} | ({"current_user_can_bypass": bypass} if bypass else {}),
+    )
+    router.get("/repos/acme/widget/labels").respond(200, json=[])
+    router.get(
+        "/repos/acme/widget/actions/permissions/fork-pr-contributor-approval"
+    ).respond(404)
+    info = await GitHubReader(client).get_repo("acme/widget")
+    assert info.service_bypasses_rules is expected
+    assert ruleset.call_count == 1, "each ruleset read once"
+
+
+async def test_an_admin_merges_past_branch_protection_that_spares_admins(
+    client, router
+):
+    router.get("/repos/acme/widget").respond(
+        200, json={"default_branch": "main", "permissions": {"admin": True}}
+    )
+    router.get("/repos/acme/widget/branches/main").respond(
+        200, json={"commit": {"sha": "s"}, "protected": True}
+    )
+    router.get("/repos/acme/widget/branches/main/protection").respond(
+        200, json={"enforce_admins": {"enabled": False}}
+    )
+    router.get("/repos/acme/widget/rules/branches/main").respond(200, json=[])
+    router.get("/repos/acme/widget/labels").respond(200, json=[])
+    router.get(
+        "/repos/acme/widget/actions/permissions/fork-pr-contributor-approval"
+    ).respond(404)
+    info = await GitHubReader(client).get_repo("acme/widget")
+    assert info.service_bypasses_rules is True

@@ -8,6 +8,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
+import { useAgent } from "../agent";
 import { api } from "../api";
 import { Empty, ErrorBox, PageHead, prPath, Section, useAct, When } from "../components";
 import { useRepos } from "../data";
@@ -19,7 +20,7 @@ import { openJob } from "../openJob";
 import { RepoTabs, useRepoScope } from "../repoScope";
 import { Skeleton, useToast } from "../ui";
 
-type Phase = "queued" | "updating" | "resolving" | "starting" | "running" | "rerunning" | "diagnosing" | "approval" | "merging" | "blocked" | "failed" | "held" | "merged";
+type Phase = "queued" | "updating" | "resolving" | "fixing" | "starting" | "running" | "rerunning" | "diagnosing" | "approval" | "merging" | "blocked" | "failed" | "held" | "merged";
 
 interface CiSummary {
   state: string;
@@ -53,6 +54,9 @@ interface Scheduled extends Row {
   finding: string;
   approval_needed: boolean;
   stale: boolean;
+  /** It follows commits pushed after it was scheduled, which its scheduler has not
+   * seen: a fork's held workflows wait for them to approve running them. */
+  unseen: boolean;
   job: { id: string; status: string; playbook: string } | null;
   forced: boolean;
 }
@@ -159,12 +163,30 @@ interface Merging {
   arming_who: string;
   freezes: Freeze[];
   resolve: { enabled: boolean; union_only: boolean; kinds: ResolveKind[] };
+  /** The schedule fixes static checks' findings by itself (``merge.schedule.fix``). */
+  fix: { enabled: boolean; max_lines: number };
   merge_queue: boolean | null;
   warnings: string[];
 }
 
+/** An open PR whose workflow runs hold or wait for CI machines now. */
+interface CiNow {
+  number: number;
+  title: string;
+  author: string;
+  url: string;
+  workflows: string[];
+  runs: number;
+  jobs: number;
+  since: string | null;
+  scheduled: boolean;
+  /** The scheduled PR whose turn it is: its CI is the schedule's. */
+  holds_turn: boolean;
+}
+
 interface MergeView {
   repo: string;
+  ci_now: CiNow[];
   enabled: boolean;
   can_arrange: boolean;
   signed_in: boolean;
@@ -220,6 +242,7 @@ const PHASE: Record<Phase, { label: string; cls: string }> = {
   queued: { label: "Waiting for its turn", cls: "job-waiting" },
   updating: { label: "Merging the base in", cls: "job-running" },
   resolving: { label: "Resolving conflicts", cls: "job-running" },
+  fixing: { label: "Fixing lint", cls: "job-running" },
   starting: { label: "Starting CI", cls: "job-running" },
   running: { label: "CI running", cls: "job-running" },
   rerunning: { label: "Rerunning a flake", cls: "job-running" },
@@ -315,6 +338,7 @@ export default function MergePage() {
           <ScopeBanner v={v} />
           <Controls v={v} />
           <ScheduleSection v={v} />
+          {v.ci_now.length > 0 && <CiNowSection v={v} />}
           {v.failed.length > 0 && <FailureLane v={v} />}
           <Candidates v={v} />
           <NotReadyList v={v} />
@@ -326,6 +350,7 @@ export default function MergePage() {
           <div className="merge-grid">
             <MergingCard v={v} />
             <ConflictsCard v={v} />
+            <LintFixCard v={v} />
           </div>
           <FlakyCard v={v} />
           {v.merged.length > 0 && <MergedList v={v} />}
@@ -435,7 +460,7 @@ function WatchButton({ job, busy }: { job: Scheduled["job"]; busy: boolean }) {
   );
 }
 
-function PrLink({ repo, row }: { repo: string; row: Row }) {
+function PrLink({ repo, row }: { repo: string; row: Pick<Row, "number" | "title"> }) {
   return (
     <Link to={prPath(repo, row.number)} className="merge-pr">
       <span className="mono muted">#{row.number}</span> <span className="merge-title">{row.title}</span>
@@ -489,6 +514,29 @@ function CheckOneButton({ check, number }: { check: (n: number) => void; number:
   );
 }
 
+/** Talk with the agent about one scheduled PR: the conversation starts from its place
+ * in the schedule and the steps the schedule took (web/chat.py:_page_block). */
+function AskButton({ repo, number }: { repo: string; number: number }) {
+  const t = useT();
+  const agent = useAgent();
+  return (
+    <button
+      className="sm ghost"
+      aria-label={t("Ask the agent about it")}
+      title={t("Ask the agent about it: it reads this PR's place in the schedule and the steps the schedule took")}
+      onClick={() =>
+        agent.open({
+          context: { page: "merge", repo, number, label: `${repo}#${number}` },
+          prompt: t("Why is it where it is in the schedule, and what would move it on?"),
+          send: false,
+        })
+      }
+    >
+      <Icon name="message" size={13} />
+    </button>
+  );
+}
+
 function ScheduleSection({ v }: { v: MergeView }) {
   const t = useT();
   const toast = useToast();
@@ -531,6 +579,7 @@ function ScheduleSection({ v }: { v: MergeView }) {
                       {t("scheduled by")} {s.scheduled_by}
                       {s.auto && ` (${t("automatically")})`}
                       {s.forced && ` (${t("by hand, before it was ready")})`}
+                      {s.unseen && ` · ${t("with commits pushed since")}`}
                     </span>
                   </span>
                   {s.approval_needed && (
@@ -540,7 +589,8 @@ function ScheduleSection({ v }: { v: MergeView }) {
                   )}
                   {s.finding && <span className="small merge-finding">{s.finding}</span>}
                 </div>
-                <WatchButton job={s.job} busy={s.phase === "diagnosing" || s.phase === "resolving"} />
+                <WatchButton job={s.job} busy={s.phase === "diagnosing" || s.phase === "resolving" || s.phase === "fixing"} />
+                <AskButton repo={v.repo} number={s.number} />
                 <CheckOneButton check={check} number={s.number} />
                 {v.can_arrange && (
                   <div className="row merge-actions">
@@ -566,6 +616,60 @@ function ScheduleSection({ v }: { v: MergeView }) {
         </ol>
       )}
       <ErrorBox error={order.error || remove.error || retry.error} />
+    </Section>
+  );
+}
+
+/** Every open PR whose CI holds or waits for CI machines now. Where scheduled PRs
+ * take turns, only the CI of the one whose turn it is counts (the schedule cancels
+ * the other scheduled PRs' own); a maintainer cancels the rest here. */
+function CiNowSection({ v }: { v: MergeView }) {
+  const t = useT();
+  const toast = useToast();
+  const cancel = useAct((n: number) => api.post<{ runs: number[] }>(`/api/merge-schedule/${v.repo}/${n}/cancel-ci`), [["merge-schedule"]]);
+  const turn = v.ci_now.find((r) => r.holds_turn);
+  const contending = v.mode === "serial" && turn !== undefined && v.ci_now.length > 1;
+  return (
+    <Section
+      title={t("CI running now")}
+      hint={contending ? t("Only the CI of the PR whose turn it is counts now; the others take CI machines from it.") : `${v.ci_now.length}`}
+    >
+      <div className="list">
+        {v.ci_now.map((r) => (
+          <div key={r.number} className="list-row merge-row">
+            <span className="merge-pos">
+              <Icon name="activity" size={14} />
+            </span>
+            <div className="stack merge-main">
+              <PrLink repo={v.repo} row={r} />
+              <span className="row merge-meta">
+                <span className={`pill ${r.holds_turn ? "job-running" : ""}`}>{r.holds_turn ? t("Its turn") : r.scheduled ? t("Scheduled") : t("Not scheduled")}</span>
+                <span className="small muted">
+                  {r.workflows.join(", ")} · {r.jobs} {t("jobs running or waiting")}
+                </span>
+                {r.since && (
+                  <span className="small muted">
+                    <When at={r.since} />
+                  </span>
+                )}
+              </span>
+            </div>
+            {v.can_arrange && !r.holds_turn && (
+              <div className="row merge-actions">
+                <button
+                  className="sm"
+                  disabled={cancel.isPending}
+                  title={t("Cancel its unfinished workflow runs, so they leave the CI machines to the PR whose turn it is; a scheduled PR runs them again on its own turn")}
+                  onClick={() => cancel.mutate(r.number, { onSuccess: () => toast({ title: t("Its CI is cancelled"), icon: "check" }) })}
+                >
+                  {t("Cancel CI")}
+                </button>
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+      <ErrorBox error={cancel.error} />
     </Section>
   );
 }
@@ -599,6 +703,7 @@ function FailureLane({ v }: { v: MergeView }) {
               {f.finding && <span className="small merge-finding">{f.finding}</span>}
             </div>
             <WatchButton job={f.job} busy={false} />
+            <AskButton repo={v.repo} number={f.number} />
             <CheckOneButton check={check} number={f.number} />
             {v.can_arrange && (
               <div className="row merge-actions">
@@ -1537,6 +1642,87 @@ function MergingCard({ v }: { v: MergeView }) {
             )}
           </li>
         </ul>
+      )}
+    </Section>
+  );
+}
+
+/** Whether the schedule fixes a scheduled PR whose CI fails only on static checks. */
+function LintFixCard({ v }: { v: MergeView }) {
+  const t = useT();
+  const toast = useToast();
+  const f = v.merging.fix;
+  const [editing, setEditing] = useState(false);
+  const [enabled, setEnabled] = useState(f.enabled);
+  const [lines, setLines] = useState(String(f.max_lines));
+  const save = useAct((body: Record<string, unknown>) => api.put<Saved>(`/api/merge-schedule/${v.repo}/merging`, body), [["merge-schedule"]]);
+  const max = Number(lines);
+  return (
+    <Section
+      title={t("Lint failures")}
+      hint={t("Whether the schedule fixes what linters, formatters, and type checkers report")}
+      aside={
+        v.can_arrange &&
+        !editing && (
+          <button
+            className="sm ghost"
+            onClick={() => {
+              setEnabled(f.enabled);
+              setLines(String(f.max_lines));
+              setEditing(true);
+            }}
+          >
+            {t("Edit")}
+          </button>
+        )
+      }
+    >
+      {editing ? (
+        <div className="stack" style={{ gap: 8 }}>
+          <label className="row small" style={{ gap: 8 }}>
+            <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
+            {t("Fix them by itself, with an agent, pushed as the maintainer who scheduled the PR")}
+          </label>
+          <label className="row small" style={{ gap: 8 }}>
+            {t("At most this many changed lines")}
+            <input type="number" min={1} max={1000} style={{ width: 90 }} value={lines} onChange={(e) => setLines(e.target.value)} />
+          </label>
+          <div className="row" style={{ gap: 8 }}>
+            <button className="sm ghost right" onClick={() => setEditing(false)}>
+              {t("Cancel")}
+            </button>
+            <button
+              className="sm primary"
+              disabled={save.isPending || !(max >= 1 && max <= 1000)}
+              onClick={() =>
+                save.mutate(
+                  { fix: { enabled, max_lines: max } },
+                  {
+                    onSuccess: (out) => {
+                      toast({ title: out.applied ? t("Saved") : t("Proposed to the maintainers"), icon: out.applied ? "check" : "inbox" });
+                      setEditing(false);
+                    },
+                  },
+                )
+              }
+            >
+              {t("Save")}
+            </button>
+          </div>
+          <ErrorBox error={save.error} />
+        </div>
+      ) : (
+        <span className="small">
+          {f.enabled ? (
+            <>
+              <Icon name="check" size={12} />{" "}
+              {t("On its turn, a scheduled PR whose CI fails only on static checks gets an agent's fix at once; it is pushed as the maintainer who scheduled it when it changes only the files the checks name, in at most")} {f.max_lines}{" "}
+              {t("lines. Any other fix waits under Approvals, and the PR goes to the failure lane.")}
+            </>
+          ) : (
+            <span className="muted">{t("Off: a scheduled PR whose lint fails goes to the failure lane for a person.")}</span>
+          )}
+        </span>
       )}
     </Section>
   );

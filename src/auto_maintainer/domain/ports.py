@@ -283,6 +283,11 @@ class CiProvider(Protocol):
 
     async def rerun_failed_jobs(self, repo: str, run_id: int) -> None: ...
 
+    async def cancel_run(self, repo: str, run_id: int) -> None:
+        """Cancel a workflow run (a pipeline on GitLab); one that already finished
+        is left as it is."""
+        ...
+
     async def list_runners(self, repo: str) -> list[RunnerInfo]: ...
 
 

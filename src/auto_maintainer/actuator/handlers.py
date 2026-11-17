@@ -27,6 +27,7 @@ from ..domain.actions import (
     ActionStatus,
     ApprovePrPayload,
     ApproveRunsPayload,
+    CancelRunsPayload,
     CodeMergePayload,
     CodePrPayload,
     CodeUpdatePayload,
@@ -380,6 +381,19 @@ async def _rerun(
         )
     await x.ci.rerun_failed_jobs(action.repo, p.run_id)
     return {"run_id": p.run_id, "rerun": len(same) + 1}
+
+
+async def _cancel_runs(
+    x: ExecContext,
+    action: Action,
+    profile: RepoProfile | None,
+    pr: PrSnapshot | None,
+    approver: str | None,
+) -> dict[str, Any]:
+    p = CancelRunsPayload.model_validate(action.payload)
+    for run_id in p.run_ids:
+        await x.ci.cancel_run(action.repo, run_id)
+    return {"cancelled": p.run_ids}
 
 
 async def _request_reviewers(
@@ -1080,6 +1094,8 @@ HANDLERS: dict[ActionKind, HandlerSpec] = {
     ActionKind.CI_RERUN_FAILED: HandlerSpec(
         _rerun, needs_pr=True, needs_current_head=True
     ),
+    # Runs at an older head are cancelled all the same: they test nothing current.
+    ActionKind.CI_CANCEL: HandlerSpec(_cancel_runs, needs_pr=True),
     ActionKind.PR_REQUEST_REVIEWERS: HandlerSpec(_request_reviewers, needs_pr=True),
     ActionKind.CI_APPROVE_RUN: HandlerSpec(
         _approve_runs, needs_pr=True, needs_current_head=True

@@ -134,6 +134,12 @@ class GitHubActionsCi:
             f"/repos/{repo}/actions/runs/{run_id}/rerun-failed-jobs", repo=repo
         )
 
+    async def cancel_run(self, repo: str, run_id: int) -> None:
+        # 409: the run finished meanwhile, which is all a cancel wants.
+        await self._client.post(
+            f"/repos/{repo}/actions/runs/{run_id}/cancel", repo=repo, allow=(409,)
+        )
+
     async def list_runners(self, repo: str) -> list[RunnerInfo]:
         data = await self._client.get(
             f"/repos/{repo}/actions/runners",

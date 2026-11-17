@@ -54,6 +54,11 @@ class MergeArm(BaseModel):
     """Armed by automatic scheduling (``merge.schedule.auto``) as ``armed_by``,
     who never saw this PR: a step that runs outside code with the repository's
     secrets (approving a fork's held workflows) waits for a person."""
+    unseen: bool = False
+    """Its head has commits pushed after it was scheduled, which ``armed_by`` has not
+    seen (the arm follows them, ``playbooks/merge.py:_new_head``): as for an
+    automatic arm, a step that runs outside code with the repository's secrets, or
+    pushes an agent's change as ``armed_by``, waits for them."""
     forced: bool = False
     """Scheduled by hand before it met the repository's target: its CI runs on its
     turn whatever the target says, and it merges once the merge rules hold."""

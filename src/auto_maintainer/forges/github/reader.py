@@ -580,6 +580,7 @@ class GitHubReader:
                     rule_methods = (
                         methods if rule_methods is None else rule_methods & methods
                     )
+        bypasses = await self._bypasses(repo, data, branch_data, protection, rules)
         approval = await self._client.get(
             f"/repos/{repo}/actions/permissions/fork-pr-contributor-approval",
             repo=repo,
@@ -605,8 +606,56 @@ class GitHubReader:
             merge_methods=methods,
             requires_thread_resolution=threads,
             merge_queue=queue,
+            service_bypasses_rules=bypasses,
             fork_approval=(approval or {}).get("approval_policy"),
         )
+
+    async def _bypasses(
+        self,
+        repo: str,
+        data: dict[str, Any],
+        branch_data: dict[str, Any],
+        protection: dict[str, Any] | None,
+        rules: Any,
+    ) -> bool | None:
+        """``RepoInfo.service_bypasses_rules``: whether this account may merge past
+        the default branch's branch protection or any ruleset on it."""
+        found: list[bool | None] = []
+        if branch_data.get("protected"):
+            if protection is None:
+                # Unreadable: only an admin reads it, but a non-admin may still be
+                # one it lets past its review rule.
+                found.append(None)
+            else:
+                admin = bool((data.get("permissions") or {}).get("admin"))
+                enforced = bool((protection.get("enforce_admins") or {}).get("enabled"))
+                allowed = (protection.get("required_pull_request_reviews") or {}).get(
+                    "bypass_pull_request_allowances"
+                ) or {}
+                if admin and not enforced:
+                    found.append(True)
+                elif any(allowed.get(k) for k in ("users", "teams", "apps")):
+                    found.append(None)  # whether they name this account is not read
+                else:
+                    found.append(False)
+        if not isinstance(rules, list):
+            found.append(None)
+        else:
+            ids = {rule.get("ruleset_id") for rule in rules}
+            if None in ids:
+                found.append(None)
+            for ruleset_id in sorted(i for i in ids if i is not None):
+                ruleset = await self._client.get(
+                    f"/repos/{repo}/rulesets/{ruleset_id}",
+                    repo=repo,
+                    params={"includes_parents": "true"},
+                    allow=(403, 404),
+                )
+                can = (ruleset or {}).get("current_user_can_bypass")
+                found.append(None if can is None else can != "never")
+        if any(f is True for f in found):
+            return True
+        return None if any(f is None for f in found) else False
 
     async def behind_by(self, repo: str, base: str, head: str) -> int | None:
         data = await self._client.get(

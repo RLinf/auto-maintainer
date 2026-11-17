@@ -73,6 +73,7 @@ SCHEDULED = frozenset(
         ActionKind.LABEL_CI_GATE,
         ActionKind.CI_APPROVE_RUN,
         ActionKind.CI_RERUN_FAILED,
+        ActionKind.CI_CANCEL,
         ActionKind.PR_MERGE,
         ActionKind.PR_FIX,
     }
@@ -94,8 +95,9 @@ ONLY_THE_SCHEDULER = AS_SCHEDULER
 """The steps the schedule approves only with the scheduler's own sign-in; without
 it they wait for the scheduler, in Approvals, and the schedule says so."""
 NOT_UNSEEN = frozenset({ActionKind.CI_APPROVE_RUN, ActionKind.PR_FIX})
-"""Of ``ONLY_THE_SCHEDULER``, the steps never approved for a PR automatic
-scheduling armed unseen: running a fork's code with the repository's secrets, or
+"""Of ``ONLY_THE_SCHEDULER``, the steps never approved for code its scheduler has
+not seen (an arm automatic scheduling made, or one that followed later commits,
+``MergeArm.unseen``): running a fork's code with the repository's secrets, or
 pushing an agent's code as someone. A base merge brings in only the base, so it runs
 for those too."""
 
@@ -235,7 +237,8 @@ class ActionPipeline:
         ):
             return False
         if action.kind == ActionKind.PR_FIX and not (
-            action.payload.get("merge_ref") and action.payload.get("target") == "branch"
+            (action.payload.get("merge_ref") or action.payload.get("schedule_fix"))
+            and action.payload.get("target") == "branch"
         ):
             return False
         arm = await self.store.get_arm(action.repo, action.number)
@@ -243,10 +246,10 @@ class ActionPipeline:
             arm is not None
             and arm.armed_by.lower() == who.lower()
             and same_commit(arm.sha, action.head_sha)
-            # Automatic scheduling armed it unseen: running a fork's code with the
-            # repository's secrets, or pushing an agent's resolution as someone,
-            # stays a person's decision.
-            and not (arm.auto and action.kind in NOT_UNSEEN)
+            # Automatic scheduling armed it, or commits came after its scheduler
+            # saw it: running a fork's code with the repository's secrets, or
+            # pushing an agent's resolution as someone, stays a person's decision.
+            and not ((arm.auto or arm.unseen) and action.kind in NOT_UNSEEN)
         )
 
     async def _revised_on_request(self, action: Action) -> bool:

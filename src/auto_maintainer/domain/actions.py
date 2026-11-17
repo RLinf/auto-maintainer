@@ -43,6 +43,7 @@ class ActionKind(StrEnum):
     COMMENT_UPSERT = "comment.upsert"
     CI_RERUN_FAILED = "ci.rerun_failed"
     CI_APPROVE_RUN = "ci.approve_run"
+    CI_CANCEL = "ci.cancel"
     """Approve workflow runs GitHub holds for a maintainer (a first-time
     contributor's fork PR), as the person who pressed the button."""
     PR_REQUEST_REVIEWERS = "pr.request_reviewers"
@@ -333,6 +334,16 @@ class RerunPayload(_Payload):
     requested: bool = False
 
 
+class CancelRunsPayload(_Payload):
+    """Cancel the PR's unfinished workflow runs ``run_ids`` at ``Action.head_sha``:
+    the merge schedule's, for a PR whose CI cannot count while another holds the
+    turn, or a maintainer's press, so they leave the CI machines to that one."""
+
+    run_ids: list[int] = Field(min_length=1, max_length=100)
+    workflows: list[str] = Field(default_factory=list, max_length=100)
+    reason: str = Field(default="", max_length=500)
+
+
 class RequestReviewersPayload(_Payload):
     logins: list[str]
 
@@ -425,6 +436,10 @@ class FixPrPayload(_Payload):
     """``pr``: a new branch and a PR into the PR's branch. ``branch``: one commit on
     the PR's branch itself, which the approver must be allowed to push to; the
     approver chooses."""
+    schedule_fix: bool = False
+    """The merge schedule's own fix of a static check's finding
+    (``merge.schedule.fix``), pushed onto the branch as the PR's scheduler, whose
+    scheduling approves it (``actuator/pipeline.py:SCHEDULED``)."""
     merge_ref: str | None = None
     """When set, the commit merges this branch of the base repository, at
     ``merge_sha``, into the PR: a merge commit, with ``resolved`` for the files that
@@ -545,6 +560,7 @@ PAYLOADS: dict[ActionKind, type[BaseModel]] = {
     ActionKind.COMMENT_UPSERT: CommentUpsertPayload,
     ActionKind.CI_RERUN_FAILED: RerunPayload,
     ActionKind.CI_APPROVE_RUN: ApproveRunsPayload,
+    ActionKind.CI_CANCEL: CancelRunsPayload,
     ActionKind.PR_REQUEST_REVIEWERS: RequestReviewersPayload,
     ActionKind.PR_APPROVE: ApprovePrPayload,
     ActionKind.PR_UPDATE_BRANCH: UpdateBranchPayload,

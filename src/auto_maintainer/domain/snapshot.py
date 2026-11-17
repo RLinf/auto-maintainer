@@ -64,6 +64,11 @@ class RepoInfo(_Model):
     ``None`` when unreadable."""
     merge_queue: bool | None = None
     """The default branch takes merges only through the forge's merge queue."""
+    service_bypasses_rules: bool | None = None
+    """Whether the service's own account may merge past the default branch's rules:
+    a ruleset that lets it bypass, or branch protection it administers that does not
+    hold admins to it. ``False`` means the forge refuses any merge of its that a rule
+    blocks; ``None`` when unreadable."""
     fork_approval: str | None = None
     """Whose workflow runs from forks wait for a maintainer to approve them, in
     GitHub's terms (``first_time_contributors_new_to_github``,

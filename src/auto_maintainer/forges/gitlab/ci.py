@@ -44,6 +44,12 @@ class GitLabCi:
             f"/projects/{project_id(repo)}/pipelines/{run_id}/retry"
         )
 
+    async def cancel_run(self, repo: str, run_id: int) -> None:
+        """Cancel the pipeline's jobs that have not finished."""
+        await self._client.post(
+            f"/projects/{project_id(repo)}/pipelines/{run_id}/cancel"
+        )
+
     async def list_runners(self, repo: str) -> list[RunnerInfo]:
         runners = await self._client.paginate(
             f"/projects/{project_id(repo)}/runners", allow=(401, 403, 404)

@@ -722,12 +722,16 @@ export const TOPICS: Topic[] = [
         zh: "[[可调度]] 列出满足合并条件的 PR。对某个 PR 点 [[调度]]，或点 [[全部调度]]。",
       },
       {
-        en: "Scheduled PRs take turns: each merges the base in, runs its CI, and merges when it passes. Reorder with [[Move up]] and [[Move down]]; [[Unschedule]] takes one out.",
-        zh: "已调度的 PR 依次进行：每个都先合并基础分支、运行 CI，通过后合并。用 [[上移]]、[[下移]] 调整顺序，用 [[取消调度]] 移出队列。",
+        en: "Scheduled PRs take turns: each merges the base in, runs its CI, and merges when it passes. Reorder with [[Move up]] and [[Move down]]; [[Unschedule]] takes one out. Only the CI of the PR whose turn it is runs: the schedule cancels the others', and [[Cancel CI]] under CI running now stops any other PR's.",
+        zh: "已调度的 PR 依次进行：每个都先合并基础分支、运行 CI，通过后合并。用 [[上移]]、[[下移]] 调整顺序，用 [[取消调度]] 移出队列。只有轮到的 PR 运行 CI：调度会取消其他 PR 的 CI，在“正在运行的 CI”中点 [[取消 CI]] 可以停止其他任何 PR 的 CI。",
       },
       {
-        en: "A PR whose CI really failed moves to the [[Failure lane]] with its cause, and the next one takes the turn. Only a flake? [[Flaky, rerun]].",
-        zh: "CI 真正失败的 PR 会带着原因移到 [[失败队列]]，由下一个 PR 接上。只是偶发失败？点 [[偶发失败，重跑]]。",
+        en: "A PR whose CI really failed moves to the [[Failure lane]] with its cause, and the next one takes the turn. Only a flake? [[Flaky, rerun]]. A failure only linters or formatters report is fixed at once instead, pushed as the maintainer who scheduled it. A PR back from the lane joins the end of the order.",
+        zh: "CI 真正失败的 PR 会带着原因移到 [[失败队列]]，由下一个 PR 接上。只是偶发失败？点 [[偶发失败，重跑]]。只有 linter 或格式化工具报告的失败会被立即修复，并以调度它的维护者身份推送。从失败队列回来的 PR 会排到队尾。",
+      },
+      {
+        en: "Wondering why a PR sits where it is? The message button on its row asks the agent, which reads its place in the schedule and every step taken.",
+        zh: "想知道某个 PR 为什么停在那里？点它那一行的消息按钮问智能体，它会读取该 PR 在调度中的位置和已执行的每一步。",
       },
       {
         en: "Below the lists are the merge conditions and how CI starts. Describe the rules in your own words, and an agent turns them into settings for you to save.",

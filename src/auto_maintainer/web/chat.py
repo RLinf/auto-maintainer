@@ -91,6 +91,7 @@ from .api import (
 )
 from .auth import User, current_user
 from .live_turns import LiveTurns, Stopped
+from .merge_schedule import schedule_brief
 from .records import open_door, reading_line
 
 log = logging.getLogger(__name__)
@@ -871,6 +872,8 @@ async def _page_block(
             "When the maintainer says 'this PR' they mean this one; put its repo and "
             "number in any proposal."
         )
+        if context.page == "merge":
+            lines += await schedule_brief(service, context.repo, context.number)
     elif context.repo:
         record = await service.store.get_repo(context.repo)
         evaluations = await service.store.list_evaluations(context.repo)

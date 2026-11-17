@@ -12,6 +12,7 @@ policy:
   comment.upsert: {level: shadow}
   ci.rerun_failed: {level: shadow}
   ci.approve_run: {level: shadow}     # a person's Approve and run; only ever as them
+  ci.cancel: {level: shadow}          # the merge schedule's, or a maintainer's Cancel
   pr.request_reviewers: {level: shadow}
   pr.update_branch: {level: shadow}
   pr.approve: {level: shadow}          # a person's Approve button; only ever as them
@@ -40,3 +41,8 @@ merge:
     # scheduled it (design 5.5). Off where a repository's approved profile predates
     # it, until its maintainers approve the change.
     resolve: {enabled: true}
+    # The schedule fixes a scheduled PR whose CI fails only on static checks
+    # (linters, formatters, type checkers), pushed as the maintainer who scheduled
+    # it, when the fix touches only the files they report (design 5.5). Off where a
+    # repository's approved profile predates it, until its maintainers approve.
+    fix: {enabled: true}

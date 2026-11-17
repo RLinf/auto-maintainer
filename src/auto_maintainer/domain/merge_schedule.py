@@ -46,6 +46,7 @@ Phase = Literal[
     "queued",
     "updating",
     "resolving",
+    "fixing",
     "starting",
     "running",
     "rerunning",
@@ -61,6 +62,7 @@ ACTIVE: frozenset[str] = frozenset(
     {
         "updating",
         "resolving",
+        "fixing",
         "starting",
         "running",
         "rerunning",
@@ -90,9 +92,22 @@ UNKNOWN_READS = 5
 """How many times, a minute apart, a PR whose mergeability the forge has not worked
 out yet is read again on its turn before the schedule goes on without it."""
 
+FIX_SECONDS = 3600
+"""How long the schedule's fix of a PR's static checks may take, from starting the
+agent to its push showing on the forge, before the schedule takes it to have failed."""
+FIXES_PER_SCHEDULE = 2
+"""How many fixes of its static checks the schedule pushes onto one scheduled PR: a
+fix that fails the checks again goes to a person after that."""
 RESOLVE_SECONDS = 3600
 """How long the schedule's resolution of a PR's conflict may take, from starting the
 agent to its push showing on the forge, before the schedule takes it to have failed."""
+
+
+def fix_key(repo: str, number: int) -> str:
+    """Where the store keeps how the schedule's fix of a PR's static checks went
+    (``merge.schedule.fix``): ``sha`` (the head it fixes), ``outcome`` (``started``,
+    ``proposed``, or ``refused``), ``why``, ``action_id``, ``at``."""
+    return f"merge-schedule-fix:{repo}#{number}"
 
 
 def resolve_key(repo: str, number: int) -> str:
@@ -166,6 +181,10 @@ class ScheduleState(BaseModel):
     merges cleanly (``Mergeable.UNKNOWN``); after ``UNKNOWN_READS`` it goes on."""
     queued: bool = False
     """Its merge went to the forge's merge queue, which merges it in its own time."""
+    cancelled: list[int] = Field(default_factory=list)
+    """Workflow runs at its head the schedule cancelled while another PR held the
+    turn (``playbooks/merge.py:_quiet``): its own turn runs them again, whatever the
+    rerun budget."""
     blocked_rule: str = ""
     """The forge's own merge verdict (``PrSnapshot.merge_state``) held back a merge
     that the service's merge gate allowed, at this head."""

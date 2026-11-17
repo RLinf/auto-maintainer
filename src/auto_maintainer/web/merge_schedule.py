@@ -34,12 +34,15 @@ from typing import Any, Literal
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from ..domain.actions import ActionKind
 from ..domain.events import Event, EventKind
 from ..domain.ids import same_commit
 from ..domain.memory import profile_path
 from ..domain.merge_gate import GateResult, MergeArm, evaluate_merge_gate
 from ..domain.merge_schedule import (
+    ACTIVE,
     ScheduleState,
+    fix_key,
     holding_back,
     next_position,
     ordered,
@@ -51,10 +54,16 @@ from ..domain.merge_schedule import (
     state_key,
 )
 from ..domain.permissions import Permission
-from ..domain.profile import FlakeSignature, ReadyCondition, RepoProfile, ResolveKind
+from ..domain.profile import (
+    FlakeSignature,
+    ReadyCondition,
+    RepoProfile,
+    ResolveKind,
+    ScheduleFix,
+)
 from ..domain.records import CiObservation, JobStatus
-from ..domain.run_ci import ci_view
-from ..domain.snapshot import Mergeable, PrSnapshot, PrState, RepoInfo
+from ..domain.run_ci import ci_view, latest_checks, unfinished_runs
+from ..domain.snapshot import CheckStatus, Mergeable, PrSnapshot, PrState, RepoInfo
 from ..playbooks.auto_schedule import AUTO_COMMAND
 from ..playbooks.ci_rules import COMMAND as CI_RULES
 from ..playbooks.ci_rules import (
@@ -68,7 +77,8 @@ from ..playbooks.ci_rules import (
 from ..playbooks.flake_learn import COMMAND as LEARN_COMMAND
 from ..playbooks.flake_learn import SUGGESTIONS
 from ..playbooks.hygiene import hygiene_key
-from ..playbooks.merge import MERGED_KEY
+from ..playbooks.merge import MERGED_KEY, cancel_runs_action
+from ..playbooks.prompts import untrusted
 from ..profiles.layers import ProfileError, parse_yaml
 from ..service import Service
 from .api import (
@@ -78,6 +88,9 @@ from .api import (
     require_view,
     service_of,
     shows_maintainer,
+)
+from .api import (
+    _run_now as run_now,
 )
 from .auth import User, current_user
 
@@ -126,6 +139,7 @@ class MergingBody(BaseModel):
     arming_who: Literal["write", "maintain", "admin", "codeowners"] | None = None
     freezes: list[FreezeBody] | None = Field(default=None, max_length=50)
     resolve: ResolveBody | None = None
+    fix: ScheduleFix | None = None
 
 
 class CiStartBody(BaseModel):
@@ -213,6 +227,160 @@ async def gate_of(
         await service.pipeline.paused(pr.repo),
         service.clock.now(),
     )
+
+
+async def schedule_brief(service: Service, repo: str, number: int) -> list[str]:
+    """What the agent is told about ``number``'s place in the merge schedule when a
+    person asks about it from the Merge page (``web/chat.py:_page_block``): who
+    scheduled it and at which head, where it stands in the order, its phase, the
+    merge rules as the service reads them, GitHub's own verdict, and the steps the
+    schedule took since it was scheduled. Root causes and findings came from agents
+    reading CI logs, so they go in as untrusted data."""
+    arm = await service.store.get_arm(repo, number)
+    if arm is None:
+        return [f"{repo}#{number} is not in the merge schedule now."]
+    state = await _state(service, repo, number)
+    arms = ordered(await service.store.list_arms(repo))
+    flags = [
+        "by automatic scheduling" if arm.auto else "",
+        "by hand before it met the conditions to schedule" if arm.forced else "",
+        "with commits pushed since that its scheduler has not seen (a fork's held "
+        "workflows wait for them to approve running them)"
+        if arm.unseen
+        else "",
+    ]
+    lines = [
+        f"The person asks about {repo}#{number} in the merge schedule. It was "
+        f"scheduled by {arm.armed_by} at {arm.armed_at:%Y-%m-%d %H:%M} UTC, now at "
+        f"head {arm.sha[:12]}" + "".join(f", {f}" for f in flags if f) + ".",
+        "The order (lowest first; one PR takes the turn at a time when PRs must be "
+        "up to date with the base): " + ", ".join(f"#{a.number}" for a in arms) + ".",
+        f"Its phase: {state.phase}"
+        + (f" since {state.since:%Y-%m-%d %H:%M} UTC" if state.since else "")
+        + (f"; {state.detail}" if state.detail else "")
+        + (f" (blocked on {state.blocked_on})" if state.phase == "blocked" else "")
+        + f". Merge attempts at this head: {state.merge_attempts}.",
+    ]
+    profile = await service.profiles.active(repo)
+    pr = await service.store.get_snapshot(repo, number) or await service.a.forge.get_pr(
+        repo, number
+    )
+    if profile is not None and pr is not None:
+        info = await service.view_repo(repo)
+        gate = await gate_of(service, profile, info, pr, arm)
+        lines.append(
+            "The merge rules as the service reads them: "
+            + "; ".join(
+                f"{i.name} "
+                + ("ok" if i.ok else "pending" if i.pending else "not met")
+                + (f" ({i.detail})" if i.detail and not i.ok else "")
+                for i in gate.items
+            )
+            + f". GitHub's own verdict: {pr.merge_state or 'unknown'}, mergeable "
+            f"{pr.mergeable.value.lower()}."
+        )
+    found = [*state.causes, state.finding] if state.finding else list(state.causes)
+    if found:
+        lines.append(untrusted("merge.root_causes", "\n".join(found), 4000))
+    steps = [
+        r
+        for r in await service.store.list_actions(
+            repo=repo, number=number, since=arm.armed_at, limit=200
+        )
+        if r.action.provenance.scheduled_by
+        or (
+            r.action.kind == ActionKind.NOTIFY
+            and str(r.action.payload.get("event") or "").startswith("merge.")
+        )
+    ]
+    if steps:
+        lines.append(
+            untrusted(
+                "merge.steps",
+                "\n".join(
+                    f"{r.action.created_at:%m-%d %H:%M} "
+                    + (
+                        f"said: {r.action.payload.get('text')}"
+                        if r.action.kind == ActionKind.NOTIFY
+                        else f"{r.action.kind} {r.status.value}"
+                        + (f" as {r.post_as}" if r.post_as else "")
+                        + (f": {r.action.rationale}" if r.action.rationale else "")
+                        + (f" (error: {r.error[:300]})" if r.error else "")
+                    )
+                    for r in sorted(steps, key=lambda r: r.action.created_at)[-60:]
+                ),
+                12000,
+            )
+        )
+    lines.append(
+        "Explain from these why it is where it is and what would move it on; the "
+        "person may retry, reorder, or unschedule it on the Merge page."
+    )
+    return lines
+
+
+async def _ci_now(
+    service: Service, repo: str, arms: list[MergeArm], prs: Any
+) -> list[dict[str, Any]]:
+    """The open PRs whose workflow runs hold or wait for CI machines now, from the
+    snapshots the service keeps: the scheduled PR holding the turn first, then the
+    rest by number."""
+    armed = {a.number: a for a in arms}
+    rows = []
+    for pr in prs:
+        if pr.state != PrState.OPEN:
+            continue
+        runs = unfinished_runs(pr.checks)
+        if not runs:
+            continue
+        arm = armed.get(pr.number)
+        phase = (await _state(service, repo, pr.number)).phase if arm else None
+        started = [
+            c.started_at
+            for c in latest_checks(pr.checks)
+            if c.run_id in runs and c.started_at is not None
+        ]
+        rows.append(
+            {
+                "number": pr.number,
+                "title": pr.title,
+                "author": pr.author,
+                "url": pr.url,
+                "workflows": sorted(set(runs.values())),
+                "runs": len(runs),
+                "jobs": sum(
+                    1
+                    for c in latest_checks(pr.checks)
+                    if c.run_id in runs and c.status != CheckStatus.COMPLETED
+                ),
+                "since": min(started).isoformat() if started else None,
+                "scheduled": arm is not None,
+                "holds_turn": phase in ACTIVE,
+            }
+        )
+    rows.sort(key=lambda r: (not r["holds_turn"], r["number"]))
+    return rows
+
+
+async def _cancel_ci(
+    service: Service, user: User, pr: PrSnapshot, why: str
+) -> dict[str, Any] | None:
+    """Cancel ``pr``'s unfinished workflow runs as ``user`` pressed it; a scheduled
+    PR runs them again on its own turn (``ScheduleState.cancelled``). ``None`` when
+    none runs."""
+    runs = unfinished_runs(pr.checks)
+    if not runs:
+        return None
+    if await service.store.get_arm(pr.repo, pr.number) is not None:
+        state = await _state(service, pr.repo, pr.number)
+        state.cancelled = sorted({*state.cancelled, *runs})
+        await service.store.set_state(
+            state_key(pr.repo, pr.number), state.model_dump(mode="json")
+        )
+    record = await run_now(
+        service, user, cancel_runs_action(pr, runs, why, by=user.login)
+    )
+    return {"status": record.status, "runs": sorted(runs), "error": record.error}
 
 
 def _item(name: str, detail: str) -> str:
@@ -468,6 +636,7 @@ def _merging(profile: RepoProfile, info: RepoInfo) -> dict[str, Any]:
         "arming_who": merge.arming.who,
         "freezes": [f.model_dump(mode="json") for f in merge.freezes],
         "resolve": resolve.model_dump(mode="json"),
+        "fix": merge.schedule.fix.model_dump(mode="json"),
         "merge_queue": info.merge_queue,
         "warnings": warnings,
     }
@@ -505,7 +674,7 @@ def build_router() -> APIRouter:
             if job.playbook == "ci_rules":
                 rules_job = {"id": job.id, "status": job.status}
             elif (
-                job.playbook in ("merge", "ci_doctor", "merge_base")
+                job.playbook in ("merge", "ci_doctor", "merge_base", "fix_ci")
                 and job.number is not None
             ):
                 # The live view of the work on the PR; a running one first.
@@ -538,6 +707,7 @@ def build_router() -> APIRouter:
                 "finding": state.finding,
                 "approval_needed": state.approval_needed,
                 "stale": not same_commit(arm.sha, pr.head_sha),
+                "unseen": arm.unseen,
                 "job": jobs.get(arm.number),
                 "forced": arm.forced,
             }
@@ -644,6 +814,7 @@ def build_router() -> APIRouter:
             "scope_request": await _scope_view(service, user),
             "scheduled": scheduled,
             "failed": failed,
+            "ci_now": await _ci_now(service, repo, arms, snaps.values()),
             "candidates": candidates,
             "not_ready": not_ready,
             "merged": await service.store.get_state(MERGED_KEY.format(repo=repo)) or [],
@@ -760,12 +931,73 @@ def build_router() -> APIRouter:
                 payload={"by": user.login},
             )
         )
-        return {"scheduled": False}
+        cancelled = None
+        profile = await service.profiles.active(repo)
+        pr = await service.store.get_snapshot(repo, number)
+        if profile is not None and pr is not None:
+            info = await service.view_repo(repo)
+            holders = [
+                a.number
+                for a in ordered(await service.store.list_arms(repo))
+                if (await _state(service, repo, a.number)).phase in ACTIVE
+            ]
+            if serial(info, profile) and holders:
+                # Its CI cannot count once #holder merges, and holds its machines.
+                cancelled = await _cancel_ci(
+                    service,
+                    user,
+                    pr,
+                    f"unscheduled by {user.login} while #{holders[0]} holds the "
+                    "merge schedule's turn",
+                )
+        return {"scheduled": False, "cancelled": cancelled}
+
+    @r.post("/{repo:path}/{number:int}/cancel-ci")
+    async def cancel_ci(
+        request: Request,
+        repo: str,
+        number: int,
+        user: User = Depends(current_user),
+    ) -> dict[str, Any]:
+        """Cancel a PR's unfinished workflow runs, so they leave the CI machines to
+        the scheduled PR whose turn it is. The PR holding the turn is the
+        schedule's: unschedule it instead."""
+        service = service_of(request)
+        repo = _repo(repo)
+        await require_view(service, user, repo)
+        await _maintainer(service, user, repo)
+        if (
+            await service.store.get_arm(repo, number) is not None
+            and (await _state(service, repo, number)).phase in ACTIVE
+        ):
+            raise HTTPException(
+                409, f"#{number} holds the schedule's turn: unschedule it instead"
+            )
+        pr = await service.a.forge.get_pr(repo, number)
+        if pr is None or pr.state != PrState.OPEN:
+            raise HTTPException(404, f"#{number} is not an open PR")
+        out = await _cancel_ci(
+            service, user, pr, f"cancelled by {user.login} from the Merge page"
+        )
+        if out is None:
+            raise HTTPException(409, f"#{number} has no CI running")
+        return out
 
     async def _send_back(
         service: Service, repo: str, number: int, user: User, why: str
     ) -> dict[str, Any]:
         state = await _state(service, repo, number)
+        arm = await service.store.get_arm(repo, number)
+        if state.phase == "failed" and arm is not None:
+            # Back from the failure lane, after every PR scheduled meanwhile.
+            others = [
+                a for a in await service.store.list_arms(repo) if a.number != number
+            ]
+            await service.store.save_arm(
+                arm.model_copy(
+                    update={"position": next_position(others, service.clock.now())}
+                )
+            )
         state.phase = "queued"
         state.detail = why
         state.retry = True
@@ -779,8 +1011,10 @@ def build_router() -> APIRouter:
         await service.store.set_state(
             state_key(repo, number), state.model_dump(mode="json")
         )
-        # The schedule tries its resolution of the PR's conflicts again.
+        # The schedule tries its resolution of the PR's conflicts, and its fix of
+        # its static checks, again.
         await service.store.set_state(resolve_key(repo, number), None)
+        await service.store.set_state(fix_key(repo, number), None)
         await service.bus.publish(
             Event(kind=EventKind.MERGE_QUEUE, repo=repo, number=number)
         )
@@ -989,6 +1223,8 @@ def build_router() -> APIRouter:
                 _section(merge, "schedule")["resolve"] = body.resolve.model_dump(
                     mode="json"
                 )
+            if body.fix is not None:
+                _section(merge, "schedule")["fix"] = body.fix.model_dump(mode="json")
             ci = _section(layer, "ci")
             if body.required_workflows is not None:
                 ci["required_workflows"] = [

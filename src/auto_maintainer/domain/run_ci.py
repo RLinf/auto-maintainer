@@ -182,6 +182,20 @@ class RunCiPlan(BaseModel):
         return self.state in ("gated", "failed", "approval")
 
 
+def unfinished_runs(checks: list[CheckRun]) -> dict[int, str]:
+    """The workflow runs among ``checks`` that still run or wait for a runner, by run
+    id, with their workflow's name: what holds CI machines. Runs GitHub holds for a
+    maintainer's approval have not started and hold none."""
+    return {
+        c.run_id: c.workflow or c.name
+        for c in latest_checks(checks)
+        if c.run_id is not None
+        and c.run_id > 0
+        and c.status != CheckStatus.COMPLETED
+        and not c.awaiting_approval
+    }
+
+
 def rerun_targets(checks: list[CheckRun]) -> list[RerunTarget]:
     """The runs of ``checks`` to run again: each finished run with a failed or
     cancelled check, at its newest attempt."""

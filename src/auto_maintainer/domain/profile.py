@@ -465,6 +465,23 @@ class ConflictResolution(_Section):
         return value
 
 
+class ScheduleFix(_Section):
+    """CI failures the merge schedule fixes by itself on a PR's turn (design 5.5):
+    when every failed job's root cause is a static check's finding
+    (``RootCause.static``: a linter, formatter, or type checker), an agent fixes it
+    (``playbooks/fix_ci.py``) without running the repository's code, and the fix is
+    pushed onto the PR's branch as the maintainer who scheduled it, only when it
+    changes no file but those the causes name, in at most ``max_lines`` changed
+    lines. Any other fix waits under Approvals and the PR goes to the failure lane.
+    On through the default profile (``config/defaults/profile.yaml``); off for a
+    profile that does not say, so an approved profile from before it stays as it was
+    until its maintainers approve."""
+
+    enabled: bool = False
+    max_lines: int = Field(default=40, ge=1, le=1000)
+    """Added and removed lines together."""
+
+
 class MergeSchedule(_Section):
     """The repository's merge scheduling (design 5.5)."""
 
@@ -490,6 +507,8 @@ class MergeSchedule(_Section):
     scheduling page."""
     resolve: ConflictResolution = Field(default_factory=ConflictResolution)
     """Conflicts with the base that the schedule resolves by itself."""
+    fix: ScheduleFix = Field(default_factory=ScheduleFix)
+    """CI failures the schedule fixes by itself: static checks' findings."""
 
 
 class Merge(_Section):

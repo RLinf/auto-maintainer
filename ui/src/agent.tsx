@@ -39,6 +39,7 @@ const PAGES: { path: string; page: string; label: string; icon: IconName }[] = [
   { path: "/", page: "home", label: "Home", icon: "home" },
   { path: "/prs", page: "queue", label: "Pull requests", icon: "pr" },
   { path: "/repos", page: "repositories", label: "Repositories", icon: "repo" },
+  { path: "/merge", page: "merge", label: "Merge schedule", icon: "merge" },
   { path: "/inbox", page: "proposals", label: "Approvals", icon: "inbox" },
   { path: "/questions", page: "questions", label: "Agent questions", icon: "question" },
   { path: "/memory", page: "memory", label: "Memory", icon: "book" },
@@ -76,6 +77,8 @@ function contextIcon(c: AgentContext): IconName {
 const SUGGESTIONS: Record<string, string[]> = {
   home: ["What needs my attention today?", "Summarize what changed since yesterday", "Which PRs are blocked, and on what?"],
   queue: ["Which PRs should I review first, and why?", "Which PRs look ready to merge?", "Which PRs have gone stale?"],
+  merge: ["Why isn't the schedule moving?", "What merges next, and when?", "Which scheduled PRs wait for me?"],
+  "merge-pr": ["Why is it where it is in the schedule?", "What would move it on?", "What has the schedule done with it so far?"],
   pr: ["Summarize this PR", "What are the risks in this change?", "Why does it have this priority?", "What should the review focus on?"],
   repository: ["How is this repository doing?", "Which settings would you change?", "What has the service learned here recently?"],
   repositories: ["Which repository needs attention?", "Compare activity across repositories"],
@@ -405,7 +408,7 @@ export function Conversation({
     if (autoFocus) input.current?.focus();
   }, [autoFocus]);
 
-  const suggestions = SUGGESTIONS[context.page] ?? SUGGESTIONS.home;
+  const suggestions = SUGGESTIONS[context.page === "merge" && context.number !== null ? "merge-pr" : context.page] ?? SUGGESTIONS.home;
   return (
     <>
       <div className="agent-body" ref={body}>
