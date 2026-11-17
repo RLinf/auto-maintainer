@@ -318,7 +318,7 @@ export default function PrPage({ me }: { me: Me }) {
           )}
         </div>
 
-        <aside className="side">
+        <aside key={rest} className="side">
           <PrPeopleCards repo={full} number={pr.number} author={pr.author} assignees={d.assignees ?? []} me={me.login} />
           <CodeOwnersCard repo={full} number={pr.number} head={pr.head_sha} />
           <QualityCard

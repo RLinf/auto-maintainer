@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Mobile layout invariants for the dashboard at 360-430px and <=640px."""
+"""Responsive layout invariants for dashboard grids, sidebars, tables, and popovers."""
 
 from __future__ import annotations
 
@@ -188,6 +188,62 @@ def test_mobile_css_collapses_grids_and_relaxes_fixed_widths() -> None:
     assert _decls_for(blocks, ".tabs button", 375).get("white-space") == "nowrap"
     assert _decls_for(blocks, "pre.diff", 375).get("overflow-x") == "auto"
     assert _decls_for(blocks, ".md-code", 375).get("overflow-x") == "auto"
+
+
+def test_pr_sidebar_scrolls_independently_on_desktop_and_resets_in_single_column() -> (
+    None
+):
+    blocks = _extract_blocks(STYLES_CSS.read_text(encoding="utf-8"))
+
+    # Two-column desktop viewports keep .split > .side sticky with its own bounded scroll box.
+    for vw in (1081, 1280, 1440):
+        side = _decls_for(blocks, ".split > .side", vw)
+        assert side.get("position") == "sticky"
+        assert side.get("top") == "calc(var(--header-h) + 18px)"
+        assert side.get("max-height") == "calc(100vh - var(--header-h) - 36px)"
+        assert side.get("overflow-y") == "auto"
+        assert side.get("overflow-x") == "hidden"
+        assert _decls_for(blocks, ".split > .side > *", vw).get("flex-shrink") == "0"
+        # Fixed-position popovers inside .side (MergeNowButton, MergeBaseButton) stay
+        # anchored to the viewport only if .side creates no fixed containing block.
+        for prop in (
+            "transform",
+            "perspective",
+            "filter",
+            "backdrop-filter",
+            "contain",
+            "will-change",
+            "container-type",
+        ):
+            assert prop not in side, f"{prop} on .split > .side would clip .pop-panel"
+
+    # When the agent panel narrows the page (<=1360px), .side joins the single-column flow.
+    for vw in (1280, 1360):
+        assert (
+            _decls_for(blocks, "body.agent-open .split", vw).get(
+                "grid-template-columns"
+            )
+            == "1fr"
+        )
+        agent_side = _decls_for(blocks, "body.agent-open .split > .side", vw)
+        assert agent_side.get("position") == "static"
+        assert agent_side.get("max-height") == "none"
+        assert agent_side.get("overflow-y") == "visible"
+        assert agent_side.get("overflow-x") == "visible"
+        assert agent_side.get("padding-bottom") == "0"
+
+    # At <=1080px (tablets and phones), .side joins the single-column flow without nested scrolling.
+    for vw in (375, 640, 1080):
+        narrow_side = _decls_for(blocks, ".split > .side", vw)
+        assert narrow_side.get("position") == "static"
+        assert narrow_side.get("max-height") == "none"
+        assert narrow_side.get("overflow-y") == "visible"
+        assert narrow_side.get("overflow-x") == "visible"
+        assert narrow_side.get("padding-bottom") == "0"
+
+    # Navigating between cached PRs resets the sidebar scroll position via key={rest}.
+    pr_tsx = (UI_SRC / "pages" / "Pr.tsx").read_text(encoding="utf-8")
+    assert '<aside key={rest} className="side">' in pr_tsx
 
 
 def test_tsx_avoids_rigid_widths_and_inline_grids() -> None:
