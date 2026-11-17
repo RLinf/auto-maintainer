@@ -930,6 +930,9 @@ class FakeUserTokens:
     async def delete(self, login: str) -> None:
         self.tokens.pop(login.lower(), None)
 
+    async def logins(self) -> list[str]:
+        return sorted(self.tokens)
+
 
 class Reconfigured:
     """Records what the service asked to run on after each settings change."""

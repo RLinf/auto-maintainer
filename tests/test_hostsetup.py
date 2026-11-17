@@ -902,6 +902,51 @@ async def test_signing_in_on_the_web_through_the_github_cli_keeps_nothing(
     await h.close()
 
 
+async def test_only_people_who_may_use_the_service_finish_signing_in(
+    tmp_path: Path, fake_gh, monkeypatch
+) -> None:
+    """Anyone on GitHub can authorize the CLI; only someone who may use the service
+    (a member of one of its repositories, its owner, an operator) gets a session,
+    and nobody else's token is kept, then or later."""
+    from auto_maintainer.domain.permissions import Permission
+    from auto_maintainer.domain.settings import UserToken
+
+    h = await build_demo(tmp_path)
+    factory = cli._gh_signin(HostConfig(data_dir=str(tmp_path / "data")))
+    logins: list[GhLogin] = []
+
+    def tracked(flow_id: str) -> GhLogin:
+        logins.append(factory(flow_id))
+        return logins[-1]
+
+    async def who(api_url: str, token: str) -> auth.User:
+        return auth.User(login="stranger", name="Stranger")
+
+    monkeypatch.setattr(auth, "_github_user", who)
+    app = create_app(h.service, data_dir=tmp_path, gh_signin=tracked)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://box"
+    ) as client:
+        started = (await client.post("/auth/gh/start")).json()
+        await _approved(logins[0])
+        refused = await client.post(
+            "/auth/gh/poll", json={"flow_id": started["flow_id"]}
+        )
+        assert refused.status_code == 403
+        assert "People record" in refused.json()["detail"]
+        assert await h.service.a.user_tokens.get("stranger") is None, "never kept"
+        assert (await client.get("/api/me")).status_code == 401
+    # A token kept for someone who has since lost access is forgotten daily.
+    h.forge.set_permission("acme/widget", "leaver", Permission.READ)
+    h.forge.set_permission("acme/widget", "member", Permission.WRITE)
+    for login in ("leaver", "member"):
+        await h.service.a.user_tokens.set(login, UserToken(token="t", source="gh"))
+    assert await h.service.forget_outsiders() == 1
+    assert await h.service.a.user_tokens.get("leaver") is None
+    assert await h.service.a.user_tokens.get("member") is not None
+    await h.close()
+
+
 async def test_without_gh_on_the_host_the_sign_in_page_says_what_is_missing(
     tmp_path: Path, monkeypatch
 ) -> None:

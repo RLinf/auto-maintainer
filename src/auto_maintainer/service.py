@@ -46,6 +46,7 @@ from .domain.memory import (
     profile_path,
     repo_dir,
 )
+from .domain.permissions import Permission
 from .domain.ports import (
     AgentInstaller,
     AgentRunner,
@@ -676,8 +677,10 @@ class Service:
         """Keep the data folder's size bounded (design 7.3): a conversation idle for
         ``CONVERSATION_IDLE`` gives up its working folder (released, and its session
         forgotten, since a session resumes only where it ran), then ``cleanup``
-        removes what nothing uses, keeping the other conversations' folders; and
-        finished bookkeeping jobs older than ``JOBS_KEPT`` leave the store."""
+        removes what nothing uses, keeping the other conversations' folders;
+        finished bookkeeping jobs older than ``JOBS_KEPT`` leave the store; and the
+        sign-ins kept for people who may no longer use the service are forgotten
+        (``forget_outsiders``)."""
         cutoff = self.clock.now() - CONVERSATION_IDLE
         keep: set[Path] = set()
         for thread, active in await self.store.threads_with_workdir():
@@ -704,6 +707,51 @@ class Service:
         pruned = await self.store.prune_jobs(bookkeeping, self.clock.now() - JOBS_KEPT)
         if pruned:
             log.info("removed %d finished bookkeeping jobs", pruned)
+        await self.forget_outsiders()
+
+    async def admits(self, login: str) -> bool | None:
+        """Whether ``login`` may use this service (design 2.3): its owner, an operator,
+        or someone who may see one of its repositories (write access, or a place in
+        its People record with read access), as the dashboard's pages decide.
+        Sign-in completes only for them, so nobody else's token is ever kept.
+        ``None`` when the forge could not say for a repository and no other admits
+        them: unknown, not refused."""
+        me = login.lower()
+        if me in {o.lower() for o in self.settings.operators}:
+            return True
+        with contextlib.suppress(Exception):
+            if (await self.service_gate(login)).allowed:
+                return True
+        unknown = False
+        for record in await self.store.list_repos():
+            try:
+                perm = await self.a.forge.get_permission(record.repo, login)
+            except Exception:
+                unknown = True
+                continue
+            if perm.at_least(Permission.WRITE):
+                return True
+            if perm.at_least(Permission.READ) and me in {
+                m.lower() for m in await self.governance.members_of(record.repo)
+            }:
+                return True
+        return None if unknown else False
+
+    async def forget_outsiders(self) -> int:
+        """Delete the kept sign-ins of people who may no longer use the service
+        (``admits`` says no, not merely unknown). Returns how many."""
+        tokens = self.a.user_tokens
+        if tokens is None:
+            return 0
+        forgotten = 0
+        for login in await tokens.logins():
+            if await self.admits(login) is False:
+                await tokens.delete(login)
+                forgotten += 1
+                log.info(
+                    "forgot the GitHub sign-in of %s, who may no longer use it", login
+                )
+        return forgotten
 
     # -- service settings (design 8.1) ------------------------------------------------
 

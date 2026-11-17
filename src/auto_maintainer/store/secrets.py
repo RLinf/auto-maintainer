@@ -135,3 +135,6 @@ class FileUserTokens:
             data = await asyncio.to_thread(self._files._read)
             if data.pop(login.lower(), None) is not None:
                 await asyncio.to_thread(self._files._write, data)
+
+    async def logins(self) -> list[str]:
+        return sorted(await asyncio.to_thread(self._files._read))

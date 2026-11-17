@@ -234,6 +234,12 @@ async def test_people_sign_in_on_another_forge_as_that_forges_people(
             ]
             bad = await browser.post("/auth/forges/corp/token", json={"token": "nope"})
             assert bad.status_code == 401
+            outsider = await browser.post(
+                "/auth/forges/corp/token", json={"token": "glpat-good"}
+            )
+            assert outsider.status_code == 403, "no repository here is hers"
+            assert await h.service.a.user_tokens.get("corp:alice") is None
+            h.service.settings.operators.add("corp:alice")
             ok = await browser.post(
                 "/auth/forges/corp/token", json={"token": "glpat-good"}
             )

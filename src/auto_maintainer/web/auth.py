@@ -131,6 +131,22 @@ def issue_csrf(request: Request, response: Any) -> None:
     )
 
 
+NOT_ADMITTED = (
+    "This service is for the reviewers of the repositories it maintains. Ask a "
+    "maintainer of one to add you to its People record, then sign in again."
+)
+
+
+async def admit(request: Request, login: str) -> None:
+    """Refuse the sign-in of someone who may not use this service (``Service.admits``)
+    before anything of theirs is kept: their token is dropped unstored. A forge that
+    cannot say today lets the sign-in through; the pages still check each request."""
+    service = getattr(request.app.state, "service", None)
+    admits = getattr(service, "admits", None)
+    if admits is not None and await admits(login) is False:
+        raise HTTPException(403, NOT_ADMITTED)
+
+
 async def remember_token(
     request: Request,
     login: str,
@@ -304,6 +320,7 @@ def router(
         if not token:
             raise HTTPException(401, "GitHub did not complete the sign-in; try again")
         user = await _github_user(api_url, token)
+        await admit(request, user.login)
         await remember_token(request, user.login, token, "gh")
         return _login_response(request, user, redirect=None)
 
@@ -349,6 +366,7 @@ def router(
         except Exception as e:
             raise HTTPException(401, f"{f.name} did not accept the token") from e
         login = person_on(f.forge, who["login"])
+        await admit(request, login)
         await remember_token(request, login, token, source)
         user = User(
             login=login,
