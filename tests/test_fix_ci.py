@@ -129,6 +129,48 @@ async def test_without_a_machine_the_agent_runs_nothing(demo) -> None:
     assert h.service.a.lab_runner.reproduced == []
 
 
+async def test_a_ci_fix_that_changed_nothing_drafts_a_change_in_its_conversation(
+    demo,
+) -> None:
+    """The agent found the failure is not the PR's and changed nothing; the person
+    talks with it anyway, and the change they ask for becomes a draft for them."""
+    h, app = demo
+    talks: list[AgentTask] = []
+
+    def judge(task: AgentTask) -> Any:
+        if task.mode == "read_only":
+            return {"title": "ci: pin ml-dtypes", "summary": "Pins ml-dtypes."}
+        if task.activity == "fix_talk":
+            talks.append(task)
+            (task.workdir / "requirements.txt").write_text("ml-dtypes<0.7\n")
+            return AgentResult(runtime="scripted", ok=True, text="Pinned it.")
+        return AgentResult(
+            runtime="scripted", ok=True, text="unit fails on main too: ml-dtypes 0.7."
+        )
+
+    h.runner.on("fix", judge)
+    async with _as(app, "maria") as maria:
+        await maria.post(f"/api/prs/{REPO}/43/fix-ci", json={})
+        await h.settle()
+        [job] = [j for j in await h.store.list_jobs(limit=50) if j.playbook == "fix_ci"]
+        assert job.result and job.result["skipped"] == "the agent changed nothing"
+        url = f"/api/jobs/{job.id}/talk"
+        state = (await maria.get(url)).json()
+        assert state["subject"] == "fix" and state["open"] and state["draft"] is None
+        said = await maria.post(url, json={"text": "Pin ml-dtypes in this PR anyway."})
+        assert said.status_code == 200, said.text
+    [turn] = talks
+    assert "ml-dtypes 0.7" in turn.prompt, "what the job's agent reported"
+    assert "Fix the PR's failing CI jobs." in turn.prompt
+    assert turn.mode == "workspace_write" and turn.requested_by == "maria"
+    [made] = said.json()["proposals"]
+    record = await h.store.get_action(made)
+    assert record is not None and record.action.draft_for == "maria"
+    assert record.action.provenance.playbook == "fix_ci"
+    assert record.action.payload["files"] == ["requirements.txt"]
+    assert record.action.payload["title"] == "ci: pin ml-dtypes"
+
+
 async def test_sync_copies_the_agents_checkout_and_removes_what_it_deleted(
     tmp_path: Path,
 ) -> None:

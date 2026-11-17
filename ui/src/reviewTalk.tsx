@@ -7,8 +7,9 @@
 // review already posted it becomes a draft that edits the posted review once whoever
 // posted it approves. Nothing is posted until someone decides.
 //
-// A change an agent made to a PR (a fix job) has the same conversation: a message
-// reaches the agent at work, and once the job ends a turn may change the files. The
+// A change an agent made to a PR (a fix, a CI fix, or a merge of the base) has the
+// same conversation: a message reaches the agent at work, and once the job ends a turn
+// may change the files (only the conflicted files' resolution, for a merge). The
 // pending draft's diff is replaced; when it was already decided, or nothing was
 // drafted, the change becomes a new draft for the person to push as themselves.
 //
@@ -19,12 +20,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Fragment, useState } from "react";
 import { AgentPicker, agentName } from "./agentPicker";
-import { api, type AgentJob, type ChatMessage, type JobStep, type ReviewTalkState } from "./api";
+import { ApiError, api, type AgentJob, type ChatMessage, type JobStep, type ReviewTalkState } from "./api";
 import { ErrorBox, GrowingTextarea, StopButton } from "./components";
 import { useProposals, useQuestions } from "./data";
 import { useT } from "./i18n";
 import { Icon } from "./icons";
-import { Steps } from "./jobs";
+import { CHANGE_TALKS, Steps } from "./jobs";
 import { Markdown } from "./markdown";
 import { QuestionCard } from "./pages/Questions";
 import { ProposalCard } from "./proposal";
@@ -76,7 +77,7 @@ export function ReviewTalk({ job, me, active }: { job: AgentJob; me: string; act
   const messages = talk.data?.messages ?? [];
   const runs = new Set([...messages.map((m) => m.run_id), live.data?.run, talk.data?.live_run].filter((x): x is string => !!x));
   const waiting = (questions.data ?? []).filter((q) => q.job_id && runs.has(q.job_id));
-  const fix = job.playbook === "fix";
+  const fix = CHANGE_TALKS.has(job.playbook);
   const draft = talk.data?.draft ?? null;
   const access = talk.data?.access ?? "talk";
   const forking = access === "fork";
@@ -101,6 +102,9 @@ export function ReviewTalk({ job, me, active }: { job: AgentJob; me: string; act
     setText("");
     send.mutate({ said: clean, chosen: pickedAgent });
   };
+
+  // A merge into a self-improvement PR has no conversation: the service answers 404.
+  if (talk.error instanceof ApiError && talk.error.status === 404) return null;
 
   return (
     <section className="stack review-talk" style={{ gap: 10 }} aria-label={fix ? t("Talk with the agent about this change") : t("Talk with the agent about this review")}>

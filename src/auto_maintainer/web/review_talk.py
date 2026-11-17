@@ -100,7 +100,11 @@ from .records import open_door, reading_line
 
 log = logging.getLogger(__name__)
 
-TALKS_ON = {"review", "followup", "fix"}
+CHANGE_TALKS = {"fix", "fix_ci", "merge_base"}
+"""Playbooks whose agent changes a PR (a ``pr.fix`` draft): their conversation is
+about that change (``web/fix_talk.py``), whether or not the job drafted one."""
+
+TALKS_ON = {"review", "followup", *CHANGE_TALKS}
 """Playbooks whose jobs have a conversation."""
 
 TALK_DIFF_LIMIT = 40_000
@@ -310,7 +314,7 @@ async def _copy_draft(service: Service, job: Job, fork: Job, login: str) -> None
     """A draft for ``login`` of what ``job`` drafted, as it stands, for ``fork``:
     a review (a posted one with its waiting edit) whatever became of it; a change
     unless it was pushed or is being pushed, since the PR has it then."""
-    if job.playbook == "fix":
+    if job.playbook in CHANGE_TALKS:
         record = await fix_draft(service, job)
         if record is None or record.status in (
             ActionStatus.EXECUTED,
@@ -359,10 +363,14 @@ def build_router() -> APIRouter:
         if (
             job.playbook not in TALKS_ON
             or not job.repo
-            or (job.number is None and job.playbook != "fix")
+            or (job.number is None and job.playbook not in CHANGE_TALKS)
+            # A merge into a self-improvement PR drafts a ``code.update`` for the
+            # owner, on the service's own code: no repository's change to talk about.
+            or _payload(job).get("service_pr")
         ):
             raise HTTPException(
-                404, "only a review, a follow-up, or a fix has a conversation"
+                404,
+                "only a review, a follow-up, or a change to a PR has a conversation",
             )
         return job
 
@@ -392,7 +400,7 @@ def build_router() -> APIRouter:
             else None,
             "copied": thread.copied if thread else 0,
         }
-        if job.playbook == "fix":
+        if job.playbook in CHANGE_TALKS:
             record = await fix_draft(service, job)
             return {
                 **shared,
@@ -513,7 +521,7 @@ def build_router() -> APIRouter:
         job = await talk_job(service, user, job_id)
         assert job.repo
         asker = str(_payload(job).get("by") or "")
-        what = "change" if job.playbook == "fix" else "review"
+        what = "change" if job.playbook in CHANGE_TALKS else "review"
         access = await talk_access(service, user, job)
         if access == "read":
             # A turn can revise the draft, so it is the asker's or a maintainer's;
@@ -531,7 +539,7 @@ def build_router() -> APIRouter:
                     f"the agent is still at work on this {what}; once it is done, "
                     "your messages go to a copy of your own",
                 )
-            if job.playbook != "fix" and await _draft(service, job) is None:
+            if job.playbook not in CHANGE_TALKS and await _draft(service, job) is None:
                 raise HTTPException(409, f"this {what} has no draft to talk about")
             fork = await fork_for(service, user, job)
             return {**await _say(request, service, user, fork, body), "fork": fork.id}
@@ -546,7 +554,7 @@ def build_router() -> APIRouter:
             check_agent(service, body.agent)
         if service.a.agents.listening(job.id):
             return await _tell(service, user, job, body.text, body.agent)
-        if job.playbook == "fix":
+        if job.playbook in CHANGE_TALKS:
             return await _fix_say(request, service, user, job, body)
         assert job.number is not None
         record = await _draft(service, job)
@@ -679,7 +687,7 @@ async def _tell(
         text,
         repo=job.repo,
         number=job.number,
-        where="fix discussion" if job.playbook == "fix" else "review discussion",
+        where="fix discussion" if job.playbook in CHANGE_TALKS else "review discussion",
         kind=SignalKind.REVIEW_DISCUSSION,
         message_id=message.id,
     )

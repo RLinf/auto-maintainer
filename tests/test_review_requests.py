@@ -571,6 +571,60 @@ async def test_an_agent_resolves_conflicts_and_the_merge_is_pushed_as_the_approv
     assert pushed["author"][0] == "maria"
 
 
+async def test_talking_with_the_merge_agent_changes_only_its_resolution(demo) -> None:
+    """The conversation about a merge of the base changes the conflicted files'
+    resolution on the pending draft; the draft stays a merge, and a file outside
+    the conflicts stays out of it."""
+    from auto_maintainer.domain.snapshot import Mergeable
+
+    h, app = demo
+    pr = h.forge.prs[(REPO, 42)]
+    h.forge.prs[(REPO, 42)] = pr.model_copy(update={"mergeable": Mergeable.CONFLICTING})
+    h.service.a.workspace.merge_conflicts = {  # type: ignore[attr-defined]
+        "src/loader.py": "<<<<<<< HEAD\nmine\n=======\ntheirs\n>>>>>>> main\n"
+    }
+    talks: list[Any] = []
+
+    def resolve(task: Any) -> Any:
+        loader = Path(task.workdir) / "src" / "loader.py"
+        if task.activity == "fix_talk":
+            talks.append(task)
+            loader.write_text("theirs only\n")
+            (Path(task.workdir) / "OTHER.md").write_text("not the merge's\n")
+            return AgentResult(runtime="scripted", ok=True, text="Kept main's side.")
+        loader.write_text("mine and theirs\n")
+        return AgentResult(runtime="scripted", ok=True, text="Kept both changes.")
+
+    h.runner.on("fix", resolve)
+    await h.service.a.user_tokens.set("maria", UserToken(token="t"))
+    async with _as(app, "maria") as maria:
+        await maria.post(f"/api/prs/{REPO}/42/merge-base", json={})
+        await h.settle()
+        [draft] = [
+            p
+            for p in (await maria.get("/api/proposals")).json()
+            if p["action"]["action"]["kind"] == "pr.fix"
+        ]
+        job = draft["action"]["action"]["provenance"]["job_id"]
+        state = (await maria.get(f"/api/jobs/{job}/talk")).json()
+        assert state["draft"] == draft["action_id"] and state["draft_pending"]
+        said = await maria.post(
+            f"/api/jobs/{job}/talk", json={"text": "Keep only main's side."}
+        )
+        assert said.status_code == 200, said.text
+    [turn] = talks
+    assert "resolving the conflicts" in turn.prompt and "merge commit" in turn.prompt
+    assert said.json()["proposals"] == [draft["action_id"]]
+    assert "OTHER.md" in said.json()["text"], "it says what the merge leaves out"
+    record = await h.store.get_action(draft["action_id"])
+    assert record is not None
+    payload = record.action.payload
+    assert payload["resolved"] == {"src/loader.py": "theirs only\n"}
+    assert payload["merge_sha"] == "d" * 40 and payload["merge_ref"] == "main"
+    assert payload["title"] == "Merge main into #42", "the schedule reads the title"
+    assert "OTHER.md" not in payload["patch"]
+
+
 async def test_a_merge_goes_as_a_pr_into_the_pr_when_its_fork_refuses_pushes(
     demo,
 ) -> None:
