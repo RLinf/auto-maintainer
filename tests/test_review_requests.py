@@ -27,6 +27,12 @@ import httpx
 import pytest
 
 from auto_maintainer.agents.approver import posting_request
+from auto_maintainer.domain.actions import (
+    ActionKind,
+    ActionStatus,
+    ReviewPostPayload,
+    make_action,
+)
 from auto_maintainer.domain.agents import (
     AgentQuestion,
     AgentResult,
@@ -35,7 +41,7 @@ from auto_maintainer.domain.agents import (
     TaskKind,
 )
 from auto_maintainer.domain.permissions import Permission
-from auto_maintainer.domain.records import Job, JobStatus
+from auto_maintainer.domain.records import ActionRecord, Job, JobStatus
 from auto_maintainer.domain.settings import UserToken
 from auto_maintainer.domain.snapshot import CheckConclusion, CheckRun, CheckStatus
 from auto_maintainer.testing.demo import build_demo
@@ -396,6 +402,100 @@ async def test_a_fix_can_go_straight_onto_the_prs_branch(demo) -> None:
     assert pushed["push_to"] == (pr.head_repo or REPO)
     assert pushed["author"] == ("maria", "maria@users.noreply.github.com")
     assert not h.forge.writes_of("create_pr"), "no PR into the PR"
+
+
+async def _followup(h: Any, number: int, statuses: list, new: list) -> str:
+    """A follow-up of the PR's review, drafted after it, as the store keeps it."""
+    pr = h.forge.prs[(REPO, number)]
+    record, _ = await h.service.store.add_action(
+        ActionRecord(
+            action=make_action(
+                ActionKind.REVIEW_POST,
+                REPO,
+                ReviewPostPayload(
+                    body="### Follow-up",
+                    kind="followup",
+                    result={
+                        "statuses": statuses,
+                        "new_findings": new,
+                        "recommendation": "Changes",
+                    },
+                ),
+                number=number,
+                head_sha=pr.head_sha,
+                discriminator="followup-test",
+            ),
+            status=ActionStatus.SHADOWED,
+        )
+    )
+    return record.action.id
+
+
+async def test_a_fix_works_from_the_newest_follow_up(demo) -> None:
+    h, app = demo
+    await _review(app, "maria", 42)
+    await h.settle()
+    new = {
+        "id": "F8",
+        "severity": "major",
+        "category": "correctness",
+        "title": "Reset drops the seed",
+        "body": "reset() ignores the seed it is given.",
+        "path": "env.py",
+        "line": 119,
+    }
+    followup = await _followup(
+        h,
+        42,
+        [
+            {"id": "F1", "status": "partial", "note": "only the empty case"},
+            {"id": "F2", "title": "Old typo", "status": "resolved"},
+        ],
+        [new],
+    )
+    prompts: list[str] = []
+
+    def fix(task: Any) -> Any:
+        if task.mode == "read_only":
+            return {"title": "fix: seed and boundary", "summary": "Fixes.", "fixed": []}
+        prompts.append(task.prompt)
+        (Path(task.workdir) / "env.py").write_text("seed = 1\n")
+        return AgentResult(runtime="scripted", ok=True, text="Fixed.")
+
+    h.runner.on("fix", fix)
+    async with _as(app, "maria") as maria:
+        started = await maria.post(f"/api/prs/{REPO}/42/fix", json={})
+        assert started.json()["review"] == followup, "the newest review, a follow-up"
+        await h.settle()
+        [prompt] = prompts
+        # The earlier finding it marks partly addressed keeps its full text.
+        assert "F1 [minor] Test does not cover a batch size of one" in prompt
+        assert "only the empty case" in prompt
+        assert "F8 [major] Reset drops the seed (env.py:119)" in prompt
+        assert "Old typo" not in prompt, "a resolved finding is not fixed again"
+        [draft] = [
+            p
+            for p in (await maria.get("/api/proposals")).json()
+            if p["action"]["action"]["kind"] == "pr.fix"
+        ]
+        assert draft["action"]["action"]["payload"]["findings"] == ["F1", "F8"]
+
+
+async def test_a_follow_up_with_everything_resolved_leaves_nothing_to_fix(
+    demo,
+) -> None:
+    h, app = demo
+    await _review(app, "maria", 42)
+    await h.settle()
+    await _followup(h, 42, [{"id": "F1", "status": "resolved"}], [])
+    async with _as(app, "maria") as maria:
+        await maria.post(f"/api/prs/{REPO}/42/fix", json={})
+        await h.settle()
+    assert not [t for t in h.runner.tasks if t.kind == TaskKind.FIX]
+    jobs = [j for j in await h.service.store.list_jobs(limit=50) if j.playbook == "fix"]
+    assert [j.result for j in jobs] == [
+        {"skipped": "the review has no findings to fix"}
+    ]
 
 
 async def test_merging_the_base_branch_without_conflicts_is_githubs_update(

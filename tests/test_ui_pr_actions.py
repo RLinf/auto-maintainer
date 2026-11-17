@@ -58,6 +58,7 @@ import {{
   agentName,
   describeRunCi,
   docsCheckUrl,
+  fixableFindings,
   prMenuItems,
   resolveAgentChoices,
 }} from {module_url!r};
@@ -121,6 +122,18 @@ assert.deepEqual(
   prMenuItems({{ isOpen: true, hasReviewFindings: false, failedCount: 0, ciState: "none" }}),
   ["change", "reproduce", "merge-base"],
 );
+
+// A follow-up leaves its new findings and the earlier ones it does not mark resolved.
+assert.equal(fixableFindings({{ findings: [{{ id: "F1" }}, {{ id: "F2" }}] }}), 2);
+assert.equal(
+  fixableFindings({{
+    statuses: [{{ id: "F1", status: "resolved" }}, {{ id: "F2", status: "partial" }}, {{ id: "F3", status: "open" }}],
+    new_findings: [{{ id: "F8" }}],
+  }}),
+  3,
+);
+assert.equal(fixableFindings({{ statuses: [{{ id: "F1", status: "resolved" }}], new_findings: [] }}), 0);
+assert.equal(fixableFindings(undefined), 0);
 
 // Live PR updates that invalidate an open inline form return the popover to the menu.
 const closedClean = {{ isOpen: false, hasReviewFindings: false, failedCount: 0, ciState: "none" as const }};
