@@ -2687,7 +2687,10 @@ def build_router() -> APIRouter:
                     ActionKind.CI_RERUN_FAILED,
                     repo,
                     RerunPayload(
-                        run_id=run.run_id, workflow=run.workflow, attempt=run.attempt
+                        run_id=run.run_id,
+                        workflow=run.workflow,
+                        attempt=run.attempt,
+                        requested=True,
                     ),
                     number=number,
                     head_sha=pr.head_sha,

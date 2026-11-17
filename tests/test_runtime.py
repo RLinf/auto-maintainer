@@ -258,6 +258,44 @@ async def test_actuator_writes_once_refuses_stale_and_guards_leaks(
     assert not any("P0" in w["body"] for w in harness.forge.writes_of("create_comment"))
 
 
+async def test_the_rerun_budget_bounds_automatic_reruns_not_requested_ones(
+    harness: Harness,
+) -> None:
+    harness.forge.put_pr(make_pr())
+    from auto_maintainer.domain.memory import profile_path
+    from auto_maintainer.profiles.layers import dump_yaml
+
+    harness.memory.files[profile_path(REPO)] = dump_yaml(
+        {
+            "schema": 1,
+            "ci": {"rerun": {"max_per_sha": 1}},
+            "policy": {"ci.rerun_failed": {"level": "auto"}},
+        }
+    )
+    await harness.approve_directly(REPO, "maria")
+
+    def rerun(discriminator: str, requested: bool = False):
+        return make_action(
+            ActionKind.CI_RERUN_FAILED,
+            REPO,
+            RerunPayload(run_id=7, requested=requested),
+            number=42,
+            head_sha="a" * 40,
+            discriminator=discriminator,
+        )
+
+    first, second, asked = rerun("1"), rerun("2"), rerun("3", requested=True)
+    for action in (first, second, asked):
+        await harness.service.pipeline.submit(action)
+        await harness.settle()
+    records = {r.action.id: r for r in await harness.store.list_actions(repo=REPO)}
+    assert records[first.id].status == ActionStatus.EXECUTED
+    assert records[second.id].status == ActionStatus.NOOP
+    assert "rerun budget used" in (records[second.id].error or "")
+    assert records[asked.id].status == ActionStatus.EXECUTED
+    assert len(harness.forge.writes_of("rerun_failed_jobs")) == 2
+
+
 # -- hygiene checks --------------------------------------------------------------------
 
 

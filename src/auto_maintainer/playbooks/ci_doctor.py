@@ -762,7 +762,7 @@ class CiDoctor(Playbook):
         self, ctx: PlaybookContext, pr: PrSnapshot, event: Event
     ) -> PlaybookResult:
         author = event.payload.get("author", "")
-        allowed = await ctx.may_command(author)
+        maintainer = allowed = await ctx.may_command(author)
         if not allowed and author.lower() == pr.author.lower():
             earlier = await ctx.store.list_actions(
                 repo=pr.repo, number=pr.number, kinds=[ActionKind.CI_RERUN_FAILED]
@@ -780,7 +780,7 @@ class CiDoctor(Playbook):
             action = make_action(
                 ActionKind.CI_RERUN_FAILED,
                 pr.repo,
-                RerunPayload(run_id=run_id),
+                RerunPayload(run_id=run_id, requested=maintainer),
                 number=pr.number,
                 head_sha=pr.head_sha,
                 discriminator=f"manual:{event.payload.get('comment_id')}:{run_id}",

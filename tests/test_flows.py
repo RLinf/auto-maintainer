@@ -1273,3 +1273,130 @@ async def test_roles_people_give_on_github_show_here(harness: Harness) -> None:
     assert await sync_roles(store, withdrawn)
     held = await store.list_assignees(pr.repo, pr.number)
     assert roles() == {("carol", "reviewer", "forge")}, "erin was un-asked first"
+
+
+async def test_a_maintainers_rerun_command_runs_past_the_rerun_budget(
+    harness: Harness,
+) -> None:
+    from auto_maintainer.domain.actions import ActionKind, RerunPayload, make_action
+    from auto_maintainer.domain.events import Event
+    from auto_maintainer.domain.records import ActionRecord
+
+    await _auto(harness, ci_rerun_failed="auto")
+    harness.forge.set_permission("acme/widget", "bob", Permission.WRITE)
+    failed = CheckRun(
+        id=7,
+        name="unit",
+        workflow="CI",
+        status=CheckStatus.COMPLETED,
+        conclusion=CheckConclusion.FAILURE,
+        run_id=99,
+        run_attempt=3,
+    )
+    pr = _pr(checks=[failed])
+    harness.forge.put_pr(pr)
+    # Earlier automatic reruns of run 99 at this head used the whole budget.
+    for n in range(2):
+        await harness.store.add_action(
+            ActionRecord(
+                action=make_action(
+                    ActionKind.CI_RERUN_FAILED,
+                    "acme/widget",
+                    RerunPayload(run_id=99),
+                    number=42,
+                    head_sha=pr.head_sha,
+                    discriminator=f"earlier:{n}",
+                ),
+                status=ActionStatus.EXECUTED,
+            )
+        )
+
+    async def rerun(author: str, comment_id: int) -> ActionStatus:
+        await harness.emit(
+            Event(
+                kind=EventKind.PR_COMMENT,
+                repo="acme/widget",
+                number=42,
+                payload={
+                    "author": author,
+                    "comment_id": comment_id,
+                    "commands": [{"name": "rerun", "args": []}],
+                },
+            )
+        )
+        await harness.settle()
+        [record] = [
+            r
+            for r in await harness.store.list_actions(
+                repo="acme/widget", kinds=[ActionKind.CI_RERUN_FAILED]
+            )
+            if r.action.provenance.requested_by == author
+        ]
+        return record.status
+
+    # The PR's author has one rerun per commit, within the budget.
+    assert await rerun(pr.author, 1) == ActionStatus.NOOP
+    assert harness.forge.writes_of("rerun_failed_jobs") == []
+    assert await rerun("bob", 2) == ActionStatus.EXECUTED
+    assert harness.forge.writes_of("rerun_failed_jobs") == [
+        {"repo": "acme/widget", "run_id": 99}
+    ]
+
+
+async def test_a_rerun_approved_from_chat_runs_past_the_rerun_budget(
+    harness: Harness, tmp_path: Path
+) -> None:
+    import httpx
+
+    from auto_maintainer.domain.actions import ActionKind, RerunPayload, make_action
+    from auto_maintainer.domain.records import ActionRecord
+    from auto_maintainer.web.app import create_app
+
+    await _auto(harness, ci_rerun_failed="auto")
+    pr = _pr()
+    harness.forge.put_pr(pr)
+    # Earlier automatic reruns of run 99 at this head used the whole budget.
+    for n in range(2):
+        await harness.store.add_action(
+            ActionRecord(
+                action=make_action(
+                    ActionKind.CI_RERUN_FAILED,
+                    "acme/widget",
+                    RerunPayload(run_id=99),
+                    number=42,
+                    head_sha=pr.head_sha,
+                    discriminator=f"earlier:{n}",
+                ),
+                status=ActionStatus.EXECUTED,
+            )
+        )
+    harness.runner.on(
+        "chat",
+        lambda t: {
+            "reply": "Rerunning it once you approve.",
+            "proposals": [
+                {"kind": "rerun", "repo": "acme/widget", "number": 42, "run_id": 99}
+            ],
+        },
+    )
+    app = create_app(harness.service, data_dir=tmp_path, allow_dev_login=True)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as maria:
+        await maria.get("/auth/dev?login=maria")
+        maria.headers["x-am-csrf"] = maria.cookies.get("am_csrf") or ""
+        thread = (await maria.post("/api/chat/threads", json={"text": "hi"})).json()
+        answer = (
+            await maria.post(
+                f"/api/chat/threads/{thread['id']}/messages",
+                json={"text": "rerun the failed CI"},
+            )
+        ).json()
+        await harness.settle()
+        [proposal_id] = answer["proposals"]
+        out = await maria.post(f"/api/proposals/{proposal_id}/approve", json={})
+        assert out.status_code == 200, out.text
+        await harness.settle()
+    assert harness.forge.writes_of("rerun_failed_jobs") == [
+        {"repo": "acme/widget", "run_id": 99}
+    ]

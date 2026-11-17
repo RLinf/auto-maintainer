@@ -1258,6 +1258,55 @@ async def test_retry_runs_what_failed_again(harness: Harness, tmp_path: Path) ->
     assert state.phase == "rerunning" and not state.retry
 
 
+async def test_retry_runs_again_after_the_rerun_budget_is_used(
+    harness: Harness, tmp_path: Path
+) -> None:
+    from auto_maintainer.domain.actions import RerunPayload, make_action
+    from auto_maintainer.domain.records import ActionRecord
+
+    h = harness
+    h.runner.on(
+        "ci_diagnose",
+        lambda t: {"category": "unknown", "confidence": 0.5, "explanation": "unclear"},
+    )
+    h.runner.on("ci_root_cause", lambda t: {"causes": []})
+    h.forge.job_logs[420] = "FAILED tests/test_m.py::test_x\n"
+    h.forge.put_pr(_ready(42, "a" * 40, _ci(42, "failure")))
+    await h.poll()
+    await _schedule(h, 42)
+    await h.settle()
+    assert (await _phase(h, 42)).phase == "failed"
+    # Earlier automatic reruns of the run at this head used the whole budget.
+    for n in range(2):
+        await h.store.add_action(
+            ActionRecord(
+                action=make_action(
+                    ActionKind.CI_RERUN_FAILED,
+                    REPO,
+                    RerunPayload(run_id=4200),
+                    number=42,
+                    head_sha="a" * 40,
+                    discriminator=f"earlier:{n}",
+                ),
+                status=ActionStatus.EXECUTED,
+            )
+        )
+    app = create_app(h.service, data_dir=tmp_path, allow_dev_login=True)
+    async with _as(app, "maria") as maria:
+        out = await maria.post(f"/api/merge-schedule/{REPO}/42/retry")
+        assert out.status_code == 200, out.text
+    await h.settle()
+    assert h.forge.writes_of("rerun_failed_jobs") == [{"repo": REPO, "run_id": 4200}]
+    [retry] = [
+        r
+        for r in await h.store.list_actions(
+            repo=REPO, number=42, kinds=[ActionKind.CI_RERUN_FAILED]
+        )
+        if r.action.payload.get("requested")
+    ]
+    assert retry.status == ActionStatus.EXECUTED, retry.error
+
+
 async def test_a_failure_marked_flaky_is_rerun_after_and_teaches_a_pattern(
     harness: Harness, tmp_path: Path
 ) -> None:
