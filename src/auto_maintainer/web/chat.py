@@ -20,8 +20,8 @@ proposal the maintainer approves in the thread, whatever the policy says.
 
 When the maintainer asks for something the service cannot do yet, the agent proposes
 ``improve``: the ``self_improve`` playbook then changes the service's own code and
-opens a PR on its repository, which a maintainer of that repository approves before it
-is merged and deployed (design 5.12).
+opens a PR on its repository once the member who asked, or the service's owner, starts
+it; only the owner merges and deploys that PR (design 5.12).
 """
 
 from __future__ import annotations
@@ -386,7 +386,8 @@ def build_router() -> APIRouter:
     ) -> list[dict[str, Any]]:
         """Request cards waiting in any conversation that ``user`` may decide (an
         ``improve`` for the owner of this service, an ``add_repo`` for
-        those who may configure that repository), and their own."""
+        those who may configure that repository), and their own (an ``improve``
+        its asker starts when they are a member of a managed repository)."""
         service = service_of(request)
         out = []
         for message in await service.store.messages_with_pending_requests():
@@ -396,7 +397,7 @@ def build_router() -> APIRouter:
             for req in message.requests:
                 if req.state != "pending":
                     continue
-                allowed, _ = await _may_decide(service, user, req)
+                allowed, _ = await _may_decide(service, user, req, thread.owner)
                 if allowed or thread.owner == user.login:
                     out.append(
                         {
@@ -433,7 +434,7 @@ def build_router() -> APIRouter:
         if found is None:
             raise HTTPException(404, "no such request in this conversation")
         message, req = found
-        allowed, why = await _may_decide(service, user, req)
+        allowed, why = await _may_decide(service, user, req, thread.owner)
         own = thread.owner == user.login
         if not own and not allowed:
             raise HTTPException(404, "no such request in this conversation")
@@ -579,15 +580,17 @@ def build_router() -> APIRouter:
                 "a lesson is saved at once when this maintainer may configure the repository, and otherwise waits for one "
                 "who may; a preference (what this person wants from the agents for themselves, about their reviews or how "
                 "you talk with them, not a rule for everyone) is saved to their own notes at once; an improve request and add_repo (onboard a repository: the service reads it and drafts its "
-                "profile for its maintainers to approve) wait on a request card for a person who may approve them. Say "
+                "profile for its maintainers to approve) wait on a request card for a person who may approve them "
+                "(an improve request: the person who asked, when they are a member of a repository the service "
+                "manages, or else the owner of this service). Say "
                 "which of these happens; never ask the maintainer to approve a lesson they may save. Internal priorities "
                 "are private: never put them in public text. Before proposing improve, check the service guide below: "
                 "if the dashboard or a proposal already does what is asked, say how instead. When the maintainer asks for "
                 "something the service cannot do yet, or for a change in how it works that needs code rather than a "
                 "setting or a lesson, propose kind=improve with a request that says what they asked for, at the "
-                "size they asked for it, and leaves the design to the agent that implements it: once the owner of this "
-                "service approves the card, the service changes its own code in the background and opens a "
-                "PR on its own repository, which the owner reviews before it is merged and deployed. A conversation "
+                "size they asked for it, and leaves the design to the agent that implements it: once the card is "
+                "approved, the service changes its own code in the background and opens a "
+                "PR on its own repository, which only the owner merges and deploys. A conversation "
                 "runs one such change at a time: if the history shows one pending or running, do not propose it again.",
                 await _guide(service),
                 f"Your working directory is {where}.",
@@ -1135,12 +1138,23 @@ async def _guide(service: Any) -> str:
     return "Service guide:\n" + re.sub(r"\A---\n.*?\n---\n", "", text, flags=re.S)
 
 
-async def _may_decide(service: Any, user: User, req: ChatRequest) -> tuple[bool, str]:
-    """Whether ``user`` may approve ``req``, and why not: an ``improve`` needs the
-    right to approve changes to the service's code, an ``add_repo`` the right to
-    configure that repository."""
+async def _may_decide(
+    service: Any, user: User, req: ChatRequest, asked_by: str
+) -> tuple[bool, str]:
+    """Whether ``user`` may approve ``req``, and why not: an ``improve`` the person who
+    asked for it, when they are a member of a repository the service manages, or the
+    service's owner (its result is only a PR on ``code_repo``, which the owner merges
+    and deploys); an ``add_repo`` the right to configure that repository."""
     if req.kind == "improve":
-        return await code_maintainer(service, user)
+        if user.login == asked_by and await visible_repos(service, user):
+            return True, ""
+        allowed, why = await code_maintainer(service, user)
+        if allowed or user.login != asked_by:
+            return allowed, why
+        return False, (
+            "a member of a repository this service manages starts their own change "
+            "to the service's code; otherwise its owner does"
+        )
     try:
         repo = check_repo(req.text)
     except ValueError as e:
