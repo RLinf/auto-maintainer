@@ -1341,7 +1341,7 @@ async def _propose(service: Any, user: User, p: ProposedAction) -> list[str]:
         action = make_action(
             ActionKind.CI_RERUN_FAILED,
             p.repo,
-            RerunPayload(run_id=p.run_id),
+            RerunPayload(run_id=p.run_id, requested=True),
             number=pr.number,
             head_sha=pr.head_sha,
             discriminator=disc,

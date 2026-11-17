@@ -130,6 +130,41 @@ async def test_pressing_run_ci_adds_the_gate_then_reruns_what_failed(demo) -> No
         assert any(a["actor"] == "walt" and "approved" in a["summary"] for a in audit)
 
 
+async def test_run_ci_reruns_past_the_rerun_budget(demo) -> None:
+    from auto_maintainer.domain.actions import (
+        ActionKind,
+        ActionStatus,
+        RerunPayload,
+        make_action,
+    )
+    from auto_maintainer.domain.records import ActionRecord
+
+    h, app = demo
+    pr = h.forge.prs[(REPO, 43)]
+    h.forge.put_pr(pr.model_copy(update={"labels": [*pr.labels, "run-ci"]}))
+    # Earlier automatic reruns of run 11 at this head used the whole budget.
+    for n in range(2):
+        await h.store.add_action(
+            ActionRecord(
+                action=make_action(
+                    ActionKind.CI_RERUN_FAILED,
+                    REPO,
+                    RerunPayload(run_id=11),
+                    number=43,
+                    head_sha=pr.head_sha,
+                    discriminator=f"earlier:{n}",
+                ),
+                status=ActionStatus.EXECUTED,
+            )
+        )
+    async with _as(app, "walt") as walt:
+        out = await walt.post(f"/api/prs/{REPO}/43/ci")
+        assert out.status_code == 200, out.text
+        assert out.json()["plan"]["state"] == "failed"
+        await h.settle()
+    assert [w["run_id"] for w in h.forge.writes_of("rerun_failed_jobs")] == [11]
+
+
 async def test_there_is_nothing_to_run_when_ci_passed(demo) -> None:
     h, app = demo
     async with _as(app, "maria") as maria:

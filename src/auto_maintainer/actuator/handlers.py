@@ -374,7 +374,7 @@ async def _rerun(
         if r.action.payload.get("run_id") == p.run_id
         and r.action.head_sha == action.head_sha
     ]
-    if len(same) >= profile.ci.rerun.max_per_sha:
+    if not p.requested and len(same) >= profile.ci.rerun.max_per_sha:
         raise Noop(
             f"rerun budget used: {len(same)} reruns of run {p.run_id} at this SHA"
         )
