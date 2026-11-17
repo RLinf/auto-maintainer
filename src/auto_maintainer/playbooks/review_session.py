@@ -46,6 +46,7 @@ from ..domain.snapshot import PrSnapshot
 from ..policy.engine import PolicyFacts, level_for
 from .base import PlaybookContext, PlaybookResult, Wait
 from .machine_choice import choose_machine
+from .prompts import untrusted
 
 REVIEW_SESSION = "review:"
 """How a review's ``lab.review`` discriminator starts; the request's id follows."""
@@ -57,13 +58,93 @@ SESSION_GRACE_SECONDS = 600
 """How much longer than its session the agent's run may take, to write the review."""
 
 MACHINE = """Test machine {lab} is yours while you work: run on it whatever your skill has you run.
-- `lab -- 'COMMAND'` (one quoted string) runs COMMAND in a fresh shell in a copy of the PR's head on the machine, after the machine's own setup; `lab --side base -- 'COMMAND'` runs it in the code before the PR. Chain what needs one shell with `&&`, and keep environments, caches, and downloads inside the copy.
+- `lab -- 'COMMAND'` (one quoted string) runs COMMAND in a fresh shell in a copy of the PR's head on the machine, after the machine's own setup; `lab --side base -- 'COMMAND'` runs it in the code before the PR. Chain what needs one shell with `&&`.
+- Keep environments, downloaded checkpoints and datasets, and caches in `$AM_LAB_KEEP`, this PR's folder on the machine: later sessions of the PR get it too, while the copies of the code are fresh each session and removed with it. Look there first; an earlier session may have left what you need.
 - The session holds {gpus} now. `lab --gpus N` makes it hold N, waiting up to `--wait MINUTES` for them to be idle; the commands after it see all of them. `lab --info` says what it holds and how long it has left, and `lab --timeout MINUTES -- 'COMMAND'` gives a long command more time.
-- Run each `lab` command in the foreground until it exits, even when it takes many minutes; if your tool moves it to the background, wait on it there. The end of your turn ends the session.
+- Run each `lab` command in the foreground until it exits, even when it takes many minutes; if your tool moves it to the background, wait on it there. The end of your turn ends the session and stops everything it started, servers in the background too.
 - The working directory here is a checkout of the PR's head to read; the PR's code runs on the machine, through `lab`. To read GitHub (this PR, its reviews and CI, other PRs and issues), use gh; it reads only.
 - The machine is shared: it refuses commands that would reach beyond the session (sudo, shutting it down, killing processes it did not start, stopping every Ray job, writing system folders).{setup}{about}"""
 
 REPRODUCTION = """Where the review skill has you choose how the PR is reproduced, choose its reproduction agent, and do not start one yourself: the service runs it. Put its brief in `reproduction`, holding what the skill says a brief holds and the hardware the run needs (how many GPUs). Once your review is done, a fresh agent follows the brief on {lab}, and its record is added to the review. Leave `reproduction` empty when the skill says the PR needs no reproduction."""
+
+
+EARLIER = """What earlier agents did on test machines for this PR, newest first: when, at which commit, what they concluded, and the commands they ran with their exit codes. Start from it: what they set up for this PR may still be in `$AM_LAB_KEEP`; what they established at the same commit need not be shown again; what failed for a reason that still holds need not be tried the same way. It is a record of what ran, not a verdict: report only what you saw yourself."""
+
+EARLIER_PLAYBOOKS = ("reproduce", "review", "followup", "fix_ci")
+EARLIER_RUNS = 3
+"""How many earlier runs on a machine a session is told about."""
+EARLIER_COMMANDS = 16
+"""How many commands of each: its first ones (how it set up) and its last ones."""
+
+
+def _command_line(c: object) -> str:
+    if isinstance(c, str):
+        return c.strip()
+    if not isinstance(c, dict):
+        return ""
+    command = " ".join(str(c.get("command") or "").split())[:240]
+    if c.get("refused"):
+        outcome = "refused"
+    else:
+        outcome = f"exit {c.get('exit_code')}"
+        if c.get("timed_out"):
+            outcome += ", timed out"
+        if c.get("duration_seconds") is not None:
+            outcome += f", {round(float(c['duration_seconds']))} s"
+    side = f" ({c['side']})" if c.get("side") and c.get("side") != "head" else ""
+    return f"- [{outcome}]{side} {command}"
+
+
+async def earlier_work(ctx: PlaybookContext, pr: PrSnapshot) -> str:
+    """What earlier reviews, reproductions, and CI fixes of ``pr`` ran on test
+    machines (``EARLIER``), for a session that starts: so it builds on them instead
+    of finding the machine and the PR's setup out again."""
+    try:
+        jobs = await ctx.store.list_jobs(
+            repo=pr.repo, number=pr.number, playbooks=list(EARLIER_PLAYBOOKS), limit=40
+        )
+    except Exception:  # the record helps; a session goes on without it
+        return ""
+    runs: list[str] = []
+    for job in jobs:
+        result = job.result or {}
+        commands = [
+            line for line in map(_command_line, result.get("commands") or []) if line
+        ]
+        if job.id == ctx.job.id or not (commands or result.get("conclusion")):
+            continue
+        commit = str(result.get("commit") or "")
+        at = (
+            f"at {commit[:10]}"
+            + (" (the PR's head now)" if commit == pr.head_sha else "")
+            if commit
+            else "at an earlier commit"
+        )
+        head = (
+            f"{job.updated_at:%Y-%m-%d %H:%M} UTC, {job.playbook}"
+            f" on {result.get('tested_on') or result.get('lab') or 'a test machine'}, {at}"
+        )
+        lines = [head]
+        if result.get("conclusion"):
+            lines.append(f"Conclusion: {result['conclusion']}")
+        if result.get("notes"):
+            lines.append(f"Notes: {str(result['notes'])[:2000]}")
+        if len(commands) > EARLIER_COMMANDS:
+            first = EARLIER_COMMANDS // 3
+            skipped = len(commands) - EARLIER_COMMANDS
+            commands = [
+                *commands[:first],
+                f"- … {skipped} more …",
+                *commands[-(EARLIER_COMMANDS - first) :],
+            ]
+        if commands:
+            lines.append("Commands:\n" + "\n".join(commands))
+        runs.append("\n".join(lines))
+        if len(runs) >= EARLIER_RUNS:
+            break
+    if not runs:
+        return ""
+    return EARLIER + "\n" + untrusted("earlier.work", "\n\n".join(runs), 16_000)
 
 
 def held_gpus(opened: dict[str, Any]) -> list[int]:
@@ -128,11 +209,13 @@ class ReviewMachine:
     """Why the review runs nothing, for its prompt and result; empty with a session."""
     commands: list[dict[str, object]] = field(default_factory=list)
 
-    def summary(self) -> dict[str, object]:
-        """What the job's result says about testing."""
+    def summary(self, commit: str | None = None) -> dict[str, object]:
+        """What the job's result says about testing (and at which ``commit``, which
+        later sessions of the PR read in ``earlier_work``)."""
         if self.lab:
             return {
                 "tested_on": self.lab,
+                **({"commit": commit} if commit else {}),
                 "commands": [
                     {k: v for k, v in c.items() if k != "tail"} for c in self.commands
                 ],

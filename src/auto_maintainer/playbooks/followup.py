@@ -63,7 +63,13 @@ from .prompts import (
 )
 from .requests import FOLLOWUP_STATES, review_key, review_request, starts_review
 from .review import reproduction_record
-from .review_session import close, review_machine, session_task_fields, testing_block
+from .review_session import (
+    close,
+    earlier_work,
+    review_machine,
+    session_task_fields,
+    testing_block,
+)
 
 
 class Followup(Playbook):
@@ -153,6 +159,9 @@ class Followup(Playbook):
         answer = None
         try:
             testing = machine.testing(ctx, reproduce=False) if machine.token else None
+            if testing:
+                earlier = await earlier_work(ctx, pr)
+                testing = f"{testing}\n\n{earlier}" if earlier else testing
             incremental = without_generated(
                 await ctx.workspace.diff(workdir, previous_sha, pr.head_sha)
                 if previous_sha
@@ -326,7 +335,7 @@ class Followup(Playbook):
                 "statuses": len(result.statuses),
                 "new": len(result.new_findings),
                 "labels": result.labels,
-                **machine.summary(),
+                **machine.summary(pr.head_sha),
             },
         )
 

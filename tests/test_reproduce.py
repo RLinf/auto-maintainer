@@ -118,8 +118,14 @@ async def test_a_session_runs_each_command_in_its_sides_folder_and_is_removed(
         progress=progress,
     )
     run_dir = "/home/ci/am-labs/acme__widget-42-12345678"
+    keep = "/home/ci/am-labs/keep/acme__widget-42"
     assert host.stdin == ["QkFTRQ==", "SEVBRA=="]
     assert f"mkdir -p {run_dir}/base" in host.commands[1][0]
+    assert f"mkdir -p {keep} && touch {keep}/.last_used" in host.commands[1][0]
+    assert (
+        executor.session_info(executor.session_token(opened["session"]))["keep_dir"]
+        == keep
+    )
     assert "token" not in opened, "the token stays in memory"
     token = executor.session_token(opened["session"])
     assert token and executor.session_info(token)["seconds_left"] == 600
@@ -138,12 +144,21 @@ async def test_a_session_runs_each_command_in_its_sides_folder_and_is_removed(
         command == "module load cuda/12.4\nsource ~/venv/bin/activate\npytest -q -k one"
     )
     assert cwd == f"{run_dir}/base"
+    env = host.commands[3][2]
+    assert env["AM_LAB_RUN"] == opened["session"] and env["AM_LAB_KEEP"] == keep, (
+        "what it starts carries the session's id, never its token"
+    )
+    assert token not in str(env)
     assert (await executor.run_in_session(token, "python check.py"))["exit_code"] == 0
     assert host.commands[4][1] == f"{run_dir}/head", "head by default"
     assert ("base", "$ pytest -q -k one", "") in heard
     closed = await executor.close_session(opened["session"])
     assert closed is not None
-    assert host.commands[-1][0] == f"rm -rf {run_dir}"
+    stop = host.commands[-1][0]
+    assert f"AM_LAB_RUN={opened['session']}" in stop and "kill -TERM" in stop, (
+        "what the session started is stopped"
+    )
+    assert stop.endswith(f"rm -rf {run_dir}") and keep not in stop
     assert [c["exit_code"] for c in closed["commands"]] == [1, 0]
     assert secret not in str(closed), "output kept is scrubbed"
     assert executor.session_token(opened["session"]) is None
@@ -223,7 +238,9 @@ async def test_a_session_ends_at_its_time_limit_and_after_a_restart(
     executor.clock.advance(seconds=301)  # type: ignore[attr-defined]
     assert "time is up" in (await executor.run_in_session(token, "ls"))["error"]
     assert await executor.expire_sessions() == 1
-    assert host.commands[-1][0].startswith("rm -rf ")
+    assert host.commands[-1][0].endswith(
+        "rm -rf /home/ci/am-labs/acme__widget-42-aaaaaaaa"
+    )
     host.results = [CommandResult(exit_code=0, stdout="/home/ci")]
     kept = await executor.open_session(
         _payload(sides=["head"], timeout_seconds=600),
@@ -276,7 +293,10 @@ async def test_a_session_ends_at_its_time_limit_and_after_a_restart(
     third.configure({"gpu-01": LabMachine()})
     third.hosts["gpu-01"] = host
     assert await third.recover_sessions() == 1, "under a minute left"
-    assert host.commands[-1][0] == "rm -rf /home/ci/am-labs/acme__widget-44-cccccccc"
+    assert host.commands[-1][0].endswith(
+        "rm -rf /home/ci/am-labs/acme__widget-44-cccccccc"
+    )
+    assert "AM_LAB_RUN=lab_" in host.commands[-1][0], "stopped by its tag"
 
 
 # -- the flow --------------------------------------------------------------------------
@@ -406,6 +426,29 @@ async def test_a_reproduction_asked_for_runs_at_once_in_its_session(demo) -> Non
             and p["requested_by"] == "maria"
         ]
         assert "batch of one" in report["action"]["action"]["payload"]["body"]
+
+
+async def test_a_second_reproduction_starts_from_what_the_first_did(demo) -> None:
+    """The next session of a PR is told what earlier ones ran and concluded, and
+    where the PR's environments are kept, instead of finding it all out again."""
+    h, app = demo
+    async with _as(app, "maria") as maria:
+        for note in ("the batch of one", "the batch of two"):
+            started = await maria.post(
+                f"/api/prs/{REPO}/42/reproduce", json={"lab": "gpu-01", "note": note}
+            )
+            assert started.status_code == 200, started.text
+            await h.settle()
+    first, second = [t for t in h.runner.tasks if t.kind == "reproduce"]
+    assert "What earlier agents did on test machines" not in first.prompt
+    assert "What earlier agents did on test machines for this PR" in second.prompt
+    assert "Conclusion: reproduced" in second.prompt
+    assert "python check.py" in second.prompt, "the commands it ran"
+    assert "(the PR's head now)" in second.prompt, "at the same commit"
+    assert "$AM_LAB_KEEP" in second.prompt, "where its environments are kept"
+    [done, _] = [j for j in await h.store.list_jobs() if j.playbook == "reproduce"]
+    assert done.result and done.result["tested_on"] == "gpu-01"
+    assert done.result["commit"]
 
 
 async def test_an_agent_that_fails_for_now_leaves_its_session_for_the_next_try(

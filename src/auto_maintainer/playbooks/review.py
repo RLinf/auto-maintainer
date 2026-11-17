@@ -82,6 +82,7 @@ from .requests import (
 )
 from .review_session import (
     close,
+    earlier_work,
     review_machine,
     session_task_fields,
     testing_block,
@@ -201,6 +202,9 @@ class ReviewPlaybook(Playbook):
             )
             own_format = skill_owns_format(profile, workdir)
             testing = machine.testing(ctx, reproduce=True) if machine.token else None
+            if testing:
+                earlier = await earlier_work(ctx, pr)
+                testing = f"{testing}\n\n{earlier}" if earlier else testing
             prompt = "\n\n".join(
                 [
                     interactive(profile, ctx.requested_by, testing)
@@ -389,7 +393,7 @@ class ReviewPlaybook(Playbook):
                 "dismissed": len(result.dismissed),
                 "recommendation": result.recommendation,
                 "labels": result.labels,
-                **machine.summary(),
+                **machine.summary(pr.head_sha),
                 **({"reproduction": events[0].id} if events else {}),
             },
         )

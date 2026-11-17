@@ -54,6 +54,7 @@ from ..domain.ports import GpuStatus, LabHost, Store
 from ..domain.profile import LabBinding, RepoProfile
 from ..domain.secrets import redact_secrets
 from ..domain.settings import LabMachine
+from ..domain.snapshot import PrState
 from ..subproc import run
 from .hosts import LocalLabHost, SshLabHost
 
@@ -65,6 +66,88 @@ GPU_POLL_SECONDS = 30
 
 SESSIONS_KEY = "lab-sessions:open"
 """Where open sessions are recorded, so a restart cleans up their run folders."""
+
+RUN_TAG = "AM_LAB_RUN"
+"""Set to the session's id in every command a session runs on the machine. Whatever
+the command starts inherits it, servers left in the background too, so closing the
+session stops them all (``STOP``). Never the session's token, which stays with the
+agent."""
+
+KEEP_VAR = "AM_LAB_KEEP"
+"""Set in every command to the PR's lasting folder (``keep_path``)."""
+
+KEEP_FOLDER = "keep"
+"""Under a machine's work folder: one folder per PR, where its sessions keep
+environments, downloaded checkpoints, and caches. The code folders are fresh each
+session; this one is shared by the PR's later sessions until the PR closes or goes
+``KEEP_DAYS`` without a session (``LabExecutor.sweep``)."""
+
+KEEP_MARK = ".last_used"
+"""Touched in a PR's lasting folder each time a session of the PR opens."""
+
+KEEP_DAYS = 7
+
+STRAY_HOURS = 24
+"""Older than any session lasts: a run folder or a tagged process this old that no
+open session claims is left over (a crash, an older version), and the sweep removes
+it. Younger ones may belong to another service instance using the same machine."""
+
+SWEEP_SECONDS = 3600
+"""How often ``LabExecutor.sweep`` looks over the machines."""
+
+RUN_FOLDER = re.compile(r"^[A-Za-z0-9_.-]+__[A-Za-z0-9_.-]+-\d+-[A-Za-z0-9_]{8}$")
+"""The name of a session's run folder (``open_session``)."""
+
+PR_FOLDER = re.compile(r"^([A-Za-z0-9_.-]+?)__([A-Za-z0-9_.-]+)-(\d+)$")
+"""The name of a PR's lasting folder: ``owner__name-number``."""
+
+STOP = """tag=%(tag)s
+dir=%(dir)s
+me=$$
+pids=""
+for p in /proc/[0-9]*; do
+  pid=${p#/proc/}
+  [ "$pid" = "$me" ] && continue
+  if [ -n "$tag" ] && grep -qzx -- "$tag" "$p/environ" 2>/dev/null; then
+    pids="$pids $pid"; continue
+  fi
+  cwd=$(readlink "$p/cwd" 2>/dev/null) || continue
+  case "$cwd" in "$dir"|"$dir"/*) pids="$pids $pid";; esac
+done
+if [ -n "$pids" ]; then
+  kill -TERM $pids 2>/dev/null
+  sleep 5
+  kill -KILL $pids 2>/dev/null
+fi
+printf 'stopped %%s\n' "$(echo $pids | wc -w)"
+"""
+"""Stop every process of a session: those carrying its tag, and those running in its
+run folder (from before the tag, or that cleared their environment)."""
+
+SURVEY = """root=%(root)s
+for d in "$root"/*/; do
+  [ -d "$d" ] || continue
+  n=$(basename "$d"); printf 'R %%s %%s\n' "$n" $(( $(date +%%s) - $(stat -c %%Y "$d") ))
+done
+for d in "$root"/%(keep)s/*/; do
+  [ -d "$d" ] || continue
+  m="$d%(mark)s"; [ -e "$m" ] || m="$d"
+  printf 'K %%s %%s\n' "$(basename "$d")" $(( $(date +%%s) - $(stat -c %%Y "$m") ))
+done
+for p in /proc/[0-9]*; do
+  t=$(tr '\0' '\n' < "$p/environ" 2>/dev/null | sed -n 's/^%(tag)s=//p' | head -1)
+  [ -n "$t" ] || continue
+  printf 'P %%s %%s %%s\n' "${p#/proc/}" "$(ps -o etimes= -p "${p#/proc/}" | tr -d ' ')" "$t"
+done
+"""
+"""What the sweep looks at on a machine: the folders under its work folder, the PRs'
+lasting folders with how long since a session used them, and the processes carrying
+a session's tag with their age, one line each."""
+
+
+def keep_path(root: str, repo: str, number: int) -> str:
+    """A PR's lasting folder on a machine whose work folder is ``root``."""
+    return f"{root}/{KEEP_FOLDER}/{repo.replace('/', '__')}-{number}"
 
 
 async def checkout_files(source: str) -> tuple[list[str], list[str]]:
@@ -330,15 +413,12 @@ class LabExecutor:
                 with contextlib.suppress(Exception):
                     await progress(LabProgress(side=side, phase=phase, line=line))
 
-        home = await host.run('printf %s "$HOME"', timeout=60)
-        root = machine.workdir.rstrip("/")
-        if not root.startswith("/"):
-            if home.exit_code != 0 or not home.stdout.strip():
-                raise RuntimeError(f"cannot find the home folder on {payload.lab}")
-            root = f"{home.stdout.strip()}/{root}"
+        root = await self._root(payload.lab, host, machine)
         run_dir = f"{root}/{repo.replace('/', '__')}-{number}-{holder[-8:]}"
+        keep = keep_path(root, repo, number)
         limit = min(payload.timeout_seconds, time_limit(machine, binding))
-        env: dict[str, str] = {}
+        session_id = new_id("lab")
+        env: dict[str, str] = {RUN_TAG: session_id, KEEP_VAR: keep}
         gpus: list[int] = []
         if payload.needs_gpu or payload.wants_gpu:
             await tell(phase=f"Looking for idle GPUs on {payload.lab}")
@@ -363,7 +443,7 @@ class LabExecutor:
         # The GPUs it holds are the only ones it sees: the rest are other people's.
         env["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, gpus))
         session = LabSession(
-            id=new_id("lab"),
+            id=session_id,
             token=secrets.token_urlsafe(32),
             lab=payload.lab,
             repo=repo,
@@ -380,14 +460,17 @@ class LabExecutor:
             job=job,
         )
         await self._remember(session)
+        # The PR's lasting folder is made (and marked used) with the first copy.
+        lasting = f"mkdir -p {shlex.quote(keep)} && touch {shlex.quote(keep + '/' + KEEP_MARK)} && "
         for side in payload.sides:
             await tell(side, phase=f"Copying the {side} code to {payload.lab}")
             put = await host.run(
-                f"mkdir -p {shlex.quote(run_dir + '/' + side)} && base64 -d "
+                lasting + f"mkdir -p {shlex.quote(run_dir + '/' + side)} && base64 -d "
                 f"| tar -xzf - -C {shlex.quote(run_dir + '/' + side)}",
                 timeout=900,
                 stdin=code[side],
             )
+            lasting = ""
             if put.exit_code != 0:
                 await self.close_session(session.id)
                 return {
@@ -430,6 +513,7 @@ class LabExecutor:
             "gpus": session.gpus,
             "seconds_left": max(0, int(left)),
             "run_dir": session.run_dir,
+            "keep_dir": session.env.get(KEEP_VAR),
         }
 
     async def run_in_session(
@@ -626,7 +710,7 @@ class LabExecutor:
             session.closed = True
             await session.tell(phase=f"Removing the run folder on {session.lab}")
             await self._clean(
-                session.lab, session.run_dir, session.gpus, session.holder
+                session.lab, session.run_dir, session.gpus, session.holder, session.id
             )
             await self._forget(session_id)
         return {
@@ -662,7 +746,11 @@ class LabExecutor:
             cleaned += 1
             with contextlib.suppress(Exception):
                 await self._clean(
-                    record["lab"], record["run_dir"], _gpus(record), record["holder"]
+                    record["lab"],
+                    record["run_dir"],
+                    _gpus(record),
+                    record["holder"],
+                    str(record.get("id") or session_id),
                 )
         await self.store.set_state(SESSIONS_KEY, kept)
         return cleaned
@@ -713,14 +801,116 @@ class LabExecutor:
         return None
 
     async def _clean(
-        self, lab: str, run_dir: str, gpus: list[int], holder: str
+        self,
+        lab: str,
+        run_dir: str,
+        gpus: list[int],
+        holder: str,
+        session_id: str | None = None,
     ) -> None:
+        """Stop what the session started (``STOP``), remove its run folder, and give
+        back its GPUs. The PR's lasting folder stays."""
         host = self.hosts.get(lab)
         if host is not None:
             with contextlib.suppress(Exception):
-                await host.run(f"rm -rf {shlex.quote(run_dir)}", timeout=300)
+                await host.run(
+                    STOP
+                    % {
+                        "tag": shlex.quote(
+                            f"{RUN_TAG}={session_id}" if session_id else ""
+                        ),
+                        "dir": shlex.quote(run_dir),
+                    }
+                    + f"rm -rf {shlex.quote(run_dir)}",
+                    timeout=300,
+                )
         for gpu in gpus:
             await self._release(lab, gpu, holder)
+
+    async def _root(self, lab: str, host: LabHost, machine: LabMachine) -> str:
+        """The machine's work folder, made absolute against its login's home."""
+        root = machine.workdir.rstrip("/")
+        if root.startswith("/"):
+            return root
+        home = await host.run('printf %s "$HOME"', timeout=60)
+        if home.exit_code != 0 or not home.stdout.strip():
+            raise RuntimeError(f"cannot find the home folder on {lab}")
+        return f"{home.stdout.strip()}/{root}"
+
+    async def pr_open(self, repo: str, number: int) -> bool:
+        """Whether the service knows ``repo#number`` as an open PR."""
+        snapshot = await self.store.get_snapshot(repo, number)
+        return snapshot is not None and snapshot.state == PrState.OPEN
+
+    async def sweep(
+        self, still_open: Callable[[str, int], Awaitable[bool]] | None = None
+    ) -> int:
+        """Look over each machine for what sessions left behind, and remove it: run
+        folders and tagged processes older than ``STRAY_HOURS`` that no open session
+        claims, and PRs' lasting folders whose PR is no longer open (``still_open``)
+        or that went ``KEEP_DAYS`` without a session. Returns how many it removed."""
+        still_open = still_open or self.pr_open
+        removed = 0
+        open_sessions = [*self._sessions.values(), *self._opening.values()]
+        claimed_runs = {s.run_dir for s in open_sessions}
+        claimed_ids = {s.id for s in open_sessions}
+        busy_prs = {(s.repo, s.number) for s in open_sessions}
+        stray = STRAY_HOURS * 3600
+        for lab, host in list(self.hosts.items()):
+            machine = self.machines.get(lab)
+            if machine is None:
+                continue
+            try:
+                root = await self._root(lab, host, machine)
+                seen = await host.run(
+                    SURVEY
+                    % {
+                        "root": shlex.quote(root),
+                        "keep": KEEP_FOLDER,
+                        "mark": KEEP_MARK,
+                        "tag": RUN_TAG,
+                    },
+                    timeout=120,
+                )
+            except Exception:  # a machine that does not answer is looked at later
+                continue
+            gone: list[str] = []
+            for line in seen.stdout.splitlines():
+                kind, _, rest = line.partition(" ")
+                parts = rest.split()
+                if kind == "R" and len(parts) == 2 and parts[1].isdigit():
+                    path = f"{root}/{parts[0]}"
+                    if (
+                        RUN_FOLDER.match(parts[0])
+                        and path not in claimed_runs
+                        and int(parts[1]) > stray
+                    ):
+                        gone.append(
+                            STOP % {"tag": "''", "dir": shlex.quote(path)}
+                            + f"rm -rf {shlex.quote(path)}"
+                        )
+                elif kind == "K" and len(parts) == 2 and parts[1].isdigit():
+                    found = PR_FOLDER.match(parts[0])
+                    if found is None:
+                        continue
+                    repo = f"{found.group(1)}/{found.group(2)}"
+                    number = int(found.group(3))
+                    if (repo, number) in busy_prs:
+                        continue
+                    old = int(parts[1]) > KEEP_DAYS * 86400
+                    if old or not await still_open(repo, number):
+                        gone.append(
+                            f"rm -rf {shlex.quote(keep_path(root, repo, number))}"
+                        )
+                elif kind == "P" and len(parts) == 3 and parts[1].isdigit():
+                    pid, age, tag = parts
+                    if tag not in claimed_ids and int(age) > stray and pid.isdigit():
+                        gone.append(f"kill -KILL {pid} 2>/dev/null || true")
+            for command in gone:
+                with contextlib.suppress(Exception):
+                    await host.run(command, timeout=300)
+                    removed += 1
+        return removed
 
     async def _remember(self, session: LabSession) -> None:
         self._opening[session.id] = session

@@ -55,6 +55,7 @@ from .prompts import (
     untrusted,
     work_lessons_block,
 )
+from .review_session import earlier_work
 
 
 def _read_log(repo: str) -> str:
@@ -79,9 +80,10 @@ FIX_CI = """You are fixing the failing CI of a pull request for {who}, inside an
 - Write any text in {public_language}: plain and specific.
 - End with a short message: the cause of each failed job, what you changed for it, what you ran to check it and what came out, which causes lie outside the PR, and what you could not fix and why."""
 
-ON_MACHINE = """- Test your fix on test machine {lab}, never here: `lab --sync` copies this checkout, as you changed it, to the machine, and `lab -- 'COMMAND'` (one quoted string) runs a command there in a fresh shell in that copy, after the machine's own setup; `lab --timeout MINUTES -- 'COMMAND'` gives a long step more time, and `lab --info` says how long the session has left. Run the failing jobs' steps the way their workflow does (install what they install, then the failing tests or commands); keep environments, caches, and downloads inside the copy, and sync again after each change.
-- Run each `lab` command in the foreground and wait until it exits, even when it takes many minutes: give your tool for running commands enough time, and if the tool moves it to the background anyway, wait on that task with the tool until it ends. Never end your turn while a command still runs or to continue later: the end of your turn ends the session.
-- When a step fails because of the machine (a missing package, a mirror, a path), fix it inside the copy and say what you changed; never use sudo or touch anything outside the session's folder: the machine refuses commands that would."""
+ON_MACHINE = """- Test your fix on test machine {lab}, never here: `lab --sync` copies this checkout, as you changed it, to the machine, and `lab -- 'COMMAND'` (one quoted string) runs a command there in a fresh shell in that copy, after the machine's own setup; `lab --timeout MINUTES -- 'COMMAND'` gives a long step more time, and `lab --info` says how long the session has left. Run the failing jobs' steps the way their workflow does (install what they install, then the failing tests or commands), and sync again after each change.
+- Keep environments, downloaded checkpoints and datasets, and caches in `$AM_LAB_KEEP`, this PR's folder on the machine: later sessions of the PR get it too, while the copy of the code is fresh each session and removed with it. Look there first; an earlier session may have left what you need.
+- Run each `lab` command in the foreground and wait until it exits, even when it takes many minutes: give your tool for running commands enough time, and if the tool moves it to the background anyway, wait on that task with the tool until it ends. Never end your turn while a command still runs or to continue later: the end of your turn ends the session and stops everything it started.
+- When a step fails because of the machine (a missing package, a mirror, a path), fix it inside the copy and say what you changed; never use sudo or touch anything outside the session's folder and `$AM_LAB_KEEP`: the machine refuses commands that would."""
 
 NO_MACHINE = """- Never run the repository's tests, builds, scripts, or the PR's code here: the repository's code runs only on its test machines, and none was chosen. Check what you changed by reading it and with the repository's static linters when it has them, and say which jobs and tests a run should cover."""
 
@@ -228,6 +230,7 @@ class FixCiPlaybook(Playbook):
                             pr.repo, [lab] if token and lab else []
                         )
                     ),
+                    await earlier_work(ctx, pr) if token else "",
                     "Failed CI jobs at the PR's head "
                     f"{short_sha(pr.head_sha)}:\n" + "\n".join(jobs),
                     "The service's diagnosis of them:\n"
@@ -322,6 +325,7 @@ class FixCiPlaybook(Playbook):
                     "skipped": "the agent changed nothing",
                     "summary": account[-2000:],
                     "commands": ran,
+                    **({"tested_on": lab, "commit": pr.head_sha} if ran else {}),
                 }
             )
         if described is not None and described.ok and described.structured is not None:
@@ -365,6 +369,7 @@ class FixCiPlaybook(Playbook):
                 "fixed": [f.id for f in fix.fixed],
                 "commands": ran,
                 "summary": account[-2000:],
+                **({"tested_on": lab, "commit": pr.head_sha} if ran else {}),
             },
         )
 

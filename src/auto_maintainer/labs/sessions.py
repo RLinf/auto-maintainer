@@ -30,6 +30,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -40,7 +41,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
-from .executor import LabExecutor
+from .executor import SWEEP_SECONDS, LabExecutor
 
 log = logging.getLogger(__name__)
 
@@ -108,10 +109,23 @@ class LabSessionServer:
                 await asyncio.wait_for(self._task, 10)
 
     async def _sweep(self) -> None:
+        # The machines are looked over soon after a start, then every SWEEP_SECONDS:
+        # what an older version or a crash left there goes (``LabExecutor.sweep``).
+        looked = time.monotonic() - SWEEP_SECONDS + JANITOR_SECONDS * 4
         while True:
             await asyncio.sleep(JANITOR_SECONDS)
             with contextlib.suppress(Exception):
                 await self.labs.expire_sessions()
+            if time.monotonic() - looked >= SWEEP_SECONDS:
+                looked = time.monotonic()
+                try:
+                    removed = await self.labs.sweep()
+                    if removed:
+                        log.info(
+                            "removed %d things sessions left on test machines", removed
+                        )
+                except Exception:
+                    log.exception("looking over the test machines failed")
 
     async def _session(self, request: Request) -> Response:
         info = self.labs.session_info(request.headers.get("x-lab-session", ""))

@@ -90,7 +90,7 @@ from .review_revise import (
     revision_blocks,
     task_kind_of,
 )
-from .review_session import held_gpus, machine_facts
+from .review_session import earlier_work, held_gpus, machine_facts
 
 WAIT_SECONDS = 7 * 24 * 3600
 
@@ -346,6 +346,8 @@ class ReproducePlaybook(Playbook):
             ctx, request, pr, payload, record, by, lab, session_id, token
         )
         summary = {
+            "tested_on": lab,
+            "commit": record.action.head_sha,
             "conclusion": report.conclusion,
             "notes": report.notes,
             "commands": [{k: v for k, v in c.items() if k != "tail"} for c in commands],
@@ -457,6 +459,7 @@ class ReproducePlaybook(Playbook):
                     payload.timeout_seconds // 60,
                     machine.suited_for if machine else "",
                 ),
+                await earlier_work(ctx, pr),
                 pr_block(pr),
                 schema_hint(ReproReport.model_json_schema()),
             ]
