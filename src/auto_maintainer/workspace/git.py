@@ -409,7 +409,10 @@ class GitWorkspace:
         """What changed in the checkout since its commit: the agent's work. The
         instruction files the checkout took from the default branch (``prepare``)
         are left out, so a fix never carries them onto a PR, nor drops the PR's own;
-        in a checkout of the default branch itself they are the agent's to change."""
+        in a checkout of the default branch itself they are the agent's to change.
+        The swapped files are listed with ``--no-renames``: a rename on the default
+        branch would otherwise name only its new path, leaving the old one staged as
+        a deletion."""
         p = Path(path)
         await self._in(p, "add", "-A", timeout=300, check=True)
         steering = self._steering.get(p)
@@ -418,6 +421,7 @@ class GitWorkspace:
                 p,
                 "diff",
                 "--name-only",
+                "--no-renames",
                 "-z",
                 "HEAD",
                 steering,
