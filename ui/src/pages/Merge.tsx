@@ -42,7 +42,8 @@ interface Scheduled extends Row {
   phase: Phase;
   detail: string;
   /** Why a blocked one is: ``workflow_scope`` (the service's sign-in lacks it),
-   * ``person_scope`` (the scheduler's own sign-in lacks it), ``forge_rules``, ``refused``. */
+   * ``person_scope`` (the scheduler's own sign-in lacks it), ``scheduler_sign_in`` (a base merge
+   * waits for the scheduler to sign in), ``forge_rules``, ``refused``. */
   blocked_on?: string;
   since: string | null;
   scheduled_by: string;

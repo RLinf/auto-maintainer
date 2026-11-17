@@ -22,7 +22,7 @@ optional wait. The context has no way to write outside the process: it holds a
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -178,6 +178,9 @@ class ServiceInfo:
     started_at: datetime | None = None
     """When this process of the service started: its forge sign-in is read then, so
     a refusal for a missing scope may pass after a later start."""
+    can_post_as: Callable[[str], Awaitable[bool]] | None = None
+    """Whether a person signed in in a way that lets the service act as them
+    (``Service.can_post_as``): a step only they may take waits for that."""
 
 
 class LabSessionControl(Protocol):

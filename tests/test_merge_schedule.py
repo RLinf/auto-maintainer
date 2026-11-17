@@ -2174,6 +2174,39 @@ async def test_a_resolution_waits_for_a_scheduler_without_a_sign_in(
     assert state.phase == "resolving" and "waits for bob to approve" in state.detail
 
 
+async def test_a_base_merge_waits_for_its_scheduler_to_sign_in(
+    harness: Harness,
+) -> None:
+    """A base merge is a commit on the contributor's branch: the schedule makes it
+    only as the maintainer who scheduled the PR, never as the service, whose account
+    may be a GitHub App that cannot write to a fork."""
+    h = harness
+    h.forge.put_pr(_ready(42, "a" * 40, _ci(42, "success"), behind_base=True))
+    await _schedule(h, 42, by="bob")  # bob has no dashboard sign-in to act with
+    await h.settle()
+    assert not h.forge.writes_of("update_branch"), "never as the service"
+    state = await _phase(h, 42)
+    assert state.phase == "blocked" and state.blocked_on == "scheduler_sign_in"
+    assert "bob, who has not signed in to the dashboard" in state.detail
+    # Its next look after bob signs in takes the base merge, as bob.
+    await h.service.a.user_tokens.set("bob", UserToken(token="b"))
+    await h.emit(Event(kind=EventKind.CHECKS_COMPLETED, repo=REPO, number=42))
+    await h.settle()
+    [update] = h.forge.writes_of("update_branch")
+    assert update["number"] == 42 and update["author"] == "bob"
+
+
+async def test_an_automatic_schedule_merges_the_base_in_as_the_one_who_turned_it_on(
+    harness: Harness,
+) -> None:
+    h = harness
+    h.forge.put_pr(_ready(42, "a" * 40, _ci(42, "success"), behind_base=True))
+    await _schedule(h, 42, auto=True)
+    await h.settle()
+    [update] = h.forge.writes_of("update_branch")
+    assert update["author"] == "maria", "a base merge brings in only the base"
+
+
 async def test_an_automatic_schedule_never_pushes_a_resolution_by_itself(
     harness: Harness,
 ) -> None:

@@ -86,14 +86,18 @@ commit onto the PR's own branch (``merge_ref``, ``target: branch``)."""
 AS_SCHEDULER = frozenset(
     {ActionKind.PR_UPDATE_BRANCH, ActionKind.CI_APPROVE_RUN, ActionKind.PR_FIX}
 )
-"""Of ``SCHEDULED``, the steps that run with the scheduler's own sign-in when they
-have one: a base merge is a commit, which the service's account never makes, and
-approving a fork's workflows, or pushing an agent's resolution of a conflict, is only
-ever a person's. Without their sign-in a base merge runs as the service, and the
-others wait for them."""
-ONLY_THE_SCHEDULER = frozenset({ActionKind.CI_APPROVE_RUN, ActionKind.PR_FIX})
-"""Of ``AS_SCHEDULER``, the steps the schedule approves only with the scheduler's
-own sign-in, and never for a PR automatic scheduling armed unseen."""
+"""Of ``SCHEDULED``, the steps that run with the scheduler's own sign-in: a base
+merge is a commit, which the service's account never makes (and as a GitHub App it
+could not make one on a contributor's fork), and approving a fork's workflows, or
+pushing an agent's resolution of a conflict, is only ever a person's."""
+ONLY_THE_SCHEDULER = AS_SCHEDULER
+"""The steps the schedule approves only with the scheduler's own sign-in; without
+it they wait for the scheduler, in Approvals, and the schedule says so."""
+NOT_UNSEEN = frozenset({ActionKind.CI_APPROVE_RUN, ActionKind.PR_FIX})
+"""Of ``ONLY_THE_SCHEDULER``, the steps never approved for a PR automatic
+scheduling armed unseen: running a fork's code with the repository's secrets, or
+pushing an agent's code as someone. A base merge brings in only the base, so it runs
+for those too."""
 
 
 class ApprovalError(ValueError):
@@ -242,7 +246,7 @@ class ActionPipeline:
             # Automatic scheduling armed it unseen: running a fork's code with the
             # repository's secrets, or pushing an agent's resolution as someone,
             # stays a person's decision.
-            and not (arm.auto and action.kind in ONLY_THE_SCHEDULER)
+            and not (arm.auto and action.kind in NOT_UNSEEN)
         )
 
     async def _revised_on_request(self, action: Action) -> bool:

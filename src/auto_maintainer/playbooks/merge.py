@@ -329,6 +329,11 @@ class MergePlaybook(Playbook):
                     resolvable
                     and state.blocked_on not in ("workflow_scope", "person_scope")
                 )
+                # A base merge that waited for its scheduler to sign in.
+                or (
+                    state.blocked_on == "scheduler_sign_in"
+                    and await self._signed_in(ctx, arm.armed_by)
+                )
             )
             if not again:
                 return PlaybookResult(
@@ -593,6 +598,21 @@ class MergePlaybook(Playbook):
                     "maintainers push to its branch: ask them to merge "
                     f"{pr.base_ref} in, or to allow edits by maintainers",
                     False,
+                )
+            if not await self._signed_in(ctx, arm.armed_by):
+                # A base merge is a commit on the PR's branch, made only as the
+                # maintainer who scheduled it (``pipeline.ONLY_THE_SCHEDULER``).
+                return await self._block(
+                    ctx,
+                    profile,
+                    pr,
+                    arm,
+                    state,
+                    f"it must merge {pr.base_ref} in, which the schedule does as "
+                    f"{arm.armed_by}, who has not signed in to the dashboard with "
+                    "GitHub: once they do (the account menu's Sign in with GitHub to "
+                    "act as you), it goes on",
+                    "scheduler",
                 )
             if state.updates >= UPDATES_PER_TURN:
                 return await self._fail(
@@ -1308,6 +1328,11 @@ class MergePlaybook(Playbook):
             events=events, result={"done": "merged" if merged else "left the schedule"}
         )
 
+    async def _signed_in(self, ctx: PlaybookContext, login: str) -> bool:
+        """Whether ``login`` signed in so the schedule can act as them."""
+        check = ctx.service.can_post_as
+        return check is None or await check(login)
+
     async def _block(
         self,
         ctx: PlaybookContext,
@@ -1322,10 +1347,13 @@ class MergePlaybook(Playbook):
         base merge, and pass the turn on: it tries again once a maintainer retries
         it, or after the service starts again (a new sign-in) when a scope was
         missing, or when the PR changes otherwise."""
-        # ``scope``: whose sign-in lacked a scope (``service``, ``person``), if any.
+        # ``scope``: whose sign-in lacked a scope (``service``, ``person``), if any;
+        # ``scheduler`` when a step only the scheduler takes waits for their sign-in.
         state.blocked_on = (
             "person_scope"
             if scope == "person"
+            else "scheduler_sign_in"
+            if scope == "scheduler"
             else "workflow_scope"
             if scope
             else "refused"

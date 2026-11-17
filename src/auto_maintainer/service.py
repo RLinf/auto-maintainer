@@ -430,6 +430,7 @@ class Service:
             code_branch=settings.code_branch,
             machines=self.machines,
             lab_socket=settings.lab_socket,
+            can_post_as=self.can_post_as,
         )
         self.engine = Engine(
             adapters.store,
