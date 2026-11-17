@@ -739,12 +739,92 @@ async def test_automatic_scheduling_arms_ready_prs_as_the_maintainer_who_chose_i
         arm = await h.store.get_arm(REPO, 42)
         assert arm is not None and arm.armed_by == "maria" and arm.auto
         assert await h.store.get_arm(REPO, 44) is None, "a draft is not ready"
-        # The fork's workflows wait for a person: automatic scheduling never saw it.
+        # The fork's workflows wait for a person: automatic scheduling never saw it,
+        # so approving them is proposed to maria rather than done.
         assert not h.forge.writes_of("approve_workflow_run")
         state = await _phase(h, 42)
-        assert state.approval_needed
+        assert state.approval_needed and "until maria approves" in state.detail
+        [card] = await h.store.list_actions(
+            repo=REPO, kinds=[ActionKind.CI_APPROVE_RUN]
+        )
+        assert card.status == ActionStatus.PROPOSED
+        assert card.action.draft_for == "maria" and card.action.payload["run_ids"] == [
+            7
+        ]
+        proposal = await h.store.proposal_for_action(card.action.id)
+        assert proposal is not None
+        await h.service.a.user_tokens.set("maria", UserToken(token="m"))
+        await h.service.pipeline.approve(proposal.id, "maria", post_as="maria")
+        await h.settle()
+        assert h.forge.writes_of("approve_workflow_run") == [
+            {"repo": REPO, "run_id": 7, "by": "maria"}
+        ]
     finally:
         await h.close()
+
+
+@pytest.mark.parametrize(
+    ("auto", "pushed_as", "kept"),
+    [(False, "maria", True), (False, "walt", False), (True, "maria", False)],
+)
+async def test_a_push_the_scheduler_approved_as_themselves_keeps_a_schedule_by_hand(
+    harness: Harness, auto: bool, pushed_as: str, kept: bool
+) -> None:
+    from auto_maintainer.domain.actions import FixPrPayload, make_action
+    from auto_maintainer.domain.records import ActionRecord
+
+    h = harness
+    pr = _ready(42, "a" * 40, _ci(42, None))
+    h.forge.put_pr(pr)
+    await _schedule(h, 42, auto=auto)
+    await h.settle()
+    # An agent's fix, approved and pushed onto the PR's branch through the service.
+    fix = make_action(
+        ActionKind.PR_FIX,
+        REPO,
+        FixPrPayload(
+            title="fix", body="", patch="", base_sha="a" * 40, target="branch"
+        ),
+        number=42,
+        head_sha="a" * 40,
+        discriminator="fix",
+    )
+    await h.store.add_action(
+        ActionRecord(
+            action=fix,
+            status=ActionStatus.EXECUTED,
+            post_as=pushed_as,
+            external_ref={"sha": "c" * 40},
+        )
+    )
+    held = _job(420, "unit", None, 4300, workflow="CI").model_copy(
+        update={
+            "status": CheckStatus.QUEUED,
+            "conclusion": CheckConclusion.ACTION_REQUIRED,
+        }
+    )
+    h.forge.put_pr(
+        pr.model_copy(
+            update={
+                "head_sha": "c" * 40,
+                "commits": [
+                    *pr.commits,
+                    Commit(sha="c" * 40, message="fix", author_login=pushed_as),
+                ],
+                "checks": [held],
+            }
+        )
+    )
+    await h.emit(
+        Event(kind=EventKind.PR_SYNCHRONIZED, repo=REPO, number=42, sha="c" * 40)
+    )
+    await h.settle()
+    arm = await h.store.get_arm(REPO, 42)
+    moved = arm is not None and arm.sha == "c" * 40
+    assert moved == kept
+    # Kept, the schedule still approves the fork's held workflows as its scheduler.
+    approved = h.forge.writes_of("approve_workflow_run")
+    assert approved == ([{"repo": REPO, "run_id": 4300, "by": "maria"}] if kept else [])
 
 
 # -- the page ---------------------------------------------------------------------------

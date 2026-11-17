@@ -643,27 +643,27 @@ class MergePlaybook(Playbook):
             self._started(state, pr, now)
             runs = sorted({c.run_id for c in view.held if c.run_id})
             workflows = sorted({c.workflow or c.name for c in view.held})
-            actions: list[Action] = []
+            # Proposed to the scheduler either way; the pipeline approves it as them
+            # only on an arm they made by hand, so on an automatic one it waits for
+            # them to approve running a fork's code as themselves.
+            action = step(
+                ActionKind.CI_APPROVE_RUN,
+                ApproveRunsPayload(run_ids=runs, workflows=workflows),
+                "approve:" + ",".join(str(r) for r in runs),
+                "GitHub holds its workflows for a maintainer",
+            )
             if arm.auto:
                 state.approval_needed = True
                 detail = (
                     "GitHub holds "
                     + ", ".join(workflows)
-                    + " until a maintainer approves running them"
+                    + f" until {arm.armed_by} approves running them"
                 )
             else:
-                actions.append(
-                    step(
-                        ActionKind.CI_APPROVE_RUN,
-                        ApproveRunsPayload(run_ids=runs, workflows=workflows),
-                        "approve:" + ",".join(str(r) for r in runs),
-                        "GitHub holds its workflows for a maintainer",
-                    )
-                )
                 detail = "approving " + ", ".join(workflows)
             await self._set(ctx, profile, info, pr, state, "starting", detail)
             return PlaybookResult(
-                actions=actions,
+                actions=[action],
                 wait=wait.model_copy(update={"seconds": start.start_minutes * 60}),
                 result={"phase": "starting"},
             )
@@ -1087,7 +1087,7 @@ class MergePlaybook(Playbook):
                     found.cause,
                 )
             ]
-        if found.step == "approve_runs" and not arm.auto:
+        if found.step == "approve_runs":
             held = [c for c in latest if c.awaiting_approval and c.run_id]
             if held:
                 return [
@@ -1726,9 +1726,10 @@ class MergePlaybook(Playbook):
         event: Event,
     ) -> MergeArm | PlaybookResult:
         """The arm at the PR's new head when the schedule keeps it, else the result
-        of unscheduling it. A base merge the schedule asked for keeps it; other
-        commits keep it only when the approval survives and the follow-up spot-check
-        finds no regression."""
+        of unscheduling it. A base merge the schedule asked for keeps it, and so does
+        a push its scheduler approved as themselves on a PR they scheduled by hand
+        (``_scheduler_pushed``); other commits keep it only when the approval
+        survives and the follow-up spot-check finds no regression."""
         if (
             state.updated_from
             and same_commit(state.updated_from, arm.sha)
@@ -1750,7 +1751,16 @@ class MergePlaybook(Playbook):
             f.get("severity") in ("critical", "major")
             for f in spot.result.get("new_findings", []) or []
         )
-        if approved and clean:
+        pushed = await self._scheduler_pushed(ctx, pr, arm)
+        if pushed == "pushing" and event.kind != EventKind.JOB_TIMEOUT:
+            return PlaybookResult(
+                wait=Wait(
+                    kinds=WAIT_KINDS,
+                    seconds=LANDING_SECONDS,
+                    reason="waiting for the scheduler's push to be recorded",
+                )
+            )
+        if (approved and clean) or pushed == "pushed":
             arm = arm.model_copy(update={"sha": pr.head_sha})
             await ctx.store.save_arm(arm)
             if state.phase == "failed":
@@ -1782,6 +1792,40 @@ class MergePlaybook(Playbook):
             events=left.events,
             result={"done": "unscheduled after a push"},
         )
+
+    async def _scheduler_pushed(
+        self, ctx: PlaybookContext, pr: PrSnapshot, arm: MergeArm
+    ) -> Literal["pushed", "pushing"] | None:
+        """``pushed`` when the PR's head is a ``pr.fix`` onto its branch, from the
+        armed head, that the maintainer who scheduled it by hand approved as
+        themselves: they saw the change, and keeping their arm keeps the steps only
+        their schedule approves (a fork's held workflows). ``pushing`` while such a
+        push runs and its new head is not recorded yet. An arm automatic scheduling
+        made is never kept this way: nobody saw the code it armed."""
+        if arm.auto:
+            return None
+        records = await ctx.store.list_actions(
+            repo=pr.repo,
+            number=pr.number,
+            kinds=[ActionKind.PR_FIX],
+            statuses=[ActionStatus.EXECUTED, ActionStatus.INTENT],
+        )
+        theirs = [
+            r
+            for r in records
+            if (r.post_as or "").lower() == arm.armed_by.lower()
+            and r.action.payload.get("target") == "branch"
+            and same_commit(r.action.payload.get("base_sha"), arm.sha)
+        ]
+        if any(
+            r.status == ActionStatus.EXECUTED
+            and same_commit(r.external_ref.get("sha"), pr.head_sha)
+            for r in theirs
+        ):
+            return "pushed"
+        if any(r.status == ActionStatus.INTENT for r in theirs):
+            return "pushing"
+        return None
 
 
 async def maintains(
