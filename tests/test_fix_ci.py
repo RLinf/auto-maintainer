@@ -127,6 +127,9 @@ async def test_without_a_machine_the_agent_runs_nothing(demo) -> None:
     [work, _] = [t for t in h.runner.tasks if t.kind == "fix"]
     assert work.lab_session is None and "none was chosen" in work.prompt
     assert h.service.a.lab_runner.reproduced == []
+    assert "whatever causes it" in work.prompt, "it fixes failures outside the PR"
+    assert "the cause is outside the PR" in work.prompt
+    assert "leave it" not in work.prompt
 
 
 async def test_sync_copies_the_agents_checkout_and_removes_what_it_deleted(
