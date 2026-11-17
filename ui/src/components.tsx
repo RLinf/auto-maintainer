@@ -3,9 +3,10 @@
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { forwardRef, useEffect, useLayoutEffect, useRef, useState, type ReactNode, type TextareaHTMLAttributes } from "react";
-import { Link } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import { api, ApiError, type QualityBand, type QuickQuality, type ReviewQuality } from "./api";
 import { REVIEW_STATES } from "./data";
+import { helpTopicFor } from "./guide";
 import { currentLang, useLang, useT, type Lang } from "./i18n";
 import { Icon, type IconName } from "./icons";
 import { Markdown } from "./markdown";
@@ -25,6 +26,16 @@ export function PageHead({
   /** Actions on their own row under the title, for long titles and many actions. */
   stacked?: boolean;
 }) {
+  const t = useT();
+  const location = useLocation();
+  // Every page opens the guide where it explains that page.
+  const topic = helpTopicFor(location.pathname, location.search);
+  const guide = topic && (
+    <Link to={`/guide/${topic}`} className="guide-link" title={t("How this page works")} aria-label={t("How this page works")}>
+      <Icon name="compass" size={15} />
+      <span className="hide-narrow">{t("Guide")}</span>
+    </Link>
+  );
   return (
     <div className={`page-head${stacked ? " stacked" : ""}`}>
       <div className="titles">
@@ -41,7 +52,12 @@ export function PageHead({
         <h1>{title}</h1>
         {sub && <div className="sub">{sub}</div>}
       </div>
-      {actions && <div className="actions">{actions}</div>}
+      {(actions || guide) && (
+        <div className="actions">
+          {actions}
+          {guide}
+        </div>
+      )}
     </div>
   );
 }

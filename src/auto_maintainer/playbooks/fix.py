@@ -12,7 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""A fix for a review's findings, or a change someone asked for in their own words: as
+"""A fix for a review's findings (a follow-up's: its new ones and the earlier ones it
+finds not fixed), or a change someone asked for in their own words: as
 a PR into an open PR's branch (or straight onto it), or as a new PR or draft PR against
 the repository's default branch when there is no open PR yet (design 5.5).
 
@@ -28,7 +29,9 @@ service's own account never pushes to a repository it maintains.
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+import contextlib
+
+from pydantic import BaseModel, Field, ValidationError
 
 from ..domain.actions import (
     Action,
@@ -41,8 +44,8 @@ from ..domain.actions import (
 from ..domain.agents import AgentTask, TaskKind
 from ..domain.events import Event, EventKind
 from ..domain.ids import short_sha
-from ..domain.records import ChatMessage
-from ..domain.review import Finding, ReviewResult
+from ..domain.records import ActionRecord, ChatMessage
+from ..domain.review import Finding, FollowupResult, ReviewResult
 from ..domain.snapshot import PrSnapshot, PrState
 from .base import Playbook, PlaybookContext, PlaybookResult, may_succeed_later
 from .ci_doctor import OUTSIDE_LOGS, outside_logs
@@ -257,11 +260,14 @@ class FixPlaybook(Playbook):
                 or review.action.number != pr.number
             ):
                 return PlaybookResult(result={"skipped": "no review of this PR to fix"})
-            result = ReviewResult.model_validate(
-                review.action.payload.get("result") or {}
-            )
+            if review.action.payload.get("kind") == "followup":
+                listed = await followup_findings(ctx, review)
+            else:
+                listed = ReviewResult.model_validate(
+                    review.action.payload.get("result") or {}
+                ).findings
             wanted = set(event.payload.get("findings") or [])
-            findings = [f for f in result.findings if not wanted or f.id in wanted]
+            findings = [f for f in listed if not wanted or f.id in wanted]
             if not findings:
                 return PlaybookResult(
                     result={"skipped": "the review has no findings to fix"}
@@ -657,6 +663,52 @@ class FixPlaybook(Playbook):
                 "base_ref": info.default_branch,
             },
         )
+
+
+async def followup_findings(
+    ctx: PlaybookContext, followup: ActionRecord
+) -> list[Finding]:
+    """What a follow-up leaves to fix: the earlier findings it marks open or partly
+    addressed, then its new findings. A follow-up keeps only the id, status, and note
+    of an earlier finding, so its text comes from the PR's earlier ``review.post``
+    actions (the newest with that id); one found in none of them keeps the status's
+    title and note."""
+    result = FollowupResult.model_validate(followup.action.payload.get("result") or {})
+    earlier: dict[str, Finding] = {}
+    reviews = await ctx.store.list_actions(
+        repo=followup.action.repo,
+        number=followup.action.number,
+        kinds=[ActionKind.REVIEW_POST],
+        limit=500,
+    )
+    for record in sorted(reviews, key=lambda r: r.action.created_at):
+        if (
+            record.action.id == followup.action.id
+            or record.action.created_at > followup.action.created_at
+        ):
+            continue
+        prior = record.action.payload.get("result") or {}
+        for raw in [*(prior.get("findings") or []), *(prior.get("new_findings") or [])]:
+            with contextlib.suppress(ValidationError):
+                finding = Finding.model_validate(raw)
+                earlier[finding.id] = finding
+    still: list[Finding] = []
+    for status in result.statuses:
+        if status.status == "resolved":
+            continue
+        finding = earlier.get(status.id) or Finding(
+            id=status.id,
+            severity="major",
+            category="",
+            title=status.title or status.id,
+            body="",
+        )
+        state = "still open" if status.status == "open" else "partly addressed"
+        note = f"The follow-up found it {state}. {status.note}".strip()
+        still.append(
+            finding.model_copy(update={"body": f"{finding.body}\n{note}".strip()})
+        )
+    return [*still, *result.new_findings]
 
 
 def _what(edit: dict[str, str]) -> str:

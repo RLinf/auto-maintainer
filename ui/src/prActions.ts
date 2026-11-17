@@ -134,3 +134,11 @@ export function activePrActionPanel(panel: PrActionPanel, s: PrMenuState): PrAct
   if (panel === "merge-base" && !s.isOpen) return "menu";
   return panel;
 }
+
+/** How many findings "Fix with agent" works on from a review's ``result``: a full
+ *  review's findings, or a follow-up's new findings and the earlier ones it does not
+ *  mark resolved (``playbooks/fix.py:followup_findings``). */
+export function fixableFindings(result: unknown): number {
+  const r = (result ?? {}) as { findings?: unknown[]; new_findings?: unknown[]; statuses?: { status?: string }[] };
+  return (r.findings?.length ?? 0) + (r.new_findings?.length ?? 0) + (r.statuses ?? []).filter((s) => s.status !== "resolved").length;
+}

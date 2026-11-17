@@ -280,7 +280,9 @@ class FlakeSignature(_Section):
 class Rerun(_Section):
     """How failed CI is run again (design 5.5): a flake within ``max_per_sha``
     reruns of its run at one commit, ``backoff_seconds`` apart; a failure nothing
-    calls a flake ``unknown`` times first, before it counts as real."""
+    calls a flake ``unknown`` times first, before it counts as real. These bound
+    the automatic reruns; one a maintainer asks for runs past them
+    (``RerunPayload.requested``)."""
 
     max_per_sha: int = Field(default=2, ge=0, le=10)
     backoff_seconds: int = Field(default=120, ge=0, le=24 * 3600)

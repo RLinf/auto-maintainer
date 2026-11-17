@@ -838,7 +838,10 @@ class MergePlaybook(Playbook):
                         step(
                             ActionKind.CI_RERUN_FAILED,
                             RerunPayload(
-                                run_id=t.run_id, workflow=t.workflow, attempt=t.attempt
+                                run_id=t.run_id,
+                                workflow=t.workflow,
+                                attempt=t.attempt,
+                                requested=True,
                             ),
                             f"retry:{t.run_id}:{state.retries}",
                             "a maintainer sent it back to run again",

@@ -18,6 +18,7 @@ import { CommandPalette, NAV, type Command } from "./palette";
 import AgentsPage from "./pages/Agents";
 import AuditPage from "./pages/Audit";
 import ChatPage from "./pages/Chat";
+import GuidePage from "./pages/Guide";
 import CiPage from "./pages/Ci";
 import HomePage from "./pages/Home";
 import InboxPage from "./pages/Inbox";
@@ -155,6 +156,7 @@ function Shell({ me }: { me: Me }) {
         run: () => setLang(lang === "zh" ? "en" : "zh"),
       },
       { id: "keys", group: "Commands", label: t("Keyboard shortcuts"), sub: "?", icon: "keyboard", run: () => setHelp(true) },
+      { id: "guide", group: "Commands", label: t("Open the guide"), sub: "g g", icon: "compass", keywords: "help how tutorial docs manual 帮助 教程 指南", run: () => navigate("/guide") },
       { id: "signout", group: "Commands", label: t("Sign out"), icon: "logout", run: () => void signOut() },
     ];
     if (canNotify) {
@@ -283,6 +285,9 @@ function Shell({ me }: { me: Me }) {
                 <MenuItem icon="settings" hint="g s" onClick={() => (navigate("/settings"), close())}>
                   {t("Settings")}
                 </MenuItem>
+                <MenuItem icon="compass" hint="g g" onClick={() => (navigate("/guide"), close())}>
+                  {t("Guide")}
+                </MenuItem>
                 <MenuItem icon="keyboard" hint="?" onClick={() => (setHelp(true), close())}>
                   {t("Keyboard shortcuts")}
                 </MenuItem>
@@ -363,6 +368,8 @@ function Shell({ me }: { me: Me }) {
           <Route path="/audit" element={<AuditPage />} />
           <Route path="/chat" element={<ChatPage />} />
           <Route path="/chat/:threadId" element={<ChatPage />} />
+          <Route path="/guide" element={<GuidePage />} />
+          <Route path="/guide/:topic" element={<GuidePage />} />
           <Route
             path="*"
             element={

@@ -797,7 +797,8 @@ def _where(service: Any, thread: ChatThread) -> str:
     if service.settings.code_repo:
         return (
             f"a checkout of the service's own code ({service.settings.code_repo}) at the "
-            "commit it runs: read it to answer questions about the service itself; "
+            "commit it runs: read it to answer questions about the service itself "
+            "(how to use the dashboard is written for its users in ui/src/guide.ts); "
             "changing it changes nothing that runs"
         )
     return "an empty folder of this conversation's own"
@@ -1341,7 +1342,7 @@ async def _propose(service: Any, user: User, p: ProposedAction) -> list[str]:
         action = make_action(
             ActionKind.CI_RERUN_FAILED,
             p.repo,
-            RerunPayload(run_id=p.run_id),
+            RerunPayload(run_id=p.run_id, requested=True),
             number=pr.number,
             head_sha=pr.head_sha,
             discriminator=disc,

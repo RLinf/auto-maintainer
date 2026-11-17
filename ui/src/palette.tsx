@@ -7,7 +7,8 @@ import type { Me } from "./api";
 import { useAgent } from "./agent";
 import { prPath } from "./components";
 import { usePrs, useRepos } from "./data";
-import { useT } from "./i18n";
+import { GROUPS, searchTopics } from "./guide";
+import { useLang, useT } from "./i18n";
 import { Icon, type IconName } from "./icons";
 import { navHref } from "./viewState";
 
@@ -36,6 +37,7 @@ export const NAV: { to: string; label: string; icon: IconName; keys?: string; hi
   { to: "/memory", label: "Memory", icon: "book", keys: "g m", hint: "Memory changes and the memory repository" },
   { to: "/service", label: "Service", icon: "server", hint: "Running version, updates, self-improvement" },
   { to: "/audit", label: "Audit log", icon: "shield", hint: "Every decision and change" },
+  { to: "/guide", label: "Guide", icon: "compass", keys: "g g", hint: "How to use the dashboard, step by step" },
 ];
 
 function matches(haystack: string, query: string): number {
@@ -56,6 +58,7 @@ export function CommandPalette({ open, onClose, commands, me }: { open: boolean;
   const navigate = useNavigate();
   const location = useLocation();
   const agent = useAgent();
+  const { lang } = useLang();
   const prs = usePrs(open);
   const repos = useRepos(open);
   const [query, setQuery] = useState("");
@@ -104,6 +107,17 @@ export function CommandPalette({ open, onClose, commands, me }: { open: boolean;
       if (counts[c.group] <= (limits[c.group] ?? 50)) out.push(c);
     }
     if (query.trim()) {
+      // The guide's topics, ranked by the guide's own search (titles first, either language).
+      for (const topic of searchTopics(query, lang).slice(0, 4)) {
+        out.push({
+          id: `guide:${topic.id}`,
+          group: "Guide",
+          label: topic.title[lang],
+          sub: GROUPS.find((g) => g.id === topic.group)?.title[lang],
+          icon: "compass",
+          run: go(`/guide/${topic.id}`),
+        });
+      }
       out.push({
         id: "ask",
         group: "Agent",
@@ -112,10 +126,10 @@ export function CommandPalette({ open, onClose, commands, me }: { open: boolean;
         run: () => agent.open({ prompt: query.trim(), send: true }),
       });
     }
-    const order = ["Agent", "Commands", "Go to", "Pull requests", "Repositories"];
+    const order = ["Agent", "Commands", "Go to", "Pull requests", "Repositories", "Guide"];
     if (query.trim()) order.push(order.shift()!);
     return out.sort((a, b) => order.indexOf(a.group) - order.indexOf(b.group));
-  }, [commands, prs.data, repos.data, me.repos, query, navigate, location, agent, t]);
+  }, [commands, prs.data, repos.data, me.repos, query, navigate, location, agent, t, lang]);
 
   useEffect(() => setIndex(0), [query]);
   useEffect(() => {

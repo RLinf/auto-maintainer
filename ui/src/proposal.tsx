@@ -14,6 +14,7 @@ import { Diff, ErrorBox, FinalText, prPath, RejectButton, Status, useAct, When }
 import { useMe } from "./data";
 import { CommentOnDiff, parseDiff, usePrDiff } from "./diffview";
 import { useT } from "./i18n";
+import { fixableFindings } from "./prActions";
 import { Icon } from "./icons";
 import { Markdown } from "./markdown";
 import { openJob } from "./openJob";
@@ -262,7 +263,7 @@ export function ProposalCard({
       {t("Discuss")}
     </button>
   );
-  const findings = ((payload.result as { findings?: unknown[] } | undefined)?.findings ?? []).length;
+  const findings = fixableFindings(payload.result);
   const approveLabel = isEdit
     ? t("Set on the PR as me")
     : isFix

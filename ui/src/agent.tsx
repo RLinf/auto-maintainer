@@ -48,6 +48,7 @@ const PAGES: { path: string; page: string; label: string; icon: IconName }[] = [
   { path: "/service", page: "service", label: "Service", icon: "server" },
   { path: "/audit", page: "audit", label: "Audit log", icon: "shield" },
   { path: "/chat/*", page: "chat", label: "Conversations", icon: "message" },
+  { path: "/guide/*", page: "guide", label: "Guide", icon: "compass" },
 ];
 
 export function routeContext(pathname: string): AgentContext {
@@ -87,6 +88,7 @@ const SUGGESTIONS: Record<string, string[]> = {
   settings: ["Run Claude Code on another model provider", "Which agent does reviews, and why?", "Check repositories less often"],
   audit: ["Summarize recent activity", "Who changed configuration recently?"],
   chat: ["What can you do?"],
+  guide: ["Where should I start?", "How do I review a PR here?", "What can I do on this dashboard?"],
 };
 
 // ---- the panel's conversation, kept across pages for the browser session -------------------

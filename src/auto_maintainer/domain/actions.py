@@ -323,9 +323,14 @@ class ApproveRunsPayload(_Payload):
 
 
 class RerunPayload(_Payload):
+    """Rerun the failed jobs of ``run_id``. ``requested`` marks a rerun a maintainer
+    asked for (Retry or Flaky in the merge schedule, Run CI, chat, ``/rerun``): it
+    runs past ``ci.rerun.max_per_sha``, which bounds only the automatic reruns."""
+
     run_id: int
     workflow: str | None = None
     attempt: int | None = None
+    requested: bool = False
 
 
 class RequestReviewersPayload(_Payload):

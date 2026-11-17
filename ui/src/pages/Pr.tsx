@@ -43,7 +43,7 @@ import { CodeOwnersCard } from "../codeOwners";
 import { ReviewProgressPanel } from "../progress";
 import { ACTIVE, PrWork, usePrWork } from "../jobs";
 import { openJob } from "../openJob";
-import { activePrActionPanel, describeRunCi, docsCheckUrl, prMenuItems, type PrActionPanel } from "../prActions";
+import { activePrActionPanel, describeRunCi, docsCheckUrl, fixableFindings, prMenuItems, type PrActionPanel } from "../prActions";
 import { MenuItem, Popover, Skeleton, Tabs, useTab, useToast } from "../ui";
 import { TranslateReview } from "../translate";
 import { forgeOf } from "../forges";
@@ -124,13 +124,13 @@ export default function PrPage({ me }: { me: Me }) {
   const reviewingText = reviewing
     ? `${t("reviewing…")} ${agentName(job?.agent)}${job?.by ? ` · ${job.by === me.login ? t("you") : job.by}` : ""}`
     : "";
-  // The fix endpoint works from a review action, drafted or posted, that has findings.
-  const withFindings = d.actions.filter(
-    (a) => a.action.kind === "review.post" && ((a.action.payload.result as { findings?: unknown[] } | undefined)?.findings?.length ?? 0) > 0,
-  );
-  const latestReview = withFindings.length
-    ? withFindings.reduce((a, b) => ((timeOf(a.action.created_at) ?? 0) >= (timeOf(b.action.created_at) ?? 0) ? a : b)).action.id
+  // The fix endpoint works from the newest review action, drafted or posted, a full
+  // review or a follow-up, when it leaves findings to fix.
+  const reviews = d.actions.filter((a) => a.action.kind === "review.post" && !!a.action.payload.result);
+  const newestReview = reviews.length
+    ? reviews.reduce((a, b) => ((timeOf(a.action.created_at) ?? 0) >= (timeOf(b.action.created_at) ?? 0) ? a : b))
     : null;
+  const latestReview = newestReview && fixableFindings(newestReview.action.payload.result) > 0 ? newestReview.action.id : null;
   const adds = pr.files.reduce((n, f) => n + f.additions, 0);
   const dels = pr.files.reduce((n, f) => n + f.deletions, 0);
   const ciControls =
