@@ -258,7 +258,9 @@ code { background: var(--code-bg); padding: 1px 5px; border-radius: 5px; }
 .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr)); gap: 16px; }
 .split { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 18px; align-items: start; }
 .split.memory-browser { grid-template-columns: 320px minmax(0, 1fr); }
-.split > .side { display: flex; flex-direction: column; gap: 16px; position: sticky; top: calc(var(--header-h) + 18px); min-width: 0; }
+/* Sticky below the top bar on wide screens, with its own scroll box; single-column media rules reset both. */
+.split > .side { display: flex; flex-direction: column; gap: 16px; position: sticky; top: calc(var(--header-h) + 18px); max-height: calc(100vh - var(--header-h) - 36px); overflow-x: hidden; overflow-y: auto; padding-bottom: 4px; min-width: 0; }
+.split > .side > * { flex-shrink: 0; }
 
 .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 210px), 1fr)); gap: 14px; }
 .tile {
@@ -665,11 +667,11 @@ details > summary { cursor: pointer; color: var(--text-2); }
 
 @media (max-width: 1360px) {
   body.agent-open .split, body.agent-open .split.memory-browser { grid-template-columns: 1fr; }
-  body.agent-open .split > .side { position: static; }
+  body.agent-open .split > .side { position: static; max-height: none; overflow-x: visible; overflow-y: visible; padding-bottom: 0; }
 }
 @media (max-width: 1080px) {
   .split, .split.memory-browser { grid-template-columns: 1fr; }
-  .split > .side { position: static; }
+  .split > .side { position: static; max-height: none; overflow-x: visible; overflow-y: visible; padding-bottom: 0; }
 }
 @media (max-width: 860px) {
   .tabs-nav a span.label-text { display: none; }
