@@ -196,6 +196,35 @@ async def test_an_agents_changes_leave_out_the_instructions_the_checkout_swapped
     await ws.release(path)
 
 
+async def test_an_agents_changes_keep_the_instructions_main_renamed(
+    tmp_path: Path,
+) -> None:
+    """When main renamed an instruction file after the PR's base, the checkout holds
+    only the new path; the fix's patch neither adds it nor deletes the old one."""
+    forge, work, _ = _repo_with_pr(tmp_path)
+    skill = work / ".agents" / "skills" / "check"
+    skill.mkdir(parents=True)
+    (skill / "driver.py").write_text("print('check the docs')\n" * 20)
+    git(work, "add", ".")
+    git(work, "commit", "-q", "-m", "add a skill")
+    git(work, "push", "-q", "origin", "HEAD:main")
+    head = _commit(work, "one, from the PR\n", "pr change")
+    git(work, "push", "-q", "origin", "feature:refs/pull/7/head")
+    git(work, "checkout", "-q", "-B", "main", "origin/main")
+    git(work, "mv", ".agents/skills/check", ".agents/skills/docs")
+    git(work, "commit", "-q", "-m", "rename the skill")
+    git(work, "push", "-q", "origin", "main")
+
+    ws = GitWorkspace(tmp_path / "data", forge_url=f"file://{forge}")
+    path = await ws.prepare("acme/widget", 7, head, "main")
+    assert not (path / ".agents/skills/check/driver.py").exists()
+    (path / "loader.py").write_text("fixed\n")
+    changes = await ws.changes(path)
+    assert changes.files == ["loader.py"]
+    assert ".agents/skills" not in changes.patch
+    await ws.release(path)
+
+
 async def test_git_config_an_agent_points_at_never_runs_on_the_host(
     tmp_path: Path,
 ) -> None:
