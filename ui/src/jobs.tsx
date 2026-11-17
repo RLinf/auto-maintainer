@@ -223,9 +223,13 @@ function useJob(id: string | null) {
   });
 }
 
+/** Playbooks whose agent changes a PR: their conversation is about that change
+ * (``web/review_talk.py:CHANGE_TALKS``). */
+export const CHANGE_TALKS = new Set(["fix", "fix_ci", "merge_base"]);
+
 /** One line about a job, for lists. */
 /** Playbooks whose jobs have a conversation with their agent (``web/review_talk.py``). */
-const TALKS = new Set(["review", "followup", "fix"]);
+const TALKS = new Set(["review", "followup", ...CHANGE_TALKS]);
 
 export function WorkRow({ job, me }: { job: AgentJob; me: string }) {
   const t = useT();
@@ -268,7 +272,7 @@ export function WorkRow({ job, me }: { job: AgentJob; me: string }) {
         </span>
       </span>
       {!active && job.status === "done" && TALKS.has(job.playbook) && (
-        <span className="pill" title={job.playbook === "fix" ? t("Open it to talk with the agent about this change") : t("Open it to talk with the agent about this review")}>
+        <span className="pill" title={CHANGE_TALKS.has(job.playbook) ? t("Open it to talk with the agent about this change") : t("Open it to talk with the agent about this review")}>
           <Icon name="message" size={12} /> {t("Talk")}
         </span>
       )}

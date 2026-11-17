@@ -14,8 +14,9 @@
 
 """Talking with the agent about a change it made to a PR (design 5.5).
 
-A fix job (``playbooks/fix.py``) has one conversation, on its live view, with the same
-endpoints as a review's (``web/review_talk.py``). While the agent works, a message
+A job that changes a PR (``fix``, ``fix_ci``, ``merge_base``: ``review_talk.CHANGE_TALKS``)
+has one conversation, on its live view, with the same endpoints as a review's
+(``web/review_talk.py``). While the agent works, a message
 reaches it at work. Once the change is drafted, a turn runs an agent in a checkout of
 the change as it stands (the draft's base commit with its diff applied, kept for the
 conversation while it matches the draft) with the conversation so far: it answers, and
@@ -24,6 +25,8 @@ whoever asked, with its PR title and description written again. When the draft w
 already decided, or there was none, the changes become a new ``pr.fix`` draft for the
 person who asked, on the PR's head when the earlier change is in it or nothing was
 drafted, else on the earlier draft's base. Only that person pushes it, as themselves.
+A merge of the base branch (``merge_ref``) stays a merge: a turn changes only its
+resolution of the conflicted files (``resolved``), which is what the merge commit takes.
 """
 
 from __future__ import annotations
@@ -42,6 +45,7 @@ from ..domain.actions import (
     make_action,
 )
 from ..domain.agents import AgentTask, TaskKind
+from ..domain.conflicts import unresolved
 from ..domain.ids import new_id, same_commit, short_sha
 from ..domain.memory import SignalKind
 from ..domain.profile import RepoProfile, Route
@@ -58,6 +62,7 @@ from ..playbooks.fix import (
     pr_edit_action,
     pr_text_task,
 )
+from ..playbooks.merge_base import only_files
 from ..playbooks.person_notes import load_notes, notes_block, remember_said
 from ..playbooks.prompts import pr_block, review_skill_block, schema_hint, untrusted
 from ..service import Service
@@ -76,6 +81,12 @@ FIX_TALK = """You made the change to {subject} in {repo} described below, for {a
 - Text for the PR goes in {public_language}. End with your answer to {user}: what you changed, if anything, and why."""
 
 PR_TEXT_RULE = """- When {user} wants the PR's own title or description changed, do not write them in any file: give the new ones in full in your answer, and the service drafts them for {user} to set. When that is all they want, with no change to the code, undo your changes to the files.\n"""
+
+ASKED_OF = {
+    "fix_ci": "Fix the PR's failing CI jobs.",
+    "merge_base": "Merge the PR's base branch into it, resolving the conflicts.",
+}
+"""What a change job's request asks for when the request has no words of its own."""
 
 FIX_DIFF_LIMIT = 40_000
 """The change's diff a turn carries; the agent reads the files in its checkout."""
@@ -149,6 +160,18 @@ def _starting_point(
         )
     payload = FixPrPayload.model_validate(record.action.payload)
     if waiting or record.status != ActionStatus.EXECUTED:
+        if payload.merge_sha:
+            return (
+                payload.base_sha,
+                payload.patch,
+                f"a checkout of the PR at `{short_sha(payload.base_sha)}` with your "
+                f"resolution of the files that conflict with `{payload.merge_ref}` "
+                f"applied: {', '.join(f'`{f}`' for f in sorted(payload.resolved))}. "
+                f"The rest of `{payload.merge_ref}` is not in it: `git show "
+                f"{short_sha(payload.merge_sha)}:PATH` reads its side. The change is a "
+                "merge commit, which takes only those files as you leave them; change "
+                "no other file.",
+            )
         return (
             payload.base_sha,
             payload.patch,
@@ -234,6 +257,12 @@ async def fix_turn(
         record, waiting is not None, pr, info.default_branch, default_sha
     )
     payload = FixPrPayload.model_validate(record.action.payload) if record else None
+    if job.playbook == "merge_base" and record is None:
+        where += (
+            " The base branch is not merged into it: never merge it here, since a "
+            "merge drafted from a conversation would be a plain diff. What you change "
+            "is a change of its own; a new merge is asked for on the PR page."
+        )
 
     text, removed = redact_secrets(said)
     message = ChatMessage(
@@ -262,7 +291,16 @@ async def fix_turn(
         if pr is not None
         else ""
     )
-    request = str(asked.get("request") or "").strip()
+    request = "\n\n".join(
+        part
+        for part in [
+            ASKED_OF.get(job.playbook, ""),
+            str(asked.get("request") or asked.get("note") or "").strip(),
+        ]
+        if part
+    )
+    # What the job's agent said when it ended, drafting a change or not.
+    account = str((job.result or {}).get("summary") or "").strip()
     subject = (
         f"PR #{job.number}"
         if job.number is not None
@@ -298,6 +336,10 @@ async def fix_turn(
             f"What {asker} asked for when you made the change:\n"
             + untrusted("maintainer.request", request, 8_000)
             if request
+            else "",
+            "What you reported when you finished the job:\n"
+            + untrusted("agent.account", account, 4_000)
+            if account
             else "",
             "The change, as its PR describes it:\n"
             + untrusted("fix.description", f"{payload.title}\n\n{payload.body}", 6_000)
@@ -384,7 +426,13 @@ async def fix_turn(
         )
     drafts: list[str] = []
     changes = await service.a.workspace.changes(workdir)
-    if changes.patch == patch or not changes.files:
+    merging = payload is not None and bool(payload.merge_sha) and bool(patch)
+    if merging and changes.patch != patch and changes.files:
+        drafts, said = await _merge_turn(
+            service, user, job, workdir, changes, record, waiting, run
+        )
+        notes += said
+    elif changes.patch == patch or not changes.files:
         if pr is not None:
             # No new code this turn, or every change undone: what was asked may be the
             # PR's own title or description.
@@ -471,7 +519,7 @@ async def fix_turn(
                 ),
                 draft_for=user.login,
                 provenance=Provenance(
-                    job_id=job.id, playbook="fix", requested_by=user.login
+                    job_id=job.id, playbook=job.playbook, requested_by=user.login
                 ),
             )
             saved = await service.pipeline.submit(action)
@@ -491,6 +539,81 @@ async def fix_turn(
     )
     await service.store.add_message(answer)
     return answer.model_dump(mode="json")
+
+
+async def _merge_turn(
+    service: Service,
+    user: User,
+    job: Job,
+    workdir: Path,
+    changes: Any,
+    record: ActionRecord | None,
+    waiting: Any,
+    run: str,
+) -> tuple[list[str], list[str]]:
+    """A turn that changed a merge's resolution: the conflicted files as the checkout
+    now has them become the draft's ``resolved`` (and its shown ``patch``), on the
+    pending draft as ``user``'s edit, else on a new merge draft for them. The merge
+    keeps its title, which the merge schedule reads. Returns the drafts it changed or
+    made, and notes for the reply."""
+    assert record is not None and job.repo
+    payload = FixPrPayload.model_validate(record.action.payload)
+    resolved = {
+        name: (workdir / name).read_text(encoding="utf-8", errors="replace")
+        for name in payload.resolved
+        if (workdir / name).is_file()
+    }
+    notes: list[str] = []
+    left = sorted(n for n, text in resolved.items() if unresolved(text))
+    missing = sorted(set(payload.resolved) - set(resolved))
+    if left or missing:
+        return [], [
+            "The draft keeps its resolution: "
+            + ", ".join(left + missing)
+            + (" still has conflict markers" if left else " is gone from the checkout")
+            + "."
+        ]
+    revised = payload.model_copy(
+        update={
+            "resolved": resolved,
+            "patch": only_files(changes.patch, set(resolved)),
+        }
+    )
+    outside = sorted(set(changes.files) - set(payload.resolved))
+    if outside:
+        notes.append(
+            "A merge takes only the files that conflict, so the draft leaves out the "
+            "changes to " + ", ".join(outside) + "."
+        )
+    if revised.resolved == payload.resolved:
+        return [], notes
+    if waiting is not None:
+        try:
+            await service.pipeline.save_edits(
+                waiting.id, user.login, revised.model_dump(mode="json")
+            )
+        except ValueError as e:
+            return [], [*notes, f"The resolution could not be saved on the draft: {e}"]
+        return [record.action.id], notes
+    action = make_action(
+        ActionKind.PR_FIX,
+        job.repo,
+        revised.model_copy(update={"requested_by": user.login}),
+        number=record.action.number,
+        head_sha=payload.base_sha,
+        discriminator=f"talk:{run}",
+        rationale=f"{record.action.rationale}, resolved again as {user.login} asked "
+        "in the conversation about it",
+        draft_for=user.login,
+        provenance=Provenance(
+            job_id=job.id, playbook=job.playbook, requested_by=user.login
+        ),
+    )
+    saved = await service.pipeline.submit(action)
+    return [saved.action.id], [
+        *notes,
+        "The earlier draft was already decided, so this is a new draft for you to push.",
+    ]
 
 
 async def _pr_text_turn(
