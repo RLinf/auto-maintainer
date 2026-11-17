@@ -1055,6 +1055,134 @@ async def test_a_reproduction_asked_for_goes_into_the_waiting_review(demo) -> No
     assert job.result and job.result["revised"] == draft["action_id"]
 
 
+async def _posted(
+    h: Any, client: httpx.AsyncClient, number: int, *, as_me: bool = False
+) -> str:
+    """Review ``number`` and post the draft; the id of the posted review's action."""
+    draft = await _review(h, client, number)
+    await client.post(f"/api/proposals/{draft['id']}/approve", json={"as_me": as_me})
+    await h.settle()
+    record = await h.store.get_action(draft["action_id"])
+    assert record is not None and record.status == "executed"
+    return draft["action_id"]
+
+
+async def _review_edits(h: Any) -> list[Any]:
+    return await h.store.list_actions(repo=REPO, number=42, kinds=["review.update"])
+
+
+async def test_a_reproduction_asked_for_edits_the_services_posted_review(
+    demo,
+) -> None:
+    """The request approves adding the result to a review the service posted: nobody
+    is asked again, even when another reviewer posted that draft."""
+    h, app = demo
+    async with _as(app, "maria") as maria:
+        review_id = await _posted(h, maria, 42)
+    async with _as(app, "walt") as walt:
+        await walt.post(f"/api/prs/{REPO}/42/reproduce", json={"lab": "gpu-01"})
+        await h.settle()
+        assert not [
+            p
+            for p in (await walt.get("/api/proposals")).json()
+            if p["action"]["action"]["kind"] == "review.update"
+        ], "nothing waits for approval"
+    [edit] = await _review_edits(h)
+    assert edit.status == "executed" and edit.approver == "walt"
+    assert edit.post_as is None, "the service's review is edited as the service"
+    assert h.forge.writes_of("update_review"), "the posted review now has the result"
+    updated = await h.store.get_action(review_id)
+    assert (
+        updated is not None
+        and updated.action.payload["body"] == edit.action.payload["body"]
+    )
+
+
+async def test_a_reviews_own_reproduction_edits_the_review_posted_meanwhile(
+    demo,
+) -> None:
+    """When a scan review is approved as the service while its own reproduction still
+    runs, the reproduction's result goes straight into the posted review."""
+    import asyncio
+
+    from auto_maintainer.domain.events import Event, EventKind
+
+    h, app = demo
+    answer = h.runner.handlers["review"]
+    h.runner.on(
+        "review",
+        lambda t: (
+            answer(t)
+            if "That reproduction has ended" in t.prompt
+            else {**answer(t), "reproduction": "Check a batch of one loads."}
+        ),
+    )
+    in_repro = asyncio.Event()
+    finish_repro = asyncio.Event()
+
+    async def repro(task: Any) -> Any:
+        in_repro.set()
+        await finish_repro.wait()
+        return {"conclusion": "reproduced", "comment": "Batch of one loaded."}
+
+    h.runner.on("reproduce", repro)
+    pr = await h.forge.get_pr(REPO, 42)
+    assert pr is not None
+    await h.service.bus.publish(
+        Event(
+            kind=EventKind.DASHBOARD_COMMAND,
+            repo=REPO,
+            number=42,
+            sha=pr.head_sha,
+            payload={"command": "review", "source": "scan"},
+            source="scan",
+        )
+    )
+    running = asyncio.create_task(h.settle())
+    await asyncio.wait_for(in_repro.wait(), 10)
+    async with _as(app, "maria") as maria:
+        [draft] = [
+            p
+            for p in (await maria.get("/api/proposals")).json()
+            if p["action"]["action"]["kind"] == "review.post"
+        ]
+        await maria.post(f"/api/proposals/{draft['id']}/approve", json={"as_me": False})
+        await h.service.actuator.drain()
+    finish_repro.set()
+    await running
+    await h.settle()
+    [edit] = await _review_edits(h)
+    assert edit.status == "executed" and edit.approver == "maria"
+    assert edit.post_as is None
+    assert h.forge.writes_of("update_review")
+
+
+async def test_a_reproduction_edits_a_review_as_its_author_only_when_they_asked(
+    demo,
+) -> None:
+    """GitHub lets only a review's author edit it, and a person's sign-in serves only
+    what they asked for: someone else's request leaves the edit for the author."""
+    from auto_maintainer.domain.settings import UserToken
+
+    h, app = demo
+    await h.service.a.user_tokens.set("maria", UserToken(token="m"))
+    async with _as(app, "maria") as maria:
+        await _posted(h, maria, 42, as_me=True)
+    async with _as(app, "walt") as walt:
+        await walt.post(f"/api/prs/{REPO}/42/reproduce", json={"lab": "gpu-01"})
+        await h.settle()
+    [waiting] = await _review_edits(h)
+    assert waiting.status == "proposed" and waiting.action.draft_for == "maria"
+    assert not h.forge.writes_of("update_review")
+
+    async with _as(app, "maria") as maria:
+        await maria.post(f"/api/prs/{REPO}/42/reproduce", json={"lab": "gpu-01"})
+        await h.settle()
+    [mine] = [e for e in await _review_edits(h) if e.action.id != waiting.action.id]
+    assert mine.status == "executed" and mine.post_as == "maria"
+    assert h.forge.writes_of("update_review")
+
+
 async def test_an_answer_given_earlier_in_a_job_reaches_its_next_agent(demo) -> None:
     from auto_maintainer.domain.agents import (
         AgentAnswer,
