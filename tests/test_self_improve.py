@@ -69,7 +69,7 @@ def _implement(task: AgentTask) -> AgentResult | dict:
     return AgentResult(runtime="scripted", ok=True, text="Added ping(); pytest passed.")
 
 
-async def test_a_chat_request_waits_for_approval_then_becomes_a_pr(
+async def test_a_member_starts_their_own_request_and_it_becomes_a_pr(
     h: Harness, tmp_path: Path
 ) -> None:
     h.runner.on(
@@ -92,26 +92,21 @@ async def test_a_chat_request_waits_for_approval_then_becomes_a_pr(
         [card] = out["requests"]
         await h.settle()
         assert h.service.a.publisher.published == [], "nothing starts before approval"  # type: ignore[union-attr]
-        denied = await walt.post(
-            f"/api/chat/threads/{thread['id']}/requests/{card['id']}/approve"
-        )
-        assert denied.status_code == 403, (
-            "write access is not enough to change the service"
-        )
+        [waiting] = (await walt.get("/api/chat/requests")).json()
+        assert waiting["can_decide"] is True, "a member of acme/widget starts it"
 
     async with _client(app, "maria") as maria:
-        # A maintainer of the service's repository finds walt's card and approves it.
+        # The owner sees every card too.
         [waiting] = (await maria.get("/api/chat/requests")).json()
         assert waiting["asked_by"] == "walt" and waiting["can_decide"] is True
-        base = f"/api/chat/threads/{waiting['thread_id']}"
-        approved = (
-            await maria.post(f"{base}/requests/{waiting['request']['id']}/approve")
-        ).json()
+
+    base = f"/api/chat/threads/{thread['id']}"
+    async with _client(app, "walt") as walt:
+        approved = (await walt.post(f"{base}/requests/{card['id']}/approve")).json()
         [decided] = approved["requests"]
         assert decided["state"] == "approved" and decided["job"]
-        assert decided["decided_by"] == "maria"
+        assert decided["decided_by"] == "walt"
         await h.settle()
-    async with _client(app, "walt") as walt:
         messages = (await walt.get(f"{base}/messages")).json()
 
     [published] = h.service.a.publisher.published  # type: ignore[union-attr]
@@ -127,7 +122,7 @@ async def test_a_chat_request_waits_for_approval_then_becomes_a_pr(
         and pr["head"] == published["branch"]
     )
     assert pr["title"] == "feat: add a ping endpoint"
-    assert "Requested by walt in chat, approved to start by maria" in pr["body"]
+    assert "Requested by walt in chat, approved to start by walt" in pr["body"]
     assert "must approve the merge" in pr["body"]
     assert "Added ping(); pytest passed." in pr["body"], "the agent's account is kept"
     assert TESTS in h.sandbox.runs and LINT in h.sandbox.runs
@@ -142,6 +137,37 @@ async def test_a_chat_request_waits_for_approval_then_becomes_a_pr(
     assert "I can change my code" not in work.prompt, (
         "the agent's answers, which can repeat PR text, are not passed on"
     )
+
+
+async def test_only_the_owner_starts_a_request_its_asker_may_not(
+    h: Harness, tmp_path: Path
+) -> None:
+    h.runner.on(
+        "chat",
+        lambda task: {
+            "reply": "Here is the request.",
+            "proposals": [{"kind": "improve", "request": "Add a ping endpoint."}],
+        },
+    )
+    app = create_app(h.service, data_dir=tmp_path, allow_dev_login=True)
+    async with _client(app, "eve") as eve:
+        # eve is a member of no repository the service manages.
+        thread = (await eve.post("/api/chat/threads", json={"text": "ping"})).json()
+        base = f"/api/chat/threads/{thread['id']}"
+        out = (await eve.post(f"{base}/messages", json={"text": "Pings?"})).json()
+        [card] = out["requests"]
+        denied = await eve.post(f"{base}/requests/{card['id']}/approve")
+        assert denied.status_code == 403, denied.text
+    async with _client(app, "walt") as walt:
+        assert (await walt.get("/api/chat/requests")).json() == [], (
+            "a member does not see or start someone else's request"
+        )
+        other = await walt.post(f"{base}/requests/{card['id']}/approve")
+        assert other.status_code == 404
+    async with _client(app, "maria") as maria:
+        approved = (await maria.post(f"{base}/requests/{card['id']}/approve")).json()
+    assert approved["requests"][0]["decided_by"] == "maria"
+    assert approved["requests"][0]["job"]
 
 
 async def test_a_conversation_runs_one_code_change_at_a_time(
