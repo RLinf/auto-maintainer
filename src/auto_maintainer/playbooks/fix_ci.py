@@ -72,12 +72,12 @@ def _read_log(repo: str) -> str:
 
 FIX_CI = """You are fixing the failing CI of a pull request for {who}, inside an automated maintainer service. The working directory is a checkout of the PR's head commit.
 - Find why each failed job below fails: {read_log}, and the service's diagnosis when there is one.
-- Fix what the PR's change causes, in the PR's code, with the smallest change that makes the job pass; keep the PR author's approach. A failure the PR does not cause (a flaky test, the CI runner, a base branch that fails without this PR) is not yours to fix: say so and leave it.
+- Fix every failed job below, whatever causes it. Where the PR's change causes it, fix it in the PR's code with the smallest change that makes the job pass and keeps the PR author's approach. Where the cause lies outside the PR (a flaky test, the CI runner, a base branch that fails without this PR), still make the smallest change in this checkout that makes the job pass, and say in your summary that the cause is outside the PR, and where.
 - Do not commit, push, or post, and never ask whether to: the service shows your changes to {who}, who decides whether to push them.
 {test}
 - When something blocks a sound fix (the intended behavior is unclear, two fixes are equally plausible), ask {who} with your tool for asking the user.
 - Write any text in {public_language}: plain and specific.
-- End with a short message: the cause of each failed job, what you changed for it, what you ran to check it and what came out, and what you left and why."""
+- End with a short message: the cause of each failed job, what you changed for it, what you ran to check it and what came out, which causes lie outside the PR, and what you could not fix and why."""
 
 ON_MACHINE = """- Test your fix on test machine {lab}, never here: `lab --sync` copies this checkout, as you changed it, to the machine, and `lab -- 'COMMAND'` (one quoted string) runs a command there in a fresh shell in that copy, after the machine's own setup; `lab --timeout MINUTES -- 'COMMAND'` gives a long step more time, and `lab --info` says how long the session has left. Run the failing jobs' steps the way their workflow does (install what they install, then the failing tests or commands); keep environments, caches, and downloads inside the copy, and sync again after each change.
 - Run each `lab` command in the foreground and wait until it exits, even when it takes many minutes: give your tool for running commands enough time, and if the tool moves it to the background anyway, wait on that task with the tool until it ends. Never end your turn while a command still runs or to continue later: the end of your turn ends the session.
