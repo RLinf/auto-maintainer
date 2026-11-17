@@ -175,7 +175,12 @@ export default function SettingsPage() {
           <ForgesCard canChange={v.access.allowed} />
         </div>
       )}
-      {tab === "file" && <FileTab v={v} />}
+      {tab === "file" &&
+        (v.document === null ? (
+          <Empty icon="shield">{t("Only the service's owner and the maintainers of its repositories see the settings file.")}</Empty>
+        ) : (
+          <FileTab v={v} document={v.document} />
+        ))}
     </>
   );
 }
@@ -1561,25 +1566,25 @@ function SystemTab({ v, ask }: { v: SettingsView; ask: (p: string, send?: boolea
   );
 }
 
-function FileTab({ v }: { v: SettingsView }) {
+function FileTab({ v, document }: { v: SettingsView; document: string }) {
   const t = useT();
   const toast = useToast();
-  const [text, setText] = useState(v.document);
+  const [text, setText] = useState(document);
   const [title, setTitle] = useState("settings: update");
   const [checked, setChecked] = useState<SettingsCheck | null>(null);
-  const [base, setBase] = useState(v.document);
+  const [base, setBase] = useState(document);
   useEffect(() => {
     // follow the stored document while there are no local edits
-    if (text === base) setText(v.document);
-    setBase(v.document);
+    if (text === base) setText(document);
+    setBase(document);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [v.document]);
+  }, [document]);
   const check = useAct((yaml: string) => api.post<SettingsCheck>("/api/settings/check", { yaml }), []);
   const save = useAct(
     (yaml: string) => api.put<{ approved: boolean; change: { id: string; state: string } | null }>("/api/settings", { yaml, title }),
     [["settings"], ["audit"]],
   );
-  const dirty = text !== v.document;
+  const dirty = text !== document;
   return (
     <Section
       title={<code style={{ background: "transparent", padding: 0, fontSize: 14 }}>config/service.yaml</code>}
@@ -1622,7 +1627,7 @@ function FileTab({ v }: { v: SettingsView }) {
           {v.access.allowed ? t("Save and apply") : t("Propose")}
         </button>
         {dirty && (
-          <button className="ghost" onClick={() => (setText(v.document), setChecked(null))}>
+          <button className="ghost" onClick={() => (setText(document), setChecked(null))}>
             {t("Revert")}
           </button>
         )}

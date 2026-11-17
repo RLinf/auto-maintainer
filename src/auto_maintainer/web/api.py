@@ -871,6 +871,28 @@ async def shows_owner(service: Service, login: str) -> GateDecision:
     )
 
 
+CONNECTION_FIELDS = frozenset(
+    {"host", "user", "port", "proxy_jump", "identity_file", "ssh_config"}
+)
+"""How the service reaches a test machine: shown only to who ``sees_internals``."""
+
+
+async def sees_internals(service: Service, user: User) -> bool:
+    """Whether ``user`` sees how the service is reached and run: the raw settings
+    file, the test machines' connections, the model APIs' addresses. Its owner and
+    operators, and the maintainers of its repositories do (kept for views like
+    ``shows_owner`` and ``shows_maintainer``); other members see what they need to
+    use it, such as each machine's name, description, and what it is for."""
+    if user.login.lower() in {o.lower() for o in service.settings.operators}:
+        return True
+    if (await shows_owner(service, user.login)).allowed:
+        return True
+    for repo in await visible_repos(service, user):
+        if await shows_maintainer(service, user, repo):
+            return True
+    return False
+
+
 def proposal_requester(proposal: Proposal, record: ActionRecord | None) -> str | None:
     """Who asked for a proposal's action: the reviewer a draft is for, or the person
     whose request on the dashboard or in chat produced it; None for the service's

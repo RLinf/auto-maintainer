@@ -25,7 +25,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import (
     FileResponse,
     HTMLResponse,
@@ -118,9 +119,7 @@ def create_app(
     ``ca_cert`` is the private authority's certificate when the dashboard serves
     HTTPS with one (``install_authority``).
     """
-    app = FastAPI(
-        title="auto-maintainer", docs_url="/api/docs", openapi_url="/api/openapi.json"
-    )
+    app = FastAPI(title="auto-maintainer", docs_url=None, openapi_url=None)
     app.state.service = service
     app.state.data_dir = data_dir
     app.state.log_path = log_path or data_dir / "logs" / "service.log"
@@ -230,6 +229,7 @@ def create_app(
         return {"build": await asyncio.to_thread(build_id)}
 
     install_authority(app, ca_cert)
+    install_api_docs(app)
 
     @app.post("/webhooks/{forge}")
     async def webhook(request: Request, forge: str) -> dict[str, Any]:
@@ -264,6 +264,19 @@ def create_app(
 
     install_spa(app)
     return app
+
+
+def install_api_docs(app: FastAPI) -> None:
+    """The API's description and its browsable docs, for signed-in people only: to
+    anyone else they would map every route of the service."""
+
+    @app.get("/api/openapi.json", include_in_schema=False)
+    async def openapi(user: auth.User = Depends(auth.current_user)) -> JSONResponse:
+        return JSONResponse(app.openapi())
+
+    @app.get("/api/docs", include_in_schema=False)
+    async def docs(user: auth.User = Depends(auth.current_user)) -> HTMLResponse:
+        return get_swagger_ui_html(openapi_url="/api/openapi.json", title=app.title)
 
 
 def install_authority(app: FastAPI, ca_cert: Path | None) -> None:

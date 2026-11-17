@@ -68,7 +68,8 @@ export function GettingStarted({ repos, prs, automations }: { repos: RepoRow[]; 
       run: () => document.getElementById("automation")?.scrollIntoView({ behavior: "smooth" }),
     },
     {
-      done: !!settings.data?.document.trim().replace(/^schema: 1\s*$/, ""),
+      // Someone who does not run the service has nothing to pick here.
+      done: settings.data ? settings.data.document === null || !!settings.data.document.trim().replace(/^schema: 1\s*$/, "") : false,
       title: t("Pick agents and models"),
       body: t("Which agents run and on which model providers. Ask the agent to change it."),
       action: t("Open"),

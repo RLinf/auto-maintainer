@@ -55,7 +55,13 @@ from ..domain.settings import (
 )
 from ..playbooks.prompts import schema_hint
 from ..service import Service
-from .api import service_of, shows_owner, visible_repos
+from .api import (
+    CONNECTION_FIELDS,
+    sees_internals,
+    service_of,
+    shows_owner,
+    visible_repos,
+)
 from .auth import User, current_user
 from .model_apis import ApiForm, ProbeBody, examine, list_models
 
@@ -111,11 +117,14 @@ async def settings_view(service: Service, user: User) -> dict[str, Any]:
     ]
     own = set(await service.own_agents(user.login))
     setups = await service.a.people.get(user.login) if own and service.a.people else {}
+    # Everyone may read what the service runs on; how it is reached is for those who
+    # run it (``sees_internals``).
+    internals = await sees_internals(service, user)
     return {
         "access": gate.model_dump(mode="json"),
         "repo": service.settings_repo(),
         "owner": service.settings.owner,
-        "document": text,
+        "document": text if internals else None,
         "status": service.settings_status.model_dump(mode="json"),
         "agents": [
             {
@@ -159,7 +168,11 @@ async def settings_view(service: Service, user: User) -> dict[str, Any]:
         ],
         "providers": [
             {
-                **provider_row(pid, p),
+                **{
+                    k: v
+                    for k, v in provider_row(pid, p).items()
+                    if internals or k != "base_url"
+                },
                 "key": secrets[p.api_key].model_dump(mode="json")
                 if p.api_key in secrets
                 else None,
@@ -218,7 +231,14 @@ async def settings_view(service: Service, user: User) -> dict[str, Any]:
         "secrets": [s.model_dump(mode="json") for s in secrets.values()],
         "pending": [c.model_dump(mode="json") for c in pending],
         "labs": [
-            {"name": name, **machine.model_dump(mode="json")}
+            {
+                "name": name,
+                **{
+                    k: v
+                    for k, v in machine.model_dump(mode="json").items()
+                    if internals or k not in CONNECTION_FIELDS
+                },
+            }
             for name, machine in config.labs.items()
         ],
         "installable": service.installable(),

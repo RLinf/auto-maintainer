@@ -46,6 +46,7 @@ from .api import (
     may_view,
     repo_param,
     require_view,
+    sees_internals,
     service_of,
     shows_gate,
     visible_repos,
@@ -388,6 +389,7 @@ def build_router() -> APIRouter:
         await require_view(service, user, repo_param(repo))
         profile = await service.profiles.active(repo)
         gate = await shows_gate(service, user, repo, profile) if profile else None
+        internals = await sees_internals(service, user)
         out = []
         for name in offered(service.machines, repo, user.login):
             machine = service.machines[name]
@@ -399,7 +401,9 @@ def build_router() -> APIRouter:
                     "description": machine.description,
                     "suited_for": machine.suited_for,
                     "transport": machine.transport,
-                    "host": machine.host,
+                    # How it is reached: a person's own machine, or for those
+                    # who run the service (``sees_internals``).
+                    "host": machine.host if internals or machine.owner else None,
                     "workdir": machine.workdir,
                     "machine_setup": machine.setup,
                     "machine_timeout_seconds": machine.timeout_seconds,

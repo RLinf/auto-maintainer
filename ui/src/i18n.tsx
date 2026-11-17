@@ -2606,6 +2606,7 @@ const zh: Record<string, string> = {
   "Walk me through this:": "请一步一步带我完成：",
   "Good to know": "提示",
   "Ask the agent about this": "就此询问智能体",
+  "Only the service's owner and the maintainers of its repositories see the settings file.": "只有服务所有者和其仓库的维护者能看到设置文件。",
   "Previous topic": "上一个主题",
   "Next topic": "下一个主题",
   "You finished this path": "你已读完这条路线",

@@ -1172,7 +1172,8 @@ export interface SettingsView {
   repo: string | null;
   /** The one person who owns this service; ``null`` until someone takes ownership. */
   owner: string | null;
-  document: string;
+  /** The raw settings file; ``null`` for those who do not run the service. */
+  document: string | null;
   status: { applied: boolean; problems: string[]; loaded_at: string | null };
   agents: SettingsAgent[];
   providers: SettingsProvider[];
