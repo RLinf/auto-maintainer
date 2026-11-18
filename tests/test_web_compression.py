@@ -61,3 +61,79 @@ async def test_hashed_build_files_are_kept_by_the_browser(tmp_path: Path) -> Non
         r = await c.get("/assets/index-abc123.js")
         assert r.status_code == 200
         assert "immutable" in r.headers["cache-control"]
+
+
+async def test_the_event_stream_passes_through_at_once() -> None:
+    """The live stream is never held back to be packed: each event reaches the page
+    as it is sent, uncompressed; only complete answers are compressed (in a worker
+    thread)."""
+    import asyncio
+
+    from starlette.responses import JSONResponse
+
+    from auto_maintainer.web.app import EVENT_STREAM, ThreadedGZip
+
+    release = asyncio.Event()
+
+    async def stream_app(scope, receive, send):  # type: ignore[no-untyped-def]
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [(b"content-type", EVENT_STREAM.encode())],
+            }
+        )
+        first = b"event: ping\ndata: " + b"x" * 4000 + b"\n\n"
+        await send({"type": "http.response.body", "body": first, "more_body": True})
+        await release.wait()
+        await send({"type": "http.response.body", "body": b"", "more_body": False})
+
+    sent: list[dict] = []
+
+    async def send(message):  # type: ignore[no-untyped-def]
+        sent.append(message)
+
+    async def receive():  # type: ignore[no-untyped-def]
+        return {"type": "http.disconnect"}
+
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/events",
+        "headers": [(b"accept-encoding", b"gzip")],
+    }
+    running = asyncio.create_task(ThreadedGZip(stream_app)(scope, receive, send))
+    for _ in range(100):
+        if len(sent) >= 2:
+            break
+        await asyncio.sleep(0.01)
+    assert [m["type"] for m in sent] == ["http.response.start", "http.response.body"]
+    assert sent[1]["body"].startswith(b"event: ping"), "before the stream ends"
+    assert b"content-encoding" not in dict(sent[0]["headers"])
+    release.set()
+    await running
+
+    big = b"y" * 5000
+    packed: list[dict] = []
+
+    async def answer_app(scope, receive, send):  # type: ignore[no-untyped-def]
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [
+                    (b"content-type", JSONResponse.media_type.encode()),
+                    (b"content-length", str(len(big)).encode()),
+                ],
+            }
+        )
+        await send({"type": "http.response.body", "body": big})
+
+    async def keep(message):  # type: ignore[no-untyped-def]
+        packed.append(message)
+
+    await ThreadedGZip(answer_app)(scope, receive, keep)
+    headers = dict(packed[0]["headers"])
+    assert headers[b"content-encoding"] == b"gzip"
+    assert gzip.decompress(packed[1]["body"]) == big
+    assert headers[b"content-length"] == str(len(packed[1]["body"])).encode()

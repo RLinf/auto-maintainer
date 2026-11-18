@@ -174,7 +174,7 @@ async def _work_batch(service: Service, jobs: list[Job]) -> _WorkBatch:
     snapshots: dict[tuple[str, int], PrSnapshot | None] = {}
     for repo_name in repos:
         for record in await service.store.list_actions(
-            repo=repo_name, since=earliest, limit=2000
+            repo=repo_name, since=earliest, limit=2000, payload=[]
         ):
             jid = record.action.provenance.job_id
             if jid:
@@ -238,7 +238,7 @@ async def job_view(
             records = [
                 r
                 for r in await service.store.list_actions(
-                    repo=job.repo, number=job.number, limit=200
+                    repo=job.repo, number=job.number, limit=200, payload=[]
                 )
                 if r.action.provenance.job_id == job.id
             ]

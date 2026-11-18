@@ -632,8 +632,11 @@ export interface PrDetail {
   evaluation: Evaluation | null;
   quality: ReviewQuality | null;
   quick_quality: QuickQuality | null;
+  /** The timeline: each action without its payload, but a review's ``fixable``, how
+   * many findings it leaves to fix (``web/api.py:timeline_row``). */
   actions: (ActionRecord & { proposal: Proposal | null })[];
-  reviews: { sha: string; kind: string; action_id: string; result: Record<string, unknown>; created_at: string }[];
+  /** The reviews the service posted, each with its inline comments. */
+  reviews: { sha: string; kind: string; action_id: string; result: Record<string, unknown>; created_at: string; comments: unknown[] }[];
   ci: CiObservation[];
   hygiene: { sha: string; results: HygieneResult[] } | null;
   arm: { sha: string; armed_by: string; armed_at: string } | null;

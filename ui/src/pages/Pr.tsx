@@ -43,7 +43,7 @@ import { CodeOwnersCard } from "../codeOwners";
 import { ReviewProgressPanel } from "../progress";
 import { ACTIVE, PrWork, usePrWork } from "../jobs";
 import { openJob } from "../openJob";
-import { activePrActionPanel, describeRunCi, docsCheckUrl, fixableFindings, prMenuItems, type PrActionPanel } from "../prActions";
+import { activePrActionPanel, describeRunCi, docsCheckUrl, prMenuItems, type PrActionPanel } from "../prActions";
 import { MenuItem, Popover, Skeleton, Tabs, useTab, useToast } from "../ui";
 import { TranslateReview } from "../translate";
 import { forgeOf } from "../forges";
@@ -126,11 +126,11 @@ export default function PrPage({ me }: { me: Me }) {
     : "";
   // The fix endpoint works from the newest review action, drafted or posted, a full
   // review or a follow-up, when it leaves findings to fix.
-  const reviews = d.actions.filter((a) => a.action.kind === "review.post" && !!a.action.payload.result);
+  const reviews = d.actions.filter((a) => a.action.kind === "review.post" && typeof a.action.payload.fixable === "number");
   const newestReview = reviews.length
     ? reviews.reduce((a, b) => ((timeOf(a.action.created_at) ?? 0) >= (timeOf(b.action.created_at) ?? 0) ? a : b))
     : null;
-  const latestReview = newestReview && fixableFindings(newestReview.action.payload.result) > 0 ? newestReview.action.id : null;
+  const latestReview = newestReview && Number(newestReview.action.payload.fixable) > 0 ? newestReview.action.id : null;
   const adds = pr.files.reduce((n, f) => n + f.additions, 0);
   const dels = pr.files.reduce((n, f) => n + f.deletions, 0);
   const ciControls =
@@ -455,8 +455,7 @@ function ReviewsTab({ d, repo, number }: { d: PrDetail; repo: string; number: nu
   const t = useT();
   const [open, setOpen] = useState<number>(0);
   const commentsOf = (actionId: string): InlineComment[] => {
-    const record = d.actions.find((a) => a.action.id === actionId);
-    const comments = record?.action.payload.comments;
+    const comments = d.reviews.find((r) => r.action_id === actionId)?.comments;
     return Array.isArray(comments) ? (comments as InlineComment[]) : [];
   };
   const anyComments = d.reviews.some((r) => commentsOf(r.action_id).length > 0);

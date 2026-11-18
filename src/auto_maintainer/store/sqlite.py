@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from collections.abc import Sequence
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, TypeVar
@@ -32,6 +33,7 @@ from sqlalchemy import (
     event,
     func,
     insert,
+    literal,
     literal_column,
     or_,
     select,
@@ -103,6 +105,35 @@ def _load(cls: type[M], row: Row | None, column: str = "data") -> M | None:
 
 def _many(cls: type[M], rows: list[Row]) -> list[M]:
     return [cls.model_validate_json(r.data) for r in rows]
+
+
+def _trimmed(paths: Sequence[str]) -> Any:
+    """An action row's JSON with its payload cut down to ``paths`` (dotted, such as
+    ``result.quality``), built by SQLite in its own thread: a view that reads a few
+    fields of many records then parses a few hundred bytes of each instead of review
+    bodies and patches (``Store.list_actions``)."""
+    tree: dict[str, Any] = {}
+    for path in paths:
+        node = tree
+        *parents, leaf = path.split(".")
+        for part in parents:
+            node = node.setdefault(part, {})
+        node[leaf] = None
+
+    def build(node: dict[str, Any], at: str) -> Any:
+        args: list[Any] = []
+        for key, child in node.items():
+            args.append(literal(key))
+            args.append(
+                build(child, f"{at}.{key}")
+                if child
+                else func.json_extract(m.actions.c.data, f"{at}.{key}")
+            )
+        return func.json_object(*args)
+
+    return func.json_set(
+        m.actions.c.data, "$.action.payload", build(tree, "$.action.payload")
+    )
 
 
 def run_migrations(db_path: Path) -> None:
@@ -592,8 +623,11 @@ class SqliteStore:
         statuses: list[str] | None = None,
         since: datetime | None = None,
         limit: int = 500,
+        payload: Sequence[str] | None = None,
     ) -> list[ActionRecord]:
-        stmt = select(m.actions.c.data)
+        stmt = select(
+            m.actions.c.data if payload is None else _trimmed(payload).label("data")
+        )
         if repo:
             stmt = stmt.where(m.actions.c.repo == repo)
         if number is not None:

@@ -588,6 +588,7 @@ class Service:
                 kinds=[ActionKind.REVIEW_POST],
                 statuses=[ActionStatus.EXECUTED],
                 limit=1000,
+                payload=[],
             )
             if record.post_as
         )

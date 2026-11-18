@@ -435,6 +435,125 @@ def assignee_row(a: PrAssignee) -> dict[str, Any]:
     }
 
 
+UNSCORED: dict[str, Any] = {
+    "tier": None,
+    "total": None,
+    "summary": "",
+    "scores": {},
+    "quality": None,
+    "quick_quality": None,
+}
+"""A PR row's internal scores, as shown to who may not see them (design 2.7)."""
+
+
+def row_holds(row: dict[str, Any], login: str, role: str) -> bool:
+    """Whether ``login`` holds ``role`` among a PR row's ``assignees``."""
+    return any(
+        a["role"] == role and a["login"].lower() == login for a in row["assignees"]
+    )
+
+
+async def pr_rows(service: Service, name: str) -> list[dict[str, Any]]:
+    """Every open PR of ``name`` as the PR list shows it, for everyone: each viewer's
+    filters, and the scores they may not see, are applied to these
+    (``GET /api/prs``). ``_rank`` orders them."""
+    on_pr: dict[tuple[str, int], list[PrAssignee]] = {}
+    for a in await service.store.list_assignees(name):
+        on_pr.setdefault((a.repo, a.number), []).append(a)
+    out: list[dict[str, Any]] = []
+    profile = await service.profiles.active(name)
+    if profile is None:
+        return []
+    snapshots = await service.store.list_snapshots(name)
+    if not snapshots:
+        return []
+    ids = service.info.identities | set(profile.people.review_identities)
+    rubric = rubric_of(profile)
+    evaluations = {ev.number: ev for ev in await service.store.list_evaluations(name)}
+    kept: list[tuple[PrSnapshot, Any, Evaluation | None, list[PrAssignee]]] = []
+    own = await service.posted_as_people(name)
+    for pr in snapshots:
+        cls = classify_review_state(
+            pr,
+            ids,
+            profile.comments.legacy_markers,
+            profile.scope.include_drafts,
+            own_actions=own,
+        )
+        ev = evaluations.get(pr.number)
+        assignees = on_pr.get((name, pr.number), [])
+        kept.append((pr, cls, ev, assignees))
+    if not kept:
+        return []
+    numbers = [pr.number for pr, _, _, _ in kept]
+    approvers = [
+        r.author
+        for pr, _, _, _ in kept
+        for r in pr.reviews
+        if r.state == ReviewEventState.APPROVED
+        and r.author.lower() != pr.author.lower()
+    ]
+    (
+        activity,
+        quality,
+        quicks,
+        check_states,
+        info,
+        perms,
+    ) = await asyncio.gather(
+        review_activity(service, name),
+        review_qualities(service, name),
+        quick_qualities(service.store, name, numbers),
+        service.store.get_states([checks_key(name, n) for n in numbers]),
+        service.view_repo(name),
+        permissions_of(service, name, approvers),
+    )
+    owner_rules = _OwnerRules(service, name, profile.people.codeowners)
+    for pr, cls, ev, assignees in kept:
+        out.append(
+            {
+                "repo": name,
+                "number": pr.number,
+                "title": pr.title,
+                "author": pr.author,
+                "url": pr.url,
+                "head": pr.head_sha[:7],
+                "labels": pr.labels,
+                "draft": pr.is_draft,
+                "created_at": pr.created_at,
+                "updated_at": pr.updated_at,
+                "review_state": cls.state,
+                "reviewed_sha": (cls.reviewed_sha or "")[:7],
+                "_rank": priority_key(ev, rubric),
+                "assignees": [assignee_row(a) for a in assignees],
+                "progress": await _progress_row(
+                    service,
+                    name,
+                    pr,
+                    assignees,
+                    owner_rules,
+                    checks_data=check_states.get(checks_key(name, pr.number)),
+                    has_checks=True,
+                    info=info,
+                    perms=perms,
+                ),
+                "tier": ev.tier if ev else None,
+                "total": ev.total if ev else None,
+                "summary": ev.summary if ev else "",
+                "scores": ev.scores if ev else {},
+                "review_trigger": profile.review.trigger,
+                "review_activity": activity.get(pr.number, {}),
+                "quality": quality[pr.number].model_dump(mode="json")
+                if pr.number in quality
+                else None,
+                "quick_quality": quicks[pr.number].model_dump(mode="json")
+                if pr.number in quicks
+                else None,
+            }
+        )
+    return out
+
+
 def holds(assignees: list[PrAssignee], login: str, role: str) -> bool:
     """Whether ``login`` holds ``role`` among a PR's ``assignees``."""
     return any(a.role == role and a.login.lower() == login.lower() for a in assignees)
@@ -1009,6 +1128,49 @@ async def machine_refusal(
                 "service's test machines"
             )
     return None
+
+
+TIMELINE_PAYLOAD = [
+    "result.findings",
+    "result.new_findings",
+    "result.statuses",
+    "comments",
+]
+"""What of an action's payload the PR page reads (``timeline_row``, its reviews'
+inline comments)."""
+QUALITY_PAYLOAD = ["kind", "result.quality"]
+"""What of a review's payload its quality needs (``domain/review.py:review_quality``)."""
+
+
+def fixable_findings(result: Any) -> int:
+    """How many findings a review's result leaves to fix: its findings, a
+    follow-up's new ones, and the earlier ones it did not find resolved."""
+    if not isinstance(result, dict):
+        return 0
+    statuses = result.get("statuses") or []
+    return (
+        len(result.get("findings") or [])
+        + len(result.get("new_findings") or [])
+        + sum(
+            1 for s in statuses if isinstance(s, dict) and s.get("status") != "resolved"
+        )
+    )
+
+
+def timeline_row(record: ActionRecord, proposal: Proposal | None) -> dict[str, Any]:
+    """An action as the PR page's timeline shows it: everything but its payload,
+    which holds review drafts, inline comments, and patches (one PR's records ran to
+    1.4 MB, sent again on every reload). A review keeps how many findings it leaves
+    to fix (``fixable``), which the Fix button needs."""
+    row = record.model_dump(mode="json", exclude={"action": {"payload"}})
+    payload: dict[str, Any] = {}
+    if record.action.kind == ActionKind.REVIEW_POST:
+        result = record.action.payload.get("result")
+        if isinstance(result, dict) and any(v is not None for v in result.values()):
+            payload["fixable"] = fixable_findings(result)
+    row["action"]["payload"] = payload
+    row["proposal"] = proposal.model_dump(mode="json") if proposal else None
+    return row
 
 
 def proposal_requester(proposal: Proposal, record: ActionRecord | None) -> str | None:
@@ -1835,120 +1997,32 @@ def build_router() -> APIRouter:
         key = ("prs", user.login.lower(), tuple(repos_), tier, state, mine, reviewing)
 
         async def compute() -> list[dict[str, Any]]:
-            on_pr: dict[tuple[str, int], list[PrAssignee]] = {}
-            for a in await service.store.list_assignees(repo):
-                on_pr.setdefault((a.repo, a.number), []).append(a)
             me = user.login.lower()
             rows = []
             for name in repos_:
-                profile = await service.profiles.active(name)
-                if profile is None:
-                    continue
-                snapshots = await service.store.list_snapshots(name)
-                if not snapshots:
-                    continue
-                ids = service.info.identities | set(profile.people.review_identities)
-                rubric = rubric_of(profile)
-                evaluations = {
-                    ev.number: ev for ev in await service.store.list_evaluations(name)
-                }
-                kept: list[
-                    tuple[PrSnapshot, Any, Evaluation | None, list[PrAssignee]]
-                ] = []
-                own = await service.posted_as_people(name)
-                for pr in snapshots:
-                    cls = classify_review_state(
-                        pr,
-                        ids,
-                        profile.comments.legacy_markers,
-                        profile.scope.include_drafts,
-                        own_actions=own,
-                    )
-                    ev = evaluations.get(pr.number)
-                    assignees = on_pr.get((name, pr.number), [])
-                    if tier and (ev is None or ev.tier != tier):
-                        continue
-                    if state and cls.state != state:
-                        continue
-                    if mine and not holds(assignees, me, "owner"):
-                        continue
-                    if reviewing and not holds(assignees, me, "reviewer"):
-                        continue
-                    kept.append((pr, cls, ev, assignees))
-                if not kept:
-                    continue
-                numbers = [pr.number for pr, _, _, _ in kept]
-                approvers = [
-                    r.author
-                    for pr, _, _, _ in kept
-                    for r in pr.reviews
-                    if r.state == ReviewEventState.APPROVED
-                    and r.author.lower() != pr.author.lower()
-                ]
-                (
-                    activity,
-                    quality,
-                    quicks,
-                    check_states,
-                    info,
-                    perms,
-                ) = await asyncio.gather(
-                    review_activity(service, name),
-                    review_qualities(service, name),
-                    quick_qualities(service.store, name, numbers),
-                    service.store.get_states([checks_key(name, n) for n in numbers]),
-                    service.view_repo(name),
-                    permissions_of(service, name, approvers),
+                # Everyone's rows of the repository, built once for all the tabs
+                # that ask at the same moment; this person's filters and what they
+                # may see follow.
+                shared = await request.app.state.recent.shared(
+                    ("prs-rows", name), lambda name=name: pr_rows(service, name)
                 )
-                owner_rules = _OwnerRules(service, name, profile.people.codeowners)
+                if not shared:
+                    continue
                 # Internal scores only for who may see them (design 2.7).
                 scored = (await access_of(service, user, name)).can(Grant.SEE_SCORES)
-                for pr, cls, ev, assignees in kept:
+                for row in shared:
+                    if tier and (not scored or row["tier"] != tier):
+                        continue
+                    if state and row["review_state"] != state:
+                        continue
+                    if mine and not row_holds(row, me, "owner"):
+                        continue
+                    if reviewing and not row_holds(row, me, "reviewer"):
+                        continue
+                    row = dict(row)
                     if not scored:
-                        ev = None
-                    rows.append(
-                        {
-                            "repo": name,
-                            "number": pr.number,
-                            "title": pr.title,
-                            "author": pr.author,
-                            "url": pr.url,
-                            "head": pr.head_sha[:7],
-                            "labels": pr.labels,
-                            "draft": pr.is_draft,
-                            "created_at": pr.created_at,
-                            "updated_at": pr.updated_at,
-                            "review_state": cls.state,
-                            "reviewed_sha": (cls.reviewed_sha or "")[:7],
-                            "_rank": priority_key(ev, rubric),
-                            "assignees": [assignee_row(a) for a in assignees],
-                            "progress": await _progress_row(
-                                service,
-                                name,
-                                pr,
-                                assignees,
-                                owner_rules,
-                                checks_data=check_states.get(
-                                    checks_key(name, pr.number)
-                                ),
-                                has_checks=True,
-                                info=info,
-                                perms=perms,
-                            ),
-                            "tier": ev.tier if ev else None,
-                            "total": ev.total if ev else None,
-                            "summary": ev.summary if ev else "",
-                            "scores": ev.scores if ev else {},
-                            "review_trigger": profile.review.trigger,
-                            "review_activity": activity.get(pr.number, {}),
-                            "quality": quality[pr.number].model_dump(mode="json")
-                            if scored and pr.number in quality
-                            else None,
-                            "quick_quality": quicks[pr.number].model_dump(mode="json")
-                            if scored and pr.number in quicks
-                            else None,
-                        }
-                    )
+                        row.update(UNSCORED)
+                    rows.append(row)
             rows.sort(key=lambda x: (x["_rank"], -x["number"]))
             for row in rows:
                 del row["_rank"]
@@ -2115,7 +2189,10 @@ def build_router() -> APIRouter:
         if pr is None:
             raise HTTPException(404, f"{repo}#{number} is not known yet")
         profile = await service.profiles.active(repo)
-        actions = await service.store.list_actions(repo=repo, number=number, limit=200)
+        # What the timeline, the Fix button, and the reviews' comments read.
+        actions = await service.store.list_actions(
+            repo=repo, number=number, limit=200, payload=TIMELINE_PAYLOAD
+        )
         proposals = {
             p.action_id: p for p in await service.store.list_proposals(repo=repo)
         }
@@ -2149,7 +2226,11 @@ def build_router() -> APIRouter:
         ev = await service.store.get_evaluation(repo, number)
         quality = review_quality(
             await service.store.list_actions(
-                repo=repo, number=number, kinds=[ActionKind.REVIEW_POST], limit=500
+                repo=repo,
+                number=number,
+                kinds=[ActionKind.REVIEW_POST],
+                limit=500,
+                payload=QUALITY_PAYLOAD,
             ),
             await assessed_quality(service.store, repo, number),
         )
@@ -2166,17 +2247,20 @@ def build_router() -> APIRouter:
             "quick_quality": quick.model_dump(mode="json")
             if scored and (quick := await quick_quality(service.store, repo, number))
             else None,
-            "actions": [
-                {
-                    **a.model_dump(mode="json"),
-                    "proposal": proposals[a.action.id].model_dump(mode="json")
-                    if a.action.id in proposals
-                    else None,
-                }
-                for a in actions
-            ],
+            "actions": [timeline_row(a, proposals.get(a.action.id)) for a in actions],
             "reviews": [
-                r_.model_dump(mode="json")
+                {
+                    **r_.model_dump(mode="json"),
+                    # Its inline comments, from the review the service posted.
+                    "comments": next(
+                        (
+                            a.action.payload.get("comments") or []
+                            for a in actions
+                            if a.action.id == r_.action_id
+                        ),
+                        [],
+                    ),
+                }
                 for r_ in await service.store.list_review_records(repo, number)
             ],
             "ci": [
@@ -4589,7 +4673,7 @@ async def review_qualities(service: Service, repo: str) -> dict[int, ReviewQuali
     """Per reviewed PR of ``repo``: its quality as its latest review found it."""
     by_pr: dict[int, list[ActionRecord]] = {}
     for record in await service.store.list_actions(
-        repo=repo, kinds=[ActionKind.REVIEW_POST], limit=5000
+        repo=repo, kinds=[ActionKind.REVIEW_POST], limit=5000, payload=QUALITY_PAYLOAD
     ):
         if record.action.number is not None:
             by_pr.setdefault(record.action.number, []).append(record)
@@ -4645,6 +4729,7 @@ async def review_activity(service: Service, repo: str) -> dict[int, dict[str, An
         kinds=[ActionKind.REVIEW_POST],
         statuses=[ActionStatus.EXECUTED],
         limit=500,
+        payload=[],
     ):
         if record.action.number is not None:
             out.setdefault(record.action.number, {}).setdefault(

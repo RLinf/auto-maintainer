@@ -21,7 +21,7 @@ and memory writes are handed to the actuator and nothing else.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -822,7 +822,14 @@ class Store(Protocol):
         statuses: list[str] | None = None,
         since: datetime | None = None,
         limit: int = 500,
-    ) -> list[ActionRecord]: ...
+        payload: Sequence[str] | None = None,
+    ) -> list[ActionRecord]:
+        """Actions newest first. With ``payload``, each action's payload holds only
+        those dotted paths (``result.quality``; none for ``[]``): for views that read
+        a few fields of many records. Such a record is for reading only: never
+        execute or save one."""
+        ...
+
     async def count_actions(
         self,
         statuses: list[str],

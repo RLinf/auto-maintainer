@@ -91,9 +91,38 @@ function jobOf(raw: string): string | undefined {
   }
 }
 
-/** Reload every query on screen (and mark the rest stale), but the costly ones. */
-export function refreshShown(client: QueryClient) {
-  void client.invalidateQueries({ predicate: (q) => !COSTLY.has(String(q.queryKey[0])) });
+/** Reload every query on screen (and mark the rest stale), but the costly ones; with
+ * ``only``, a PR page's queries only for the PRs it names (``repo#number``): what an
+ * event about one PR changes shows on that PR's page, not on every PR's. */
+export function refreshShown(client: QueryClient, only?: Set<string> | null) {
+  void client.invalidateQueries({
+    predicate: (q) => {
+      const key = q.queryKey as unknown[];
+      if (COSTLY.has(String(key[0]))) return false;
+      if (only && key[0] === "pr" && key.length >= 3) return only.has(`${key[1]}#${key[2]}`);
+      return true;
+    },
+  });
+}
+
+/** The PR an event names, as ``repo#number``; ``null`` for one about no single PR. */
+function prOf(raw: string): string | null {
+  try {
+    const e = JSON.parse(raw) as { repo?: string | null; number?: number | null };
+    return e.repo && e.number != null ? `${e.repo}#${e.number}` : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Reload the page of the one PR ``pr`` (``repo#number``) names. */
+function refreshPr(client: QueryClient, pr: string) {
+  void client.invalidateQueries({
+    predicate: (q) => {
+      const key = q.queryKey as unknown[];
+      return key[0] === "pr" && key.length >= 3 && `${key[1]}#${key[2]}` === pr;
+    },
+  });
 }
 
 const PING_MS = 15_000;
@@ -152,15 +181,19 @@ export function useLiveEvents(enabled: boolean, login?: string) {
     let source: EventSource | null = null;
     let heard = Date.now();
     let connected = false;
-    // A broad refresh runs at once, and once more at the end of a burst.
+    // A broad refresh runs at once, and once more at the end of a burst. ``scope``
+    // holds the PRs the burst's events named; ``null`` once one named none.
     let broadTimer: number | null = null;
     let broadAgain = false;
+    let scope: Set<string> | null = new Set();
     const broad = () => {
       if (broadTimer !== null) {
         broadAgain = true;
         return;
       }
-      refreshShown(client);
+      const only = scope;
+      scope = new Set();
+      refreshShown(client, only);
       broadTimer = window.setTimeout(() => {
         broadTimer = null;
         if (broadAgain) {
@@ -174,6 +207,7 @@ export function useLiveEvents(enabled: boolean, login?: string) {
     const shown = () => {
       if (!document.hidden && missed) {
         missed = false;
+        scope = null;
         broad();
       }
     };
@@ -187,9 +221,15 @@ export function useLiveEvents(enabled: boolean, login?: string) {
         return;
       }
       if (e.type === "job.progress") refreshJob(client, jobOf(e.data));
+      const pr = prOf(e.data);
       const keys = INVALIDATES[e.type];
-      if (keys) keys.forEach((queryKey) => client.invalidateQueries({ queryKey }));
-      if (BROAD.has(e.type)) broad();
+      // A PR's page follows the events about it alone.
+      if (keys) keys.forEach((queryKey) => (queryKey.length === 1 && queryKey[0] === "pr" && pr ? refreshPr(client, pr) : client.invalidateQueries({ queryKey })));
+      if (BROAD.has(e.type)) {
+        if (pr === null) scope = null;
+        else scope?.add(pr);
+        broad();
+      }
       const slow = SLOW[e.type];
       if (slow && !timers.has(e.type)) {
         timers.set(
@@ -208,7 +248,10 @@ export function useLiveEvents(enabled: boolean, login?: string) {
       s.addEventListener("open", () => {
         heard = Date.now();
         // Whatever happened while the page was not listening.
-        if (connected) broad();
+        if (connected) {
+          scope = null;
+          broad();
+        }
         connected = true;
       });
       s.addEventListener("ping", () => {

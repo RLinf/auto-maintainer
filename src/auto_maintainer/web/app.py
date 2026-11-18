@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
 import hmac
 import json
 import os
@@ -35,7 +36,7 @@ from fastapi.responses import (
     Response,
 )
 from fastapi.staticfiles import StaticFiles
-from starlette.middleware.gzip import GZipMiddleware
+from starlette.datastructures import Headers, MutableHeaders
 
 from ..domain.forges import check_repo, default_forge
 from ..service import Service
@@ -350,9 +351,70 @@ GZIP_MIN_BYTES = 1024
 def install_compression(app: FastAPI) -> None:
     """Compress answers for browsers that accept it: the PR list and a PR's page are
     hundreds of kilobytes of JSON and the dashboard's script a megabyte, which a
-    person far from the host otherwise waits for on every load. The live event
-    stream goes out uncompressed, as Starlette leaves ``text/event-stream``."""
-    app.add_middleware(GZipMiddleware, minimum_size=GZIP_MIN_BYTES, compresslevel=5)
+    person far from the host otherwise waits for on every load (``ThreadedGZip``)."""
+    app.add_middleware(ThreadedGZip, minimum_size=GZIP_MIN_BYTES, level=5)
+
+
+EVENT_STREAM = "text/event-stream"
+"""The live stream's content type: it goes out as it is, at once."""
+
+
+class ThreadedGZip:
+    """Gzip an answer of at least ``minimum_size`` bytes for a browser that accepts
+    it, in a worker thread: zlib lets go of Python's interpreter lock while it
+    compresses, so a large answer is packed on another core while the one event loop
+    serves everyone else. The live event stream, and an answer already encoded, go
+    out as they are, at once."""
+
+    def __init__(self, app: Any, minimum_size: int = GZIP_MIN_BYTES, level: int = 5):
+        self.app = app
+        self.minimum_size = minimum_size
+        self.level = level
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] != "http" or "gzip" not in Headers(scope=scope).get(
+            "accept-encoding", ""
+        ):
+            await self.app(scope, receive, send)
+            return
+        start: dict[str, Any] | None = None
+        parts: list[bytes] = []
+        passing = False
+
+        async def wrapped(message: dict[str, Any]) -> None:
+            nonlocal start, passing
+            if passing:
+                await send(message)
+                return
+            if message["type"] == "http.response.start":
+                start = message
+                headers = Headers(raw=message["headers"])
+                if headers.get("content-type", "").startswith(EVENT_STREAM) or (
+                    "content-encoding" in headers
+                ):
+                    passing = True
+                    await send(message)
+                return
+            if message["type"] != "http.response.body" or start is None:
+                await send(message)
+                return
+            parts.append(message.get("body", b""))
+            if message.get("more_body", False):
+                return
+            body = b"".join(parts)
+            if len(body) < self.minimum_size:
+                await send(start)
+                await send({"type": "http.response.body", "body": body})
+                return
+            packed = await asyncio.to_thread(gzip.compress, body, self.level)
+            headers = MutableHeaders(raw=start["headers"])
+            headers["Content-Encoding"] = "gzip"
+            headers["Content-Length"] = str(len(packed))
+            headers.add_vary_header("Accept-Encoding")
+            await send(start)
+            await send({"type": "http.response.body", "body": packed})
+
+        await self.app(scope, receive, wrapped)
 
 
 class HashedAssets(StaticFiles):

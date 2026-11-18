@@ -665,3 +665,58 @@ async def test_the_served_build_is_public(tmp_path) -> None:
         assert got.status_code == 200 and set(got.json()) == {"build"}
     finally:
         await h.close()
+
+
+async def test_the_pr_page_gets_its_timeline_without_the_actions_payloads(
+    demo,
+) -> None:
+    """A PR's actions carry review drafts and patches (one PR's ran to 1.4 MB): the
+    page's timeline gets each without its payload, a review keeps how many findings
+    it leaves to fix, and each posted review comes with its inline comments."""
+    from auto_maintainer.domain.actions import (
+        ActionKind,
+        ReviewPostPayload,
+        make_action,
+    )
+    from auto_maintainer.domain.records import ActionRecord, ReviewRecord
+
+    h, app = demo
+    action = make_action(
+        ActionKind.REVIEW_POST,
+        "acme/widget",
+        ReviewPostPayload(
+            body="x" * 50_000,
+            event="COMMENT",
+            comments=[{"path": "src/a.py", "line": 3, "body": "use a set"}],
+            result={
+                "findings": [{"title": "a"}, {"title": "b"}],
+                "statuses": [{"status": "resolved"}, {"status": "open"}],
+            },
+        ),
+        number=42,
+        head_sha="a" * 40,
+        discriminator="t",
+    )
+    await h.store.add_action(ActionRecord(action=action, status="executed"))
+    await h.store.add_review_record(
+        ReviewRecord(
+            repo="acme/widget",
+            number=42,
+            sha="a" * 40,
+            kind="review",
+            action_id=action.id,
+            result={},
+        )
+    )
+    async with _client(app, "maria") as maria:
+        detail = (await maria.get("/api/prs/acme/widget/42")).json()
+    [row] = [a for a in detail["actions"] if a["action"]["id"] == action.id]
+    assert row["action"]["payload"] == {"fixable": 3}
+    assert row["status"] == "executed" and row["action"]["kind"] == "review.post"
+    [review] = [r for r in detail["reviews"] if r["action_id"] == action.id]
+    [comment] = review["comments"]
+    assert (comment["path"], comment["line"], comment["body"]) == (
+        "src/a.py",
+        3,
+        "use a set",
+    )
