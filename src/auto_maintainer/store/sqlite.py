@@ -153,6 +153,11 @@ class SqliteStore:
     def __init__(self, engine: AsyncEngine) -> None:
         self._engine = engine
         self._write = asyncio.Lock()
+        self._parsed: dict[tuple[str, int], tuple[str, PrSnapshot]] = {}
+        """Each PR snapshot as last parsed, with the JSON it was parsed from: the
+        lists read every open PR's snapshot on each change anywhere, and a snapshot
+        (a hundred CI checks, every review and thread) costs more to parse than to
+        read. Snapshots are frozen, so every reader may share one."""
 
     @classmethod
     async def open(cls, db_path: Path) -> SqliteStore:
@@ -232,10 +237,21 @@ class SqliteStore:
     # -- snapshots and evaluations -------------------------------------------------
 
     async def get_snapshot(self, repo: str, number: int) -> PrSnapshot | None:
-        stmt = select(m.pr_snapshots.c.data).where(
-            m.pr_snapshots.c.repo == repo, m.pr_snapshots.c.number == number
-        )
-        return _load(PrSnapshot, await self._one(stmt))
+        stmt = select(
+            m.pr_snapshots.c.repo, m.pr_snapshots.c.number, m.pr_snapshots.c.data
+        ).where(m.pr_snapshots.c.repo == repo, m.pr_snapshots.c.number == number)
+        row = await self._one(stmt)
+        return self._snapshot(row) if row is not None else None
+
+    def _snapshot(self, row: Row) -> PrSnapshot:
+        """``row``'s snapshot, parsed again only when its JSON changed."""
+        key = (row.repo, row.number)
+        kept = self._parsed.get(key)
+        if kept is not None and kept[0] == row.data:
+            return kept[1]
+        parsed = PrSnapshot.model_validate_json(row.data)
+        self._parsed[key] = (row.data, parsed)
+        return parsed
 
     async def save_snapshot(self, pr: PrSnapshot) -> None:
         await self._upsert(
@@ -245,24 +261,27 @@ class SqliteStore:
                 "state": pr.state.value,
                 "head_sha": pr.head_sha,
                 "updated_at": ts(pr.updated_at) if pr.updated_at else "",
-                "data": _dump(pr),
+                "data": (data := _dump(pr)),
             },
         )
+        self._parsed[(pr.repo, pr.number)] = (data, pr)
 
     async def list_snapshots(
         self, repo: str | None = None, open_only: bool = True
     ) -> list[PrSnapshot]:
-        stmt = select(m.pr_snapshots.c.data)
+        stmt = select(
+            m.pr_snapshots.c.repo, m.pr_snapshots.c.number, m.pr_snapshots.c.data
+        )
         if repo:
             stmt = stmt.where(m.pr_snapshots.c.repo == repo)
         if open_only:
             stmt = stmt.where(m.pr_snapshots.c.state == PrState.OPEN.value)
-        return _many(
-            PrSnapshot,
-            await self._fetch(
+        return [
+            self._snapshot(row)
+            for row in await self._fetch(
                 stmt.order_by(m.pr_snapshots.c.repo, m.pr_snapshots.c.number.desc())
-            ),
-        )
+            )
+        ]
 
     async def get_evaluation(self, repo: str, number: int) -> Evaluation | None:
         stmt = select(m.evaluations.c.data).where(
