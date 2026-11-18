@@ -242,3 +242,60 @@ async def test_a_jobs_view_is_shared_but_its_viewers_fields_are_their_own(
             assert by_request["id"] == "job_shared", "a request's id finds its job"
     finally:
         await h.close()
+
+
+async def test_a_jobs_new_step_shows_at_once_though_its_view_is_shared(
+    tmp_path: Path,
+) -> None:
+    """Steps are announced once a second, as long as a view is shared: a view kept
+    by its time alone would show each step one notice late, and the last one of a
+    burst not until the agent's next."""
+    from auto_maintainer.domain.labs import LabProgress
+    from auto_maintainer.domain.records import JobStatus
+    from auto_maintainer.testing.demo import DEMO_REPO
+    from auto_maintainer.web import jobs
+
+    h = await build_demo(tmp_path)
+    try:
+        await h.store.upsert_job(
+            Job(
+                id="job_steps",
+                key="review:s",
+                playbook="review",
+                repo=DEMO_REPO,
+                number=42,
+                status=JobStatus.RUNNING,
+                events=[{"id": "evt_s", "payload": {"by": "maria"}}],
+            )
+        )
+        app = create_app(h.service, data_dir=tmp_path, allow_dev_login=True)
+        jobs.JOB_VIEW_SECONDS, kept = 60.0, jobs.JOB_VIEW_SECONDS
+        try:
+            async with _as(app, "maria") as maria:
+                before = (await maria.get("/api/jobs/job_steps")).json()
+                await h.service.progress.lab(
+                    "job_steps", DEMO_REPO, 42, "a800", LabProgress(phase="cloning")
+                )
+                after = (await maria.get("/api/jobs/job_steps")).json()
+        finally:
+            jobs.JOB_VIEW_SECONDS = kept
+        assert [s["text"] for s in after["steps"]] == [
+            *(s["text"] for s in before["steps"]),
+            "cloning",
+        ]
+    finally:
+        await h.close()
+
+
+async def test_kept_values_in_their_window_outlast_a_full_cache() -> None:
+    """A watched job adds a shared key a step: filling the cache drops what is out
+    of its window, not the PR list everyone is reading."""
+    recent = Recent(60.0, lambda: 0)
+    await recent.shared("rows", lambda: _value("rows"), seconds=60.0)
+    for i in range(300):
+        await recent.shared(("step", i), lambda i=i: _value(i), seconds=0.0)
+    assert await recent.shared("rows", lambda: _value("again")) == "rows"
+
+
+async def _value(v: Any) -> Any:
+    return v

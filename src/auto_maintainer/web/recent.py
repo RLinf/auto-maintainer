@@ -46,7 +46,7 @@ class Recent:
         self._writes = 0
         self._done: dict[Hashable, tuple[float, bytes]] = {}
         self._running: dict[Hashable, asyncio.Future[bytes]] = {}
-        self._values: dict[Hashable, tuple[float, Any]] = {}
+        self._values: dict[Hashable, tuple[float, Any, float]] = {}
         self._computing: dict[Hashable, asyncio.Future[Any]] = {}
 
     def wrote(self) -> None:
@@ -106,17 +106,24 @@ class Recent:
         if running is None:
             running = asyncio.ensure_future(compute())
             self._computing[full] = running
-            running.add_done_callback(lambda _: self._kept_value(full, running))
+            running.add_done_callback(lambda _: self._kept_value(full, running, window))
         return await asyncio.shield(running)
 
-    def _kept_value(self, full: Hashable, done: asyncio.Future[Any]) -> None:
+    def _kept_value(
+        self, full: Hashable, done: asyncio.Future[Any], window: float
+    ) -> None:
         if self._computing.get(full) is done:
             del self._computing[full]
         if done.cancelled() or done.exception() is not None:
             return
+        now = time.monotonic()
         if len(self._values) >= MAX_KEYS:
-            self._values.clear()
-        self._values[full] = (time.monotonic(), done.result())
+            # A watched job adds a key a step; values still in their window stay.
+            for old in [k for k, (at, _, w) in self._values.items() if now - at >= w]:
+                del self._values[old]
+            if len(self._values) >= MAX_KEYS:
+                self._values.clear()
+        self._values[full] = (now, done.result(), window)
 
 
 async def _encode(compute: Callable[[], Awaitable[Any]]) -> bytes:

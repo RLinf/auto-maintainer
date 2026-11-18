@@ -319,9 +319,9 @@ def personal(shared: dict[str, Any], me: str) -> dict[str, Any]:
 
 
 JOB_VIEW_SECONDS = 1.0
-"""How long one job's view is shared by everyone watching it: its progress is
-announced at most once a second (``engine/progress.py:NOTIFY_SECONDS``), so a view
-kept this long shows nothing later than it would have."""
+"""How long one job's view is shared by everyone watching it at the same revision
+(``JobProgress.revision``): a new step or status builds it anew, so this only joins
+the tabs that reload on the same notice."""
 
 _REQUESTS: OrderedDict[str, str] = OrderedDict()
 """The job each request event (``evt_...``) started, once found: a page that asked
@@ -718,10 +718,16 @@ def build_router() -> APIRouter:
             await require_grant(
                 service, user, job.repo, Grant.SEE_OTHERS_WORK, "see others' agent work"
             )
-        # Everyone watching the job shares one view a second, built anew when the
-        # job itself changes.
+        # Everyone watching the job shares one view, built anew when the job or
+        # its steps change.
         shared = await request.app.state.recent.shared(
-            ("job-view", job.id, job.status, job.updated_at.isoformat()),
+            (
+                "job-view",
+                job.id,
+                job.status,
+                job.updated_at.isoformat(),
+                service.progress.revision(job.id),
+            ),
             lambda: job_view(service, job, steps=True, asked=True),
             seconds=JOB_VIEW_SECONDS,
         )

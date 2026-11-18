@@ -80,6 +80,7 @@ class JobProgress:
         self._live: OrderedDict[str, list[JobStep]] = OrderedDict()
         self._jobs: dict[str, tuple[str | None, int | None]] = {}
         self._last_notice: dict[str, float] = {}
+        self._revisions: dict[str, int] = {}
         self._pending: set[str] = set()
         self._lock = asyncio.Lock()
 
@@ -199,8 +200,14 @@ class JobProgress:
                 out[job_id] = _parse_steps(raw_map.get(_key(job_id)))
         return out
 
+    def revision(self, job_id: str) -> int:
+        """How many times ``job_id``'s steps or status changed in this process: a view
+        of the job built at one revision is current until it grows (``web/jobs.py``)."""
+        return self._revisions.get(job_id, 0)
+
     def changed(self, job_id: str, repo: str | None, number: int | None) -> None:
         """Tell dashboards that the job changed (its steps or its status)."""
+        self._revisions[job_id] = self._revisions.get(job_id, 0) + 1
         loop = asyncio.get_running_loop()
         self._last_notice[job_id] = loop.time()
         self._pending.discard(job_id)
@@ -217,6 +224,8 @@ class JobProgress:
         )
 
     def _throttled(self, job_id: str) -> None:
+        # Changed now, though dashboards hear of it within ``NOTIFY_SECONDS``.
+        self._revisions[job_id] = self._revisions.get(job_id, 0) + 1
         loop = asyncio.get_running_loop()
         wait = self._last_notice.get(job_id, 0) + NOTIFY_SECONDS - loop.time()
         repo, number = self._jobs.get(job_id, (None, None))

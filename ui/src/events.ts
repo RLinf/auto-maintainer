@@ -35,6 +35,8 @@ const INVALIDATES: Record<string, string[][]> = {
   // lists follow at most every few seconds (``SLOW``), since agents report a step a
   // second each.
   "job.progress": [],
+  // A job's end: what it changed follows through ``SLOW``.
+  "job.finished": [],
 };
 
 /** Events after which everything on screen loads again (at most once per
