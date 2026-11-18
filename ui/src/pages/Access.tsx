@@ -6,7 +6,7 @@
 // change goes through PUT /api/access, the gate of that file.
 
 import { useQuery } from "@tanstack/react-query";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { Person } from "../avatar";
 import { Empty, ErrorBox, PageHead, Section, useAct } from "../components";
@@ -95,7 +95,7 @@ interface PersonRow {
 const ROLE_CLASS: Record<RoleId, string> = {
   maintainer: "job-running",
   reviewer: "job-done",
-  guest_reviewer: "tag",
+  guest_reviewer: "access-guest",
   viewer: "job-waiting",
   blocked: "job-failed",
 };
@@ -143,6 +143,12 @@ function RolePill({ catalog, role, title }: { catalog: Catalog; role: RoleId | n
       {t(roleName(catalog, role))}
     </span>
   );
+}
+
+function toggled(set: Set<string>, value: string): Set<string> {
+  const next = new Set(set);
+  if (!next.delete(value)) next.add(value);
+  return next;
 }
 
 /** ``config`` without empty sections, so saving sends only what it sets. */
@@ -200,6 +206,7 @@ export default function AccessPage() {
 function YourPermissions({ mine }: { mine: Mine }) {
   const t = useT();
   const why = useWhy();
+  const [open, setOpen] = useState<Set<string>>(new Set());
   if (!mine.repos.length) {
     return (
       <Section title={t("Your permissions")}>
@@ -207,20 +214,35 @@ function YourPermissions({ mine }: { mine: Mine }) {
       </Section>
     );
   }
+  const total = mine.groups.reduce((n, g) => n + g.grants.length, 0);
   return (
     <Section title={t("Your permissions")} hint={mine.owner ? t("You own the service.") : mine.admin ? t("You are a service admin.") : undefined}>
-      <div className="stack" style={{ gap: 12 }}>
-        {mine.repos.map((e) => (
-          <div key={e.repo} className="stack" style={{ gap: 6 }}>
-            <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
-              <strong>{e.repo}</strong>
-              <RolePill catalog={mine} role={e.role} />
-              <span className="small muted">{why(e.role_from)}</span>
+      <div className="stack" style={{ gap: 14 }}>
+        {mine.repos.map((e) => {
+          // With several repositories, each one's list waits to be opened.
+          const shown = mine.repos.length === 1 || open.has(e.repo);
+          const held = Object.keys(e.grants).length;
+          return (
+            <div key={e.repo} className="stack" style={{ gap: 8 }}>
+              <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+                <strong>{e.repo}</strong>
+                <RolePill catalog={mine} role={e.role} />
+                <span className="small muted">{why(e.role_from)}</span>
+                <span className="small muted">
+                  {held}/{total} {t("permissions")}
+                </span>
+                {mine.repos.length > 1 && (
+                  <button className="sm ghost right" aria-expanded={shown} onClick={() => setOpen(toggled(open, e.repo))}>
+                    <Icon name={shown ? "chevronDown" : "chevronRight"} size={13} />
+                    {shown ? t("Hide") : t("Show")}
+                  </button>
+                )}
+              </div>
+              {shown && <GrantList catalog={mine} grants={e.grants} withheld={e.withheld} />}
+              <LimitLine limits={e.limits} />
             </div>
-            <GrantList catalog={mine} grants={e.grants} withheld={e.withheld} />
-            <LimitLine limits={e.limits} />
-          </div>
-        ))}
+          );
+        })}
       </div>
     </Section>
   );
@@ -328,6 +350,11 @@ function PeopleSection({ v, rows, loading, error, draft, setDraft }: DraftProps 
   const t = useT();
   const why = useWhy();
   const [open, setOpen] = useState<string | null>(null);
+  const editor = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    // Opened from anywhere in a long list: bring it into view.
+    if (open) editor.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }, [open]);
   const repos = v.repos.map((r) => r.repo);
   const list = useList<PersonRow>({
     rows,
@@ -339,7 +366,7 @@ function PeopleSection({ v, rows, loading, error, draft, setDraft }: DraftProps 
     ],
     sorts: [{ id: "login", label: t("Name"), value: (p) => p.login.toLowerCase() }],
     defaultSort: "login",
-    pageSize: 100,
+    pageSize: 25,
     param: "people",
   });
   const columns: Column<PersonRow>[] = [
@@ -364,12 +391,21 @@ function PeopleSection({ v, rows, loading, error, draft, setDraft }: DraftProps 
     { id: "signed", header: t("Signed in"), cell: (p) => (p.signed_in ? <Icon name="check" size={13} /> : <span className="muted">—</span>), width: 90 },
   ];
   return (
-    <Section title={t("People")} hint={t("Everyone signed in, in a People record, or set here. Open a person to change their role or permissions.")}>
-      <ListToolbar list={list} placeholder={t("Search people")} />
-      <ErrorBox error={error} />
-      {loading ? <Skeleton rows={6} /> : <DataTable list={list} columns={columns} onOpen={(p) => setOpen(open === p.login ? null : p.login)} empty={<Empty>{t("Nobody yet.")}</Empty>} />}
-      {open && <PersonEditor v={v} login={open} row={rows.find((r) => r.login === open)} draft={draft} setDraft={setDraft} onClose={() => setOpen(null)} />}
-      <AddPerson draft={draft} setDraft={setDraft} onAdd={setOpen} />
+    <Section
+      title={t("People")}
+      hint={t("Everyone signed in, in a People record, or set here. Open a person to change their role or permissions.")}
+      aside={<AddPerson draft={draft} setDraft={setDraft} onAdd={setOpen} />}
+    >
+      <div className="stack" style={{ gap: 12 }}>
+        <ListToolbar list={list} placeholder={t("Search people")} />
+        <ErrorBox error={error} />
+        {open && (
+          <div ref={editor} className="access-editor-wrap">
+            <PersonEditor v={v} login={open} row={rows.find((r) => r.login === open)} draft={draft} setDraft={setDraft} onClose={() => setOpen(null)} />
+          </div>
+        )}
+        {loading ? <Skeleton rows={6} /> : <DataTable list={list} columns={columns} onOpen={(p) => setOpen(open === p.login ? null : p.login)} empty={<Empty>{t("Nobody yet.")}</Empty>} />}
+      </div>
     </Section>
   );
 }
@@ -385,8 +421,8 @@ function AddPerson({ draft, setDraft, onAdd }: { draft: AccessConfig; setDraft: 
     setLogin("");
   };
   return (
-    <div className="row" style={{ gap: 8, marginTop: 8 }}>
-      <input className="mono" style={{ flex: "0 1 220px" }} value={login} placeholder={t("GitHub login")} onChange={(e) => setLogin(e.target.value)} onKeyDown={(e) => e.key === "Enter" && add()} />
+    <div className="row access-add" style={{ gap: 8 }}>
+      <input className="mono" value={login} placeholder={t("GitHub login")} onChange={(e) => setLogin(e.target.value)} onKeyDown={(e) => e.key === "Enter" && add()} />
       <button className="sm ghost" disabled={!login.trim()} onClick={add}>
         <Icon name="plus" size={13} />
         {t("Set someone's access")}
@@ -427,7 +463,7 @@ function PersonEditor({ v, login, row, draft, setDraft, onClose }: DraftProps & 
   const set = (patch: Partial<PersonAccess>) => setDraft({ ...draft, people: { ...draft.people, [login]: { ...person, ...patch } } });
   const grants = person.grants ?? {};
   return (
-    <div className="card stack access-editor" style={{ gap: 10, marginTop: 10 }}>
+    <div className="card stack access-editor" style={{ gap: 10 }}>
       <div className="row" style={{ gap: 8 }}>
         <Person login={login} size={20} />
         <button className="sm ghost right" onClick={onClose}>

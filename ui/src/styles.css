@@ -1395,6 +1395,18 @@ details.pv-section[open] > summary { margin-bottom: 6px; }
 .access-role-name {
   flex: 0 1 220px;
 }
+.pill.access-guest {
+  background: var(--warn-bg);
+  color: var(--warn);
+}
+/* Clear of the sticky header when an opened person scrolls into view. */
+.access-editor-wrap {
+  scroll-margin-top: calc(var(--header-h) + 12px);
+}
+.access-add input {
+  width: 200px;
+  max-width: 100%;
+}
 .access-grid {
   min-width: 640px;
 }

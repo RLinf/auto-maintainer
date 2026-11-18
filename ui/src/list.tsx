@@ -568,7 +568,7 @@ export function TableFoot<T>({ list }: { list: ListState<T> }) {
     <div className="table-foot">
       <span>
         {list.count ? `${from}–${to} ${t("of")} ${list.count}` : "0"}
-        {list.count !== list.total ? ` (filtered from ${list.total})` : ""}
+        {list.count !== list.total ? ` (${t("filtered from")} ${list.total})` : ""}
       </span>
       <span className="spacer" />
       <span className="hide-narrow">
@@ -577,13 +577,13 @@ export function TableFoot<T>({ list }: { list: ListState<T> }) {
       {!list.grouped && list.pages > 1 && (
         <span className="row">
           <button className="sm" disabled={list.page === 0} onClick={() => list.setPage(list.page - 1)}>
-            Previous
+            {t("Previous")}
           </button>
           <span>
             {list.page + 1} / {list.pages}
           </span>
           <button className="sm" disabled={list.page >= list.pages - 1} onClick={() => list.setPage(list.page + 1)}>
-            Next
+            {t("Next")}
           </button>
         </span>
       )}
