@@ -31,9 +31,10 @@ const INVALIDATES: Record<string, string[][]> = {
   "service.changed": [["agents"], ["agents-usage"], ["service-sign-ins"], ["my-agents"]],
   "question.asked": [["questions"], ["me"]],
   "question.answered": [["questions"], ["me"], ["audit"], ["job"], ["work"]],
-  // An agent's steps: only the views of that work follow at once; lists follow
-  // at most every few seconds (``SLOW``), since agents report a step a second.
-  "job.progress": [["job"], ["chat", "steps"]],
+  // An agent's steps: only the views of that one job follow at once (``refreshJob``);
+  // lists follow at most every few seconds (``SLOW``), since agents report a step a
+  // second each.
+  "job.progress": [],
 };
 
 /** Events after which everything on screen loads again (at most once per
@@ -65,6 +66,30 @@ const SLOW_MS = 3000;
  * reads their limits (``agents``, ``agents-usage``), or does not change after an
  * action (``forges``, ``auth-config``, ``diff``); their own events refresh them. */
 const COSTLY = new Set(["agents", "agents-usage", "forges", "auth-config", "diff"]);
+
+/** Reload the views of job ``job`` alone: those keyed by its id, and one keyed by the
+ * request that started it once that request resolved to it. Every other view stays:
+ * one agent's progress reloading every open job view in every tab kept the
+ * service's one core busy. */
+function refreshJob(client: QueryClient, job: string | undefined) {
+  if (!job) return;
+  void client.invalidateQueries({
+    predicate: (q) => {
+      const key = q.queryKey as unknown[];
+      if (key[0] === "job") return key[1] === job || (q.state.data as { id?: string } | undefined)?.id === job;
+      if (key[0] === "chat" && key[1] === "steps") return key.includes(job);
+      return false;
+    },
+  });
+}
+
+function jobOf(raw: string): string | undefined {
+  try {
+    return (JSON.parse(raw) as { job?: string }).job;
+  } catch {
+    return undefined;
+  }
+}
 
 /** Reload every query on screen (and mark the rest stale), but the costly ones. */
 export function refreshShown(client: QueryClient) {
@@ -144,8 +169,24 @@ export function useLiveEvents(enabled: boolean, login?: string) {
         }
       }, SLOW_MS);
     };
+    // A hidden tab reloads nothing as events come; it catches up once when shown.
+    let missed = false;
+    const shown = () => {
+      if (!document.hidden && missed) {
+        missed = false;
+        broad();
+      }
+    };
+    document.addEventListener("visibilitychange", shown);
     const handler = (e: MessageEvent) => {
       heard = Date.now();
+      if (e.type === "question.asked") alertReviewer(e.data, login);
+      if (e.type === "action.executed" || e.type === "action.failed") reportAction(e.data);
+      if (document.hidden) {
+        missed = true;
+        return;
+      }
+      if (e.type === "job.progress") refreshJob(client, jobOf(e.data));
       const keys = INVALIDATES[e.type];
       if (keys) keys.forEach((queryKey) => client.invalidateQueries({ queryKey }));
       if (BROAD.has(e.type)) broad();
@@ -159,8 +200,6 @@ export function useLiveEvents(enabled: boolean, login?: string) {
           }, SLOW_MS),
         );
       }
-      if (e.type === "question.asked") alertReviewer(e.data, login);
-      if (e.type === "action.executed" || e.type === "action.failed") reportAction(e.data);
     };
     const connect = () => {
       source?.close();
@@ -184,6 +223,7 @@ export function useLiveEvents(enabled: boolean, login?: string) {
     }, PING_MS);
     return () => {
       source?.close();
+      document.removeEventListener("visibilitychange", shown);
       window.clearInterval(watchdog);
       if (broadTimer !== null) window.clearTimeout(broadTimer);
       timers.forEach((id) => window.clearTimeout(id));

@@ -46,6 +46,8 @@ class Recent:
         self._writes = 0
         self._done: dict[Hashable, tuple[float, bytes]] = {}
         self._running: dict[Hashable, asyncio.Future[bytes]] = {}
+        self._values: dict[Hashable, tuple[float, Any]] = {}
+        self._computing: dict[Hashable, asyncio.Future[Any]] = {}
 
     def wrote(self) -> None:
         """A request changed something: no kept answer is served again."""
@@ -84,6 +86,37 @@ class Recent:
             if len(self._done) >= MAX_KEYS:
                 self._done.clear()
         self._done[full] = (now, done.result())
+
+    async def shared(
+        self,
+        key: Hashable,
+        compute: Callable[[], Awaitable[Any]],
+        seconds: float | None = None,
+    ) -> Any:
+        """The value of ``key`` as ``json`` keeps an answer, for a page that adds
+        each person's own fields to what everyone shares: one computation serves
+        every tab asking at the same version within ``seconds`` (``self.seconds``
+        when unset). Callers must not change what it returns."""
+        full = (key, self.version())
+        window = self.seconds if seconds is None else seconds
+        hit = self._values.get(full)
+        if hit is not None and time.monotonic() - hit[0] < window:
+            return hit[1]
+        running = self._computing.get(full)
+        if running is None:
+            running = asyncio.ensure_future(compute())
+            self._computing[full] = running
+            running.add_done_callback(lambda _: self._kept_value(full, running))
+        return await asyncio.shield(running)
+
+    def _kept_value(self, full: Hashable, done: asyncio.Future[Any]) -> None:
+        if self._computing.get(full) is done:
+            del self._computing[full]
+        if done.cancelled() or done.exception() is not None:
+            return
+        if len(self._values) >= MAX_KEYS:
+            self._values.clear()
+        self._values[full] = (time.monotonic(), done.result())
 
 
 async def _encode(compute: Callable[[], Awaitable[Any]]) -> bytes:

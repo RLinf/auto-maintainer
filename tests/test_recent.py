@@ -179,3 +179,66 @@ async def test_hygiene_that_finds_nothing_new_reloads_no_dashboard(
         assert "hygiene" not in heard and "hygiene" not in finished
     finally:
         await h.close()
+
+
+async def test_a_shared_value_is_computed_once_for_everyone_asking() -> None:
+    """Tabs asking at the same moment share one computation, which pages extend with
+    each viewer's own fields; a new event or a change computes it again."""
+    from auto_maintainer.web.recent import Recent
+
+    events = [0]
+    recent = Recent(60.0, lambda: events[0])
+    calls = [0]
+
+    async def compute() -> dict[str, int]:
+        calls[0] += 1
+        await asyncio.sleep(0.01)
+        return {"n": calls[0]}
+
+    first = await asyncio.gather(*(recent.shared("k", compute) for _ in range(5)))
+    assert calls[0] == 1 and all(v == {"n": 1} for v in first)
+    assert await recent.shared("k", compute) == {"n": 1}, "kept within its window"
+    events[0] += 1
+    assert await recent.shared("k", compute) == {"n": 2}, "an event retires it"
+    recent.wrote()
+    assert await recent.shared("k", compute) == {"n": 3}, "and so does a change"
+    assert await recent.shared("k", compute, seconds=0) == {"n": 4}, "its own window"
+
+
+async def test_a_jobs_view_is_shared_but_its_viewers_fields_are_their_own(
+    tmp_path: Path,
+) -> None:
+    from auto_maintainer.domain.records import Job, JobStatus
+    from auto_maintainer.testing.demo import DEMO_REPO, build_demo
+    from auto_maintainer.web.app import create_app
+
+    h = await build_demo(tmp_path)
+    try:
+        h.forge.set_permission(DEMO_REPO, "walt", Permission.WRITE)
+        job, _ = await h.store.upsert_job(
+            Job(
+                id="job_shared",
+                key="review:t",
+                playbook="review",
+                repo=DEMO_REPO,
+                number=42,
+                status=JobStatus.RUNNING,
+                events=[
+                    {
+                        "id": "evt_req",
+                        "kind": "dashboard.command",
+                        "payload": {"by": "maria"},
+                    }
+                ],
+            )
+        )
+        app = create_app(h.service, data_dir=tmp_path, allow_dev_login=True)
+        async with _as(app, "maria") as maria, _as(app, "walt") as walt:
+            hers = (await maria.get("/api/jobs/job_shared")).json()
+            his = (await walt.get("/api/jobs/job_shared")).json()
+            assert hers["mine"] and not his["mine"]
+            assert "_asked" not in hers and "_asked" not in his
+            by_request = (await maria.get("/api/jobs/evt_req")).json()
+            assert by_request["id"] == "job_shared", "a request's id finds its job"
+    finally:
+        await h.close()

@@ -660,166 +660,180 @@ def build_router() -> APIRouter:
         service = service_of(request)
         repo = _repo(repo)
         await require_view(service, user, repo)
-        profile = await service.profiles.active(repo)
-        if profile is None:
-            raise HTTPException(409, f"{repo} has no approved profile yet")
-        info = await service.view_repo(repo)
-        arms = ordered(await service.store.list_arms(repo))
-        armed = {a.number: a for a in arms}
-        jobs: dict[int, dict[str, Any]] = {}
-        rules_job: dict[str, Any] | None = None
-        for job in await service.store.list_jobs(
-            [JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.WAITING]
-        ):
-            if job.repo != repo:
-                continue
-            if job.playbook == "ci_rules":
-                rules_job = {"id": job.id, "status": job.status}
-            elif (
-                job.playbook in ("merge", "ci_doctor", "merge_base", "fix_ci")
-                and job.number is not None
+
+        async def compute() -> dict[str, Any]:
+            # What every viewer sees, computed once for all the tabs that ask at
+            # the same moment (``web/recent.py``); each viewer's own fields follow.
+            profile = await service.profiles.active(repo)
+            if profile is None:
+                raise HTTPException(409, f"{repo} has no approved profile yet")
+            info = await service.view_repo(repo)
+            arms = ordered(await service.store.list_arms(repo))
+            armed = {a.number: a for a in arms}
+            jobs: dict[int, dict[str, Any]] = {}
+            rules_job: dict[str, Any] | None = None
+            for job in await service.store.list_jobs(
+                [JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.WAITING]
             ):
-                # The live view of the work on the PR; a running one first.
-                was = jobs.get(job.number)
-                if was is None or job.status == JobStatus.RUNNING:
-                    jobs[job.number] = {
-                        "id": job.id,
-                        "status": job.status,
-                        "playbook": job.playbook,
-                    }
-        snaps = {p.number: p for p in await service.store.list_snapshots(repo)}
-        scheduled, failed = [], []
-        for arm in arms:
-            pr = snaps.get(arm.number) or await service.store.get_snapshot(
-                repo, arm.number
+                if job.repo != repo:
+                    continue
+                if job.playbook == "ci_rules":
+                    rules_job = {"id": job.id, "status": job.status}
+                elif (
+                    job.playbook in ("merge", "ci_doctor", "merge_base", "fix_ci")
+                    and job.number is not None
+                ):
+                    # The live view of the work on the PR; a running one first.
+                    was = jobs.get(job.number)
+                    if was is None or job.status == JobStatus.RUNNING:
+                        jobs[job.number] = {
+                            "id": job.id,
+                            "status": job.status,
+                            "playbook": job.playbook,
+                        }
+            snaps = {p.number: p for p in await service.store.list_snapshots(repo)}
+            scheduled, failed = [], []
+            for arm in arms:
+                pr = snaps.get(arm.number) or await service.store.get_snapshot(
+                    repo, arm.number
+                )
+                if pr is None:
+                    continue
+                state = await _state(service, repo, arm.number)
+                row = {
+                    **_row(pr, profile),
+                    "phase": state.phase,
+                    "detail": state.detail,
+                    "blocked_on": state.blocked_on if state.phase == "blocked" else "",
+                    "since": state.since.isoformat() if state.since else None,
+                    "scheduled_by": arm.armed_by,
+                    "auto": arm.auto,
+                    "failed_jobs": state.failed_jobs,
+                    "causes": state.causes,
+                    "finding": state.finding,
+                    "approval_needed": state.approval_needed,
+                    "stale": not same_commit(arm.sha, pr.head_sha),
+                    "unseen": arm.unseen,
+                    "job": jobs.get(arm.number),
+                    "forced": arm.forced,
+                }
+                (failed if state.phase == "failed" else scheduled).append(row)
+            candidates, not_ready = [], []
+            unarmed = [
+                pr
+                for pr in sorted(snaps.values(), key=lambda p: p.number)
+                if pr.number not in armed
+                and pr.state == PrState.OPEN
+                and (not pr.is_draft or profile.scope.include_drafts)
+            ]
+            # Every reviewer's permission in one parallel read: once their ten minutes
+            # run out, reading them PR by PR held the page for tens of seconds.
+            known = await permissions_of(
+                service, repo, [r.author for pr in unarmed for r in pr.reviews]
             )
-            if pr is None:
-                continue
-            state = await _state(service, repo, arm.number)
-            row = {
-                **_row(pr, profile),
-                "phase": state.phase,
-                "detail": state.detail,
-                "blocked_on": state.blocked_on if state.phase == "blocked" else "",
-                "since": state.since.isoformat() if state.since else None,
-                "scheduled_by": arm.armed_by,
-                "auto": arm.auto,
-                "failed_jobs": state.failed_jobs,
-                "causes": state.causes,
-                "finding": state.finding,
-                "approval_needed": state.approval_needed,
-                "stale": not same_commit(arm.sha, pr.head_sha),
-                "unseen": arm.unseen,
-                "job": jobs.get(arm.number),
-                "forced": arm.forced,
+            for pr in unarmed:
+                gate = await gate_of(service, profile, info, pr, None, known)
+                back = holding_back(gate, ready_conditions(profile))
+                row = _row(pr, profile)
+                if not back:
+                    candidates.append(row)
+                else:
+                    row["reasons"] = [_item(i.name, i.detail) for i in back[:3]]
+                    row["conflict"] = pr.mergeable == Mergeable.CONFLICTING
+                    not_ready.append(row)
+            draft = await service.store.get_state(DRAFT_KEY.format(repo=repo))
+            own_patterns = await _own_pattern_ids(service, repo)
+            start = profile.ci.start
+            return {
+                "repo": repo,
+                "enabled": profile.merge.enabled,
+                "mode": "serial" if serial(info, profile) else "parallel",
+                "parallel": profile.merge.schedule.parallel,
+                "auto": profile.merge.schedule.auto,
+                "auto_by": profile.merge.schedule.auto_by,
+                "paused": await service.pipeline.paused(repo),
+                "checking": service.checking_prs(repo),
+                "check_progress": service.check_progress(repo),
+                "rules": {
+                    "approvals": max(
+                        profile.merge.approvals, info.required_approvals or 0
+                    ),
+                    "code_owners": info.requires_code_owner_reviews,
+                    "last_push": info.requires_last_push_approval,
+                    "threads": True,
+                    "up_to_date": info.requires_up_to_date,
+                    "update_branch": profile.merge.update_branch,
+                    "required_checks": info.required_checks,
+                    "required_workflows": profile.ci.required_workflows,
+                    "methods": info.merge_methods,
+                    "method": profile.merge.method,
+                    "fork_approval": info.fork_approval,
+                    "blocking_labels": [
+                        label
+                        for role in profile.merge.blocking_roles
+                        if (label := profile.label_for(role))
+                    ],
+                    "notes": profile.merge.schedule.notes,
+                    "subject": profile.merge.message.subject,
+                    "preserve_trailers": profile.merge.message.preserve_trailers,
+                    "cancelled_is_failure": profile.ci.cancelled_is_failure,
+                    "hygiene": [
+                        s.id for s in profile.checks if s.blocking and s.enabled
+                    ],
+                    "ready": list(ready_conditions(profile)),
+                    "ready_set": profile.merge.schedule.ready is not None,
+                    "blocking_roles": profile.merge.blocking_roles,
+                    "label_roles": dict(sorted(profile.labels.roles.items())),
+                },
+                "merging": _merging(profile, info),
+                "flaky": {
+                    "diagnose": profile.ci.diagnose,
+                    "max_reruns": profile.ci.rerun.max_per_sha,
+                    "backoff_seconds": profile.ci.rerun.backoff_seconds,
+                    "rerun_unknown": profile.ci.rerun.unknown,
+                    "root_cause": profile.ci.root_cause,
+                    "patterns": [
+                        {
+                            **sig.model_dump(
+                                mode="json",
+                                include={"id", "pattern", "category", "description"},
+                            ),
+                            "own": sig.id in own_patterns,
+                        }
+                        for sig in profile.ci.flake_signatures
+                    ],
+                    "suggestions": await service.store.get_state(
+                        SUGGESTIONS.format(repo=repo)
+                    )
+                    or [],
+                },
+                "ci_start": {
+                    **start.model_dump(mode="json"),
+                    "gate_label": profile.label_for("ci_gate"),
+                    "reruns": profile.ci.rerun.max_per_sha,
+                },
+                "draft": {
+                    **draft,
+                    "draft": draft_of(draft, profile).model_dump(mode="json"),
+                }
+                if isinstance(draft, dict)
+                else None,
+                "rules_job": rules_job,
+                "scheduled": scheduled,
+                "failed": failed,
+                "ci_now": await _ci_now(service, repo, arms, snaps.values()),
+                "candidates": candidates,
+                "not_ready": not_ready,
+                "merged": await service.store.get_state(MERGED_KEY.format(repo=repo))
+                or [],
             }
-            (failed if state.phase == "failed" else scheduled).append(row)
-        candidates, not_ready = [], []
-        unarmed = [
-            pr
-            for pr in sorted(snaps.values(), key=lambda p: p.number)
-            if pr.number not in armed
-            and pr.state == PrState.OPEN
-            and (not pr.is_draft or profile.scope.include_drafts)
-        ]
-        # Every reviewer's permission in one parallel read: once their ten minutes
-        # run out, reading them PR by PR held the page for tens of seconds.
-        known = await permissions_of(
-            service, repo, [r.author for pr in unarmed for r in pr.reviews]
-        )
-        for pr in unarmed:
-            gate = await gate_of(service, profile, info, pr, None, known)
-            back = holding_back(gate, ready_conditions(profile))
-            row = _row(pr, profile)
-            if not back:
-                candidates.append(row)
-            else:
-                row["reasons"] = [_item(i.name, i.detail) for i in back[:3]]
-                row["conflict"] = pr.mergeable == Mergeable.CONFLICTING
-                not_ready.append(row)
-        draft = await service.store.get_state(DRAFT_KEY.format(repo=repo))
-        own_patterns = await _own_pattern_ids(service, repo)
-        start = profile.ci.start
+
+        shared = await request.app.state.recent.shared(("merge-view", repo), compute)
         return {
-            "repo": repo,
-            "enabled": profile.merge.enabled,
+            **shared,
             "can_arrange": await shows_maintainer(service, user, repo),
             "signed_in": await service.can_post_as(user.login),
-            "mode": "serial" if serial(info, profile) else "parallel",
-            "parallel": profile.merge.schedule.parallel,
-            "auto": profile.merge.schedule.auto,
-            "auto_by": profile.merge.schedule.auto_by,
-            "paused": await service.pipeline.paused(repo),
-            "checking": service.checking_prs(repo),
-            "check_progress": service.check_progress(repo),
-            "rules": {
-                "approvals": max(profile.merge.approvals, info.required_approvals or 0),
-                "code_owners": info.requires_code_owner_reviews,
-                "last_push": info.requires_last_push_approval,
-                "threads": True,
-                "up_to_date": info.requires_up_to_date,
-                "update_branch": profile.merge.update_branch,
-                "required_checks": info.required_checks,
-                "required_workflows": profile.ci.required_workflows,
-                "methods": info.merge_methods,
-                "method": profile.merge.method,
-                "fork_approval": info.fork_approval,
-                "blocking_labels": [
-                    label
-                    for role in profile.merge.blocking_roles
-                    if (label := profile.label_for(role))
-                ],
-                "notes": profile.merge.schedule.notes,
-                "subject": profile.merge.message.subject,
-                "preserve_trailers": profile.merge.message.preserve_trailers,
-                "cancelled_is_failure": profile.ci.cancelled_is_failure,
-                "hygiene": [s.id for s in profile.checks if s.blocking and s.enabled],
-                "ready": list(ready_conditions(profile)),
-                "ready_set": profile.merge.schedule.ready is not None,
-                "blocking_roles": profile.merge.blocking_roles,
-                "label_roles": dict(sorted(profile.labels.roles.items())),
-            },
-            "merging": _merging(profile, info),
-            "flaky": {
-                "diagnose": profile.ci.diagnose,
-                "max_reruns": profile.ci.rerun.max_per_sha,
-                "backoff_seconds": profile.ci.rerun.backoff_seconds,
-                "rerun_unknown": profile.ci.rerun.unknown,
-                "root_cause": profile.ci.root_cause,
-                "patterns": [
-                    {
-                        **sig.model_dump(
-                            mode="json",
-                            include={"id", "pattern", "category", "description"},
-                        ),
-                        "own": sig.id in own_patterns,
-                    }
-                    for sig in profile.ci.flake_signatures
-                ],
-                "suggestions": await service.store.get_state(
-                    SUGGESTIONS.format(repo=repo)
-                )
-                or [],
-            },
-            "ci_start": {
-                **start.model_dump(mode="json"),
-                "gate_label": profile.label_for("ci_gate"),
-                "reruns": profile.ci.rerun.max_per_sha,
-            },
-            "draft": {
-                **draft,
-                "draft": draft_of(draft, profile).model_dump(mode="json"),
-            }
-            if isinstance(draft, dict)
-            else None,
-            "rules_job": rules_job,
             "scope_request": await _scope_view(service, user),
-            "scheduled": scheduled,
-            "failed": failed,
-            "ci_now": await _ci_now(service, repo, arms, snaps.values()),
-            "candidates": candidates,
-            "not_ready": not_ready,
-            "merged": await service.store.get_state(MERGED_KEY.format(repo=repo)) or [],
         }
 
     @r.post("/{repo:path}/schedule")

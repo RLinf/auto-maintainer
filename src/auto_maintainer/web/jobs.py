@@ -24,6 +24,7 @@ the repository, checked live.
 from __future__ import annotations
 
 import re
+from collections import OrderedDict
 from datetime import timedelta
 from typing import Any
 
@@ -197,8 +198,10 @@ async def job_view(
     me: str | None = None,
     queued: list[Job] | None = None,
     batch: _WorkBatch | None = None,
+    asked: bool = False,
 ) -> dict[str, Any]:
-    """What the dashboard shows about ``job``."""
+    """What the dashboard shows about ``job``; with ``asked``, also whom each of its
+    questions is for (``_asked``), for ``personal`` to fill in a viewer's fields."""
     payload = _payload(job)
     by = payload.get("by")
     found = (
@@ -301,13 +304,35 @@ async def job_view(
     }
     if steps:
         out["steps"] = [s.model_dump(mode="json") for s in found]
+    if asked:
+        out["_asked"] = [(q.asked_for or "").lower() for q in questions]
     return out
+
+
+def personal(shared: dict[str, Any], me: str) -> dict[str, Any]:
+    """A view ``job_view`` built for everyone (``asked``), with ``me``'s own fields."""
+    out = {k: v for k, v in shared.items() if k != "_asked"}
+    me_ = me.lower()
+    out["mine"] = bool(shared.get("by") and str(shared["by"]).lower() == me_)
+    out["questions_for_me"] = sum(1 for a in shared.get("_asked", []) if a in ("", me_))
+    return out
+
+
+JOB_VIEW_SECONDS = 1.0
+"""How long one job's view is shared by everyone watching it: its progress is
+announced at most once a second (``engine/progress.py:NOTIFY_SECONDS``), so a view
+kept this long shows nothing later than it would have."""
+
+_REQUESTS: OrderedDict[str, str] = OrderedDict()
+"""The job each request event (``evt_...``) started, once found: a page that asked
+for work polls by the request's id until it learns the job's."""
+REQUESTS_KEPT = 4096
 
 
 async def _job(service: Service, user: User, job_id: str) -> Job:
     """The job ``job_id`` names: a job id, or the id of the request event that
     started it (what the dashboard knows right after asking for the work)."""
-    job = await service.store.get_job(job_id)
+    job = await service.store.get_job(_REQUESTS.get(job_id, job_id))
     if job is None and job_id.startswith("evt_"):
         job = next(
             (
@@ -319,6 +344,10 @@ async def _job(service: Service, user: User, job_id: str) -> Job:
             ),
             None,
         )
+        if job is not None:
+            _REQUESTS[job_id] = job.id
+            while len(_REQUESTS) > REQUESTS_KEPT:
+                _REQUESTS.popitem(last=False)
     if job is None:
         raise HTTPException(404, "no such job yet")
     if job.repo:
@@ -689,7 +718,14 @@ def build_router() -> APIRouter:
             await require_grant(
                 service, user, job.repo, Grant.SEE_OTHERS_WORK, "see others' agent work"
             )
-        return await job_view(service, job, steps=True, me=user.login)
+        # Everyone watching the job shares one view a second, built anew when the
+        # job itself changes.
+        shared = await request.app.state.recent.shared(
+            ("job-view", job.id, job.status, job.updated_at.isoformat()),
+            lambda: job_view(service, job, steps=True, asked=True),
+            seconds=JOB_VIEW_SECONDS,
+        )
+        return personal(shared, user.login)
 
     @r.post("/jobs/{job_id}/stop")
     async def stop_job(
