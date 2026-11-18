@@ -18,8 +18,10 @@ read and change ``config/access.yaml``, which says it."""
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
+import yaml
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
@@ -30,15 +32,27 @@ from ..domain.access import (
     GATED,
     GROUPS,
     ROLE_NAMES,
+    PeopleRole,
     Role,
+    default_role,
+    dump_access,
+    parse_access,
 )
-from .api import access_of, service_of, shows_owner
+from .api import access_of, permissions_of, service_of, shows_owner
 from .auth import User, current_user
 
 
 class AccessBody(BaseModel):
-    text: str = Field(max_length=200_000)
+    """The new ``config/access.yaml``: its ``text``, or its ``config`` as the page
+    edits it (written as YAML by ``dump_access``)."""
+
+    text: str | None = Field(default=None, max_length=200_000)
+    config: dict[str, Any] | None = None
     title: str = Field(default="access: update", max_length=200)
+
+
+def dump_yaml(data: dict[str, Any]) -> str:
+    return yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
 
 
 def _effective(effective: Any) -> dict[str, Any]:
@@ -99,11 +113,14 @@ def build_router() -> APIRouter:
             effective = await access_of(service, user, record.repo)
             if effective.role is not None:
                 repos.append(_effective(effective))
+        owner = (await shows_owner(service, user.login)).allowed
         return {
             "login": user.login,
-            "owner": (await shows_owner(service, user.login)).allowed,
+            "owner": owner,
             "admin": service.access.is_admin(user.login),
+            "manages": owner or service.access.is_admin(user.login),
             "repos": repos,
+            **_catalog(),
         }
 
     @r.get("")
@@ -112,13 +129,89 @@ def build_router() -> APIRouter:
     ) -> dict[str, Any]:
         """``config/access.yaml``, whether it is in force, and what it changes."""
         service = await _manager(request, user)
+        repos = []
+        for record in await service.store.list_repos():
+            loaded = await service.governance.load(record.repo)
+            mapping = service.access.mapping(record.repo)
+            roles = []
+            if loaded.stored and not loaded.error:
+                gov = loaded.governance
+                for role in sorted(gov.roles, key=lambda r: -r.level):
+                    held = PeopleRole(
+                        id=role.id,
+                        name=role.name,
+                        maintains=role.maintains,
+                        github_permission=role.github_permission,
+                    )
+                    roles.append(
+                        {
+                            "id": role.id,
+                            "name": role.name,
+                            "members": sum(1 for m in gov.members if m.role == role.id),
+                            "maintains": role.maintains,
+                            "default": default_role(held),
+                            "mapped": mapping.get(role.id),
+                        }
+                    )
+            repos.append({"repo": record.repo, "people_roles": roles})
         return {
             "path": ACCESS_PATH,
             "text": await service.a.memory.read_text(ACCESS_PATH) or "",
             "problem": service.access_problem,
+            "config": service.access.model_dump(mode="json", by_alias=True),
             "admins": service.access.admins,
+            "owner": (await shows_owner(service, user.login)).allowed,
+            "repos": repos,
+            "agents": sorted(getattr(service.a.agents, "runtimes", {}) or {}),
+            "machines": sorted(n for n, m in service.machines.items() if not m.owner),
             **_catalog(),
         }
+
+    @r.get("/people")
+    async def people(
+        request: Request, user: User = Depends(current_user)
+    ) -> list[dict[str, Any]]:
+        """Everyone the service knows (signed in, in a People record, or in the
+        file), with their role in each repository it serves and where it came
+        from."""
+        service = await _manager(request, user)
+        served = [r.repo for r in await service.store.list_repos()]
+        signed = {lg.lower(): lg for lg in await service.a.user_tokens.logins()}
+        known: dict[str, str] = dict(signed)
+        for repo in served:
+            for login in await service.governance.members_of(repo):
+                known.setdefault(login.lower(), login)
+        for login in [*service.access.people, *service.access.admins]:
+            known.setdefault(login.lower(), login)
+        logins = sorted(known.values(), key=str.lower)
+        perms = {repo: await permissions_of(service, repo, logins) for repo in served}
+        gate = asyncio.Semaphore(8)
+
+        async def one(login: str, repo: str) -> Any:
+            async with gate:
+                return await service.access_for(
+                    login, repo, perms[repo].get(login.lower())
+                )
+
+        found = await asyncio.gather(
+            *(one(login, repo) for login in logins for repo in served)
+        )
+        rows = []
+        for i, login in enumerate(logins):
+            here = found[i * len(served) : (i + 1) * len(served)]
+            person = service.access.person(login)
+            rows.append(
+                {
+                    "login": login,
+                    "signed_in": login.lower() in signed,
+                    "admin": service.access.is_admin(login),
+                    "set": person.model_dump(mode="json") if person else None,
+                    "repos": {
+                        e.repo: {"role": e.role, "role_from": e.role_from} for e in here
+                    },
+                }
+            )
+        return rows
 
     @r.get("/{repo:path}/people/{login}")
     async def of_person(
@@ -136,9 +229,13 @@ def build_router() -> APIRouter:
         service admin unless it changes who the service admins are."""
         service = await _manager(request, user)
         try:
-            change, decision = await service.change_access(
-                body.text, user.login, body.title
-            )
+            if body.config is not None:
+                text = dump_access(parse_access(dump_yaml(body.config)))
+            elif body.text is not None:
+                text = body.text
+            else:
+                raise ValueError("send the file's text or its config")
+            change, decision = await service.change_access(text, user.login, body.title)
         except ValueError as e:
             raise HTTPException(422, str(e)) from e
         return {

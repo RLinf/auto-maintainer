@@ -209,3 +209,64 @@ async def test_the_services_machines_run_outside_code_only_for_who_may(
         assert await h.service.lab_refusal(session("walt"), team, "gpu-01") is None
     finally:
         await h.close()
+
+
+async def test_the_page_lists_people_and_saves_what_it_edits(tmp_path: Path) -> None:
+    from auto_maintainer.domain.ports import UserToken
+    from auto_maintainer.profiles.governance import governance_path
+
+    h = await build_demo(tmp_path)
+    try:
+        h.memory.files[governance_path(DEMO_REPO)] = (
+            "schema: 1\nestablished: true\n"
+            "roles: [{id: contributor, name: Contributor, level: 1}]\n"
+            "members: [{login: gina, role: contributor}]\n"
+        )
+        h.forge.set_permission(DEMO_REPO, "gina", Permission.READ)
+        h.forge.set_permission(DEMO_REPO, "walt", Permission.WRITE)
+        await h.service.a.user_tokens.set("walt", UserToken(token="w"))
+        app = create_app(h.service, data_dir=tmp_path, allow_dev_login=True)
+        async with _as(app, "maria") as maria:
+            view = (await maria.get("/api/access")).json()
+            assert view["owner"] and "gpu-01" in view["machines"]
+            [repo] = [r for r in view["repos"] if r["repo"] == DEMO_REPO]
+            assert repo["people_roles"] == [
+                {
+                    "id": "contributor",
+                    "name": "Contributor",
+                    "members": 1,
+                    "maintains": False,
+                    "default": "guest_reviewer",
+                    "mapped": None,
+                }
+            ]
+            rows = {
+                r["login"]: r for r in (await maria.get("/api/access/people")).json()
+            }
+            assert rows["walt"]["signed_in"] and rows["walt"]["repos"][DEMO_REPO][
+                "role"
+            ] == ("reviewer")
+            assert rows["gina"]["repos"][DEMO_REPO]["role"] == "guest_reviewer"
+
+            config = view["config"]
+            config["people"] = {
+                "gina": {"grants": {"use.agents": True}, "limits": {"jobs_at_once": 1}}
+            }
+            config["repos"] = {DEMO_REPO: {"people_roles": {"contributor": "viewer"}}}
+            saved = await maria.put("/api/access", json={"config": config})
+            assert saved.status_code == 200 and saved.json()["applied"], saved.text
+            text = (await maria.get("/api/access")).json()["text"]
+            assert "jobs_at_once: 1" in text and "tokens_per_day" not in text, (
+                "only what the page set"
+            )
+            rows = {
+                r["login"]: r for r in (await maria.get("/api/access/people")).json()
+            }
+            assert rows["gina"]["repos"][DEMO_REPO]["role"] == "viewer"
+            assert rows["gina"]["set"]["grants"] == {"use.agents": True}
+            bad = await maria.put(
+                "/api/access", json={"config": {"people": {"x": {"role": "king"}}}}
+            )
+            assert bad.status_code == 422
+    finally:
+        await h.close()

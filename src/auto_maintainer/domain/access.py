@@ -101,7 +101,7 @@ ABOUT: dict[Grant, str] = {
     Grant.SEE_OTHERS_WORK: "Other people's drafts, agent jobs, and conversations.",
     Grant.SEE_USAGE: "Everyone's usage of agents and models, and its cost.",
     Grant.SEE_AUDIT: "The audit log.",
-    Grant.SEE_INTERNALS: "How the service is reached and run (``web/api.py:sees_internals``).",
+    Grant.SEE_INTERNALS: "How the service is reached and run: the settings file, test machines' addresses, model APIs' endpoints.",
     Grant.USE_AGENTS: "The service's agents, on its own agent accounts.",
     Grant.USE_MODELS: "The service's model APIs.",
     Grant.USE_MACHINES: "The test machines the service offers the repository.",
@@ -112,7 +112,7 @@ ABOUT: dict[Grant, str] = {
     Grant.FIX: "Have an agent fix a PR's code or its CI.",
     Grant.SCORE: "Have PRs scored again: priority and quality.",
     Grant.PRIORITY: "Override a PR's priority.",
-    Grant.MERGE_SCHEDULE: "Schedule merges (and only for the repository's maintainers: ``GATED``).",
+    Grant.MERGE_SCHEDULE: "Schedule merges; only the repository's maintainers, whatever this file says.",
     Grant.PROPOSE: "Propose changes to the repository's settings, which its maintainers decide.",
     Grant.IMPROVE: "Ask for a change to the service's own code, as a self-improvement PR.",
     Grant.OWN_AGENTS: "Sign their own agent accounts in, for their own tasks.",
@@ -470,3 +470,10 @@ def parse_access(text: str) -> AccessConfig:
         return AccessConfig.model_validate(data)
     except ValidationError as e:
         raise ValueError(f"{ACCESS_PATH}: {e}") from e
+
+
+def dump_access(config: AccessConfig) -> str:
+    """``config`` as the text of ``config/access.yaml``: only what it sets."""
+    data = config.model_dump(mode="json", by_alias=True, exclude_defaults=True)
+    data = {"schema": config.schema_version, **data}
+    return yaml.safe_dump(data, sort_keys=False, allow_unicode=True)

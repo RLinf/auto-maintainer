@@ -15,6 +15,7 @@ import { useLang, useT } from "./i18n";
 import { Icon } from "./icons";
 import { Logo } from "./logo";
 import { CommandPalette, NAV, type Command } from "./palette";
+import AccessPage from "./pages/Access";
 import AgentsPage from "./pages/Agents";
 import AuditPage from "./pages/Audit";
 import ChatPage from "./pages/Chat";
@@ -285,6 +286,9 @@ function Shell({ me }: { me: Me }) {
                 <MenuItem icon="settings" hint="g s" onClick={() => (navigate("/settings"), close())}>
                   {t("Settings")}
                 </MenuItem>
+                <MenuItem icon="key" onClick={() => (navigate("/access"), close())}>
+                  {t("Your permissions")}
+                </MenuItem>
                 <MenuItem icon="compass" hint="g g" onClick={() => (navigate("/guide"), close())}>
                   {t("Guide")}
                 </MenuItem>
@@ -366,6 +370,7 @@ function Shell({ me }: { me: Me }) {
           <Route path="/setup" element={<SetupPage />} />
           <Route path="/service" element={<ServicePage />} />
           <Route path="/audit" element={<AuditPage />} />
+          <Route path="/access" element={<AccessPage />} />
           <Route path="/chat" element={<ChatPage />} />
           <Route path="/chat/:threadId" element={<ChatPage />} />
           <Route path="/guide" element={<GuidePage />} />

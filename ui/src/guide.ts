@@ -1173,6 +1173,42 @@ export const TOPICS: Topic[] = [
       { to: "/audit", label: { en: "Open Audit log", zh: "打开审计日志" } },
     ],
   },
+  {
+    id: "access",
+    group: "service",
+    icon: "key",
+    who: ["admin"],
+    title: { en: "People and their permissions", zh: "人员与权限" },
+    summary: {
+      en: "Who may do what: each person's role in each repository, and the permissions it gives them.",
+      zh: "谁可以做什么：每个人在每个仓库中的角色，以及该角色赋予的权限。",
+    },
+    steps: [
+      {
+        en: "[People & permissions](/access) shows [[Your permissions]] in each repository the service serves, and where each comes from: maintaining it, a role in its People record, or write access on GitHub.",
+        zh: "[人员与权限](/access) 显示你在服务管理的每个仓库中的 [[你的权限]]，以及每项权限的来源：维护该仓库、成员档案中的角色，或 GitHub 写权限。",
+      },
+      {
+        en: "Guest reviewers, from outside the team, review the PRs they review or own with their own agents and machines; reviewers and maintainers also use the service's.",
+        zh: "访客评审者来自团队之外，用自己的智能体和机器评审自己负责或评审的 PR；评审者和维护者还可以使用服务的智能体和机器。",
+      },
+      {
+        en: "The owner and service admins see everyone under [[People]]: open a person to set their role everywhere or in one repository, turn single permissions on or off, and set limits.",
+        zh: "所有者和服务管理员可以在 [[人员]] 中看到所有人：打开某人即可设置其在所有仓库或某个仓库中的角色，单独开启或关闭权限，并设置限额。",
+      },
+      {
+        en: "[[Roles]] changes what a role lets everyone with it do, and [[People records]] which service role each People record role gives. Changes apply when you press [[Save]].",
+        zh: "[[角色]] 修改某个角色允许所有拥有者做什么，[[成员档案]] 设置每个成员档案角色对应的服务角色。按下 [[保存]] 后生效。",
+      },
+    ],
+    tips: [
+      {
+        en: "Only the owner names the service admins, and scheduling merges and changing a repository's settings stay with its maintainers whatever the permissions say.",
+        zh: "只有所有者能任命服务管理员；无论权限如何设置，调度合并和修改仓库设置都只限仓库的维护者。",
+      },
+    ],
+    open: [{ to: "/access", label: { en: "Open People & permissions", zh: "打开人员与权限" } }],
+  },
 ];
 
 export const GLOSSARY: { term: Text; text: Text }[] = [
@@ -1445,6 +1481,7 @@ export function helpTopicFor(pathname: string, search = ""): string | null {
     "/chat": "chat",
     "/service": "service-page",
     "/audit": "service-page",
+    "/access": "access",
   };
   const page = Object.keys(byPage).find((p) => pathname === p || pathname.startsWith(`${p}/`));
   return page ? byPage[page] : null;

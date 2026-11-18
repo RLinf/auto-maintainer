@@ -292,6 +292,7 @@ def test_tsx_avoids_rigid_widths_and_inline_grids() -> None:
         "pages/Agents.tsx",
         "pages/Service.tsx",
         "pages/Audit.tsx",
+        "pages/Access.tsx",
         "people.tsx",
     )
     for rel in datatable_files:

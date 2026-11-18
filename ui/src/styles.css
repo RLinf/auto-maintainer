@@ -1337,3 +1337,87 @@ details.pv-section[open] > summary { margin-bottom: 6px; }
   .guide-search { max-width: none; }
   .guide-path, .guide-gloss, .guide-tiles, .guide-roles { grid-template-columns: 1fr; }
 }
+
+/* People & permissions (pages/Access.tsx) */
+.access-groups {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 10px 18px;
+}
+.access-grid-wrap {
+  overflow-x: auto;
+}
+.access-grid {
+  border-collapse: collapse;
+  width: 100%;
+}
+.access-grid th {
+  font-size: 12px;
+  font-weight: 600;
+  text-align: center;
+  padding: 4px 6px;
+  white-space: nowrap;
+}
+.access-grid td {
+  padding: 2px 6px;
+  border-top: 1px solid var(--border);
+}
+.access-grid .access-group td {
+  padding-top: 10px;
+  border-top: none;
+}
+.access-cell {
+  text-align: center;
+  width: 110px;
+}
+.access-cell .changed,
+.access-switch.on,
+.access-switch.off {
+  outline: 1px solid var(--accent);
+}
+.access-switch {
+  min-width: 64px;
+}
+.access-switch.off {
+  outline-color: var(--bad);
+}
+.access-save {
+  position: sticky;
+  bottom: 12px;
+  z-index: 5;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.12);
+}
+.access-file {
+  white-space: pre-wrap;
+  max-height: 420px;
+  overflow: auto;
+}
+.access-role-name {
+  flex: 0 1 220px;
+}
+.access-grid {
+  min-width: 640px;
+}
+.access-grant {
+  display: grid;
+  grid-template-columns: 72px 1fr;
+  gap: 8px;
+  align-items: baseline;
+}
+@media (max-width: 640px) {
+  .access-grid {
+    min-width: 420px;
+  }
+  .access-cell {
+    width: 56px;
+  }
+  /* The permission stays in view while the roles scroll past it. */
+  .access-grid td:first-child,
+  .access-grid th:first-child {
+    position: sticky;
+    left: 0;
+    z-index: 1;
+    width: 150px;
+    background: var(--surface);
+  }
+}

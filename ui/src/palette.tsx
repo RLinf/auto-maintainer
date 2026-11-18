@@ -37,6 +37,7 @@ export const NAV: { to: string; label: string; icon: IconName; keys?: string; hi
   { to: "/memory", label: "Memory", icon: "book", keys: "g m", hint: "Memory changes and the memory repository" },
   { to: "/service", label: "Service", icon: "server", hint: "Running version, updates, self-improvement" },
   { to: "/audit", label: "Audit log", icon: "shield", hint: "Every decision and change" },
+  { to: "/access", label: "People & permissions", icon: "key", hint: "Who may do what: roles, permissions, and limits" },
   { to: "/guide", label: "Guide", icon: "compass", keys: "g g", hint: "How to use the dashboard, step by step" },
 ];
 
