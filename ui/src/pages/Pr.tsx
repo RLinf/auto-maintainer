@@ -78,7 +78,7 @@ export default function PrPage({ me }: { me: Me }) {
   const keys = [["pr"], ["prs"]];
   const [reviewer, setReviewer] = useAgentChoice("review");
   const agentOpts = useAgentOptions(reviewer, "review");
-  const review = useAct(() => api.post<ReviewStart>(`${base}/review`, { agent: agentOpts.current || null }), [...keys, ["proposals"]]);
+  const review = useAct((full: boolean = false) => api.post<ReviewStart>(`${base}/review`, { agent: agentOpts.current || null, full }), [...keys, ["proposals"]]);
   const arm = useAct(() => api.post(`${base}/merge`), keys);
   const disarm = useAct(() => api.del(`${base}/merge`), keys);
   const d = detail.data;
@@ -119,6 +119,29 @@ export default function PrPage({ me }: { me: Me }) {
   // The PR's compiled docs: the docs build's check, when one reported a link.
   const docsHref = docsCheckUrl(pr.checks);
   const mutationError = review.error || arm.error || disarm.error;
+  // Reviewed before: the button follows up on what changed; its menu also offers a
+  // full review of the whole PR again.
+  const followsUp = !!d.review_state.reviewed_sha && !d.own_review;
+  const startReview = (full: boolean) =>
+    review.mutate(full, {
+      onSuccess: (o) =>
+        toast(
+          o.run === "review" || o.run === "followup"
+            ? {
+                title: full ? t("Full review requested") : t("Review requested"),
+                body: t("Watch the agent work; the draft comes back to you to edit and post."),
+                icon: "pr",
+                action: o.event ? { label: t("Watch"), onClick: () => openJob(o.event as string) } : undefined,
+              }
+            : o.run === "skip"
+              ? { title: t("Nothing to review"), body: o.reason, icon: "check" }
+              : {
+                  title: o.run === "joined" ? t("Already being reviewed") : t("Already drafted"),
+                  body: `${o.by ?? "—"} · ${agentName(o.agent) || t("Default agent")}`,
+                  icon: "pr",
+                },
+        ),
+    });
   const job = row?.review_activity.job;
   const reviewing = !!job && ["queued", "running", "waiting"].includes(job.status);
   const reviewingText = reviewing
@@ -193,32 +216,10 @@ export default function PrPage({ me }: { me: Me }) {
                         ? `${t("Which agent does it")}: ${agentOpts.label(agentOpts.primary)} (${t("default")})`
                         : undefined
                 }
-                onClick={() =>
-                  reviewing && job?.id
-                    ? openJob(job.id)
-                    : review.mutate(undefined, {
-                        onSuccess: (o) =>
-                          toast(
-                            o.run === "review" || o.run === "followup"
-                              ? {
-                                  title: t("Review requested"),
-                                  body: t("Watch the agent work; the draft comes back to you to edit and post."),
-                                  icon: "pr",
-                                  action: o.event ? { label: t("Watch"), onClick: () => openJob(o.event as string) } : undefined,
-                                }
-                              : o.run === "skip"
-                                ? { title: t("Nothing to review"), body: o.reason, icon: "check" }
-                                : {
-                                    title: o.run === "joined" ? t("Already being reviewed") : t("Already drafted"),
-                                    body: `${o.by ?? "—"} · ${agentName(o.agent) || t("Default agent")}`,
-                                    icon: "pr",
-                                  },
-                          ),
-                      })
-                }
+                onClick={() => (reviewing && job?.id ? openJob(job.id) : startReview(false))}
               >
                 <Icon name="pr" size={15} />
-                {reviewing ? t("Reviewing…") : d.review_state.reviewed_sha && !d.own_review ? t("Follow up") : t("Review")}
+                {reviewing ? t("Reviewing…") : followsUp ? t("Follow up") : t("Review")}
                 {!reviewing && agentOpts.current && <span className="agent-hint">· {agentName(agentOpts.current)}</span>}
               </button>
               <Popover
@@ -239,6 +240,22 @@ export default function PrPage({ me }: { me: Me }) {
               >
                 {(close) => (
                   <>
+                    {followsUp && (
+                      <>
+                        <MenuItem
+                          icon="pr"
+                          disabled={review.isPending}
+                          title={t("The whole PR again, not only what changed since its last review")}
+                          onClick={() => {
+                            close();
+                            startReview(true);
+                          }}
+                        >
+                          {t("Full review")}
+                        </MenuItem>
+                        <div className="menu-sep" />
+                      </>
+                    )}
                     <div className="menu-label">{t("Which agent does it")}</div>
                     <MenuItem
                       checked={!agentOpts.current}

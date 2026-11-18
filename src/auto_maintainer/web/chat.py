@@ -254,6 +254,12 @@ class ProposedAction(BaseModel):
         default=False,
         description="For kind=change: open the PR as a draft PR when asked.",
     )
+    full: bool = Field(
+        default=False,
+        description="For kind=review: review the whole PR again when asked, though "
+        "it was reviewed before; otherwise a reviewed PR gets a follow-up on what "
+        "changed.",
+    )
     labels: list[str] = Field(default_factory=list)
     run_id: int | None = None
     logins: list[str] = Field(default_factory=list)
@@ -1359,7 +1365,11 @@ async def _propose(service: Any, user: User, p: ProposedAction) -> list[str]:
                 kind=EventKind.DASHBOARD_COMMAND,
                 repo=p.repo,
                 number=p.number,
-                payload={"command": "review", "by": user.login},
+                payload={
+                    "command": "review",
+                    "by": user.login,
+                    **({"full": True} if p.full else {}),
+                },
                 source="chat",
             )
         )

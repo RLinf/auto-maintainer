@@ -141,9 +141,13 @@ class ReviewPlaybook(Playbook):
             profile.scope.include_drafts or manual,
             own_actions=ctx.own_reviews,
         ).state
-        if request is not None and request.own and state != ReviewState.SELF_PR:
-            # One of the PR's owners or reviewers wants a review of their own,
-            # whoever else reviewed it.
+        if (
+            request is not None
+            and (request.own or request.full)
+            and state != ReviewState.SELF_PR
+        ):
+            # One of the PR's owners or reviewers wants a review of their own, or
+            # someone asked for a full review: whoever reviewed it before.
             state = ReviewState.NEW_REVIEW
         if state in FOLLOWUP_STATES:
             return PlaybookResult(

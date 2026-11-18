@@ -43,6 +43,10 @@ class ReviewRequest:
     """A review of the PR's own by one of its owners or reviewers, beside the reviews
     others asked for (``web/api.py:_request_review``): it runs as a new review
     whatever the PR's review state, and the follow-up leaves it alone."""
+    full: bool = False
+    """A review of the whole PR asked for by name (the dashboard's Full review,
+    ``/am review full``, chat), whatever reviews it already has: it runs as a new
+    review, and the follow-up leaves it alone."""
 
     @property
     def manual(self) -> bool:
@@ -66,15 +70,20 @@ def review_request(event: Event) -> ReviewRequest | None:
                 by=str(by),
                 agent=str(agent) if agent else None,
                 own=bool(event.payload.get("own")),
+                full=bool(event.payload.get("full")),
             )
             if by
             else None
         )
-    if event.kind == EventKind.PR_COMMENT and any(
-        c.get("name") == "review" for c in event.payload.get("commands", [])
-    ):
+    if event.kind == EventKind.PR_COMMENT:
+        asked = [
+            c for c in event.payload.get("commands", []) if c.get("name") == "review"
+        ]
         author = event.payload.get("author")
-        return ReviewRequest(source="comment", by=str(author)) if author else None
+        if not asked or not author:
+            return None
+        full = any(str(a).lower() == "full" for c in asked for a in c.get("args") or [])
+        return ReviewRequest(source="comment", by=str(author), full=full)
     return None
 
 

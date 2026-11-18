@@ -454,6 +454,10 @@ export const TOPICS: Topic[] = [
         en: "The follow-up comes back to you as a draft, like a first review.",
         zh: "跟进评审和首次评审一样，作为草稿回到你这里。",
       },
+      {
+        en: "To review the whole PR again instead, open the menu beside the button and choose [[Full review]]; in a comment, `/am review full` does the same.",
+        zh: "如需重新评审整个 PR，打开按钮旁的菜单并选择 [[完整评审]]；在评论中写 `/am review full` 效果相同。",
+      },
     ],
     tips: [
       {

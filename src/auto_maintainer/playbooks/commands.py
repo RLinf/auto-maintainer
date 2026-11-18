@@ -31,7 +31,7 @@ from .base import Playbook, PlaybookContext, PlaybookResult
 from .merge import arm_allowed
 
 HELP = """Commands, one per line:
-- `{p} review`: ask for a fresh review of the current head.
+- `{p} review`: review the PR, or what changed since its last review. `{p} review full` reviews the whole PR again.
 - `{p} rerun`: rerun failed CI jobs (the PR author may do this once per commit).
 - `{p} merge`: merge when every check passes and the PR is approved. `{p} merge cancel` stops it.
 - `{p} label <name> ...`: add labels.

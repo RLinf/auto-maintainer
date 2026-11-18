@@ -272,6 +272,76 @@ async def test_a_prs_reviewer_gets_a_review_of_their_own_beside_anothers(
     assert (await _review(app, "walt", 42))["run"] == "skip", "his own covers him now"
 
 
+async def _full(app: Any, login: str, number: int, agent: str | None = None) -> dict:
+    async with _as(app, login) as client:
+        r = await client.post(
+            f"/api/prs/{REPO}/{number}/review", json={"agent": agent, "full": True}
+        )
+        assert r.status_code == 200, r.text
+        return r.json()
+
+
+async def test_a_full_review_runs_though_the_pr_was_reviewed(demo) -> None:
+    """A reviewed PR gets a follow-up on what changed, or nothing at the same commit;
+    a full review asked for by name reviews the whole PR again, joining only another
+    full review."""
+    h, app = demo
+    await _review(app, "maria", 42)
+    await h.settle()
+    async with _as(app, "maria") as maria:
+        [draft] = [
+            p
+            for p in (await maria.get("/api/proposals")).json()
+            if p["action"]["action"]["kind"] == "review.post"
+        ]
+        posted = await maria.post(f"/api/proposals/{draft['id']}/approve", json={})
+        assert posted.status_code == 200, posted.text
+        await h.settle()
+    await h.poll()
+    assert (await _review(app, "maria", 42))["run"] == "skip", "reviewed at this head"
+
+    started = await _full(app, "maria", 42)
+    assert started["run"] == "review" and started.get("full") is True
+    await h.settle()
+    kinds = [t.kind for t in h.runner.tasks]
+    assert kinds.count(TaskKind.REVIEW) == 2 and TaskKind.FOLLOWUP not in kinds
+    again = await _full(app, "walt", 42)
+    assert again["run"] == "drafted" and again["by"] == "maria"
+
+    pr = h.forge.prs[(REPO, 42)]
+    h.forge.put_pr(pr.model_copy(update={"head_sha": "c" * 40}))
+    await h.poll()
+    plain = await _review(app, "walt", 42)
+    assert plain["run"] == "followup"
+    full = await _full(app, "walt", 42)
+    assert full["run"] == "review", "a follow-up in progress is not the full review"
+    await h.settle()
+    kinds = [t.kind for t in h.runner.tasks]
+    assert kinds.count(TaskKind.REVIEW) == 3 and kinds.count(TaskKind.FOLLOWUP) == 1
+
+
+def test_am_review_full_asks_for_a_full_review() -> None:
+    from auto_maintainer.domain.events import Event, EventKind, parse_commands
+    from auto_maintainer.playbooks.requests import review_request
+
+    def asked(body: str) -> Any:
+        return review_request(
+            Event(
+                kind=EventKind.PR_COMMENT,
+                repo=REPO,
+                number=42,
+                payload={
+                    "author": "walt",
+                    "commands": [c.model_dump() for c in parse_commands(body)],
+                },
+            )
+        )
+
+    assert asked("/am review full").full is True
+    assert asked("/am review").full is False
+    assert asked("looks fine") is None
+
+
 # -- when reviews start on their own -------------------------------------------------------
 
 

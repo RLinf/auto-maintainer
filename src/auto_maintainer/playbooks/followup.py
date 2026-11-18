@@ -114,10 +114,12 @@ class Followup(Playbook):
                     "skipped": "this repository does not re-review updated PRs on its own"
                 }
             )
-        if request is not None and request.own:
+        if request is not None and (request.own or request.full):
             return PlaybookResult(
                 result={
-                    "skipped": "a review of the person's own",
+                    "skipped": "a full review asked for"
+                    if request.full
+                    else "a review of the person's own",
                     "handed_to": "review",
                 }
             )

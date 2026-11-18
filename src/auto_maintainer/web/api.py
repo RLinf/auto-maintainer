@@ -1346,6 +1346,8 @@ class ReviewsBody(BaseModel):
 
 class ReviewBody(BaseModel):
     agent: str | None = None
+    full: bool = False
+    """Review the whole PR again, not only what changed since its last review."""
 
 
 MAX_EVALUATIONS = 500
@@ -3539,7 +3541,12 @@ def build_router() -> APIRouter:
         repo = _repo(repo)
         await require_view(service, user, repo)
         return await _request_review(
-            service, user, repo, number, body.agent if body else None
+            service,
+            user,
+            repo,
+            number,
+            body.agent if body else None,
+            full=bool(body and body.full),
         )
 
     @r.post("/prs/{repo:path}/{number:int}/fix")
@@ -4556,7 +4563,13 @@ async def may_review_own(
 
 
 async def _request_review(
-    service: Service, user: User, repo: str, number: int, agent: str | None = None
+    service: Service,
+    user: User,
+    repo: str,
+    number: int,
+    agent: str | None = None,
+    *,
+    full: bool = False,
 ) -> dict[str, Any]:
     """Publish a review request for one PR and say what it will run.
 
@@ -4565,7 +4578,9 @@ async def _request_review(
     instead of starting another, whoever asked first. A different agent may review
     the same commit. A PR's owner or reviewer whose own review it lacks gets one of
     their own, whatever others' reviews cover (``may_review_own``); it joins only
-    their own review in progress.
+    their own review in progress. With ``full``, a PR reviewed before is reviewed
+    whole again instead of followed up; it joins only a full review asked for, and
+    a full review's draft.
     """
     out: dict[str, Any] = {"repo": repo, "number": number}
     refused = await review_refusal(service, user, repo, number)
@@ -4588,11 +4603,11 @@ async def _request_review(
         own_actions=await service.posted_as_people(repo),
     ).state
     own = await may_review_own(service, user.login, repo, number, state)
-    if state == "UP_TO_DATE" and not own:
+    if state == "UP_TO_DATE" and not own and not full:
         return {**out, "run": "skip", "reason": "already reviewed at the current head"}
     run = (
         "followup"
-        if state in ("FOLLOWUP_REVIEW", "APPROVED_NEW_COMMITS") and not own
+        if state in ("FOLLOWUP_REVIEW", "APPROVED_NEW_COMMITS") and not own and not full
         else "review"
     )
     route = profile.route(run, service.settings.routing)
@@ -4616,6 +4631,8 @@ async def _request_review(
         payload = last.get("payload") or {}
         if own and str(payload.get("by") or "").lower() != user.login.lower():
             continue
+        if full and not payload.get("full"):
+            continue
         if (last.get("sha") or "")[:12] == head and (
             payload.get("agent") or default_agent
         ) == chosen:
@@ -4635,6 +4652,7 @@ async def _request_review(
             and (record.action.head_sha or "")[:12] == head
             and record.action.payload.get("runtime") == chosen
             and not own
+            and not (full and record.action.payload.get("kind") == "followup")
         ):
             return {
                 **out,
@@ -4655,6 +4673,7 @@ async def _request_review(
             "source": "dashboard",
             **({"agent": agent} if agent else {}),
             **({"own": True} if own else {}),
+            **({"full": True} if full else {}),
         },
         source="dashboard",
     )
@@ -4666,6 +4685,7 @@ async def _request_review(
         "state": state,
         "agent": chosen,
         **({"own": True} if own else {}),
+        **({"full": True} if full else {}),
     }
 
 
