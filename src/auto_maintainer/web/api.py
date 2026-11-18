@@ -38,6 +38,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from ..domain.access import Effective, Facts, PeopleRole, resolve
 from ..domain.actions import (
     Action,
     ActionKind,
@@ -700,7 +701,10 @@ async def permissions_of(
 
 async def may_view(service: Service, user: User, repo: str) -> bool:
     """Whether ``user`` may use the dashboard for ``repo`` (design 2.3): write access
-    on GitHub, or a place in its People record with access to it."""
+    on GitHub, or a place in its People record with access to it, unless
+    ``config/access.yaml`` blocks them (design 2.7)."""
+    if service.access.blocked(user.login, repo):
+        return False
     perm = await permission(service, user, repo)
     if perm.at_least(Permission.WRITE):
         return True
@@ -891,6 +895,54 @@ async def sees_internals(service: Service, user: User) -> bool:
         if await shows_maintainer(service, user, repo):
             return True
     return False
+
+
+async def access_of(service: Service, user: User, repo: str) -> Effective:
+    """``user``'s role and permissions in ``repo`` (``domain/access.py:resolve``,
+    design 2.7), from their permission, the configuration gate, the People record,
+    and who owns and operates the service, each read as the views read it (kept
+    ``VIEW_CHECK_SECONDS``)."""
+
+    async def read() -> Effective:
+        me = user.login.lower()
+        perm, maintains, owner, loaded = await asyncio.gather(
+            permission(service, user, repo),
+            shows_maintainer(service, user, repo),
+            shows_owner(service, user.login),
+            service.governance.load(repo),
+        )
+        people_role = None
+        if loaded.stored and not loaded.error:
+            gov = loaded.governance
+            member = next((m for m in gov.members if m.login.lower() == me), None)
+            held = (
+                next((r for r in gov.roles if r.id == member.role), None)
+                if member
+                else None
+            )
+            if held is not None:
+                people_role = PeopleRole(
+                    id=held.id,
+                    name=held.name,
+                    maintains=held.maintains,
+                    github_permission=held.github_permission,
+                )
+        return resolve(
+            service.access,
+            Facts(
+                login=user.login,
+                repo=repo,
+                permission=perm,
+                maintains=maintains,
+                people_role=people_role,
+                owner=owner.allowed,
+                operator=me in {o.lower() for o in service.settings.operators},
+            ),
+        )
+
+    return await service.view_cached(
+        ("access", repo, user.login.lower()), read, seconds=VIEW_CHECK_SECONDS
+    )
 
 
 def proposal_requester(proposal: Proposal, record: ActionRecord | None) -> str | None:

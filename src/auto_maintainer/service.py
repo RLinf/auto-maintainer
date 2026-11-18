@@ -34,6 +34,7 @@ from .actuator.context import ExecContext, LabRunner
 from .actuator.executor import Actuator
 from .actuator.lab_sessions import LabSessions
 from .actuator.pipeline import ActionPipeline
+from .domain.access import ACCESS_PATH, AccessConfig, parse_access
 from .domain.actions import ActionKind, ActionStatus, MemoryChangePayload, make_action
 from .domain.agents import AgentInstall, AgentLogin, AgentQuota
 from .domain.clock import Clock
@@ -336,6 +337,10 @@ class Service:
         self.service_config = ServiceConfig()
         """The settings in force, from ``config/service.yaml``."""
         self.settings_status = SettingsStatus(applied=True)
+        self.access = AccessConfig()
+        """Who may do what, from ``config/access.yaml`` (design 2.7)."""
+        self.access_problem: str | None = None
+        """Why the stored ``config/access.yaml`` is not in force, when it is not."""
         self.closing = asyncio.Event()
         """Set when shutdown begins; the dashboard's live streams end on it."""
         self.restart_requested = asyncio.Event()
@@ -593,6 +598,7 @@ class Service:
         for piece in self.a.background:
             await piece.start()
         await self.reload_settings()
+        await self.reload_access()
         await self.actuator.reconcile_intents()
         await self.questions.cancel_orphans()
         await self.end_cut_off_turns()
@@ -712,7 +718,8 @@ class Service:
     async def admits(self, login: str) -> bool | None:
         """Whether ``login`` may use this service (design 2.3): its owner, an operator,
         or someone who may see one of its repositories (write access, or a place in
-        its People record with read access), as the dashboard's pages decide.
+        its People record with read access), as the dashboard's pages decide, unless
+        ``config/access.yaml`` blocks them everywhere (design 2.7).
         Sign-in completes only for them, so nobody else's token is ever kept.
         ``None`` when the forge could not say for a repository and no other admits
         them: unknown, not refused."""
@@ -722,6 +729,8 @@ class Service:
         with contextlib.suppress(Exception):
             if (await self.service_gate(login)).allowed:
                 return True
+        if self.access.blocked(login):
+            return False
         unknown = False
         for record in await self.store.list_repos():
             try:
@@ -794,6 +803,94 @@ class Service:
         if problems:
             raise SettingsError(problems)
         return config
+
+    async def reload_access(self) -> str | None:
+        """Apply ``config/access.yaml`` from the memory repo. A file that does not
+        read keeps the previous one in force and says why (``access_problem``)."""
+        text = await self.a.memory.read_text(ACCESS_PATH) or ""
+        try:
+            self.access = parse_access(text)
+        except ValueError as e:
+            log.warning("access not applied: %s", e)
+            self.access_problem = str(e)[:2000]
+            return self.access_problem
+        self.access_problem = None
+        self.forget_views("access")
+        return None
+
+    async def access_gate(self, login: str, text: str) -> GateDecision:
+        """Whether ``login``, a person signed in, may make ``config/access.yaml`` say
+        ``text``: the owner may; a service admin may unless it changes who the
+        service admins are."""
+        owner = await self.service_gate(login)
+        if owner.allowed or not self.access.is_admin(login):
+            return owner
+        try:
+            admins = {a.lower() for a in parse_access(text).admins}
+        except ValueError as e:
+            return owner.model_copy(update={"allowed": False, "reason": str(e)[:500]})
+        if admins != {a.lower() for a in self.access.admins}:
+            return owner.model_copy(
+                update={
+                    "allowed": False,
+                    "reason": "only the service's owner names its service admins",
+                }
+            )
+        return owner.model_copy(
+            update={"allowed": True, "reason": f"{login} is a service admin"}
+        )
+
+    async def change_access(
+        self, text: str, login: str, title: str
+    ) -> tuple[MemoryChange, GateDecision]:
+        """Open a change to ``config/access.yaml`` as ``login``; one they may make
+        (``access_gate``) is approved by making it and applies at once, any other
+        waits for the owner.
+
+        Raises:
+            ValueError: The file does not read, or says what it says already.
+        """
+        parse_access(text)
+        current = await self.a.memory.read_text(ACCESS_PATH) or ""
+        if current.strip() == text.strip():
+            raise ValueError("the file already says this; there is nothing to change")
+        decision = await self.access_gate(login, text)
+        change = MemoryChange(
+            tier=Tier.T2,
+            title=title or "access: update",
+            description=f"Who may do what, changed by {login}.",
+            files={ACCESS_PATH: text if text.endswith("\n") else text + "\n"},
+            service=True,
+            author=login,
+            requested_by=login,
+            from_own_signals=False,
+            created_at=self.clock.now(),
+        )
+        if decision.allowed:
+            change.approvals = {decision.repo: [login]}
+        await self.store.save_memory_change(change)
+        await self.store.add_audit(
+            AuditEntry(
+                kind="config",
+                actor=login,
+                summary=f"access change: {change.title}",
+                data={"change": change.id, "approved": bool(change.approvals)},
+            )
+        )
+        await self.submit_memory_change(change)
+        stored = await self.store.get_memory_change(change.id)
+        if stored is not None and stored.state == MemoryChangeState.MERGED:
+            await self.reload_access()
+        return stored or change, decision
+
+    async def _service_change_gate(
+        self, change: MemoryChange, login: str
+    ) -> GateDecision:
+        """Who approves a change to the service's own files: its owner, and for a
+        change only to ``config/access.yaml``, a service admin (``access_gate``)."""
+        if set(change.files) == {ACCESS_PATH} and change.files[ACCESS_PATH]:
+            return await self.access_gate(login, change.files[ACCESS_PATH] or "")
+        return await self.service_gate(login)
 
     async def reload_settings(self) -> SettingsStatus:
         """Apply ``config/service.yaml`` from the memory repo. A document that does not
@@ -1064,6 +1161,8 @@ class Service:
         paths = set(event.payload.get("paths") or [])
         if paths & {SETTINGS_PATH, LEGACY_RUNTIMES_PATH, "remote"}:
             await self.reload_settings()
+        if paths & {ACCESS_PATH, "remote"}:
+            await self.reload_access()
         if event.repo and lock_path(event.repo) in paths:
             self.poll_now(event.repo)
 
@@ -1751,7 +1850,7 @@ class Service:
             raise ValueError(f"memory change {change_id} is not open")
         decisions = []
         if change.service:
-            decision = await self.service_gate(login)
+            decision = await self._service_change_gate(change, login)
             decisions.append(decision)
             if decision.allowed and login not in change.approvals.get(
                 decision.repo, []
@@ -1778,6 +1877,8 @@ class Service:
         state = await self.actuator.merge_memory(change_id)
         if change.service and state == MemoryChangeState.MERGED:
             await self.reload_settings()
+            if ACCESS_PATH in change.files:
+                await self.reload_access()
         return decisions, state
 
     async def reject_memory_change(
@@ -1787,7 +1888,7 @@ class Service:
         if change is None or change.state != MemoryChangeState.OPEN:
             raise ValueError(f"memory change {change_id} is not open")
         if change.service and login != change.requested_by:
-            decision = await self.service_gate(login)
+            decision = await self._service_change_gate(change, login)
             if not decision.allowed:
                 raise PermissionError(decision.reason)
         for repo in change.repos:
