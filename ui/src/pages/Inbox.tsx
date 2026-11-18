@@ -1,8 +1,8 @@
 // Proposals: every action that waits for a maintainer, showing exactly what will be
-// posted, editable before approval, with filters, sorting, grouping, and bulk approval.
+// posted, editable before approval, with filters, sorting, grouping, collapsing, and bulk approval.
 
 import { useQuery } from "@tanstack/react-query";
-import { Fragment } from "react";
+import { Fragment, useState } from "react";
 import { api, type Me, type PendingRequest, type ProposalWithAction } from "../api";
 import { RequestCard, useAgent } from "../agent";
 import { CaughtUp, ErrorBox, PageHead, timeOf, useAct } from "../components";
@@ -12,6 +12,7 @@ import { Icon } from "../icons";
 import { BulkBar, ListToolbar, useList } from "../list";
 import { watchAction } from "../events";
 import { actionTitle, kindLabel, ProposalCard, PROPOSAL_KEYS } from "../proposal";
+import { collapseProposals, expandProposals, proposalCollapseState, toggleProposalCollapsed } from "../proposalCollapse";
 import { Skeleton, Tabs, useTab, useToast } from "../ui";
 
 export { useProposals } from "../data";
@@ -64,6 +65,8 @@ export default function InboxPage({ me }: { me: Me }) {
     return ids.length;
   }, PROPOSAL_KEYS);
 
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
+  const { allCollapsed, allExpanded } = proposalCollapseState(collapsed, list.all);
   const groups = list.grouped ?? [["", list.visible] as [string, ProposalWithAction[]]];
   return (
     <>
@@ -86,7 +89,20 @@ export default function InboxPage({ me }: { me: Me }) {
         </section>
       )}
       <Tabs tabs={tabs} active={tab} onChange={setTab} />
-      <ListToolbar list={list} placeholder={t("Search proposals")} />
+      <ListToolbar
+        list={list}
+        placeholder={t("Search proposals")}
+        beforeGroup={
+          <>
+            <button type="button" className="ghost" disabled={allCollapsed} onClick={() => setCollapsed((c) => collapseProposals(c, list.all))}>
+              <Icon name="chevronRight" size={14} /> {t("Collapse all")}
+            </button>
+            <button type="button" className="ghost" disabled={allExpanded} onClick={() => setCollapsed((c) => expandProposals(c, list.all))}>
+              <Icon name="chevronDown" size={14} /> {t("Expand all")}
+            </button>
+          </>
+        }
+      />
       <ErrorBox error={proposals.error || bulk.error} />
       {proposals.isLoading ? (
         <div className="card">
@@ -110,7 +126,14 @@ export default function InboxPage({ me }: { me: Me }) {
                 </div>
               )}
               {items.map((p) => (
-                <ProposalCard key={p.id} proposal={p} selected={list.isSelected(p)} onSelect={() => list.toggle(p)} />
+                <ProposalCard
+                  key={p.id}
+                  proposal={p}
+                  selected={list.isSelected(p)}
+                  onSelect={() => list.toggle(p)}
+                  collapsed={collapsed.has(p.id)}
+                  onToggleCollapse={() => setCollapsed((c) => toggleProposalCollapsed(c, p.id))}
+                />
               ))}
             </Fragment>
           ))}
