@@ -306,6 +306,12 @@ async def test_a_session_ends_at_its_time_limit_and_after_a_restart(
 async def demo(tmp_path: Path):
     h = await build_demo(tmp_path)
     h.forge.set_permission(REPO, "walt", Permission.WRITE)
+    # walt, a reviewer, may run outside contributors' PRs on the service's machines
+    # here (design 2.7: by default only maintainers do).
+    h.memory.files["config/access.yaml"] = (
+        "people: {walt: {grants: {machines.outside_prs: true}}}\n"
+    )
+    await h.service.reload_access()
     app = create_app(h.service, data_dir=tmp_path, allow_dev_login=True)
     yield h, app
     await h.close()
@@ -1171,6 +1177,9 @@ async def test_a_reviews_own_reproduction_edits_the_review_posted_meanwhile(
     h.runner.on("reproduce", repro)
     pr = await h.forge.get_pr(REPO, 42)
     assert pr is not None
+    # Its author is on the team: a session nobody asked for runs only team code.
+    pr = pr.model_copy(update={"author_association": "MEMBER"})
+    h.forge.put_pr(pr)
     await h.service.bus.publish(
         Event(
             kind=EventKind.DASHBOARD_COMMAND,

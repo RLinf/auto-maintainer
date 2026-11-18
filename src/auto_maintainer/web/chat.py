@@ -35,6 +35,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from ..domain.access import Grant
 from ..domain.actions import (
     ActionKind,
     CommentUpsertPayload,
@@ -81,7 +82,10 @@ from ..playbooks.quality import assessed_quality, quick_quality
 from ..profiles.layers import ProfileError, parse_yaml
 from ..service import Service
 from .api import (
+    access_of,
     code_maintainer,
+    require_grant,
+    require_propose,
     require_view,
     review_setup,
     service_of,
@@ -512,6 +516,15 @@ def build_router() -> APIRouter:
             raise HTTPException(404, "unknown thread")
         if body.agent:
             check_agent(service, body.agent)
+        here = body.context.repo if body.context and body.context.repo else None
+        if here and service.serves(here):
+            await require_grant(service, user, here, Grant.DISCUSS, "talk with agents")
+        elif not await service.access_anywhere(user.login, Grant.DISCUSS):
+            raise HTTPException(
+                403,
+                "your role does not let you talk with agents; the service's owner or "
+                "a service admin can change that",
+            )
         base_route = service.settings.routing.get("chat")
         if base_route is None:
             raise HTTPException(500, "no chat route is configured")
@@ -547,6 +560,8 @@ def build_router() -> APIRouter:
         if page in QUEUE_PAGES or QUEUE_WORDS.search(recent):
             queue = []
             for name in repos[:10]:
+                if not (await access_of(service, user, name)).can(Grant.SEE_SCORES):
+                    continue
                 for ev in (await service.store.list_evaluations(name))[:15]:
                     queue.append(
                         f"{name}#{ev.number} [{ev.tier} {ev.total}] {ev.title} — {ev.summary}"
@@ -839,7 +854,8 @@ async def _page_block(
             )
             + ".",
         ]
-        if ev is not None:
+        scores = (await access_of(service, user, pr.repo)).can(Grant.SEE_SCORES)
+        if ev is not None and scores:
             lines.append(f"Internal evaluation: {ev.tier} ({ev.total}); {ev.summary}")
         quality = review_quality(
             await service.store.list_actions(
@@ -850,14 +866,14 @@ async def _page_block(
             ),
             await assessed_quality(service.store, pr.repo, pr.number),
         )
-        if quality is not None:
+        if quality is not None and scores:
             lines.append(
                 f"Internal quality, as the reviewing agent judged it at {quality.sha[:12]} "
                 f"by the repository's quality guide: {quality.score}/100 ({quality.band}). "
                 f"{quality.reason}".rstrip()
             )
         quick = await quick_quality(service.store, pr.repo, pr.number)
-        if quick is not None:
+        if quick is not None and scores:
             lines.append(
                 f"Internal quick quality score from the diff at {quick.sha[:12]}, before "
                 f"any review{' (the review score above is the accurate one)' if quality else ''}: "
@@ -1115,6 +1131,10 @@ async def _configure(
     if p.repo not in repos:
         return None, f"You cannot see {p.repo}, so I cannot change its settings."
     try:
+        await require_propose(service, user, p.repo)
+    except HTTPException as e:
+        return None, str(e.detail)
+    try:
         layer = parse_yaml(doc, "settings")
         _, change = await service.profiles.propose_memory_layer(
             p.repo, layer, user.login, title
@@ -1149,14 +1169,16 @@ async def _may_decide(
     service's owner (its result is only a PR on ``code_repo``, which the owner merges
     and deploys); an ``add_repo`` the right to configure that repository."""
     if req.kind == "improve":
-        if user.login == asked_by and await visible_repos(service, user):
+        if user.login == asked_by and await service.access_anywhere(
+            user.login, Grant.IMPROVE
+        ):
             return True, ""
         allowed, why = await code_maintainer(service, user)
         if allowed or user.login != asked_by:
             return allowed, why
         return False, (
-            "a member of a repository this service manages starts their own change "
-            "to the service's code; otherwise its owner does"
+            "a member of a repository this service manages whose role lets them ask "
+            "for changes to the service starts their own; otherwise its owner does"
         )
     try:
         repo = check_repo(req.text)

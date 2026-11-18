@@ -34,11 +34,28 @@ from .actuator.context import ExecContext, LabRunner
 from .actuator.executor import Actuator
 from .actuator.lab_sessions import LabSessions
 from .actuator.pipeline import ActionPipeline
-from .domain.access import ACCESS_PATH, AccessConfig, parse_access
-from .domain.actions import ActionKind, ActionStatus, MemoryChangePayload, make_action
+from .domain.access import (
+    ACCESS_PATH,
+    AccessConfig,
+    Effective,
+    Facts,
+    Grant,
+    PeopleRole,
+    ServiceUse,
+    parse_access,
+    resolve,
+)
+from .domain.actions import (
+    Action,
+    ActionKind,
+    ActionStatus,
+    MemoryChangePayload,
+    make_action,
+)
 from .domain.agents import AgentInstall, AgentLogin, AgentQuota
 from .domain.clock import Clock
 from .domain.events import Event, EventKind
+from .domain.labs import owns
 from .domain.memory import (
     MemoryChange,
     MemoryChangeState,
@@ -87,7 +104,7 @@ from .domain.settings import (
     parse_legacy_runtimes,
     parse_settings,
 )
-from .domain.snapshot import RepoInfo
+from .domain.snapshot import PrSnapshot, RepoInfo
 from .engine.bus import EventBus
 from .engine.engine import Engine
 from .engine.ledger import TokenLedger
@@ -103,6 +120,7 @@ from .playbooks.base import (
     Playbook,
     PlaybookContext,
     ServiceInfo,
+    author_is_team,
 )
 from .profiles.gate import ConfigGate, GateDecision
 from .profiles.governance import GovernanceRecords
@@ -122,6 +140,10 @@ LATEST_MAX_AGE = timedelta(hours=6)
 SIGNED_IN_SECONDS = 60
 VIEW_CACHE_SECONDS = 300
 """How long the dashboard's views reuse a repository's settings and CODEOWNERS."""
+ACCESS_SECONDS = 60.0
+"""How long a person's role and permissions are reused (``Service.access_for``): a
+change of ``config/access.yaml`` or the People record drops them at once; one on
+the forge shows within this."""
 VIEW_STALE_FACTOR = 2
 """A kept view value up to this many of its windows old is shown at once while it is
 read again behind the view (``Service.view_cached``); an older one is waited for."""
@@ -380,6 +402,8 @@ class Service:
         """The tokens each person's requests used on the service's agents."""
         if hasattr(adapters.agents, "person_limit"):
             adapters.agents.person_limit = self.over_limit
+        if hasattr(adapters.agents, "service_use"):
+            adapters.agents.service_use = self.service_use
         self.exec = ExecContext(
             store=adapters.store,
             reader=adapters.actuator_reader,
@@ -402,6 +426,7 @@ class Service:
             writer_as=self.user_writer,
             publisher_as=self.user_publisher,
             lab_progress=self.progress.lab,
+            lab_refusal=self.lab_refusal,
         )
         if adapters.lab_runner is not None and hasattr(
             adapters.lab_runner, "progress_sink"
@@ -818,6 +843,127 @@ class Service:
         self.forget_views("access")
         return None
 
+    async def access_for(
+        self, login: str, repo: str, permission: Permission | None = None
+    ) -> Effective:
+        """``login``'s role and permissions in ``repo`` (``domain/access.py:resolve``,
+        design 2.7): from their permission on the forge (``permission`` when the
+        caller read it), the configuration gate, their People record role, and who
+        owns and operates the service; kept ``ACCESS_SECONDS`` like the views."""
+
+        async def read() -> Effective:
+            perm = permission
+            if perm is None:
+                perm = await self.a.forge.get_permission(repo, login)
+            profile = await self.profiles.active(repo)
+            maintains = await self.gate.check(repo, login, profile, person=True)
+            owner = await self.service_gate(login)
+            return resolve(
+                self.access,
+                Facts(
+                    login=login,
+                    repo=repo,
+                    permission=perm,
+                    maintains=maintains.allowed,
+                    people_role=await self._people_role(repo, login),
+                    owner=owner.allowed,
+                    operator=login.lower()
+                    in {o.lower() for o in self.settings.operators},
+                ),
+            )
+
+        return await self.view_cached(
+            ("access", repo, login.lower()), read, seconds=ACCESS_SECONDS
+        )
+
+    async def _people_role(self, repo: str, login: str) -> PeopleRole | None:
+        loaded = await self.governance.load(repo)
+        if not loaded.stored or loaded.error:
+            return None
+        gov = loaded.governance
+        me = login.lower()
+        member = next((m for m in gov.members if m.login.lower() == me), None)
+        held = next((r for r in gov.roles if member and r.id == member.role), None)
+        if held is None:
+            return None
+        return PeopleRole(
+            id=held.id,
+            name=held.name,
+            maintains=held.maintains,
+            github_permission=held.github_permission,
+        )
+
+    async def access_anywhere(self, login: str, grant: Grant) -> bool:
+        """Whether ``login`` holds ``grant`` in any repository the service serves:
+        for what is not about one repository (their own agent accounts, a
+        conversation outside a repository, the service's own code)."""
+        if (await self.service_gate(login)).allowed:
+            return True
+        for record in await self.store.list_repos():
+            if (await self.access_for(login, record.repo)).can(grant):
+                return True
+        return False
+
+    async def service_use(self, login: str, repo: str | None) -> ServiceUse:
+        """What of the service's agents and model APIs ``login``'s task about
+        ``repo`` may run on (``AgentRouter.service_use``): by their role there, or
+        for a task about no repository the service serves, by their best one."""
+        if (await self.service_gate(login)).allowed:
+            return ServiceUse()
+        served = [r.repo for r in await self.store.list_repos()]
+        here = [r for r in served if repo and r.lower() == repo.lower()] or served
+        found = [await self.access_for(login, r) for r in here]
+        agents = [e for e in found if e.can(Grant.USE_AGENTS)]
+        names: list[str] | None = None
+        if agents and all(e.limits.agents is not None for e in agents):
+            names = sorted({n for e in agents for n in e.limits.agents or []})
+        return ServiceUse(
+            agents=bool(agents),
+            models=any(e.can(Grant.USE_MODELS) for e in found),
+            agent_names=names,
+        )
+
+    async def lab_refusal(self, action: Action, pr: PrSnapshot, lab: str) -> str | None:
+        """Why a session for ``action`` may not open on test machine ``lab`` (design
+        2.7), or ``None``: a person's own machine runs only their work; the
+        service's runs the work of who may use it (``Grant.USE_MACHINES``, within
+        ``Limits.machines``), and a PR from outside the team only for who may run
+        outside contributors' code there (``MACHINES_OUTSIDE_PRS``), so a session
+        nobody asked for runs only team code."""
+        machine = self.machines.get(lab)
+        if machine is None:
+            return None
+        whose = action.provenance.requested_by or action.draft_for
+        if machine.owner:
+            return None if owns(machine, whose) else f"{lab} is {machine.owner}'s own"
+        profile = await self.profiles.active(action.repo)
+        team = profile is not None and await author_is_team(self.a.forge, profile, pr)
+        if not whose:
+            if team:
+                return None
+            return (
+                f"#{pr.number} comes from outside the team, and nobody whose role "
+                "lets them run outside contributors' code on the service's test "
+                "machines asked for this session"
+            )
+        if (await self.service_gate(whose)).allowed:
+            return None
+        effective = await self.access_for(whose, action.repo)
+        if not effective.can(Grant.USE_MACHINES):
+            return f"{whose}'s role does not let them use the service's test machines"
+        if (
+            effective.limits.machines is not None
+            and lab not in effective.limits.machines
+        ):
+            return f"{lab} is not among the test machines {whose} may use"
+        if not team and not effective.can(Grant.MACHINES_OUTSIDE_PRS):
+            return (
+                f"#{pr.number} comes from outside the team, and {whose}'s role does "
+                "not let them run outside contributors' code on the service's test "
+                "machines"
+            )
+        return None
+
     async def access_gate(self, login: str, text: str) -> GateDecision:
         """Whether ``login``, a person signed in, may make ``config/access.yaml`` say
         ``text``: the owner may; a service admin may unless it changes who the
@@ -1157,7 +1303,7 @@ class Service:
             return
         # A People record or the settings may have changed who maintains or owns,
         # and a profile change what the profile page shows.
-        self.forget_views("gate", "maintainer", "service_gate", "profile")
+        self.forget_views("gate", "maintainer", "service_gate", "profile", "access")
         paths = set(event.payload.get("paths") or [])
         if paths & {SETTINGS_PATH, LEGACY_RUNTIMES_PATH, "remote"}:
             await self.reload_settings()

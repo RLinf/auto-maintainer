@@ -48,6 +48,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from ..domain.access import Grant
 from ..domain.actions import (
     ActionKind,
     ActionStatus,
@@ -82,7 +83,14 @@ from ..playbooks.review_revise import (
     task_kind_of,
 )
 from ..service import Service
-from .api import is_maintainer, service_of, shows_maintainer
+from .api import (
+    access_of,
+    is_maintainer,
+    require_grant,
+    service_of,
+    shows_maintainer,
+    takes_part,
+)
 from .auth import User, current_user
 from .chat import (
     ProposedAction,
@@ -220,6 +228,9 @@ async def talk_access(
     maintainer check as kept for views."""
     assert job.repo
     asker = str(_payload(job).get("by") or "")
+    effective = await access_of(service, user, job.repo)
+    if not effective.can(Grant.DISCUSS):
+        return "read"
     if asker and asker.lower() == user.login.lower():
         return "talk"
     me = user.login.lower()
@@ -238,6 +249,23 @@ async def talk_access(
     if await maintains(service, user, job.repo):
         return "talk"
     return "fork" if roles else "read"
+
+
+async def require_seeing(service: Service, user: User, job: Job) -> None:
+    """403 unless ``user`` may see ``job``'s conversation: theirs, a PR they review
+    or own, or others' work their role lets them see (design 2.7)."""
+    assert job.repo
+    asker = str(_payload(job).get("by") or "").lower()
+    me = user.login.lower()
+    if not asker or asker == me:
+        return
+    if job.number is not None and await takes_part(
+        service, user.login, job.repo, job.number
+    ):
+        return
+    await require_grant(
+        service, user, job.repo, Grant.SEE_OTHERS_WORK, "see others' agent work"
+    )
 
 
 async def fork_for(service: Service, user: User, job: Job) -> Job:
@@ -382,6 +410,7 @@ def build_router() -> APIRouter:
         and the draft it talks about (whether it can still change)."""
         service = service_of(request)
         job = await talk_job(service, user, job_id)
+        await require_seeing(service, user, job)
         thread = await service.store.get_thread(thread_id_of(job))
         access = await talk_access(service, user, job, live=False)
         mine = (
@@ -522,7 +551,16 @@ def build_router() -> APIRouter:
         assert job.repo
         asker = str(_payload(job).get("by") or "")
         what = "change" if job.playbook in CHANGE_TALKS else "review"
+        await require_seeing(service, user, job)
         access = await talk_access(service, user, job)
+        if access == "read" and not (await access_of(service, user, job.repo)).can(
+            Grant.DISCUSS
+        ):
+            raise HTTPException(
+                403,
+                f"your role in {job.repo} does not let you talk with agents; the "
+                "service's owner or a service admin can change that",
+            )
         if access == "read":
             # A turn can revise the draft, so it is the asker's or a maintainer's;
             # the PR's owners and reviewers talk on a copy of their own.

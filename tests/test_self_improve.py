@@ -150,8 +150,11 @@ async def test_only_the_owner_starts_a_request_its_asker_may_not(
         },
     )
     app = create_app(h.service, data_dir=tmp_path, allow_dev_login=True)
+    # eve is a guest reviewer: she talks with agents, but her role does not let her
+    # ask for changes to the service (design 2.7).
+    h.memory.files["config/access.yaml"] = "people: {eve: {role: guest_reviewer}}\n"
+    await h.service.reload_access()
     async with _client(app, "eve") as eve:
-        # eve is a member of no repository the service manages.
         thread = (await eve.post("/api/chat/threads", json={"text": "ping"})).json()
         base = f"/api/chat/threads/{thread['id']}"
         out = (await eve.post(f"{base}/messages", json={"text": "Pings?"})).json()

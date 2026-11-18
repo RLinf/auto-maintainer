@@ -32,6 +32,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from ..domain.access import Grant
 from ..domain.labs import personal_name
 from ..domain.ports import PersonalAgents
 from ..domain.settings import LabMachine, personal_machine_problems
@@ -155,6 +156,12 @@ def build_router() -> APIRouter:
         """Add or change one of the user's own test machines; the work they ask for
         uses it from now on."""
         service = service_of(request)
+        if not await service.access_anywhere(user.login, Grant.OWN_MACHINES):
+            raise HTTPException(
+                403,
+                "your role does not let you add your own test machines; the service's owner or a "
+                "service admin can change that",
+            )
         people = await _may_have_machines(service, user)
         machine = body.machine()
         problems = personal_machine_problems(name, machine)

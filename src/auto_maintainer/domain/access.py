@@ -322,6 +322,17 @@ class Facts(_Model):
     operator: bool = False
 
 
+class ServiceUse(_Model):
+    """What of the service's own a person's agent task may run on (``Grant.USE_AGENTS``,
+    ``USE_MODELS``, ``Limits.agents``); their own accounts and model APIs they may
+    always use."""
+
+    agents: bool = True
+    models: bool = True
+    agent_names: list[str] | None = None
+    """The service's agents they may use; ``None`` for every one."""
+
+
 class Effective(_Model):
     """A person's role and permissions in one repository, with where each came from."""
 

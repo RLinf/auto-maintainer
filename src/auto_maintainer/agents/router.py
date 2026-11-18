@@ -46,6 +46,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from ..domain.access import ServiceUse
 from ..domain.agents import (
     QUICK_TIMEOUT_SECONDS,
     AgentEvent,
@@ -208,6 +209,11 @@ class AgentRouter:
         provider is not used, except for the tasks of a person who runs it on their
         own account."""
         self.person_limit: Callable[[str], Awaitable[str | None]] | None = None
+        self.service_use: Callable[[str, str | None], Awaitable[ServiceUse]] | None = (
+            None
+        )
+        """What of the service's agents and model APIs a person's task may run on
+        (``Service.service_use``, design 2.7); their own they may always use."""
         """Why the person who asked for a task may not run it on the service's own
         agent accounts and model APIs now, such as a token limit they reached
         (``Service.over_limit``); ``None`` when they may. Their own accounts are
@@ -525,6 +531,10 @@ class AgentRouter:
                     return f"circuit open ({breaker.reason})"
                 breaker.open_until = None
                 breaker.invalid_streak = 0
+        if not own and task is not None and task.requested_by and self.service_use:
+            reason = await self._not_theirs(name, runtime, task)
+            if reason:
+                return reason
         if not own and task is not None and task.requested_by and self.person_limit:
             reason = await self.person_limit(str(task.requested_by))
             if reason:
@@ -540,6 +550,33 @@ class AgentRouter:
                 return f"daily run budget of {budget.daily_runs} used"
             if budget.daily_usd is not None and usd >= budget.daily_usd:
                 return f"daily budget of ${budget.daily_usd:.2f} used"
+        return None
+
+    async def _not_theirs(
+        self, name: str, runtime: AgentRuntime, task: AgentTask
+    ) -> str | None:
+        """Why the service's own ``runtime`` is not for ``task``'s requester: its
+        model API or its agent account is the service's, and their role does not let
+        them use it (design 2.7); ``None`` when it is theirs to use."""
+        assert self.service_use is not None and task.requested_by
+        who = str(task.requested_by)
+        try:
+            use = await self.service_use(who, task.repo)
+        except Exception as exc:  # unknown is not allowed: the forge may be down
+            return f"whether {who} may use the service's agents is unknown ({exc})"
+        if getattr(runtime, "provider", None) is not None:
+            if not use.models:
+                return (
+                    f"it runs on the service's model API, which {who} may not use: "
+                    "add your own under My agents"
+                )
+        elif not use.agents:
+            return (
+                f"it runs on the service's agent account, which {who} may not use: "
+                "sign your own in under My agents"
+            )
+        if use.agent_names is not None and name not in use.agent_names:
+            return f"not among the service's agents {who} may use"
         return None
 
     async def _run_structured(

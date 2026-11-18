@@ -38,7 +38,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from ..domain.access import Effective, Facts, PeopleRole, resolve
+from ..domain.access import ROLE_NAMES, Effective, Grant
 from ..domain.actions import (
     Action,
     ActionKind,
@@ -78,7 +78,7 @@ from ..domain.codeowners import (
 from ..domain.events import Event, EventKind
 from ..domain.forges import all_infos, default_forge
 from ..domain.ids import check_login, check_repo, new_id, same_commit
-from ..domain.labs import FIX_CI_SESSION, time_limit, unusable
+from ..domain.labs import FIX_CI_SESSION, owns, time_limit, unusable
 from ..domain.memory import (
     MemoryChange,
     MemoryChangeState,
@@ -119,6 +119,7 @@ from ..domain.run_ci import ci_view, latest_checks, plan_run_ci
 from ..domain.scoring import Evaluation, priority_key, recompute
 from ..domain.secrets import redact_secrets
 from ..domain.snapshot import Mergeable, PrSnapshot, PrState, ReviewEventState
+from ..playbooks.base import author_is_team
 from ..playbooks.ci_doctor import failing_checks
 from ..playbooks.evaluate import haystack, rubric_of
 from ..playbooks.hygiene import hygiene_key
@@ -898,51 +899,116 @@ async def sees_internals(service: Service, user: User) -> bool:
 
 
 async def access_of(service: Service, user: User, repo: str) -> Effective:
-    """``user``'s role and permissions in ``repo`` (``domain/access.py:resolve``,
-    design 2.7), from their permission, the configuration gate, the People record,
-    and who owns and operates the service, each read as the views read it (kept
-    ``VIEW_CHECK_SECONDS``)."""
-
-    async def read() -> Effective:
-        me = user.login.lower()
-        perm, maintains, owner, loaded = await asyncio.gather(
-            permission(service, user, repo),
-            shows_maintainer(service, user, repo),
-            shows_owner(service, user.login),
-            service.governance.load(repo),
-        )
-        people_role = None
-        if loaded.stored and not loaded.error:
-            gov = loaded.governance
-            member = next((m for m in gov.members if m.login.lower() == me), None)
-            held = (
-                next((r for r in gov.roles if r.id == member.role), None)
-                if member
-                else None
-            )
-            if held is not None:
-                people_role = PeopleRole(
-                    id=held.id,
-                    name=held.name,
-                    maintains=held.maintains,
-                    github_permission=held.github_permission,
-                )
-        return resolve(
-            service.access,
-            Facts(
-                login=user.login,
-                repo=repo,
-                permission=perm,
-                maintains=maintains,
-                people_role=people_role,
-                owner=owner.allowed,
-                operator=me in {o.lower() for o in service.settings.operators},
-            ),
-        )
-
-    return await service.view_cached(
-        ("access", repo, user.login.lower()), read, seconds=VIEW_CHECK_SECONDS
+    """``user``'s role and permissions in ``repo`` (``Service.access_for``, design
+    2.7), with their permission read as the views read it."""
+    return await service.access_for(
+        user.login, repo, await permission(service, user, repo)
     )
+
+
+async def require_grant(
+    service: Service, user: User, repo: str, grant: Grant, doing: str
+) -> Effective:
+    """403 unless ``user`` holds ``grant`` in ``repo``; ``doing`` names what they
+    tried, for the message."""
+    effective = await access_of(service, user, repo)
+    if not effective.can(grant):
+        why = effective.withheld.get(grant)
+        role = (
+            ROLE_NAMES.get(effective.role, "no role") if effective.role else "no role"
+        )
+        raise HTTPException(
+            403,
+            f"your role in {repo} ({role}) does not let you {doing}"
+            + (f": {why}" if why else "")
+            + "; the service's owner or a service admin can change that",
+        )
+    return effective
+
+
+async def require_propose(service: Service, user: User, repo: str) -> None:
+    """403 unless ``user`` may change ``repo``'s settings: its maintainers apply
+    them (the configuration gate decides that, live); anyone else proposes them to
+    the maintainers, when their role lets them (``Grant.PROPOSE``)."""
+    if await shows_maintainer(service, user, repo):
+        return
+    await require_grant(
+        service, user, repo, Grant.PROPOSE, "propose changes to its settings"
+    )
+
+
+async def takes_part(service: Service, login: str, repo: str, number: int) -> bool:
+    """Whether ``login`` reviews or owns ``repo#number`` here (``PrAssignee``)."""
+    me = login.lower()
+    return any(
+        a.login.lower() == me for a in await service.store.list_assignees(repo, number)
+    )
+
+
+async def review_refusal(
+    service: Service, user: User, repo: str, number: int
+) -> str | None:
+    """Why ``user`` may not have agents review or follow up ``repo#number``
+    (``Grant.REVIEW_ANY``, or ``REVIEW_ASSIGNED`` on a PR they review or own), or
+    ``None`` when they may."""
+    effective = await access_of(service, user, repo)
+    if effective.can(Grant.REVIEW_ANY):
+        return None
+    role = ROLE_NAMES[effective.role] if effective.role else "no role"
+    if effective.can(Grant.REVIEW_ASSIGNED):
+        if await takes_part(service, user.login, repo, number):
+            return None
+        return (
+            f"your role in {repo} ({role}) lets you have agents review only the PRs "
+            "you review or own"
+        )
+    return f"your role in {repo} ({role}) does not let you have agents review PRs"
+
+
+async def require_review(service: Service, user: User, repo: str, number: int) -> None:
+    why = await review_refusal(service, user, repo, number)
+    if why:
+        raise HTTPException(403, why)
+
+
+async def machine_refusal(
+    service: Service,
+    user: User,
+    repo: str,
+    name: str,
+    pr: PrSnapshot | None = None,
+) -> str | None:
+    """Why ``user`` may not have work on ``repo`` (its PR ``pr``) run on test machine
+    ``name``, or ``None``: their own machine needs ``Grant.OWN_MACHINES``; the
+    service's needs ``USE_MACHINES``, a place in ``Limits.machines`` when they are
+    limited, and for a PR from outside the team, ``MACHINES_OUTSIDE_PRS``."""
+    machine = service.machines.get(name)
+    if machine is None:
+        return None
+    effective = await access_of(service, user, repo)
+    role = ROLE_NAMES[effective.role] if effective.role else "no role"
+    if owns(machine, user.login):
+        if effective.can(Grant.OWN_MACHINES):
+            return None
+        return f"your role in {repo} ({role}) does not let you use your own machines"
+    if not effective.can(Grant.USE_MACHINES):
+        return (
+            f"your role in {repo} ({role}) does not let you use the service's test "
+            "machines; add your own under My machines"
+        )
+    if effective.limits.machines is not None and name not in effective.limits.machines:
+        return f"{name} is not among the test machines you may use"
+    if pr is not None and not effective.can(Grant.MACHINES_OUTSIDE_PRS):
+        profile = await service.profiles.active(repo)
+        if profile is not None and not await author_is_team(
+            service.a.forge, profile, pr
+        ):
+            return (
+                f"#{pr.number} comes from outside the team, and your role in {repo} "
+                f"({role}) does not let you run outside contributors' code on the "
+                "service's test machines"
+            )
+    return None
 
 
 def proposal_requester(proposal: Proposal, record: ActionRecord | None) -> str | None:
@@ -1376,6 +1442,7 @@ def build_router() -> APIRouter:
         service = service_of(request)
         repo = _repo(repo)
         await require_view(service, user, repo)
+        await require_propose(service, user, repo)
         try:
             layer = (
                 body.layer
@@ -1496,6 +1563,7 @@ def build_router() -> APIRouter:
             "scan": f"review every {body.every_hours}h",
             "events": "review every update",
         }[body.trigger]
+        await require_propose(service, user, repo)
         try:
             merged, change = await service.profiles.propose_memory_layer(
                 repo, layer, user.login, f"review: {what}"
@@ -1605,6 +1673,7 @@ def build_router() -> APIRouter:
             layer["review"] = review
         else:
             layer.pop("review", None)
+        await require_propose(service, user, repo)
         try:
             merged, change = await service.profiles.propose_memory_layer(
                 repo,
@@ -1719,6 +1788,7 @@ def build_router() -> APIRouter:
                 rule.pop("otherwise", None)
         policy[kind] = rule
         layer["policy"] = policy
+        await require_propose(service, user, repo)
         try:
             merged, change = await service.profiles.propose_memory_layer(
                 repo, layer, user.login, f"policy: {kind} at {body.level}"
@@ -1831,7 +1901,11 @@ def build_router() -> APIRouter:
                     permissions_of(service, name, approvers),
                 )
                 owner_rules = _OwnerRules(service, name, profile.people.codeowners)
+                # Internal scores only for who may see them (design 2.7).
+                scored = (await access_of(service, user, name)).can(Grant.SEE_SCORES)
                 for pr, cls, ev, assignees in kept:
+                    if not scored:
+                        ev = None
                     rows.append(
                         {
                             "repo": name,
@@ -1868,10 +1942,10 @@ def build_router() -> APIRouter:
                             "review_trigger": profile.review.trigger,
                             "review_activity": activity.get(pr.number, {}),
                             "quality": quality[pr.number].model_dump(mode="json")
-                            if pr.number in quality
+                            if scored and pr.number in quality
                             else None,
                             "quick_quality": quicks[pr.number].model_dump(mode="json")
-                            if pr.number in quicks
+                            if scored and pr.number in quicks
                             else None,
                         }
                     )
@@ -1945,6 +2019,9 @@ def build_router() -> APIRouter:
         targets = body.prs[:MAX_EVALUATIONS]
         for target in targets:
             await require_view(service, user, target.repo)
+            await require_grant(
+                service, user, target.repo, Grant.SCORE, "have PRs scored again"
+            )
         return await start_evaluations(
             service, user.login, [(t.repo, t.number) for t in targets], "dashboard"
         )
@@ -1961,6 +2038,9 @@ def build_router() -> APIRouter:
         targets = body.prs[:MAX_EVALUATIONS]
         for target in targets:
             await require_view(service, user, target.repo)
+            await require_grant(
+                service, user, target.repo, Grant.SCORE, "have PRs scored again"
+            )
         running = {
             (job.repo, job.number): job
             for job in await service.store.list_jobs(
@@ -2065,6 +2145,7 @@ def build_router() -> APIRouter:
             profile.comments.legacy_markers if profile else [],
             own_actions=await service.posted_as_people(repo),
         )
+        scored = (await access_of(service, user, repo)).can(Grant.SEE_SCORES)
         ev = await service.store.get_evaluation(repo, number)
         quality = review_quality(
             await service.store.list_actions(
@@ -2080,10 +2161,10 @@ def build_router() -> APIRouter:
             "own_review": await may_review_own(
                 service, user.login, repo, number, str(cls.state)
             ),
-            "evaluation": ev.model_dump(mode="json") if ev else None,
-            "quality": quality.model_dump(mode="json") if quality else None,
+            "evaluation": ev.model_dump(mode="json") if ev and scored else None,
+            "quality": quality.model_dump(mode="json") if quality and scored else None,
             "quick_quality": quick.model_dump(mode="json")
-            if (quick := await quick_quality(service.store, repo, number))
+            if scored and (quick := await quick_quality(service.store, repo, number))
             else None,
             "actions": [
                 {
@@ -2206,6 +2287,7 @@ def build_router() -> APIRouter:
         service = service_of(request)
         repo = _repo(repo)
         await require_view(service, user, repo)
+        await require_review(service, user, repo, number)
         if await service.store.get_snapshot(repo, number) is None:
             raise HTTPException(404, f"{repo}#{number} is not known yet")
         event = Event(
@@ -2824,6 +2906,7 @@ def build_router() -> APIRouter:
         service = service_of(request)
         repo = _repo(repo)
         await require_view(service, user, repo)
+        await require_grant(service, user, repo, Grant.PRIORITY, "override priorities")
         if not body.reason.strip():
             raise HTTPException(422, "an override needs a reason")
         profile = await service.profiles.active(repo)
@@ -3098,7 +3181,7 @@ def build_router() -> APIRouter:
             key = who.lower() if who else None
             row = people.setdefault(key, _usage_row(who))
             _add_usage(row, run)
-        everyone = await shows_maintainer(service, user, repo)
+        everyone = (await access_of(service, user, repo)).can(Grant.SEE_USAGE)
         rows = sorted(
             people.values(),
             key=lambda r_: -(r_["input_tokens"] + r_["output_tokens"]),
@@ -3198,7 +3281,11 @@ def build_router() -> APIRouter:
         since = service.clock.now() - timedelta(days=days)
         runs = await service.store.list_agent_runs(USAGE_RUNS, since=since)
         gate = await shows_owner(service, user.login)
-        everything = gate.allowed or user.login in service.settings.operators
+        everything = (
+            gate.allowed
+            or user.login in service.settings.operators
+            or service.access.is_admin(user.login)
+        )
         me = user.login.lower()
         people: dict[str, dict[str, Any]] = {}
         background = _usage_row(None)
@@ -3385,6 +3472,7 @@ def build_router() -> APIRouter:
         service = service_of(request)
         repo = _repo(repo)
         await require_view(service, user, repo)
+        await require_grant(service, user, repo, Grant.FIX, "have agents fix PRs")
         if body.request.strip():
             event = await start_change(
                 service, user.login, repo, number, body.request, agent=body.agent
@@ -3434,6 +3522,7 @@ def build_router() -> APIRouter:
         service = service_of(request)
         repo = _repo(repo)
         await require_view(service, user, repo)
+        await require_grant(service, user, repo, Grant.FIX, "have agents look into CI")
         profile = await service.profiles.active(repo)
         if profile is None:
             raise HTTPException(409, f"{repo} has no approved profile yet")
@@ -3480,6 +3569,7 @@ def build_router() -> APIRouter:
         service = service_of(request)
         repo = _repo(repo)
         await require_view(service, user, repo)
+        await require_grant(service, user, repo, Grant.FIX, "have agents fix CI")
         pr = await service.a.forge.get_pr(repo, number)
         if pr is None or pr.state != PrState.OPEN:
             raise HTTPException(409, f"{repo}#{number} is not open")
@@ -3497,6 +3587,10 @@ def build_router() -> APIRouter:
             machine = service.machines.get(body.lab)
             binding = profile.labs.get(body.lab) if profile else None
             why = unusable(repo, body.lab, machine, binding, user.login)
+            if not why:
+                refused = await machine_refusal(service, user, repo, body.lab, pr)
+                if refused:
+                    raise HTTPException(403, refused)
             if why or machine is None:
                 raise HTTPException(
                     409, why or f"there is no test machine {body.lab!r}"
@@ -3569,6 +3663,19 @@ def build_router() -> APIRouter:
         service = service_of(request)
         repo = _repo(repo)
         await require_view(service, user, repo)
+        if body.lab:
+            pr = await service.store.get_snapshot(repo, number)
+            refused = await machine_refusal(service, user, repo, body.lab, pr)
+            if refused:
+                raise HTTPException(403, refused)
+        else:
+            await require_grant(
+                service,
+                user,
+                repo,
+                Grant.USE_MACHINES,
+                "use the service's test machines",
+            )
         event = Event(
             kind=EventKind.DASHBOARD_COMMAND,
             repo=repo,
@@ -3600,6 +3707,7 @@ def build_router() -> APIRouter:
         code_visible: bool | None = None
         code_allowed: bool | None = None
         maintains: dict[str, bool] = {}
+        others: dict[str, bool] = {}
         # The PRs the user owns, per repository: they change others' drafts there.
         owned: dict[str, set[int]] = {}
         me = user.login.lower()
@@ -3641,6 +3749,14 @@ def build_router() -> APIRouter:
                 can_edit = can_decide or (
                     record is not None and record.action.number in owned[p.repo]
                 )
+                if not (can_decide or can_edit):
+                    # Others' drafts only for who may see others' work there.
+                    if p.repo not in others:
+                        others[p.repo] = (await access_of(service, user, p.repo)).can(
+                            Grant.SEE_OTHERS_WORK
+                        )
+                    if not others[p.repo]:
+                        continue
             out.append(
                 {
                     **p.model_dump(mode="json"),
@@ -4175,10 +4291,20 @@ def build_router() -> APIRouter:
         visible = set(await visible_repos(service, user))
         if repo:
             await require_view(service, user, repo)
+        # The audit log for who may see it there (design 2.7); entries outside any
+        # repository for who may see it anywhere.
+        allowed = {
+            r
+            for r in visible
+            if (await access_of(service, user, r)).can(Grant.SEE_AUDIT)
+        }
+        if repo and repo not in allowed:
+            raise HTTPException(403, f"your role in {repo} does not show its audit log")
+        anywhere = bool(allowed) or (await shows_owner(service, user.login)).allowed
         return [
             a.model_dump(mode="json")
             for a in await service.store.list_audit(repo)
-            if a.repo is None or a.repo in visible
+            if (a.repo is None and anywhere) or a.repo in allowed
         ]
 
     @r.post("/pause")
@@ -4357,9 +4483,12 @@ async def _request_review(
     their own, whatever others' reviews cover (``may_review_own``); it joins only
     their own review in progress.
     """
+    out: dict[str, Any] = {"repo": repo, "number": number}
+    refused = await review_refusal(service, user, repo, number)
+    if refused:
+        return {**out, "run": "skip", "reason": refused}
     pr = await service.store.get_snapshot(repo, number)
     profile = await service.profiles.active(repo)
-    out: dict[str, Any] = {"repo": repo, "number": number}
     if pr is None or profile is None:
         return {
             **out,

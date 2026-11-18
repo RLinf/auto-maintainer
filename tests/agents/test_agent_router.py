@@ -466,6 +466,34 @@ async def test_a_person_over_their_token_limit_gets_no_service_agent() -> None:
     assert "a" not in router.breakers or not router.breakers["a"].open_until
 
 
+async def test_a_person_without_the_services_agents_runs_on_their_own_only() -> None:
+    """A guest reviewer's tasks run on their own agent accounts (design 2.7): the
+    service's are refused them, with why, and their own goes on."""
+    from auto_maintainer.domain.access import ServiceUse
+
+    async def use(login: str, repo: str | None) -> ServiceUse:
+        return (
+            ServiceUse(agents=False, models=False) if login != "owner" else ServiceUse()
+        )
+
+    a = _own("a", [])
+    b = _own("b", [])
+    a.default = b.default = {"ok": True}
+    router, _ = _router(a, b)
+    router.people = _People()  # type: ignore[assignment]
+    router.service_use = use
+    route = Route(primary="a", fallback=["b"])
+    refused = await router.run(_task(requested_by="walt"), route, Verdict)
+    assert not refused.ok and not a.tasks and not b.tasks
+    assert "the service's agent account, which walt may not use" in (
+        refused.error or ""
+    )
+    mine = await router.run(_task(requested_by="maria"), route, Verdict)
+    assert mine.ok and mine.runtime == "b", "her own account of b"
+    assert (await router.run(_task(), route, Verdict)).ok, "the service's own work"
+    assert (await router.run(_task(requested_by="owner"), route, Verdict)).ok
+
+
 async def test_quick_tasks_run_on_an_agents_quick_model() -> None:
     """The service settings' ``quick_model`` takes triage, scores, and other short
     answers, unless the route names a model; other work keeps the agent's model."""

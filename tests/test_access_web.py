@@ -110,3 +110,102 @@ async def maria_blocks(app: Any, login: str) -> None:
             json={"text": f"admins: [walt]\npeople:\n  {login}: {{role: blocked}}\n"},
         )
         assert out.json()["applied"], out.text
+
+
+async def test_a_guest_reviewer_uses_their_own_and_sees_their_own(
+    tmp_path: Path,
+) -> None:
+    """A guest reviewer (design 2.7: a People record role without write access) has
+    the PRs they review reviewed, on their own agents and machines; the service's
+    machines, internal scores, the audit log, and others' drafts are not theirs."""
+    from auto_maintainer.domain.records import PrAssignee
+    from auto_maintainer.profiles.governance import governance_path
+
+    h = await build_demo(tmp_path)
+    try:
+        h.memory.files[governance_path(DEMO_REPO)] = (
+            "schema: 1\nestablished: true\n"
+            "roles: [{id: contributor, name: Contributor, level: 1}]\n"
+            "members: [{login: gina, role: contributor}]\n"
+        )
+        h.forge.set_permission(DEMO_REPO, "gina", Permission.READ)
+        await h.store.add_assignee(
+            PrAssignee(repo=DEMO_REPO, number=43, login="gina", by="maria")
+        )
+        app = create_app(h.service, data_dir=tmp_path, allow_dev_login=True)
+        async with _as(app, "maria") as maria:
+            await maria.post(f"/api/prs/{DEMO_REPO}/42/review", json={})
+        await h.settle()
+        async with _as(app, "gina") as gina:
+            [mine] = (await gina.get("/api/access/me")).json()["repos"]
+            assert (
+                mine["role"] == "guest_reviewer"
+                and "People record" in mine["role_from"]
+            )
+            other = (await gina.post(f"/api/prs/{DEMO_REPO}/42/review", json={})).json()
+            assert other["run"] == "skip" and "you review or own" in other["reason"]
+            hers = (await gina.post(f"/api/prs/{DEMO_REPO}/43/review", json={})).json()
+            assert hers["run"] != "skip" or "role" not in hers["reason"], hers
+            offered = (await gina.get(f"/api/labs?repo={DEMO_REPO}")).json()
+            assert "gpu-01" not in {m["name"] for m in offered["machines"]}
+            refused = await gina.post(
+                f"/api/prs/{DEMO_REPO}/43/reproduce", json={"lab": "gpu-01"}
+            )
+            assert refused.status_code == 403 and "My machines" in refused.text
+            rows = (await gina.get(f"/api/prs?repo={DEMO_REPO}")).json()
+            assert rows and all(
+                r["tier"] is None and r["quality"] is None for r in rows
+            )
+            assert (await gina.get(f"/api/audit?repo={DEMO_REPO}")).status_code == 403
+            drafts = (await gina.get("/api/proposals")).json()
+            assert not [p for p in drafts if p.get("requester") == "maria"]
+            assert (
+                await gina.post(
+                    f"/api/prs/{DEMO_REPO}/43/override",
+                    json={"tier": "P0", "reason": "mine"},
+                )
+            ).status_code == 403
+    finally:
+        await h.close()
+
+
+async def test_the_services_machines_run_outside_code_only_for_who_may(
+    tmp_path: Path,
+) -> None:
+    """A session on the service's test machine (design 2.7) runs an outside
+    contributor's PR only for a person whose role lets them; one nobody asked for runs
+    only team code."""
+    from auto_maintainer.domain.actions import (
+        ActionKind,
+        LabReproducePayload,
+        make_action,
+    )
+
+    h = await build_demo(tmp_path)
+    try:
+        h.forge.set_permission(DEMO_REPO, "walt", Permission.WRITE)
+        outside = await h.forge.get_pr(DEMO_REPO, 42)
+        assert outside is not None
+        team = outside.model_copy(update={"author_association": "MEMBER"})
+
+        def session(by: str | None) -> Any:
+            action = make_action(
+                ActionKind.LAB_REVIEW,
+                DEMO_REPO,
+                LabReproducePayload(lab="gpu-01", summary="s", sides=["head"]),
+                number=42,
+                head_sha=outside.head_sha,
+                discriminator=f"t:{by}",
+            )
+            action.provenance.requested_by = by
+            return action
+
+        nobody = await h.service.lab_refusal(session(None), outside, "gpu-01")
+        assert nobody and "nobody" in nobody
+        assert await h.service.lab_refusal(session(None), team, "gpu-01") is None
+        assert await h.service.lab_refusal(session("maria"), outside, "gpu-01") is None
+        reviewer = await h.service.lab_refusal(session("walt"), outside, "gpu-01")
+        assert reviewer and "outside the team" in reviewer
+        assert await h.service.lab_refusal(session("walt"), team, "gpu-01") is None
+    finally:
+        await h.close()

@@ -659,6 +659,11 @@ async def _lab_reproduce(
     if x.labs is None or x.workspace is None:
         raise RuntimeError("no test machines are configured")
     p = LabReproducePayload.model_validate(action.payload)
+    if x.lab_refusal is not None:
+        why = await x.lab_refusal(action, pr, p.lab)
+        if why:
+            # The agent goes on without the machine, and says why.
+            return {"refused": why}
     info = await x.reader.get_repo(action.repo)
     workdir = await x.workspace.prepare(
         action.repo, pr.number, pr.head_sha, info.default_branch

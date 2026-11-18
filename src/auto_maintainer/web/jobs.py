@@ -30,10 +30,11 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
+from ..domain.access import Grant
 from ..domain.actions import ActionKind, Proposal, ProposalState
 from ..domain.agents import AgentQuestion, QuestionState
 from ..domain.events import Event, EventKind
-from ..domain.labs import offered, unusable
+from ..domain.labs import offered, owns, unusable
 from ..domain.memory import profile_path
 from ..domain.permissions import Permission
 from ..domain.profile import LabBinding
@@ -43,8 +44,12 @@ from ..domain.snapshot import PrSnapshot
 from ..profiles.layers import ProfileError, parse_yaml
 from ..service import Service
 from .api import (
+    access_of,
+    machine_refusal,
     may_view,
     repo_param,
+    require_grant,
+    require_propose,
     require_view,
     sees_internals,
     service_of,
@@ -390,9 +395,19 @@ def build_router() -> APIRouter:
         profile = await service.profiles.active(repo)
         gate = await shows_gate(service, user, repo, profile) if profile else None
         internals = await sees_internals(service, user)
+        effective = await access_of(service, user, repo)
         out = []
         for name in offered(service.machines, repo, user.login):
             machine = service.machines[name]
+            if not owns(machine, user.login) and (
+                not effective.can(Grant.USE_MACHINES)
+                or (
+                    effective.limits.machines is not None
+                    and name not in effective.limits.machines
+                )
+            ):
+                # The service's machines are offered only to who may use them.
+                continue
             binding = profile.labs.get(name) if profile else None
             out.append(
                 {
@@ -468,6 +483,7 @@ def build_router() -> APIRouter:
         labs[lab] = entry
         layer["labs"] = labs
         what = f"labs: {'use' if body.use else 'stop using'} {lab}"
+        await require_propose(service, user, repo)
         try:
             merged, change = await service.profiles.propose_memory_layer(
                 repo, layer, user.login, what
@@ -515,6 +531,10 @@ def build_router() -> APIRouter:
         pr = await service.store.get_snapshot(repo, number)
         if pr is None:
             raise HTTPException(404, f"{repo}#{number} is not known yet")
+        await require_grant(service, user, repo, Grant.FIX, "have PRs reproduced")
+        refused = await machine_refusal(service, user, repo, body.lab, pr)
+        if refused:
+            raise HTTPException(403, refused)
         event = Event(
             kind=EventKind.DASHBOARD_COMMAND,
             repo=repo,
@@ -562,6 +582,12 @@ def build_router() -> APIRouter:
             tuple(sorted(visible)),
         )
 
+        # Others' work shows only where the user's role lets them see it.
+        others = {
+            r: (await access_of(service, user, r)).can(Grant.SEE_OTHERS_WORK)
+            for r in visible
+        }
+
         async def compute() -> list[dict[str, Any]]:
             code_repo = service.settings.code_repo if repo is None else None
             code_visible: bool | None = None
@@ -599,6 +625,12 @@ def build_router() -> APIRouter:
                     continue
                 by = (_payload(job).get("by") or "").lower()
                 if not everyone and by != user.login.lower():
+                    continue
+                if (
+                    by != user.login.lower()
+                    and job.repo in others
+                    and not others[job.repo]
+                ):
                     continue
                 if (
                     job.playbook == "quick_quality"
@@ -652,6 +684,11 @@ def build_router() -> APIRouter:
     ) -> dict[str, Any]:
         service = service_of(request)
         job = await _job(service, user, job_id)
+        by = (_payload(job).get("by") or "").lower()
+        if job.repo and by and by != user.login.lower() and service.serves(job.repo):
+            await require_grant(
+                service, user, job.repo, Grant.SEE_OTHERS_WORK, "see others' agent work"
+            )
         return await job_view(service, job, steps=True, me=user.login)
 
     @r.post("/jobs/{job_id}/stop")

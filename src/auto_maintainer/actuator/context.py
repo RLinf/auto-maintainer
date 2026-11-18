@@ -126,6 +126,11 @@ class ExecContext:
     ) = None
     """Shows what a run on a test machine is doing on the job that asked for it:
     (job id, repository, PR, machine, progress)."""
+    lab_refusal: Callable[[Action, PrSnapshot, str], Awaitable[str | None]] | None = (
+        None
+    )
+    """Why a session for ``action`` on the PR may not open on a machine
+    (``Service.lab_refusal``, design 2.7), or ``None`` when it may."""
     """Held while the memory gate stages or merges a change: an approval on the
     dashboard and the action that saved the change can reach the gate at once."""
 

@@ -85,6 +85,7 @@ from .api import (
     _repo,
     is_maintainer,
     permissions_of,
+    require_propose,
     require_view,
     service_of,
     shows_maintainer,
@@ -428,6 +429,7 @@ async def _save_layer(
         await service.a.memory.read_text(profile_path(repo)) or "", "settings"
     )
     change(layer)
+    await require_propose(service, user, repo)
     try:
         merged, memory_change = await service.profiles.propose_memory_layer(
             repo, layer, user.login, summary

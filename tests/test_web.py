@@ -387,6 +387,15 @@ async def test_approve_and_edit_a_proposal(demo) -> None:
 async def test_override_requires_reason_and_starts_calibration(demo) -> None:
     h, app = demo
     async with _client(app, "walt") as walt:
+        refused = await walt.post(
+            "/api/prs/acme/widget/43/override", json={"tier": "P0", "reason": "x"}
+        )
+        assert refused.status_code == 403, "a reviewer's role does not override"
+    h.memory.files["config/access.yaml"] = (
+        "people: {walt: {grants: {priority.override: true}}}\n"
+    )
+    await h.service.reload_access()
+    async with _client(app, "walt") as walt:
         assert (
             await walt.post(
                 "/api/prs/acme/widget/43/override", json={"tier": "P0", "reason": " "}

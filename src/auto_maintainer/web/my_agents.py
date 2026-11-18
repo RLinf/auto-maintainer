@@ -36,6 +36,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from ..domain.access import Grant
 from ..domain.agents import AgentLogin, PersonalAgent
 from ..domain.ports import PersonalAgents
 from ..domain.settings import PROVIDER_PROTOCOLS, REASONING_LEVELS, protocol_for
@@ -168,6 +169,12 @@ def build_router() -> APIRouter:
         whether it runs on their CLI sign-in or on one of their own model APIs, with
         which model and reasoning level."""
         service = service_of(request)
+        if not await service.access_anywhere(user.login, Grant.OWN_AGENTS):
+            raise HTTPException(
+                403,
+                "your role does not let you use your own agent accounts; the service's owner or a "
+                "service admin can change that",
+            )
         _ready(service, name)
         people = _people(service)
         if body.use_own and not service.agents_isolated(name):
@@ -225,6 +232,12 @@ def build_router() -> APIRouter:
         is stored apart, for the runs of the user's own tasks only, and never sent
         back."""
         service = service_of(request)
+        if not await service.access_anywhere(user.login, Grant.OWN_MODELS):
+            raise HTTPException(
+                403,
+                "your role does not let you add your own model APIs; the service's owner or a "
+                "service admin can change that",
+            )
         people = _people(service)
         try:
             provider = body.model_copy(update={"api_key": None}).provider()
@@ -297,6 +310,12 @@ def build_router() -> APIRouter:
         """Start agent ``name``'s own sign-in for the user's own account, to the
         account kind ``option`` where the CLI offers several."""
         service = service_of(request)
+        if not await service.access_anywhere(user.login, Grant.OWN_AGENTS):
+            raise HTTPException(
+                403,
+                "your role does not let you sign your own agent accounts in; the service's owner or a "
+                "service admin can change that",
+            )
         _ready(service, name)
         try:
             state = service.start_login(

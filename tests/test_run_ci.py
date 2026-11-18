@@ -126,7 +126,11 @@ async def test_pressing_run_ci_adds_the_gate_then_reruns_what_failed(demo) -> No
         await walt.post(f"/api/prs/{REPO}/43/ci")
         await h.settle()
         assert len(h.forge.writes_of("rerun_failed_jobs")) == 1
-        audit = (await walt.get(f"/api/audit?repo={REPO}")).json()
+        assert (await walt.get(f"/api/audit?repo={REPO}")).status_code == 403, (
+            "a reviewer does not see the audit log"
+        )
+    async with _as(app, "maria") as maria:
+        audit = (await maria.get(f"/api/audit?repo={REPO}")).json()
         assert any(a["actor"] == "walt" and "approved" in a["summary"] for a in audit)
 
 
