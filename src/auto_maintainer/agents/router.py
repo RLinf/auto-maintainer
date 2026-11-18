@@ -764,6 +764,9 @@ class AgentRouter:
             runtime.name,
             AgentEvent(
                 type=AgentEventType.FINAL,
+                # What the agent answered in full, for the job's watchers and the
+                # draft it wrote (``JobStep.output``).
+                text=result.text,
                 result=result.model_copy(update={"error": scrub(result.error or "")}),
             ),
         )

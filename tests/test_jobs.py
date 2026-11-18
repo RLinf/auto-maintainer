@@ -96,7 +96,7 @@ def test_a_final_message_is_kept_apart_from_the_error() -> None:
     step = step_from_event(
         AgentEvent(
             type=AgentEventType.FINAL,
-            text="The null check is wrong. " + secret + " " + "x" * 9000,
+            text="The null check is wrong. " + secret + " " + "x" * FINAL_OUTPUT_LIMIT,
             result=AgentResult(runtime="codex", ok=False, error="stopped early"),
         ),
         "codex",
@@ -119,7 +119,9 @@ async def test_the_router_reports_each_attempt_and_survives_its_observer() -> No
                 _tool("Read", file_path="src/loader.py"),
                 AgentEvent(
                     type=AgentEventType.FINAL,
-                    result=AgentResult(runtime="a", ok=True, text="done"),
+                    result=AgentResult(
+                        runtime="a", ok=True, text=f"Found two problems. {secret}"
+                    ),
                 ),
             ]
         ],
@@ -142,6 +144,9 @@ async def test_the_router_reports_each_attempt_and_survives_its_observer() -> No
         AgentEventType.FINAL,
     ]
     assert secret not in seen[1][1].text
+    # The whole answer reaches the job's steps, scrubbed like the rest.
+    assert seen[-1][1].text.startswith("Found two problems.")
+    assert secret not in seen[-1][1].text
 
 
 # -- the job view --------------------------------------------------------------------
@@ -173,10 +178,10 @@ async def test_the_requester_follows_their_review_step_by_step(demo) -> None:
         )
         assert "tool" in kinds[start:] and kinds[-1] == "done"
         assert any("pytest" in s["detail"] for s in job["steps"])
-        # What the agent said when it finished shows with the job, and on the job
-        # alone: the review card reads it from there rather than the step list.
-        assert mine["final"] == job["final"]
-        assert "steps" not in mine and job["final"]
+        # What the agent said when it finished shows on the job's own view, where
+        # the review card reads it; lists, which never show it, leave it out.
+        assert job["final"] and mine["final"] is None
+        assert "steps" not in mine
     async with _as(app, "walt") as walt:
         assert (await walt.get("/api/work")).json() == []
         everyone = (await walt.get("/api/work?everyone=true")).json()
@@ -423,3 +428,20 @@ async def test_background_hygiene_jobs_do_not_hide_recent_agent_work(demo) -> No
     async with _as(app, "maria") as maria:
         work = (await maria.get("/api/work")).json()
     assert [j["id"] for j in work] == ["job_real_review"]
+
+
+def test_a_reviews_final_output_is_the_reviewers_not_its_verifiers() -> None:
+    from auto_maintainer.domain.progress import JobStep
+    from auto_maintainer.web.jobs import final_output
+
+    def done(kind: str, output: str) -> JobStep:
+        return JobStep(kind="done", ok=True, task_kind=kind, output=output)
+
+    steps = [
+        done("review", '{"findings": [], "summary": "first try"}'),
+        done("review", '{"findings": [1], "summary": "again"}'),
+        done("verify", '{"verdicts": []}'),
+    ]
+    assert final_output(steps, "review") == '{"findings": [1], "summary": "again"}'
+    assert final_output(steps[2:], "review") == '{"verdicts": []}', "nothing else"
+    assert final_output([done("fix", "")], "fix") is None

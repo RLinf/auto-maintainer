@@ -2,7 +2,7 @@
 // color alone), times, diffs, empty and error states, and mutation helpers.
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { forwardRef, useEffect, useLayoutEffect, useRef, useState, type ReactNode, type TextareaHTMLAttributes } from "react";
+import { forwardRef, Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type TextareaHTMLAttributes } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { api, ApiError, type QualityBand, type QuickQuality, type ReviewQuality } from "./api";
 import { REVIEW_STATES } from "./data";
@@ -537,7 +537,76 @@ export function StopButton({ url, onStopped }: { url: string; onStopped?: () => 
 
 /** What an agent said when it finished a job, drawn in a box of its own: a bounded
  * height with its own scroll, so a long message never stretches the page it sits on
- * (design 5.13). ``className`` cannot be given here: the box is always ``final-body``. */
+ * (design 5.13). ``className`` cannot be given here: the box is always ``final-body``.
+ * An answer in JSON (a review's: every finding, its summary and scores) shows as
+ * labeled fields, and as written on request. */
 export function FinalText({ text }: { text: string }) {
-  return <Markdown text={text} className="posted final-body" />;
+  const t = useT();
+  const value = useMemo(() => jsonIn(text), [text]);
+  const [raw, setRaw] = useState(false);
+  if (value === undefined) return <Markdown text={text} className="posted final-body" />;
+  return (
+    <div className="stack" style={{ gap: 4 }}>
+      <div className="md posted final-body final-json">
+        {raw ? <pre className="mono small final-json-raw">{JSON.stringify(value, null, 2)}</pre> : <JsonValue value={value} />}
+      </div>
+      <button className="ghost sm" style={{ alignSelf: "flex-start" }} onClick={() => setRaw(!raw)}>
+        <Icon name="list" size={13} />
+        {raw ? t("Readable") : t("Raw JSON")}
+      </button>
+    </div>
+  );
+}
+
+/** The object or list ``text`` holds as JSON, maybe inside a ```json fence; else
+ * ``undefined``. */
+function jsonIn(text: string): object | undefined {
+  const body = text
+    .trim()
+    .replace(/^```(?:json)?\s*/, "")
+    .replace(/\s*```$/, "");
+  if (!/^[[{]/.test(body)) return undefined;
+  try {
+    const value: unknown = JSON.parse(body);
+    return value !== null && typeof value === "object" ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function blank(v: unknown): boolean {
+  return v === null || v === undefined || v === "" || (Array.isArray(v) && !v.length) || (typeof v === "object" && v !== null && !Object.keys(v).length);
+}
+
+function JsonValue({ value }: { value: unknown }) {
+  if (value === null || value === undefined || value === "") return <span className="muted">—</span>;
+  if (typeof value === "string") return value.includes("\n") || value.length > 120 ? <Markdown text={value} className="final-json-text" /> : <span>{value}</span>;
+  if (typeof value !== "object") return <span className="mono">{String(value)}</span>;
+  if (Array.isArray(value)) {
+    if (!value.length) return <span className="muted">—</span>;
+    return (
+      <ol className="final-json-list">
+        {value.map((v, i) => (
+          <li key={i}>
+            <JsonValue value={v} />
+          </li>
+        ))}
+      </ol>
+    );
+  }
+  // Fields the agent left empty show only as written (``Raw JSON``).
+  const entries = Object.entries(value as Record<string, unknown>).filter(([, v]) => !blank(v));
+  if (!entries.length) return <span className="muted">—</span>;
+  return (
+    <dl className="final-json-fields">
+      {entries.map(([k, v]) => (
+        <Fragment key={k}>
+          <dt>{k}</dt>
+          <dd>
+            <JsonValue value={v} />
+          </dd>
+        </Fragment>
+      ))}
+    </dl>
+  );
 }

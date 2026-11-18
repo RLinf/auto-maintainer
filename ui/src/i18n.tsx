@@ -553,6 +553,8 @@ const zh: Record<string, string> = {
   "Hash": "哈希",
   "Health checks": "健康检查",
   "Hide": "隐藏",
+  "Raw JSON": "原始 JSON",
+  "Readable": "易读格式",
   "Full review": "完整评审",
   "Full review requested": "已请求完整评审",
   "The whole PR again, not only what changed since its last review": "重新评审整个 PR，而不只是上次评审后的改动",

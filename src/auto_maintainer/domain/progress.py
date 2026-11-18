@@ -45,9 +45,10 @@ StepKind = Literal[
 """``output`` is the live output of a run on a test machine: ``text`` names it,
 ``detail`` holds its newest lines."""
 
-FINAL_OUTPUT_LIMIT = 8000
-"""Characters kept of an agent's final message: enough for its reasoning, bounded so a
-job's saved steps stay small."""
+FINAL_OUTPUT_LIMIT = 40_000
+"""Characters kept of an agent's final message: a review's whole answer (every
+finding, its summary and scores) runs to some 25,000; bounded so a job's saved steps
+stay small. Only one job's own view carries it (``web/jobs.py:final_output``)."""
 
 _INPUT_KEYS = (
     "command",

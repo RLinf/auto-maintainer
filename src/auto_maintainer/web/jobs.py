@@ -33,7 +33,7 @@ from pydantic import BaseModel, Field
 
 from ..domain.access import Grant
 from ..domain.actions import ActionKind, Proposal, ProposalState
-from ..domain.agents import AgentQuestion, QuestionState
+from ..domain.agents import AgentQuestion, QuestionState, TaskKind
 from ..domain.events import Event, EventKind
 from ..domain.labs import offered, owns, unusable
 from ..domain.memory import profile_path
@@ -210,10 +210,7 @@ async def job_view(
         else await service.progress.steps(job.id)
     )
     ran = next((s.runtime for s in found if s.kind == "start"), None)
-    # What the agent said when it finished; a job run again keeps its newest run's.
-    final = next(
-        (s.output for s in reversed(found) if s.kind == "done" and s.output), None
-    )
+    final = final_output(found, job.playbook) if steps else None
     questions = (
         batch.questions_by_job.get(job.id, [])
         if batch is not None
@@ -316,6 +313,20 @@ def personal(shared: dict[str, Any], me: str) -> dict[str, Any]:
     out["mine"] = bool(shared.get("by") and str(shared["by"]).lower() == me_)
     out["questions_for_me"] = sum(1 for a in shared.get("_asked", []) if a in ("", me_))
     return out
+
+
+def final_output(steps: list[JobStep], playbook: str) -> str | None:
+    """What the agent answered when it finished the job's own task: a review's whole
+    answer, not its verifier's verdicts after it; a job run again shows its newest
+    run's. Only a job's own view carries it: it runs to tens of thousands of
+    characters, and lists never show it."""
+    said = [s for s in steps if s.kind == "done" and s.output]
+    main = (
+        [s for s in said if s.task_kind == playbook]
+        or [s for s in said if s.task_kind != TaskKind.VERIFY]
+        or said
+    )
+    return main[-1].output if main else None
 
 
 JOB_VIEW_SECONDS = 1.0
