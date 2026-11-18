@@ -613,9 +613,6 @@ class QualityPlaybook(Playbook):
             pr.repo, pr.number, head, info.default_branch
         )
         try:
-            diff = await ctx.workspace.diff(
-                workdir, f"origin/{info.default_branch}", head
-            )
             lessons = await ctx.knowledge.review_lessons(pr.repo, profile)
             prompt = "\n\n".join(
                 part
@@ -630,7 +627,8 @@ class QualityPlaybook(Playbook):
                         json.dumps(_review_data(review), ensure_ascii=False, indent=1),
                         40_000,
                     ),
-                    pr_block(pr, diff),
+                    pr_block(pr)
+                    + f"\n\nThe change: `git diff origin/{info.default_branch}...HEAD`.",
                     schema_hint(QualityVerdict.model_json_schema()),
                 ]
                 if part

@@ -64,7 +64,7 @@ from ..playbooks.fix import (
 )
 from ..playbooks.merge_base import only_files
 from ..playbooks.person_notes import load_notes, notes_block, remember_said
-from ..playbooks.prompts import pr_block, review_skill_block, schema_hint, untrusted
+from ..playbooks.prompts import forge_note, schema_hint, untrusted
 from ..service import Service
 from .auth import User
 from .chat import keep_session, stopped_message, turn_route
@@ -284,13 +284,6 @@ async def fix_turn(
     workdir = await _checkout(
         service, thread, job.repo, job.number, info.default_branch, base, patch
     )
-    diff = (
-        await service.a.workspace.diff(
-            workdir, f"origin/{info.default_branch}", pr.head_sha
-        )
-        if pr is not None
-        else ""
-    )
     request = "\n\n".join(
         part
         for part in [
@@ -349,8 +342,7 @@ async def fix_turn(
             + untrusted("fix.diff", patch, FIX_DIFF_LIMIT)
             if patch
             else "",
-            review_skill_block(profile, service.info.skills_dir, workdir),
-            pr_block(pr, diff, diff_limit=FIX_DIFF_LIMIT) if pr is not None else "",
+            forge_note(pr) if pr is not None else "",
             notes_block(await load_notes(service.store, user.login), "conversations"),
             reading_line(user.login) if door is not None else "",
             f"Answer the newest message, from {user.login}, above.",

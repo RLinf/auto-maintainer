@@ -42,7 +42,7 @@ from auto_maintainer.playbooks.quality import (
     quick_misses,
     quick_quality,
 )
-from auto_maintainer.testing.fakes import make_pr
+from auto_maintainer.testing.fakes import make_pr, report
 from auto_maintainer.testing.harness import Harness
 
 REPO = "acme/widget"
@@ -58,8 +58,14 @@ def _review(quality: dict | None) -> dict:
     }
 
 
-async def _reviewed(tmp_path: Path, quality: dict | None, layer=None) -> Harness:
+async def _reviewed(
+    tmp_path: Path, quality: dict | None, layer=None, *, in_prose: bool = False
+) -> Harness:
+    """A PR reviewed for maria; ``in_prose``: the agent ends with its skill's report
+    and fills in the form after."""
     h = await Harness.create(tmp_path, layer=layer)
+    if in_prose:
+        h.runner.on("form", lambda t: _review(quality))
     h.runner.on("triage", lambda t: {"summary": "s", "labels": []})
     h.runner.on(
         "evaluate",
@@ -73,6 +79,8 @@ async def _reviewed(tmp_path: Path, quality: dict | None, layer=None) -> Harness
                 "reason": "Sound, but the loader change is in the wrong layer.",
             }
             if SCORING in t.prompt
+            else report()
+            if in_prose
             else _review(quality)
         ),
     )
@@ -112,13 +120,17 @@ async def test_the_review_scores_quality_by_the_guides_it_is_given(
     tmp_path: Path,
 ) -> None:
     layer = {"review": {"writing_guide": "Two sentences at most, no code."}}
-    h = await _reviewed(tmp_path, {"score": 91, "reason": "Fits the design."}, layer)
+    h = await _reviewed(
+        tmp_path, {"score": 91, "reason": "Fits the design."}, layer, in_prose=True
+    )
     try:
         [task] = [t for t in h.runner.tasks if str(t.kind) == "review"]
         assert "Two sentences at most, no code." in task.prompt
         assert DEFAULT_WRITING_GUIDE not in task.prompt, "the repository's guide wins"
-        assert DEFAULT_QUALITY_GUIDE in task.prompt
-        assert "en (English), zh (Simplified Chinese)" in task.prompt
+        assert DEFAULT_QUALITY_GUIDE not in task.prompt, "the review is the skill's"
+        [form] = [t for t in h.runner.tasks if str(t.kind) == "form"]
+        assert DEFAULT_QUALITY_GUIDE in form.prompt, "scored once the review is written"
+        assert "en (English), zh (Simplified Chinese)" in form.prompt
         q = await _quality(h)
         assert q is not None and (q.score, q.band, q.rescored) == (
             91,
@@ -428,7 +440,7 @@ async def test_quick_scores_learn_from_reviews_that_disagree(tmp_path: Path) -> 
         "review",
         lambda t: _review(
             {
-                "score": 86 if "PR: #45" in t.prompt else 55,
+                "score": 86 if "PR #45 in" in t.prompt else 55,
                 "reason": "Touches shared worker code with no tests.",
             }
         ),

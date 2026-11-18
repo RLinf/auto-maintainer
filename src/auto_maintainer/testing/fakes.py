@@ -1118,6 +1118,12 @@ class RecordingNotifier:
         self.sent.append((channel, text, event))
 
 
+def report(text: str = "# Review\n\nNo findings.") -> AgentResult:
+    """A review agent's answer as its skill's report, in prose: the playbook then has
+    the agent fill in the review's form (``TaskKind.FORM``)."""
+    return AgentResult(runtime="scripted", ok=True, text=text, session="session-1")
+
+
 def make_pr(
     repo: str = "acme/widget", number: int = 42, sha: str = "a" * 40, **kwargs: Any
 ) -> PrSnapshot:

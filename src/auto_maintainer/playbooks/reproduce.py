@@ -63,7 +63,7 @@ from ..domain.agents import AgentTask, TaskKind
 from ..domain.diffs import commentable
 from ..domain.events import Event, EventKind
 from ..domain.labs import setup_lines, time_limit, unusable
-from ..domain.records import ActionRecord
+from ..domain.records import ActionRecord, JobStatus
 from ..domain.snapshot import PrSnapshot, PrState
 from .base import (
     Playbook,
@@ -100,7 +100,7 @@ SESSION_GRACE_SECONDS = 600
 SESSION = """You are the reproduction agent of the review of PR #{number} in {repo}, inside an automated maintainer service, working on test machine {lab}.
 - {skill}
 - {asked}
-- When you are done, return the JSON your task asks for: the conclusion (reproduced, not_reproduced, or inconclusive), in `comment` the record your skill has the reproduction agent report, in {public_language}, and in `notes` anything only maintainers should read."""
+- When you are done, return the JSON your task asks for: the conclusion (reproduced, not_reproduced, inconclusive, or not_needed), in `comment` the record your skill has the reproduction agent report, in {public_language}, and in `notes` anything only maintainers should read."""
 
 SKILL = (
     "Your job is the reproduction agent that the review skill at `{path}` describes: "
@@ -109,6 +109,16 @@ SKILL = (
 )
 
 ASK = "When only {by} can settle something that changes what you run, ask them with your tool for asking the user."
+
+ALONGSIDE = "The PR's review runs while you work, and your record goes into it. Reproduce what the PR adds or claims, as your skill says; when the skill says the PR needs no reproduction, run nothing and conclude `not_needed`."
+"""What the reproduction agent started with a review is asked (``review.alongside``)."""
+
+REVIEW_WAIT_SECONDS = 6 * 3600
+"""How long a finished reproduction waits at a time for the review it runs alongside
+to be written."""
+
+REPORT_STATE = "reproduce_report:{job}"
+"""A finished reproduction's record while it waits for its review's draft."""
 
 UPDATE = """You wrote the {what} of PR #{number} in {repo} given below, and it said a reproduction on a test machine would follow. That reproduction has ended; its record is below. Revise the {what} with it:
 - Fill in where the skill asks how the PR was reproduced, what came out, and whether the documentation could be followed: the steps run and how, the functional and the metric result, the first failure and every step the docs left out; or, when no run happened, why and what a run would need.
@@ -119,7 +129,12 @@ UPDATE = """You wrote the {what} of PR #{number} in {repo} given below, and it s
 
 
 class ReproReport(BaseModel):
-    conclusion: Literal["reproduced", "not_reproduced", "inconclusive"]
+    conclusion: Literal[
+        "reproduced", "not_reproduced", "inconclusive", "not_needed"
+    ] = Field(
+        description="`not_needed` only when the review skill says the PR needs no "
+        "reproduction, and nothing ran."
+    )
     comment: str = Field(
         description="The record the review skill has the reproduction agent report."
     )
@@ -139,7 +154,11 @@ class ReproducePlaybook(Playbook):
     def accepts(self, event, profile) -> bool:  # type: ignore[no-untyped-def]
         return (
             event.payload.get("command") == "reproduce"
-            and bool(event.payload.get("by") or event.payload.get("brief"))
+            and bool(
+                event.payload.get("by")
+                or event.payload.get("brief")
+                or event.payload.get("alongside")
+            )
             and event.number is not None
         )
 
@@ -223,6 +242,7 @@ class ReproducePlaybook(Playbook):
             limit=time_limit(machine, binding),
             by=by,
             brief=str(request.payload.get("brief") or "").strip(),
+            alongside=bool(request.payload.get("alongside")),
             note=str(request.payload.get("note") or "").strip(),
             discriminator=discriminator,
             team=ctx.trusted_input,
@@ -254,6 +274,10 @@ class ReproducePlaybook(Playbook):
         record = await ctx.store.get_action(planned.action.id) or planned
         payload = LabReproducePayload.model_validate(record.action.payload)
         pr = await ctx.forge.get_pr(request.repo or "", request.number or 0)
+        kept = await ctx.store.get_state(REPORT_STATE.format(job=ctx.job.id))
+        if isinstance(kept, dict):
+            # The run is over: its record waits for the review to be written.
+            return await self._report(ctx, request, pr, by, kept)
         if record.status in (
             ActionStatus.NEW,
             ActionStatus.PROPOSED,
@@ -352,49 +376,111 @@ class ReproducePlaybook(Playbook):
             "notes": report.notes,
             "commands": [{k: v for k, v in c.items() if k != "tail"} for c in commands],
         }
-        runs = {"commands": commands}
-        if pr is not None:
-            machine = ctx.service.machines.get(lab)
-            record_text = untrusted(
-                "reproduction",
-                json.dumps(
-                    {
-                        "machine": machine.description if machine else "",
-                        "commit": record.action.head_sha,
-                        "brief": payload.brief or payload.summary,
-                        "commands": runs["commands"],
-                        "conclusion": report.conclusion,
-                        "report": report.comment,
-                    },
-                    ensure_ascii=False,
-                    indent=1,
-                ),
-                40_000,
+        if report.conclusion == "not_needed":
+            return PlaybookResult(
+                result={**summary, "skipped": "the PR needs no reproduction"}
             )
-            target = await self._review_of(ctx, request, pr)
+        machine = ctx.service.machines.get(lab)
+        record_text = untrusted(
+            "reproduction",
+            json.dumps(
+                {
+                    "machine": machine.description if machine else "",
+                    "commit": record.action.head_sha,
+                    "brief": payload.brief or payload.summary,
+                    "commands": commands,
+                    "conclusion": report.conclusion,
+                    "report": report.comment,
+                },
+                ensure_ascii=False,
+                indent=1,
+            ),
+            40_000,
+        )
+        return await self._report(
+            ctx,
+            request,
+            pr,
+            by,
+            {
+                "summary": summary,
+                "record_text": record_text,
+                "comment": report.comment,
+                "runtime": runtime,
+                "head_sha": record.action.head_sha,
+            },
+        )
+
+    async def _report(
+        self,
+        ctx: PlaybookContext,
+        request: Event,
+        pr: PrSnapshot | None,
+        by: str | None,
+        kept: dict[str, Any],
+    ) -> PlaybookResult:
+        """Put the finished run's record (``kept``) in the PR's review: the review
+        that asked for it, or that it runs alongside, once that review is written;
+        else, for a person's request, in a comment drafted for them."""
+        summary = dict(kept.get("summary") or {})
+        alongside = str(request.payload.get("alongside") or "")
+        if pr is not None:
+            if alongside:
+                target = await self._review_of_job(ctx, pr, alongside)
+                if target is None and await self._running(ctx, alongside):
+                    await ctx.store.set_state(REPORT_STATE.format(job=ctx.job.id), kept)
+                    return PlaybookResult(
+                        wait=Wait(
+                            kinds=[EventKind.JOB_FINISHED],
+                            seconds=REVIEW_WAIT_SECONDS,
+                            reason="waiting for the review it runs alongside",
+                        ),
+                        result=summary,
+                    )
+            else:
+                target = await self._review_of(ctx, request, pr)
+            record_text = str(kept.get("record_text") or "")
+            done: PlaybookResult | None = None
             if target is not None and target[1] is not None:
                 revised = await self._revise(ctx, target[0], target[1], pr, record_text)
                 if revised is not None:
-                    return PlaybookResult(result={**summary, "revised": revised})
+                    done = PlaybookResult(result={**summary, "revised": revised})
             elif target is not None:
                 update = await self._update_posted(
                     ctx, target[0], pr, record_text, by, request
                 )
                 if update is not None:
-                    return PlaybookResult(
+                    done = PlaybookResult(
                         actions=[update],
                         result={**summary, "updates": target[0].action.id},
                     )
-        if request.payload.get("review"):
-            # Its review was turned down while it ran: the record stays with the job.
-            return PlaybookResult(result={**summary, "comment": report.comment})
+            # Kept until here, so a try that fails while adding it keeps the record.
+            await ctx.store.set_state(REPORT_STATE.format(job=ctx.job.id), None)
+            if done is not None:
+                return done
+        if request.payload.get("review") or alongside:
+            # Its review was turned down while it ran, or never written: the record
+            # stays with the job.
+            return PlaybookResult(result={**summary, "comment": kept.get("comment")})
         return PlaybookResult(
             actions=[
                 self._comment(
-                    request, record.action.head_sha, report.comment, by, runtime
+                    request,
+                    kept.get("head_sha"),
+                    str(kept.get("comment") or ""),
+                    by,
+                    kept.get("runtime"),
                 )
             ],
             result=summary,
+        )
+
+    async def _running(self, ctx: PlaybookContext, job_id: str) -> bool:
+        job = await ctx.store.get_job(job_id)
+        return job is not None and job.status in (
+            JobStatus.QUEUED,
+            JobStatus.RUNNING,
+            JobStatus.WAITING,
         )
 
     async def _work(
@@ -425,7 +511,9 @@ class ReproducePlaybook(Playbook):
         )
         note = str(request.payload.get("note") or "").strip()
         asked = (
-            "The reviewer's brief, which you follow:\n"
+            ALONGSIDE
+            if request.payload.get("alongside")
+            else "The reviewer's brief, which you follow:\n"
             + untrusted("review.brief", payload.brief, 8_000)
             if payload.brief
             else f"{by} asked for this reproduction"
@@ -530,6 +618,26 @@ class ReproducePlaybook(Playbook):
                 reverse=True,
             )
         )
+        return await self._open_review(ctx, records)
+
+    async def _review_of_job(
+        self, ctx: PlaybookContext, pr: PrSnapshot, job_id: str
+    ) -> tuple[ActionRecord, Proposal | None] | None:
+        """The review the job ``job_id`` wrote, while it waits or once posted."""
+        records = [
+            r
+            for r in await ctx.store.list_actions(
+                repo=pr.repo, number=pr.number, kinds=[ActionKind.REVIEW_POST]
+            )
+            if r.action.provenance.job_id == job_id
+        ]
+        return await self._open_review(ctx, records)
+
+    async def _open_review(
+        self, ctx: PlaybookContext, records: list[ActionRecord]
+    ) -> tuple[ActionRecord, Proposal | None] | None:
+        """The first of ``records`` that waits for a decision, with its proposal, or
+        that was posted."""
         for record in records:
             proposal = await ctx.store.proposal_for_action(record.action.id)
             if proposal is not None and proposal.state == ProposalState.PENDING:
@@ -635,7 +743,6 @@ class ReproducePlaybook(Playbook):
                         pr=pr,
                         head=head,
                         default_branch=info.default_branch,
-                        diff=diff,
                         payload=payload,
                     ),
                     schema_hint(model.model_json_schema()),
@@ -700,14 +807,20 @@ def _session_action(
     note: str,
     discriminator: str,
     team: bool,
+    alongside: bool = False,
 ) -> Action:
-    """The session the reproduction agent works in. A review's (``brief``) is a
-    ``lab.review``, under the rule the review's own session runs by; a person's is a
-    ``lab.reproduce`` drafted for them, which their request approves
-    (``pipeline.RUN_ON_REQUEST``)."""
-    summary = (brief or note or f"Reproduce #{pr.number}").strip().splitlines()[0]
+    """The session the reproduction agent works in. A review's (started with it,
+    ``alongside``, or from its ``brief``) is a ``lab.review``, under the rule the
+    review's own session runs by; a person's is a ``lab.reproduce`` drafted for them,
+    which their request approves (``pipeline.RUN_ON_REQUEST``)."""
+    review = bool(brief) or alongside
+    summary = (
+        (brief or note or f"Reproduce #{pr.number}").strip().splitlines()[0]
+        if not alongside
+        else f"Reproduce #{pr.number} alongside its review"
+    )
     return make_action(
-        ActionKind.LAB_REVIEW if brief else ActionKind.LAB_REPRODUCE,
+        ActionKind.LAB_REVIEW if review else ActionKind.LAB_REPRODUCE,
         pr.repo,
         LabReproducePayload(
             lab=lab,
@@ -722,8 +835,14 @@ def _session_action(
         head_sha=pr.head_sha,
         discriminator=discriminator,
         rationale=f"a reproduction on {lab}"
-        + (", from its review's brief" if brief else f", asked by {by}"),
+        + (
+            ", alongside its review"
+            if alongside
+            else ", from its review's brief"
+            if brief
+            else f", asked by {by}"
+        ),
         hints=ActionHints(author_is_team=team, changed_paths=pr.paths),
         provenance=Provenance(requested_by=by),
-        draft_for=None if brief else by,
+        draft_for=None if review else by,
     )

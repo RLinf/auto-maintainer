@@ -91,6 +91,9 @@ class TaskKind(StrEnum):
     """A review translated into the dashboard's language, for reading only."""
     COMMENT_CHECK = "comment_check"
     """Whether a PR's open review comments are addressed by its code now."""
+    FORM = "form"
+    """A finished review's or follow-up's report put into the fields the service
+    posts, by the agent that wrote it, continuing its session."""
 
 
 class Capabilities(BaseModel):

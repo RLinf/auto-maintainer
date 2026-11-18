@@ -25,7 +25,7 @@ from auto_maintainer.domain.actions import ActionKind, ProposalState
 from auto_maintainer.domain.events import Event, EventKind
 from auto_maintainer.domain.memory import Tier
 from auto_maintainer.domain.snapshot import Commit, PrFile, RepoInfo
-from auto_maintainer.testing.fakes import make_pr
+from auto_maintainer.testing.fakes import make_pr, report
 from auto_maintainer.testing.harness import Harness
 
 REPO = "acme/widget"
@@ -55,7 +55,8 @@ async def h(tmp_path: Path):
         )
     )
     harness.runner.on("triage", lambda t: {"summary": "s", "labels": []})
-    harness.runner.on("review", lambda t: REVIEW)
+    harness.runner.on("review", lambda t: report())
+    harness.runner.on("form", lambda t: REVIEW)
     harness.runner.on("learn", lambda t: {"disposition": "PR_SPECIFIC", "why": "w"})
     yield harness
     await harness.close()
@@ -94,7 +95,9 @@ async def test_rejected_labels_stay_out_and_the_reason_reaches_the_next_review(
     await h.emit(_request())
     second = _tasks(h, "review")[-1]
     assert REASON in second.prompt and "turned these proposals down" in second.prompt
-    assert "enhancement" not in second.prompt.split("Only these exist:")[-1]
+    form = _tasks(h, "form")[-1]
+    offered = form.prompt.split("source='repository.labels'")[1].split("</untrusted")[0]
+    assert "feature" in offered and "enhancement" not in offered
     again, _ = await _labels_proposal(h)
     assert again is None, "the agent named them again, and they were dropped"
 

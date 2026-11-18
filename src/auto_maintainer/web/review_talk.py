@@ -115,10 +115,6 @@ about that change (``web/fix_talk.py``), whether or not the job drafted one."""
 TALKS_ON = {"review", "followup", *CHANGE_TALKS}
 """Playbooks whose jobs have a conversation."""
 
-TALK_DIFF_LIMIT = 40_000
-"""The diff a turn carries; the agent reads the rest in its checkout. A turn's
-prompt stays far below what any agent CLI takes in one message."""
-
 _turns: dict[str, asyncio.Lock] = {}
 """One turn at a time per conversation, in this process."""
 
@@ -835,9 +831,7 @@ async def _turn(
                 pr=pr,
                 head=head,
                 default_branch=default_branch,
-                diff=diff,
                 payload=payload,
-                diff_limit=TALK_DIFF_LIMIT,
                 reviewer=notes_block(
                     await load_notes(service.store, record.action.draft_for),
                     "reviews",

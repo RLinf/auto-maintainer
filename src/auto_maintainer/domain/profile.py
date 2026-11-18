@@ -214,7 +214,9 @@ class Review(_Section):
             "blocked": "Blocked",
         }
     )
-    verify: bool = True
+    verify: bool = False
+    """Whether a second agent checks each finding of a first review against the code
+    after it. Off by default: the review skills settle every finding themselves."""
     cross_agent: bool = False
     max_inline_comments: int = 20
     suggest_labels: bool = True
@@ -222,14 +224,17 @@ class Review(_Section):
     the role labels the service manages); a suggestion is a ``label.apply`` action."""
     max_suggested_labels: int = Field(default=3, ge=1, le=10)
     writing_guide: str | None = Field(default=None, max_length=8000)
-    """How every review, follow-up, and revision of one is written, in plain words;
-    ``None`` uses the service's default (``playbooks.prompts.DEFAULT_WRITING_GUIDE``)."""
+    """How every review, follow-up, and revision of one is written, in plain words,
+    over any review skill's own rules. ``None``: a repository's own review skill keeps
+    its rules, and the service's skill writes by its default
+    (``playbooks.prompts.DEFAULT_WRITING_GUIDE``)."""
     quick_quality: bool = True
     """Whether every open PR gets a quick quality score from its diff before it is
     reviewed, in the background (``playbooks/quality.py``)."""
     quality_guide: str | None = Field(default=None, max_length=8000)
-    """How the reviewing agent judges the PR's quality from 0 to 100; ``None`` uses
-    the service's default (``playbooks.prompts.DEFAULT_QUALITY_GUIDE``)."""
+    """How the reviewing agent judges the PR's quality from 0 to 100, once its review
+    is written; ``None`` uses the service's default
+    (``playbooks.prompts.DEFAULT_QUALITY_GUIDE``)."""
 
     def meaning_of(self, recommendation: str | None) -> str | None:
         """Map a recommendation label back to ``ready``, ``changes``, or ``blocked``."""

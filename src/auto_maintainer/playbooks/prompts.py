@@ -22,6 +22,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
+
+from pydantic import BaseModel, create_model
 
 from ..domain import forges
 from ..domain.agents import REPO_SKILL_FOLDERS, parse_skill
@@ -111,21 +114,6 @@ def pr_block(pr: PrSnapshot, diff: str | None = None, diff_limit: int = 120_000)
     return "\n\n".join(parts)
 
 
-def skill_instruction(profile: RepoProfile, skills_dir: Path) -> str:
-    """Where the review skill lives, for the agent to read first."""
-    skill = profile.review.skill
-    if skill.startswith(("builtin:", "service:")):
-        path = skills_dir / skill.split(":", 1)[1] / "SKILL.md"
-        return f"Follow the review skill at {path} (read it first)."
-    if skill.startswith("repo:"):
-        path = skill.split(":", 1)[1].split("#", 1)[0]
-        return (
-            f"Follow the repository's review skill at `{path}` in the working directory (read it first). "
-            "It comes from the default branch, not from the PR."
-        )
-    return f"Follow the review skill {skill!r}."
-
-
 _NO_CODE = (
     "- Do not run the PR's tests, builds, or workflow here: its code is reproduced on "
     "the repository's test machines, through the service's reproduction (its record is "
@@ -154,42 +142,6 @@ def no_code_rule(repo: str | None = None) -> str:
         f"{_NO_CODE} This repository is on {forge.terms.forge_name}, which no command "
         "line here reaches: read its change, discussion, and CI from what this prompt "
         "includes, and the code and its history from the checkout."
-    )
-
-
-NO_CODE_RULE = no_code_rule()
-"""``no_code_rule`` for a repository on a GitHub forge."""
-
-HEADLESS = """You are running headless inside an automated maintainer service.
-- Do not ask questions, do not post anything, do not push, and do not edit files.
-- Steps of the skill that ask the user or post to GitHub are replaced by returning the structured result.
-{no_code}
-- Public text you write is in {public_language}. Write plainly and specifically."""
-
-
-def headless(profile: RepoProfile, testing: str | None = None) -> str:
-    """Instructions for a review nobody waits on; ``testing`` replaces the rule
-    against running code when the review has a test machine."""
-    return HEADLESS.format(
-        public_language=profile.languages.public,
-        no_code=testing or no_code_rule(profile.repo),
-    )
-
-
-INTERACTIVE = """You are reviewing for {reviewer}, a maintainer, inside an automated maintainer service.
-- When something you cannot settle from the code, the PR, or the repository would change your review (the intent behind a change, an unwritten convention, which of two designs is wanted), ask {reviewer} with your tool for asking the user. Ask only what matters, a few questions at most, each answerable in a line.
-- Never ask whether to post, publish, or comment, and never post, push, or edit files. Return the review as the structured result: {reviewer} reads it, edits it, and decides what is posted.
-{no_code}
-- Public text you write is in {public_language}. Write plainly and specifically."""
-
-
-def interactive(profile: RepoProfile, reviewer: str, testing: str | None = None) -> str:
-    """Instructions for a review a maintainer asked for: questions go to them.
-    ``testing`` replaces the rule against running code when it has a test machine."""
-    return INTERACTIVE.format(
-        reviewer=reviewer,
-        public_language=profile.languages.public,
-        no_code=testing or no_code_rule(profile.repo),
     )
 
 
@@ -257,30 +209,6 @@ def skill_owns_format(profile: RepoProfile, workdir: Path) -> bool:
     )
 
 
-def skill_format_block(profile: RepoProfile) -> str:
-    """The output instructions when the repository's review skill fixes the format of
-    the main comment."""
-    recs = ", ".join(
-        f"{label!r} ({meaning})"
-        for meaning, label in profile.review.recommendations.items()
-    )
-    return (
-        "The repository's review skill fixes the main comment's format: follow it. Return "
-        "the main comment in `sections`: one entry per section of the skill's main comment, "
-        "keyed by its heading word for word (as the skill writes it), in the skill's order, "
-        "each holding the text to post under it, with the skill's own recommendation wording "
-        "in its section. Still list every confirmed or unresolved finding in `findings`: one "
-        "that names a line of the diff becomes an inline comment, so the sections need not "
-        "repeat its code or location. The service adds the findings to the end of the main "
-        "comment, listed by id with severity, category, and title, and with the body of each "
-        "one that is not an inline comment; the sections may refer to a finding by its id "
-        "(`F1`). A finding's `body` is posted as that inline comment exactly as you "
-        "write it, so write it the way the skill says inline comments are written; put "
-        "replacement code for exactly the commented lines in `suggestion`. Fill `summary` with "
-        f"two or three sentences, and set `recommendation` to the closest of: {recs}."
-    )
-
-
 def reproduction_block(
     record: str | None,
     *,
@@ -329,36 +257,139 @@ def review_instructions_block(profile: RepoProfile) -> str:
     )
 
 
-def review_skill_block(profile: RepoProfile, skills_dir: Path, workdir: Path) -> str:
-    """Which review skill to follow: one the profile names, else the repository's own
-    review skill when it has one, else the built-in skill; the repository's other
-    skills, which the agent may use; and the maintainers' own review instructions."""
-    skills = repo_skills(workdir)
-    own = [s for s in skills if "review" in s[0].lower() or "review" in s[1].lower()]
-    skill = profile.review.skill
-    if skill.startswith("builtin:") and own:
-        name, path, _ = own[0]
-        lines = [
-            f"Follow this repository's review skill `{name}` at `{path}` in the working "
-            "directory (read it first). It comes from the default branch, not from the PR."
-        ]
-        skip = {path}
-    else:
-        lines = [skill_instruction(profile, skills_dir)]
-        # The maintainers chose the service's skill over the repository's own.
-        skip = {p for _, p, _ in own} if skill.startswith("service:") else set()
-        if skill.startswith("repo:"):
-            skip.add(skill.split(":", 1)[1].split("#", 1)[0])
-    others = [s for s in skills if s[1] not in skip]
-    if others:
-        lines.append(
-            "The repository also has these skills; use one when it applies:\n"
-            + "\n".join(f"- `{p}`: {d or n}" for n, p, d in others[:20])
+def review_skill(
+    profile: RepoProfile, skills_dir: Path, workdir: Path
+) -> tuple[str, str]:
+    """The review skill a review of the repository follows, as its name and the path
+    an agent in ``workdir`` opens (``review_skill_path``)."""
+    path = review_skill_path(profile, skills_dir, workdir)
+    return Path(path).parent.name, path
+
+
+def review_call(
+    profile: RepoProfile, skills_dir: Path, workdir: Path, pr: PrSnapshot, what: str
+) -> str:
+    """The review's task in one line: the skill to use and the PR to ``what`` (such
+    as ``review``), the way a person asks for it."""
+    name, path = review_skill(profile, skills_dir, workdir)
+    return f"Use the `{name}` skill (`{path}`) to {what} PR #{pr.number} in {pr.repo}."
+
+
+def checkout_line(head: str, base_ref: str) -> str:
+    """Where the PR is in the working directory."""
+    return (
+        f"The working directory is a checkout of the PR's head `{head}`, with its "
+        f"base branch at `origin/{base_ref}`."
+    )
+
+
+def language_line(profile: RepoProfile) -> str:
+    """The public language, for a repository that does not write in English."""
+    lang = profile.languages.public
+    return (
+        "" if lang.lower().startswith("en") else f"Write what will be posted in {lang}."
+    )
+
+
+REVIEW_FOR = "You review for {reviewer}: ask them, with your tool for asking the user, only what you cannot settle yourself and what would change the review. Do not post, push, or edit files: end with the skill's report, which {reviewer} reads before anything is posted."
+
+REVIEW_UNATTENDED = "Nobody waits on this review, so do not ask questions. Do not post, push, or edit files: end with the skill's report, which a maintainer reads before anything is posted."
+
+
+def review_rules(profile: RepoProfile, reviewer: str | None) -> str:
+    """What a review or follow-up agent must know beyond its skill: who it works for,
+    that it posts nothing, and the public language."""
+    rules = REVIEW_FOR.format(reviewer=reviewer) if reviewer else REVIEW_UNATTENDED
+    lang = language_line(profile)
+    return f"{rules} {lang}" if lang else rules
+
+
+def forge_note(pr: PrSnapshot) -> str:
+    """The PR for an agent whose forge no command line in its container reaches;
+    nothing on GitHub, where ``gh`` reads it."""
+    forge = forges.info_of(pr.repo)
+    if forge.kind == "github":
+        return ""
+    return (
+        f"No command line here reaches {forge.terms.forge_name}: the PR is below, and "
+        "its code and history are in the checkout.\n\n" + pr_block(pr)
+    )
+
+
+NOTHING_RUNS = "{note} Do not run the PR's code here; the skill's own check scripts may run. Where the skill asks how the PR was reproduced, say that no run was made and what one would need."
+
+
+def skills_note(workdir: Path) -> str:
+    """Where the repository keeps its skills, for an agent changing its code; empty
+    when it has none."""
+    folders = [base for base in SKILL_DIRS if any((workdir / base).glob("*/SKILL.md"))]
+    return f" (in `{folders[0]}/`)" if folders else ""
+
+
+REVIEW_FORM = """Now give the review you just wrote as the JSON your task returns, for the service to post. Copy your report's text; do not review again or run anything.
+- `sections`: {sections}
+- `findings`: each confirmed or unresolved finding, with its id from your report. `body` is its comment exactly as it is to be posted; `path` and `line` name the line of the PR's diff that carries it, when one does, and `suggestion` holds replacement code for exactly those lines.
+- `dismissed`: the candidates you dismissed, one line each on why.
+- `summary`: what the PR does and whether it is ready, in two or three sentences.
+- `recommendation`: the closest of: {recommendations}."""
+
+FOLLOWUP_FORM = """Now give the follow-up review you just wrote as the JSON your task returns, for the service to post. Copy your report's text; do not review again or run anything.
+- `statuses`: one per earlier finding, by its id: `resolved` (with the commit that fixed it in `fixed_in`), `partial`, or `open`, and a short note.
+- `new_findings`: the problems the new commits bring, each with an id after the earlier ones. `body` is its comment exactly as it is to be posted; `path` and `line` name the line of the PR's diff that carries it, when one does.
+- `summary`: what changed and whether the PR is ready now, in two or three sentences.
+- `recommendation`: the closest of: {recommendations}."""
+
+
+def recommendations_line(profile: RepoProfile) -> str:
+    return ", ".join(
+        f"{label!r} ({meaning})"
+        for meaning, label in profile.review.recommendations.items()
+    )
+
+
+SERVICE_SECTIONS = {"summary", "findings", "tests and docs", "recommendation"}
+"""Sections of the service's own review format that it writes from the result's
+fields (``render_review``), not from ``sections``."""
+
+
+def sections_rule(profile: RepoProfile, own_format: bool) -> str:
+    """What goes in ``sections``: the skill's main comment, section by section, when
+    its format is the one posted; else the profile's sections the service does not
+    write itself."""
+    if own_format:
+        return (
+            "the main comment, one entry per section, keyed by its heading word for "
+            "word as the skill writes it, in order, each holding the text under it."
         )
-    told = review_instructions_block(profile)
-    if told:
-        lines.append(told)
-    return "\n".join(lines)
+    extra = [s for s in profile.review.template if s.lower() not in SERVICE_SECTIONS]
+    if not extra:
+        return "leave it empty."
+    return "the text of each of these sections: " + ", ".join(extra) + "."
+
+
+def form_prompt(intro: str, report: str, extra: list[str]) -> str:
+    """The turn that puts a finished report in its playbook's fields: ``intro`` (a
+    ``*_FORM``), the other fields it fills (``extra``), and the report itself, for an
+    agent that does not continue the session that wrote it."""
+    return "\n\n".join(
+        part
+        for part in [
+            intro,
+            *extra,
+            "Your report:\n" + untrusted("review.report", report, 80_000),
+        ]
+        if part
+    )
+
+
+def form_model(model: type[BaseModel], *left_out: str) -> type[BaseModel]:
+    """``model`` without the fields ``left_out``: what a form turn fills."""
+    fields: dict[str, Any] = {
+        name: (info.annotation, info)
+        for name, info in model.model_fields.items()
+        if name not in left_out
+    }
+    return create_model(f"{model.__name__}Form", **fields)
 
 
 DEFAULT_WRITING_GUIDE = """Write for a maintainer who has not read this PR and does not know this part of the code.
@@ -377,15 +408,14 @@ DEFAULT_QUALITY_GUIDE = """Score the PR's quality from 0 to 100 as a maintainer 
 - Use the whole range: most PRs are neither excellent nor bad, and scores that all sit near the top tell reviewers nothing."""
 
 
-def writing_block(profile: RepoProfile) -> str:
-    """How the review's text is written: the repository's guide, or the default. It
-    applies to every review, follow-up, and revision, over a review skill's format."""
-    guide = (profile.review.writing_guide or "").strip() or DEFAULT_WRITING_GUIDE
-    return (
-        "How to write the review (the repository's rule for every review; where the "
-        "review skill's format asks for more code or references, keep its sections and "
-        f"follow this):\n{guide}"
-    )
+def writing_block(profile: RepoProfile, own_skill: bool) -> str:
+    """How the review's text is written: the guide the maintainers set, which applies
+    over any skill's rules; else, for a review that follows the service's own skill,
+    the default guide. A repository's own review skill keeps its own rules."""
+    guide = (profile.review.writing_guide or "").strip()
+    if not guide and own_skill:
+        return ""
+    return "How to write the review:\n" + (guide or DEFAULT_WRITING_GUIDE)
 
 
 QUALITY_CHECKS = {
@@ -433,20 +463,6 @@ def schema_hint(model_schema: dict) -> str:
     )
 
 
-def template_block(profile: RepoProfile) -> str:
-    recs = ", ".join(
-        f"{label!r} ({meaning})"
-        for meaning, label in profile.review.recommendations.items()
-    )
-    sections = "\n".join(f"- {s}" for s in profile.review.template)
-    return (
-        "The main review comment has these sections, in order:\n"
-        f"{sections}\n"
-        "Fill `sections` for any section that is not Summary, Findings, Tests and docs, or Recommendation.\n"
-        f"`recommendation` must be exactly one of: {recs}."
-    )
-
-
 def label_choices(
     repo_labels: list[str], profile: RepoProfile, pr: PrSnapshot
 ) -> list[str]:
@@ -465,9 +481,9 @@ def label_block(choices: list[str], limit: int) -> str:
     if not choices:
         return ""
     return (
-        f"Suggesting labels: if this PR should carry labels it does not have yet, list at most "
-        f"{limit} of these in `labels`; leave it empty when none clearly applies. "
-        "Only these exist: " + untrusted("repository.labels", ", ".join(choices), 4000)
+        f"`labels`: at most {limit} of these labels that the PR should carry and does "
+        "not have yet; none when none clearly applies: "
+        + untrusted("repository.labels", ", ".join(choices), 4000)
     )
 
 

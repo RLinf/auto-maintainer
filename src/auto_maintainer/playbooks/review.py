@@ -12,11 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""First review (design 5.5): the profile's review skill, headless, then a verifier pass."""
+"""First review (design 5.5): the review skill, asked for the way a person asks for a
+review, then its report put into the fields the service posts (``review_form``)."""
 
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -45,7 +47,7 @@ from ..domain.review import (
     classify_review_state,
     render_review,
 )
-from ..domain.snapshot import PrState
+from ..domain.snapshot import PrSnapshot, PrState
 from .base import (
     PR_EVENTS,
     Playbook,
@@ -54,21 +56,28 @@ from .base import (
     in_scope,
     keeps_session,
 )
-from .feedback import declined_labels, rejections_block, rejections_on
+from .feedback import Rejection, declined_labels, rejections_block, rejections_on
 from .person_notes import load_notes, notes_block
 from .prompts import (
+    NOTHING_RUNS,
+    REVIEW_FORM,
     accepted_labels,
-    headless,
-    interactive,
+    checkout_line,
+    forge_note,
+    form_model,
+    form_prompt,
     label_block,
     label_choices,
+    own_review_skill,
     pr_block,
     quality_block,
-    review_skill_block,
+    recommendations_line,
+    review_call,
+    review_instructions_block,
+    review_rules,
     schema_hint,
-    skill_format_block,
+    sections_rule,
     skill_owns_format,
-    template_block,
     untrusted,
     without_generated,
     work_lessons_block,
@@ -76,11 +85,14 @@ from .prompts import (
 )
 from .requests import (
     FOLLOWUP_STATES,
+    ReviewRequest,
     review_key,
     review_request,
     starts_review,
 )
+from .review_form import fill_form, forget_report, keep_report, saved_report
 from .review_session import (
+    ReviewMachine,
     close,
     earlier_work,
     review_machine,
@@ -178,84 +190,71 @@ class ReviewPlaybook(Playbook):
             c for c in label_choices(info.labels, profile, pr) if c not in declined
         ]
         limit = profile.review.max_suggested_labels
-        machine = await review_machine(
-            ctx,
-            pr,
-            profile,
-            event.id,
-            ctx.requested_by,
-            timed_out=wake.kind == EventKind.JOB_TIMEOUT,
+        # A report this job's agent wrote already needs only its form filled in.
+        answer = await saved_report(ctx, pr.head_sha)
+        machine = (
+            ReviewMachine()
+            if answer is not None
+            else await review_machine(
+                ctx,
+                pr,
+                profile,
+                event.id,
+                ctx.requested_by,
+                timed_out=wake.kind == EventKind.JOB_TIMEOUT,
+            )
         )
         if machine.wait is not None:
-            return machine.wait
+            return alongside(machine.wait, pr, request, ctx.job.id)
         workdir = await ctx.workspace.prepare(
             pr.repo, pr.number, pr.head_sha, info.default_branch
         )
-        answer = None
         try:
             diff = without_generated(
                 await ctx.workspace.diff(
                     workdir, f"origin/{info.default_branch}", pr.head_sha
                 )
             )
-            lessons = await ctx.knowledge.review_lessons(pr.repo, profile)
-            reviewer = (
-                notes_block(await load_notes(ctx.store, ctx.requested_by), "reviews")
-                if ctx.requested_by
-                else ""
-            )
             own_format = skill_owns_format(profile, workdir)
-            testing = machine.testing(ctx, reproduce=True) if machine.token else None
-            if testing:
-                earlier = await earlier_work(ctx, pr)
-                testing = f"{testing}\n\n{earlier}" if earlier else testing
-            prompt = "\n\n".join(
-                [
-                    interactive(profile, ctx.requested_by, testing)
-                    if ctx.requested_by
-                    else headless(profile, testing),
-                    review_skill_block(profile, ctx.service.skills_dir, workdir),
-                    work_lessons_block(
-                        await ctx.knowledge.agent_lessons(
-                            pr.repo, [machine.lab] if machine.lab else []
-                        )
+            if answer is None:
+                answer = await ctx.ask(
+                    AgentTask(
+                        kind=TaskKind.REVIEW,
+                        prompt=await review_prompt(
+                            ctx,
+                            pr,
+                            profile,
+                            info.default_branch,
+                            workdir,
+                            machine,
+                            turned_down,
+                        ),
+                        workdir=workdir,
+                        skill_dirs=ctx.skill_dirs(),
+                        repo=pr.repo,
+                        messages=True,
+                        **session_task_fields(ctx, machine),
+                    )
+                )
+                if not answer.ok:
+                    raise RuntimeError(f"review agent failed: {answer.error}")
+                await close(ctx, machine)
+                await keep_report(ctx, pr.head_sha, answer)
+            form = await fill_form(
+                ctx,
+                answer,
+                REVIEW_FORM_MODEL,
+                form_prompt(
+                    REVIEW_FORM.format(
+                        sections=sections_rule(profile, own_format),
+                        recommendations=recommendations_line(profile),
                     ),
-                    skill_format_block(profile)
-                    if own_format
-                    else template_block(profile),
-                    writing_block(profile),
-                    quality_block(profile),
-                    testing_block(
-                        machine,
-                        await reproduction_record(ctx.store, pr.repo, pr.number),
-                    ),
-                    f"Review lessons from this repository's maintainers:\n{lessons}"
-                    if lessons
-                    else "",
-                    reviewer,
-                    f"The working directory is a checkout of the PR head {pr.head_sha}. "
-                    f"Compare against origin/{info.default_branch}.",
-                    pr_block(pr, diff),
-                    rejections_block(turned_down),
-                    label_block(choices, limit),
-                    schema_hint(ReviewResult.model_json_schema()),
-                ]
+                    answer.text,
+                    [label_block(choices, limit), quality_block(profile)],
+                ),
+                workdir,
             )
-            task = AgentTask(
-                kind=TaskKind.REVIEW,
-                prompt=prompt,
-                workdir=workdir,
-                output_schema=ReviewResult.model_json_schema(),
-                skill_dirs=ctx.skill_dirs(),
-                repo=pr.repo,
-                messages=True,
-                **session_task_fields(ctx, machine),
-            )
-            answer = await ctx.ask(task, ReviewResult)
-            if not answer.ok or answer.structured is None:
-                raise RuntimeError(f"review agent failed: {answer.error}")
-            await close(ctx, machine)
-            result = ReviewResult.model_validate(answer.structured)
+            result = ReviewResult.model_validate(form.model_dump(mode="json"))
             runtime = answer.runtime
             if profile.review.verify and result.findings:
                 result = await self._verify(ctx, result, pr_block(pr, diff), workdir)
@@ -264,6 +263,7 @@ class ReviewPlaybook(Playbook):
             # A run the job's next try (or the next start) picks up keeps its session.
             if not keeps_session(ctx, answer):
                 await close(ctx, machine)
+        await forget_report(ctx)
 
         result.labels = accepted_labels(result.labels, choices, limit)
         meaning = profile.review.meaning_of(result.recommendation)
@@ -367,38 +367,14 @@ class ReviewPlaybook(Playbook):
                     draft_for=request.by if request else None,
                 )
             )
-        # The skill's reproduction agent: the service runs it from the brief, on the
-        # machine suited to what the brief needs, and adds its record to this review.
-        brief = (result.reproduction or "").strip()
-        events = (
-            [
-                Event(
-                    kind=EventKind.DASHBOARD_COMMAND,
-                    repo=pr.repo,
-                    number=pr.number,
-                    sha=pr.head_sha,
-                    payload={
-                        "command": "reproduce",
-                        "by": request.by if request else None,
-                        "brief": brief[:8_000],
-                        "review": actions[0].id,
-                    },
-                    source="review",
-                )
-            ]
-            if brief and machine.lab
-            else []
-        )
         return PlaybookResult(
             actions=actions,
-            events=events,
             result={
                 "findings": len(result.findings),
                 "dismissed": len(result.dismissed),
                 "recommendation": result.recommendation,
                 "labels": result.labels,
                 **machine.summary(pr.head_sha),
-                **({"reproduction": events[0].id} if events else {}),
             },
         )
 
@@ -443,6 +419,88 @@ class ReviewPlaybook(Playbook):
                     )
                 )
         return result.model_copy(update={"findings": kept, "dismissed": dismissed})
+
+
+REVIEW_FORM_MODEL = form_model(ReviewResult, "reproduction")
+"""What the review's form turn fills: the review result, whose reproduction the
+service starts alongside the review instead of from a brief."""
+
+
+async def review_prompt(
+    ctx: PlaybookContext,
+    pr: PrSnapshot,
+    profile: RepoProfile,
+    base_ref: str,
+    workdir: Path,
+    machine: ReviewMachine,
+    turned_down: list[Rejection],
+) -> str:
+    """What the review agent reads: the skill to use on the PR, as a person asks for a
+    review, then only what the skill cannot know: who it works for, the test machine,
+    and what the maintainers taught or turned down."""
+    if machine.token:
+        testing = machine.testing(ctx, reproduce=True)
+        earlier = await earlier_work(ctx, pr)
+        testing = f"{testing}\n\n{earlier}" if earlier else testing
+    else:
+        testing = NOTHING_RUNS.format(
+            note=machine.note or "No test machine is attached to this review."
+        )
+    lessons = await ctx.knowledge.review_lessons(pr.repo, profile)
+    return "\n\n".join(
+        part
+        for part in [
+            review_call(profile, ctx.service.skills_dir, workdir, pr, "review"),
+            checkout_line(pr.head_sha, base_ref),
+            review_rules(profile, ctx.requested_by),
+            testing,
+            testing_block(await reproduction_record(ctx.store, pr.repo, pr.number)),
+            review_instructions_block(profile),
+            writing_block(profile, own_review_skill(profile, workdir) is not None),
+            f"The maintainers' lessons for reviews of this repository:\n{lessons}"
+            if lessons
+            else "",
+            notes_block(await load_notes(ctx.store, ctx.requested_by), "reviews")
+            if ctx.requested_by
+            else "",
+            work_lessons_block(
+                await ctx.knowledge.agent_lessons(
+                    pr.repo, [machine.lab] if machine.lab else []
+                )
+            ),
+            rejections_block(turned_down),
+            forge_note(pr),
+        ]
+        if part
+    )
+
+
+def alongside(
+    wait: PlaybookResult,
+    pr: PrSnapshot,
+    request: ReviewRequest | None,
+    job_id: str,
+) -> PlaybookResult:
+    """The review's first wait for its session, which also starts the skill's
+    reproduction agent on the same machine: it runs while the review does, and its
+    record goes into this job's review (``reproduce.py``)."""
+    lab = str(wait.actions[0].payload.get("lab") or "") if wait.actions else ""
+    if not lab:
+        return wait
+    start = Event(
+        kind=EventKind.DASHBOARD_COMMAND,
+        repo=pr.repo,
+        number=pr.number,
+        sha=pr.head_sha,
+        payload={
+            "command": "reproduce",
+            "by": request.by if request else None,
+            "lab": lab,
+            "alongside": job_id,
+        },
+        source="review",
+    )
+    return wait.model_copy(update={"events": [*wait.events, start]})
 
 
 async def reproduction_record(store: Store, repo: str, number: int) -> str | None:

@@ -51,12 +51,14 @@ from ..domain.review import (
 )
 from ..domain.snapshot import PrSnapshot
 from .prompts import (
-    pr_block,
-    quality_block,
-    review_skill_block,
-    skill_format_block,
+    checkout_line,
+    forge_note,
+    own_review_skill,
+    recommendations_line,
+    review_instructions_block,
+    review_skill,
+    sections_rule,
     skill_owns_format,
-    template_block,
     untrusted,
     writing_block,
 )
@@ -143,48 +145,39 @@ def revision_blocks(
     pr: PrSnapshot,
     head: str,
     default_branch: str,
-    diff: str,
     payload: ReviewPostPayload,
-    diff_limit: int = 120_000,
     reviewer: str = "",
 ) -> list[str]:
     """Everything a revising agent reads after its instructions: the skill and the
     format, ``reproduction`` (a ``reproduction_block``), the lessons, the checkout, the
     PR, and the review as data and as text. ``reviewer``: the notes about reviews of
     the person the draft is for (``person_notes.notes_block``)."""
-    _, field = names(kind)
-    if kind == TaskKind.REVIEW:
-        format_block = (
-            skill_format_block(profile)
-            if owns_format(kind, profile, workdir)
-            else template_block(profile)
-        )
-    else:
-        format_block = "`recommendation` must be one of: " + ", ".join(
-            repr(v) for v in profile.review.recommendations.values()
-        )
+    what, field = names(kind)
+    name, path = review_skill(profile, skills_dir, workdir)
+    fields = (
+        f"In `{field}`, `sections` holds "
+        + sections_rule(profile, owns_format(kind, profile, workdir))
+        + " "
+        if kind == TaskKind.REVIEW
+        else f"In `{field}`, "
+    ) + f"`recommendation` is the closest of: {recommendations_line(profile)}."
     return [
-        review_skill_block(profile, skills_dir, workdir),
-        format_block,
-        writing_block(profile),
-        quality_block(profile, followup=kind != TaskKind.REVIEW),
+        f"The {what} follows the `{name}` skill (`{path}`): keep to it.",
+        fields,
+        review_instructions_block(profile),
+        writing_block(profile, own_review_skill(profile, workdir) is not None),
         reproduction,
-        f"Review lessons from this repository's maintainers:\n{lessons}"
+        f"The maintainers' lessons for reviews of this repository:\n{lessons}"
         if lessons
         else "",
         reviewer,
-        f"The working directory is a checkout of the reviewed commit {head}. "
-        f"Compare against origin/{default_branch}."
+        checkout_line(head, default_branch)
         + (
             f" The PR's head is now {pr.head_sha}: say so when it matters."
             if pr.head_sha != head
             else ""
         ),
-        pr_block(pr, diff, diff_limit),
-        f"The diff above may be cut; the checkout has the whole change: "
-        f"`git diff origin/{default_branch}...{head}`."
-        if len(diff) > diff_limit
-        else "",
+        forge_note(pr),
         untrusted(
             f"{field}.structured",
             json.dumps(payload.result or {}, ensure_ascii=False, indent=1),

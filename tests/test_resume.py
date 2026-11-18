@@ -81,6 +81,15 @@ def _review(task: AgentTask) -> Any:
     return {"summary": "Fine.", "recommendation": "Ready"}
 
 
+def _reviews(h: Any) -> list[AgentTask]:
+    """The review agents' tasks, apart from revisions of their drafts."""
+    return [
+        t
+        for t in h.runner.tasks
+        if t.kind == "review" and "That reproduction has ended" not in t.prompt
+    ]
+
+
 async def _cut_off_review(h: Any, app: Any, runtime: str = "antigravity") -> str:
     """Ask for a review, and record that a restart cut off its agent's session."""
     async with _as(app, "maria") as maria:
@@ -100,7 +109,7 @@ async def test_a_review_a_restart_cut_off_resumes_its_agent(demo) -> None:
     h.runner.on("review", _review)
     await _cut_off_review(h, app)
     await h.settle()
-    [review] = [t for t in h.runner.tasks if t.kind == "review"]
+    [review] = _reviews(h)
     route = h.runner.routes[h.runner.tasks.index(review)]
     assert review.resume_session == "s-before" and route.primary == "antigravity"
     assert review.prompt.startswith("The service restarted while you were working")
@@ -124,7 +133,7 @@ async def test_an_agent_that_cannot_resume_starts_afresh(demo) -> None:
     h.runner.on("review", review)
     await _cut_off_review(h, app)
     await h.settle()
-    resumed, fresh = [t for t in h.runner.tasks if t.kind == "review"]
+    resumed, fresh = _reviews(h)
     assert resumed.resume_session == "s-before"
     assert fresh.resume_session is None
     assert fresh.prompt.startswith("An earlier agent worked on this task"), (

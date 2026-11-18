@@ -66,8 +66,7 @@ from .base import (
 from .ci_doctor import OUTSIDE_LOGS, failing_checks, outside_logs
 from .fix import DESCRIBE, FixResult
 from .prompts import (
-    pr_block,
-    review_skill_block,
+    forge_note,
     schema_hint,
     untrusted,
     work_lessons_block,
@@ -267,9 +266,6 @@ class FixCiPlaybook(Playbook):
                 ctx.lab_sessions.allow_sync(session_id, workdir)
             lab = str(request.payload.get("lab") or "")
             note = str(request.payload.get("note") or "").strip()
-            diff = await ctx.workspace.diff(
-                workdir, f"origin/{info.default_branch}", pr.head_sha
-            )
             machine = ctx.service.machines.get(lab) if token else None
             prompt = "\n\n".join(
                 part
@@ -290,7 +286,6 @@ class FixCiPlaybook(Playbook):
                     f"them:\n{machine.description.strip()}"
                     if machine and machine.description.strip()
                     else "",
-                    review_skill_block(profile, ctx.service.skills_dir, workdir),
                     work_lessons_block(
                         await ctx.knowledge.agent_lessons(
                             pr.repo, [lab] if token and lab else []
@@ -309,7 +304,9 @@ class FixCiPlaybook(Playbook):
                     f"What {by} added: " + untrusted("maintainer.note", note, 2000)
                     if note
                     else "",
-                    pr_block(pr, diff),
+                    f"The PR is #{pr.number} in {pr.repo}; its base branch is at "
+                    f"`origin/{info.default_branch}`.",
+                    forge_note(pr),
                 ]
                 if part
             )

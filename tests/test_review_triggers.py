@@ -207,7 +207,7 @@ async def test_periodic_scan_reviews_a_bounded_batch_by_priority(
         tick = Event(kind=EventKind.SCHEDULE_TICK, payload={"name": "review_scan"})
         await h.emit(tick)
         assert [
-            t.prompt.split("PR: #")[1].split(" ")[0] for t in _kinds(h, "review")
+            t.prompt.split("review PR #")[1].split(" ")[0] for t in _kinds(h, "review")
         ] == ["41"]
         assert not await h.store.list_proposals(ProposalState.PENDING), (
             "scan drafts follow policy (shadow here)"
@@ -219,7 +219,7 @@ async def test_periodic_scan_reviews_a_bounded_batch_by_priority(
         h.clock.advance(hours=6)
         await h.emit(tick.model_copy(update={"id": "evt_later"}))
         assert [
-            t.prompt.split("PR: #")[1].split(" ")[0] for t in _kinds(h, "review")
+            t.prompt.split("review PR #")[1].split(" ")[0] for t in _kinds(h, "review")
         ] == ["41", "40"]
     finally:
         await h.close()

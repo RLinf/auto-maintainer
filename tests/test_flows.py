@@ -781,7 +781,7 @@ async def test_agent_tasks_are_untrusted_unless_the_author_is_on_the_team(
     harness.forge.put_pr(_pr(number=51, sha="b" * 40, author="maria"))
     await harness.poll()
     by_pr = {
-        t.prompt.split("PR: #")[1].split(" ")[0]: t.untrusted_input
+        t.prompt.split("review PR #")[1].split(" ")[0]: t.untrusted_input
         for t in harness.runner.tasks
         if t.kind == "review"
     }
