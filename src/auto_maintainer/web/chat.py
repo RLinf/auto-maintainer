@@ -79,6 +79,7 @@ from ..playbooks.person_notes import (
 )
 from ..playbooks.prompts import schema_hint, untrusted
 from ..playbooks.quality import assessed_quality, quick_quality
+from ..profiles.knowledge import LESSONS, PRIORITY_LESSONS
 from ..profiles.layers import ProfileError, parse_yaml
 from ..service import Service
 from .api import (
@@ -270,9 +271,14 @@ class ProposedAction(BaseModel):
     )
     lesson: str = Field(
         default="",
-        description="For kind=lesson: a review lesson to remember for this repository. "
+        description="For kind=lesson: a lesson to remember for this repository. "
         "For kind=preference: what the person wants from the agents for themselves, "
         "in one sentence.",
+    )
+    lesson_for: Literal["reviews", "priority"] = Field(
+        default="reviews",
+        description="For kind=lesson: whether it is about how the repository's PRs "
+        "are reviewed (reviews) or how their priority is scored (priority).",
     )
     about: Literal["reviews", "conversations", "both"] = Field(
         default="both",
@@ -1316,11 +1322,17 @@ async def _evaluate(service: Any, user: User, p: ProposedAction) -> str:
 
 
 async def save_lesson(service: Any, user: User, p: ProposedAction) -> str:
-    """Save a review lesson for ``p.repo`` as a memory change and return its id. It
+    """Save a lesson for ``p.repo`` as a memory change and return its id: in its
+    review lessons, or its priority lessons, which only priority scoring reads. It
     carries ``user``'s approval when they may configure the repository, so it merges
     at once; otherwise it waits for a maintainer who may."""
-    path = f"{repo_dir(p.repo)}/knowledge/review_lessons.md"
-    current = await service.a.memory.read_text(path) or "# Review lessons\n"
+    name, header = (
+        (PRIORITY_LESSONS, "# Priority lessons\n")
+        if p.lesson_for == "priority"
+        else (LESSONS, "# Review lessons\n")
+    )
+    path = f"{repo_dir(p.repo)}/{name}"
+    current = await service.a.memory.read_text(path) or header
     lesson = p.lesson.strip()
     item = "\n  ".join(line.rstrip() for line in lesson.splitlines())
     change = MemoryChange(

@@ -249,7 +249,14 @@ class EvaluatePlaybook(Playbook):
             f"- {name} (weight {d.weight:.2f}): {d.rule}" for name, d in dims.items()
         )
         workdir = ctx.scratch()
-        lessons = await ctx.knowledge.review_lessons(pr.repo, profile)
+        lessons = "\n\n".join(
+            part
+            for part in [
+                await ctx.knowledge.priority_lessons(pr.repo, profile),
+                await ctx.knowledge.review_lessons(pr.repo, profile),
+            ]
+            if part
+        )
         prompt = "\n\n".join(
             [
                 "Score this pull request for the maintainers' private review queue. "
