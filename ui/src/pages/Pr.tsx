@@ -213,7 +213,7 @@ export default function PrPage({ me }: { me: Me }) {
                       : agentOpts.current
                       ? `${t("Which agent does it")}: ${agentOpts.label(agentOpts.current)}`
                       : agentOpts.primary
-                        ? `${t("Which agent does it")}: ${agentOpts.label(agentOpts.primary)} (${t("default")})`
+                        ? `${t("Which agent does it")}: ${agentOpts.defaultLabel}`
                         : undefined
                 }
                 onClick={() => (reviewing && job?.id ? openJob(job.id) : startReview(false))}
@@ -264,7 +264,7 @@ export default function PrPage({ me }: { me: Me }) {
                         close();
                       }}
                     >
-                      {agentOpts.primary ? `${agentOpts.label(agentOpts.primary)} (${t("default")})` : t("Default agent")}
+                      {agentOpts.defaultLabel}
                     </MenuItem>
                     {agentOpts.others.map((a) => (
                       <MenuItem

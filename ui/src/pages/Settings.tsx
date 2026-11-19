@@ -1024,7 +1024,7 @@ function ServiceDefaultChoice({ v }: { v: SettingsView }) {
   const t = useT();
   const toast = useToast();
   const { name, source } = v.default_agent;
-  const set = useAct((agent: string | null) => api.put<{ approved: boolean }>("/api/settings/default-agent", { agent }), [["settings"], ["memory"]]);
+  const set = useAct((agent: string | null) => api.put<{ approved: boolean }>("/api/settings/default-agent", { agent }), [["settings"], ["memory"], ["my-agents"]]);
   const offered = v.agents.filter((a) => a.enabled && a.installed !== false);
   const runsOn = v.routing.find((r) => r.task === "review")?.runs_on;
   const value = source === "settings" ? (name ?? "") : "";
@@ -1638,7 +1638,7 @@ function FileTab({ v, document }: { v: SettingsView; document: string }) {
   const check = useAct((yaml: string) => api.post<SettingsCheck>("/api/settings/check", { yaml }), []);
   const save = useAct(
     (yaml: string) => api.put<{ approved: boolean; change: { id: string; state: string } | null }>("/api/settings", { yaml, title }),
-    [["settings"], ["audit"]],
+    [["settings"], ["audit"], ["my-agents"]],
   );
   const dirty = text !== document;
   return (

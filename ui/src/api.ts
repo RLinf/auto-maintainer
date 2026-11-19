@@ -1044,7 +1044,7 @@ export interface SettingsAgent {
   /** Installed, and its account signed in or a model provider set: it can run tasks. */
   usable: boolean;
   /** Whether the work the signed-in person asks for runs on their own account of it
-   * (their own model API, or their own sign-in), and so tries it first. */
+   * (their own model API, or their own sign-in), tried first when they have no personal default. */
   mine: "api" | "sign-in" | null;
   /** Whether its CLI has a sign-in the dashboard can run; dsh has none and runs only on a model API. */
   can_sign_in: boolean;
@@ -1196,6 +1196,9 @@ export interface SettingsView {
   providers: SettingsProvider[];
   /** The agent every task tries first, and whether the settings or setup chose it. */
   default_agent: { name: string | null; source: "settings" | "setup" | null };
+  /** The agent the signed-in person's requests try first, on their own account (``own``)
+   * or the service's; ``null`` tries their own agents first, then the route. */
+  my_default?: { agent: string; own: boolean } | null;
   routing: SettingsRoute[];
   system: {
     poll_seconds: number;

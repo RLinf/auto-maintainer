@@ -115,8 +115,15 @@ async def settings_view(service: Service, user: User) -> dict[str, Any]:
         for c in await service.store.list_memory_changes(MemoryChangeState.OPEN)
         if c.service
     ]
+    people = service.a.people
     own = set(await service.own_agents(user.login))
-    setups = await service.a.people.get(user.login) if own and service.a.people else {}
+    setups = await people.get(user.login) if own and people else {}
+    chosen = None
+    if people is not None:
+        try:
+            chosen = await people.default(user.login)
+        except ValueError:
+            chosen = None
     # Everyone may read what the service runs on; how it is reached is for those who
     # run it (``sees_internals``).
     internals = await sees_internals(service, user)
@@ -150,7 +157,8 @@ async def settings_view(service: Service, user: User) -> dict[str, Any]:
                 "installed": service.agent_ready(name) if cfg.enabled else None,
                 "usable": service.agent_usable(name) if cfg.enabled else False,
                 # Whether the work this person asks for runs on their own account of
-                # it, and which: what pickers offer them and try first.
+                # it, and which: what pickers offer them (and try first when they
+                # have no personal default).
                 "mine": (
                     "api" if setups.get(name) and setups[name].provider else "sign-in"
                 )
@@ -189,6 +197,7 @@ async def settings_view(service: Service, user: User) -> dict[str, Any]:
             if host_agent
             else None,
         },
+        "my_default": chosen.model_dump(mode="json") if chosen else None,
         "routing": [
             {
                 "task": task,
