@@ -48,6 +48,7 @@ from ..domain.profile import RepoProfile
 from ..domain.records import ActionRecord, ChatMessage
 from ..domain.review import Finding, FollowupResult, ReviewResult
 from ..domain.snapshot import PrSnapshot, PrState
+from .answers import checkout_paths, clip
 from .base import Playbook, PlaybookContext, PlaybookResult, may_succeed_later
 from .ci_doctor import OUTSIDE_LOGS, outside_logs
 from .prompts import (
@@ -118,7 +119,7 @@ def pr_text_task(
                 PR_TEXT.format(public_language=public_language),
                 *asked,
                 current_pr_text(pr),
-                untrusted("agent.account", account[-4000:], 4000)
+                untrusted("agent.account", account, 12_000)
                 if account
                 else "The agent gave no answer.",
                 schema_hint(PrText.model_json_schema()),
@@ -344,7 +345,7 @@ class FixPlaybook(Playbook):
                     f"The agent could not change #{pr.number}: {answer.error}",
                 )
                 return PlaybookResult(failed=f"fix agent failed: {answer.error}")
-            account = answer.text.strip()
+            account = checkout_paths(answer.text.strip(), workdir)
             await ctx.keep_work_session(answer, workdir)
             changes = await ctx.workspace.changes(workdir)
             described = None
@@ -360,7 +361,7 @@ class FixPlaybook(Playbook):
                                 asked,
                                 current_pr_text(pr),
                                 *(
-                                    [untrusted("agent.account", account[-4000:], 4000)]
+                                    [untrusted("agent.account", account, 12_000)]
                                     if account
                                     else []
                                 ),
@@ -418,12 +419,12 @@ class FixPlaybook(Playbook):
                 ctx,
                 thread,
                 f"The agent changed nothing in #{pr.number}."
-                + (f" {account[-1500:]}" if account else ""),
+                + (f" {clip(account, 1500)}" if account else ""),
             )
             return PlaybookResult(
                 result={
                     "skipped": "the agent changed nothing",
-                    "summary": account[-1000:],
+                    "summary": clip(account, 1000),
                 }
             )
         if described is not None and described.ok and described.structured is not None:
@@ -433,7 +434,7 @@ class FixPlaybook(Playbook):
                 title=f"Changes to #{pr.number}"
                 if request
                 else f"Fix review findings on #{pr.number}",
-                summary=account[-2000:]
+                summary=clip(account, 8000)
                 or (
                     "The changes asked for."
                     if request
@@ -561,7 +562,7 @@ class FixPlaybook(Playbook):
                     f"The agent could not prepare a PR for {event.repo}: {answer.error}",
                 )
                 return PlaybookResult(failed=f"fix agent failed: {answer.error}")
-            account = answer.text.strip()
+            account = checkout_paths(answer.text.strip(), workdir)
             await ctx.keep_work_session(answer, workdir)
             changes = await ctx.workspace.changes(workdir)
             described = None
@@ -579,7 +580,7 @@ class FixPlaybook(Playbook):
                                 ),
                                 asked,
                                 *(
-                                    [untrusted("agent.account", account[-4000:], 4000)]
+                                    [untrusted("agent.account", account, 12_000)]
                                     if account
                                     else []
                                 ),
@@ -602,12 +603,12 @@ class FixPlaybook(Playbook):
                 ctx,
                 thread,
                 f"The agent changed nothing in {event.repo}."
-                + (f" {account[-1500:]}" if account else ""),
+                + (f" {clip(account, 1500)}" if account else ""),
             )
             return PlaybookResult(
                 result={
                     "skipped": "the agent changed nothing",
-                    "summary": account[-1000:],
+                    "summary": clip(account, 1000),
                 }
             )
         if described is not None and described.ok and described.structured is not None:
@@ -615,7 +616,7 @@ class FixPlaybook(Playbook):
         else:
             fix = FixResult(
                 title=f"Changes to {event.repo}",
-                summary=account[-2000:] or "The changes asked for.",
+                summary=clip(account, 8000) or "The changes asked for.",
             )
         lines = [fix.summary]
         if fix.fixed:

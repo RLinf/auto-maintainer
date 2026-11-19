@@ -55,6 +55,7 @@ from ..domain.merge_schedule import fix_key
 from ..domain.profile import RepoProfile
 from ..domain.records import ActionRecord, CiObservation
 from ..domain.snapshot import PrSnapshot, PrState
+from .answers import checkout_paths, clip
 from .base import (
     Playbook,
     PlaybookContext,
@@ -332,7 +333,7 @@ class FixCiPlaybook(Playbook):
                     else {},
                 )
             )
-            account = answer.text.strip() if answer.ok else ""
+            account = checkout_paths(answer.text.strip(), workdir) if answer.ok else ""
             await ctx.keep_work_session(answer, workdir)
             changes = await ctx.workspace.changes(workdir)
             if answer.ok and changes.files:
@@ -347,7 +348,7 @@ class FixCiPlaybook(Playbook):
                                 "The agent was asked to fix these failed CI jobs; "
                                 "use each job's name as its id:\n" + "\n".join(jobs),
                                 *(
-                                    [untrusted("agent.account", account[-4000:], 4000)]
+                                    [untrusted("agent.account", account, 12_000)]
                                     if account
                                     else []
                                 ),
@@ -391,12 +392,12 @@ class FixCiPlaybook(Playbook):
                     ctx,
                     pr,
                     "the agent changed nothing"
-                    + (f": {account[-400:]}" if account else ""),
+                    + (f": {clip(account, 400)}" if account else ""),
                 )
             return PlaybookResult(
                 result={
                     "skipped": "the agent changed nothing",
-                    "summary": account[-2000:],
+                    "summary": clip(account, 2000),
                     "commands": ran,
                     **({"tested_on": lab, "commit": pr.head_sha} if ran else {}),
                 }
@@ -406,7 +407,7 @@ class FixCiPlaybook(Playbook):
         else:
             fix = FixResult(
                 title=f"Fix failing CI on #{pr.number}",
-                summary=account[-2000:] or "Fixes for the failing CI jobs.",
+                summary=clip(account, 8000) or "Fixes for the failing CI jobs.",
             )
         lines = [fix.summary, ""]
         lines += [f"- {f.id}: {f.change}" for f in fix.fixed]
@@ -419,7 +420,7 @@ class FixCiPlaybook(Playbook):
             "files": changes.files,
             "fixed": [f.id for f in fix.fixed],
             "commands": ran,
-            "summary": account[-2000:],
+            "summary": clip(account, 2000),
             **({"tested_on": lab, "commit": pr.head_sha} if ran else {}),
         }
         if scheduled:

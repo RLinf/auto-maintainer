@@ -38,6 +38,7 @@ from ..domain.events import Event, EventKind
 from ..domain.ports import CommandResult
 from ..domain.profile import RepoProfile
 from ..domain.records import ChatMessage
+from .answers import clip
 from .base import Playbook, PlaybookContext, PlaybookResult, may_succeed_later
 from .prompts import schema_hint, untrusted
 
@@ -155,7 +156,7 @@ class SelfImprove(Playbook):
                     ctx,
                     thread_id,
                     "I did not change any code."
-                    + (f" {account[-1500:]}" if account else ""),
+                    + (f" {clip(account, 1500)}" if account else ""),
                 )
                 return PlaybookResult(result={"done": False})
             checks = await _run_checks(ctx, path)
@@ -222,7 +223,7 @@ class SelfImprove(Playbook):
         else:  # the PR still says what was asked and shows the diff
             summary = ImproveSummary(
                 title=request.splitlines()[0],
-                summary=account[-3000:] or "See the diff.",
+                summary=clip(account, 8000) or "See the diff.",
             )
         title = _title(summary.title)
         branch = f"am/self/{_slug(title)}-{event.id[-6:]}"
@@ -239,7 +240,7 @@ class SelfImprove(Playbook):
                     _check(name, " ".join(argv), result)
                     for name, argv, result in checks
                 ),
-                "## The agent's account\n" + account[-3000:] if account else "",
+                "## The agent's account\n" + clip(account, 8000) if account else "",
                 "## Notes for the reviewer\n" + summary.notes if summary.notes else "",
                 f"Files: {', '.join(changes.files[:40])}",
                 f"Drafted by auto-maintainer with {work.runtime}. A maintainer of this "
@@ -379,7 +380,7 @@ def _summary_prompt(request: str, patch: str, account: str) -> str:
             "the diff; do not change any file.",
             f"What a reviewer asked for:\n\n{request}",
             *(
-                [f"What the agent that made it said:\n\n{account[-4000:]}"]
+                [f"What the agent that made it said:\n\n{clip(account, 4000)}"]
                 if account
                 else []
             ),

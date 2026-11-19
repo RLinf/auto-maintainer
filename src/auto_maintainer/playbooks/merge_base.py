@@ -54,6 +54,7 @@ from ..domain.events import Event, EventKind
 from ..domain.ids import same_commit, short_sha
 from ..domain.merge_schedule import resolve_key
 from ..domain.snapshot import PrSnapshot, PrState
+from .answers import checkout_paths, clip
 from .base import Playbook, PlaybookContext, PlaybookResult, may_succeed_later
 from .prompts import no_code_rule, pr_block, untrusted, work_lessons_block
 
@@ -257,9 +258,12 @@ class MergeBasePlaybook(Playbook):
         if left:
             return PlaybookResult(
                 failed="the agent left conflicts in " + ", ".join(left),
-                result={"left": left, "summary": answer.text.strip()[-1000:]},
+                result={"left": left, "summary": clip(answer.text, 1000)},
             )
-        account = answer.text.strip()[-3000:] or f"Resolves the conflicts with {base}."
+        account = (
+            clip(checkout_paths(answer.text, workdir), 20_000)
+            or f"Resolves the conflicts with {base}."
+        )
         rationale = (
             f"merge {base} at {short_sha(attempt.merge_sha)} into "
             f"{short_sha(pr.head_sha)}, resolving {len(resolved)} conflicted files"
@@ -466,11 +470,11 @@ class MergeBasePlaybook(Playbook):
             )
         finally:
             await ctx.workspace.release(workdir)
-        account = answer.text.strip()
+        account = checkout_paths(answer.text.strip(), workdir)
         if problems:
             return await refuse(
                 "; ".join(problems[:5])
-                + (f". The agent said: {account[-600:]}" if account else "")
+                + (f". The agent said: {clip(account, 600)}" if account else "")
             )
         action = _resolution(
             pr,
@@ -509,7 +513,7 @@ def _resolution(
     schedule through (``Merge <base> into #<n>``)."""
     names = sorted({k.name for k in kinds.values() if k is not None})
     body = (
-        (account[-2500:] + "\n\n" if account else "")
+        (clip(account, 2500) + "\n\n" if account else "")
         + f"Minor conflicts ({', '.join(names)}) resolved by the merge schedule "
         f"for {by}, who scheduled the PR."
     )

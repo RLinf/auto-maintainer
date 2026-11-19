@@ -53,6 +53,7 @@ from ..domain.profile import RepoProfile, Route
 from ..domain.records import ActionRecord, ChatMessage, ChatThread, Job
 from ..domain.secrets import redact_secrets
 from ..domain.snapshot import PrSnapshot
+from ..playbooks.answers import checkout_paths, clip
 from ..playbooks.base import author_is_team
 from ..playbooks.fix import (
     DESCRIBE,
@@ -442,7 +443,7 @@ async def fix_turn(
         raise HTTPException(502, f"the agent failed: {result.error}")
     keep_session(thread, result)
     await service.store.save_thread(thread)
-    reply = result.text.strip()[-6_000:] or "Done."
+    reply = clip(checkout_paths(result.text, workdir), 6_000) or "Done."
 
     notes: list[str] = []
     if removed:
@@ -770,7 +771,7 @@ async def _describe(
                     else "",
                     f"What {login} then asked:\n"
                     + untrusted("maintainer.request", text, 8_000),
-                    untrusted("agent.account", reply[-4_000:], 4_000),
+                    untrusted("agent.account", reply, 8_000),
                     current_pr_text(pr) if pr is not None else "",
                     "The draft so far also gives the pull request this new title or "
                     "description; keep them unless what was asked since says otherwise:\n"
