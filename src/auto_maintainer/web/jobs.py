@@ -71,8 +71,11 @@ AGENT_PLAYBOOKS = {
     "quick_quality": "evaluate",
     "merge_base": "fix",
     "fix_ci": "fix",
+    "lessons": "learn",
 }
-"""Playbooks whose work is an agent's, and the task kind of their main agent run."""
+"""Playbooks whose work is an agent's, and the task kind of their main agent run. A
+playbook missing here has no live view: the dashboard cannot find its job by the
+request that started it."""
 
 ASKED_FOR = {EventKind.DASHBOARD_COMMAND.value, EventKind.PRIORITY_RESCORE.value}
 """Kinds of the events that start scoring someone waits for: a maintainer's request,

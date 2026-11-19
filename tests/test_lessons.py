@@ -212,6 +212,8 @@ async def test_an_agent_summarizes_into_a_draft_a_maintainer_applies(demo) -> No
         asked = await walt.post(f"/api/repos/{REPO}/lessons/review/summarize", json={})
         assert asked.status_code == 200, asked.text
         await h.settle()
+        live = await walt.get(f"/api/jobs/{asked.json()['event']}")
+        assert live.status_code == 200, "its live view opens by the request's id"
         [task] = [t for t in h.runner.tasks if t.kind == "learn"]
         assert task.requested_by == "walt" and "Reviews must be brief." in task.prompt
         page = (await walt.get(f"/api/repos/{REPO}/lessons")).json()
