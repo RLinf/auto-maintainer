@@ -162,6 +162,27 @@ async def test_repair_resumes_the_session_when_supported() -> None:
     assert repair.id.endswith("-repair") and len(records) == 2
 
 
+async def test_a_session_the_cli_cannot_take_up_runs_afresh_on_the_same_agent() -> None:
+    """A conversation resumes the session its work ended in; when the CLI cannot
+    take it up, the same agent answers from the whole prompt before any other."""
+    a = ScriptedAgentRuntime("a", [_fail("other"), {"ok": True}])
+    b = ScriptedAgentRuntime("b", [{"ok": True}])
+    router, _ = _router(a, b)
+    task = _task(prompt="Go on.", resume_session="s-gone", fresh_prompt="Judge it.")
+    result = await router.run(task, Route(primary="a", fallback=["b"]), Verdict)
+    assert result.ok and result.runtime == "a" and not b.tasks
+    resumed, fresh = a.tasks
+    assert resumed.resume_session == "s-gone" and resumed.prompt == "Go on."
+    assert fresh.resume_session is None and fresh.prompt == "Judge it."
+    # Without a prompt to start afresh from, the route's next agent answers.
+    a2 = ScriptedAgentRuntime("a", [_fail("other")])
+    b2 = ScriptedAgentRuntime("b", [{"ok": True}])
+    router, _ = _router(a2, b2)
+    plain = _task(resume_session="s-gone")
+    result = await router.run(plain, Route(primary="a", fallback=["b"]), Verdict)
+    assert result.runtime == "b" and len(a2.tasks) == 1
+
+
 async def test_repair_starts_fresh_without_sessions() -> None:
     caps = Capabilities(schema_flag=False, sessions=False)
     a = ScriptedAgentRuntime(

@@ -733,9 +733,18 @@ class FakeWorkspace:
         """Each conflicted file on each side of the merge, as git would record it."""
 
     async def prepare(
-        self, repo: str, number: int | None, sha: str, default_branch: str
+        self,
+        repo: str,
+        number: int | None,
+        sha: str,
+        default_branch: str,
+        at: Path | None = None,
     ) -> Path:
-        path = self.root / f"{repo.replace('/', '__')}-{number}-{sha[:7]}"
+        path = (
+            Path(at)
+            if at is not None and not Path(at).exists()
+            else self.root / f"{repo.replace('/', '__')}-{number}-{sha[:7]}"
+        )
         path.mkdir(parents=True, exist_ok=True)
         self.prepared.append((repo, number, sha))
         return path

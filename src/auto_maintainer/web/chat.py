@@ -60,6 +60,7 @@ from ..domain.memory import (
     repo_dir,
 )
 from ..domain.profile import Route
+from ..domain.progress import work_session_key
 from ..domain.records import ChatMessage, ChatRequest, ChatThread, JobStatus
 from ..domain.review import review_quality
 from ..domain.run_ci import latest_checks
@@ -242,6 +243,34 @@ def resumed_route(
     return route.model_copy(
         update={"primary": resumed.runtime, "fallback": rest, "model": model}
     ), resumed.session or resume
+
+
+async def work_session(service: Service, thread: ChatThread) -> dict[str, Any] | None:
+    """The session the agent finished the conversation's work in (a review, a
+    follow-up, a change: ``PlaybookContext.keep_work_session``), for the work's own
+    conversation to go on in; ``None`` for a copy, or work that kept none."""
+    if not thread.job_id or thread.forked_from:
+        return None
+    kept = await service.store.get_state(work_session_key(thread.job_id))
+    if not isinstance(kept, dict) or not kept.get("session") or not kept.get("workdir"):
+        return None
+    return kept
+
+
+def take_up_work(
+    service: Service, thread: ChatThread, kept: dict[str, Any] | None, path: Path
+) -> None:
+    """Make the conversation's first turn resume the work's session when its new
+    checkout sits where the work's did (the agent's CLI finds its session by that
+    path) and that agent is ready; otherwise it starts afresh."""
+    thread.session = None
+    if (
+        kept is not None
+        and str(path) == kept["workdir"]
+        and service.agent_ready(str(kept.get("runtime") or ""))
+    ):
+        thread.session = str(kept["session"])
+        thread.runtime = str(kept["runtime"])
 
 
 def keep_session(thread: ChatThread, result: AgentResult) -> None:

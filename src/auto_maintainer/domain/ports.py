@@ -404,12 +404,19 @@ class Workspace(Protocol):
     """Git worktrees of target repositories for agent runs (design 4.7)."""
 
     async def prepare(
-        self, repo: str, number: int | None, sha: str, default_branch: str
+        self,
+        repo: str,
+        number: int | None,
+        sha: str,
+        default_branch: str,
+        at: Path | None = None,
     ) -> Any:
         """Check out ``sha`` in a fresh worktree from the service's mirror and return its path.
 
         Agent instruction files and skills are replaced with their default-branch
-        versions, so a PR cannot change how it is reviewed.
+        versions, so a PR cannot change how it is reviewed. ``at``: the path to use,
+        when it is free (a checkout released earlier, whose agent session is taken up
+        there); otherwise a new one.
         """
         ...
 

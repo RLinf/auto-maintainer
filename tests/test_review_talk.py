@@ -656,3 +656,28 @@ async def test_a_turn_the_stopping_service_cuts_off_stays_answering(demo) -> Non
         h.service.closing.clear()
     thread = await h.store.get_thread(f"chat_{job['id']}")
     assert thread is not None and thread.live_run, "still answering, to take up"
+
+
+async def test_a_discussion_goes_on_in_the_session_its_review_ended_in(demo) -> None:
+    """The first turn's checkout sits where the review's was, and resumes the
+    session the reviewing agent ended in, so it answers with all it read; the
+    whole prompt is there for a CLI that cannot take the session up."""
+    from auto_maintainer.domain.progress import work_session_key
+
+    h, app = demo
+    async with _as(app, "maria") as maria:
+        job = await _reviewed(h, maria, 42)
+        review = next(
+            t
+            for t in h.runner.tasks
+            if t.kind == "review" and "That reproduction has ended" not in t.prompt
+        )
+        wrote = h.runner.routes[h.runner.tasks.index(review)].primary
+        await h.store.set_state(
+            work_session_key(job["id"]),
+            {"runtime": wrote, "session": "s-review", "workdir": str(review.workdir)},
+        )
+        await maria.post(f"/api/jobs/{job['id']}/talk", json={"text": "Why F1?"})
+        first = h.runner.tasks[-1]
+        assert first.workdir == review.workdir and first.resume_session == "s-review"
+        assert first.fresh_prompt and "Why F1?" in first.fresh_prompt

@@ -333,6 +333,7 @@ class FixCiPlaybook(Playbook):
                 )
             )
             account = answer.text.strip() if answer.ok else ""
+            await ctx.keep_work_session(answer, workdir)
             changes = await ctx.workspace.changes(workdir)
             if answer.ok and changes.files:
                 described = await ctx.ask(

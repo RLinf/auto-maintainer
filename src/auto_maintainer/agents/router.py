@@ -351,6 +351,24 @@ class AgentRouter:
             result = await self._run_structured(runtime, attempt, schema, output_model)
             if result.ok:
                 return result
+            if (
+                attempt.resume_session
+                and attempt.fresh_prompt
+                and result.error_kind not in ("timeout", "quota", "limit", "auth")
+            ):
+                # The CLI could not take the session up: the same agent, afresh.
+                fresh = attempt.model_copy(
+                    update={
+                        "prompt": attempt.fresh_prompt,
+                        "resume_session": None,
+                        "id": f"{task.id}-fresh",
+                    }
+                )
+                result = await self._run_structured(
+                    runtime, fresh, schema, output_model
+                )
+                if result.ok:
+                    return result
             last = result
         if last is not None:
             return last

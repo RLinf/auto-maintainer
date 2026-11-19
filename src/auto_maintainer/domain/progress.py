@@ -108,6 +108,13 @@ def agent_session_key(job_id: str, kind: str) -> str:
     return f"agent-session:{job_id}:{kind}"
 
 
+def work_session_key(job_id: str) -> str:
+    """Where a job that did agent work (a review, a follow-up, a change) keeps the
+    session its agent finished in: runtime, account, session id, and the checkout it
+    worked in, so the conversation about that work goes on in the same session."""
+    return f"work-session:{job_id}"
+
+
 def step_from_event(event: AgentEvent, runtime: str, task_kind: str) -> JobStep | None:
     """The step ``event`` adds to a job's progress, or ``None`` for events that add
     nothing a person would read (usage counters)."""

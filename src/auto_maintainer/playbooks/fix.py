@@ -345,6 +345,7 @@ class FixPlaybook(Playbook):
                 )
                 return PlaybookResult(failed=f"fix agent failed: {answer.error}")
             account = answer.text.strip()
+            await ctx.keep_work_session(answer, workdir)
             changes = await ctx.workspace.changes(workdir)
             described = None
             if changes.files:
@@ -561,6 +562,7 @@ class FixPlaybook(Playbook):
                 )
                 return PlaybookResult(failed=f"fix agent failed: {answer.error}")
             account = answer.text.strip()
+            await ctx.keep_work_session(answer, workdir)
             changes = await ctx.workspace.changes(workdir)
             described = None
             if changes.files:

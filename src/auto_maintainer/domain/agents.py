@@ -146,6 +146,11 @@ class AgentTask(BaseModel):
     """Folders the agent may read but never change, such as the service's own code
     beside a conversation's checkout; a container mounts them read-only."""
     resume_session: str | None = None
+    fresh_prompt: str | None = None
+    """For a task that resumes ``resume_session``: what the same agent runs afresh
+    when its CLI cannot take that session up (another checkout or account, a session
+    it no longer has), before the route's other agents. It carries all a fresh run
+    needs."""
     model: str | None = None
     effort: str | None = None
     budget: Literal["normal", "quick"] = "normal"

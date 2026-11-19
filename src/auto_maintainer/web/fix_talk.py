@@ -74,7 +74,9 @@ from .chat import (
     keep_session,
     resumed_route,
     stopped_message,
+    take_up_work,
     turn_route,
+    work_session,
 )
 from .live_turns import LiveTurns, Stopped
 from .records import open_door, reading_line
@@ -221,7 +223,12 @@ async def _checkout(
         if same_commit(now.base_sha, base) and now.patch == patch:
             return Path(thread.workdir)
         await ws.release(thread.workdir)
-    path = await ws.prepare(repo, number, base, default_branch)
+    # The first checkout goes where the change was made, so its agent's session
+    # resumes with everything it read and did.
+    kept = await work_session(service, thread) if not thread.workdir else None
+    path = await ws.prepare(
+        repo, number, base, default_branch, at=Path(kept["workdir"]) if kept else None
+    )
     try:
         await ws.apply(path, patch)
     except Exception as e:
@@ -230,7 +237,7 @@ async def _checkout(
             409, f"the change no longer applies to {short_sha(base)}: {e}"
         ) from e
     thread.workdir = str(path)
-    thread.session = None
+    take_up_work(service, thread, kept, path)
     await service.store.save_thread(thread)
     return path
 
@@ -373,6 +380,7 @@ async def fix_turn(
     )
     turn, resume = await turn_route(service, user.login, thread, route)
     turn, resume = resumed_route(service, turn, resumed, resume)
+    fresh = prompt  # all a fresh run needs, when the CLI cannot resume
     if resumed is not None and resume:
         prompt = f"{RESUMED_TURN}\n\n{prompt}"
     run = new_id("run")
@@ -394,6 +402,7 @@ async def fix_turn(
         or (payload is not None and turn.primary == payload.runtime),
         untrusted_input=untrusted_input,
         resume_session=resume,
+        fresh_prompt=fresh if resume else None,
         records_token=token,
         env=door_env,
         timeout_seconds=2400,

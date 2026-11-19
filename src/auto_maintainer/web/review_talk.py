@@ -103,7 +103,9 @@ from .chat import (
     resumed_route,
     save_lesson,
     stopped_message,
+    take_up_work,
     turn_route,
+    work_session,
 )
 from .fix_talk import fix_draft, fix_turn, pending
 from .jobs import ACTIVE, _job, _payload
@@ -197,14 +199,18 @@ async def _checkout(
     info = await service.a.forge.get_repo(pr.repo)
     if thread.workdir and Path(thread.workdir).is_dir():
         return Path(thread.workdir), info.default_branch
+    # The first checkout goes where the review's was, so its agent's session
+    # resumes with everything it read.
+    kept = await work_session(service, thread) if not thread.workdir else None
     path = await service.a.workspace.prepare(
         pr.repo,
         pr.number,
         record.action.head_sha or pr.head_sha,
         info.default_branch,
+        at=Path(kept["workdir"]) if kept else None,
     )
     thread.workdir = str(path)
-    thread.session = None
+    take_up_work(service, thread, kept, path)
     await service.store.save_thread(thread)
     return path, info.default_branch
 
@@ -862,6 +868,7 @@ async def _turn(
     )
     route, resume = await turn_route(service, user.login, thread, base_route)
     route, resume = resumed_route(service, route, resumed, resume)
+    fresh = prompt  # all a fresh run needs, when the CLI cannot resume
     if resumed is not None and resume:
         prompt = f"{RESUMED_TURN}\n\n{prompt}"
     run = new_id("run")
@@ -883,6 +890,7 @@ async def _turn(
         or route.primary == payload.runtime,
         untrusted_input=not await author_is_team(service.a.forge, profile, pr),
         resume_session=resume,
+        fresh_prompt=fresh if resume else None,
         records_token=token,
         env=door_env,
     )

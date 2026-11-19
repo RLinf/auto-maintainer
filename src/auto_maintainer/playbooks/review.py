@@ -240,6 +240,7 @@ class ReviewPlaybook(Playbook):
                     raise RuntimeError(f"review agent failed: {answer.error}")
                 await close(ctx, machine)
                 await keep_report(ctx, pr.head_sha, answer)
+            await ctx.keep_work_session(answer, workdir)
             form = await fill_form(
                 ctx,
                 answer,
