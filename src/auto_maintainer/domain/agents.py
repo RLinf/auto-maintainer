@@ -398,6 +398,18 @@ class AgentLogin(BaseModel):
     started_at: datetime
 
 
+ANTIGRAVITY_TOOL_POLICIES = (
+    "always-proceed",
+    "request-review",
+    "strict",
+    "proceed-in-sandbox",
+)
+"""Antigravity's tool execution policies (its settings key ``autoExecutionPolicy``,
+the runtime option ``tool_policy``): whether terminal commands run without asking
+(``always-proceed``), ask for review, are held strictly, or run without asking
+inside its sandbox."""
+
+
 class PersonalDefault(BaseModel):
     """The agent the work a person asks for tries first when they pick none, on their
     own account (``own``) or on the service's: chosen among both, it replaces "every

@@ -17,11 +17,16 @@
 ``agy``'s print mode has an ``auto`` mode but no way to hand a permission prompt to
 the caller, so the service runs ``agy acp`` and answers ``session/request_permission``
 itself (see ``agents.acp``). The ACP server offers the modes ``default`` (asks before
-edits and commands), ``accept-edits``, and ``plan``. Tasks that may write run in
-``accept-edits``; read-only tasks run in ``default``, so the automatic rules and
-reviewers see every edit and command. Read-only tasks also get ``--sandbox``, which
-restricts terminal commands; on hosts where ``agy``'s sandbox server cannot start,
-every command then fails, and operators set the runtime option ``sandbox: false``.
+edits and commands), ``accept-edits``, ``plan``, and since 1.5.11 ``auto`` (approves
+edits and safe commands itself, asks before irreversible actions). A task in auto
+mode runs in ``auto`` where the CLI offers it, so only what agy itself asks about
+reaches the automatic rules and reviewers; elsewhere, and for a restricted task,
+tasks that may write run in ``accept-edits`` and read-only tasks in ``default``.
+Read-only tasks also get ``--sandbox``, which restricts terminal commands; on hosts
+where ``agy``'s sandbox server cannot start, every command then fails, and operators
+set the runtime option ``sandbox: false``. The runtime option ``tool_policy`` sets
+agy's tool execution policy for each session (``--settings``, never saved), such as
+``always-proceed``, under which terminal commands run without asking.
 The model and the reasoning level are session config options (``model``,
 ``thought_level``). ``--dangerously-skip-permissions`` is bypass mode.
 """
@@ -33,7 +38,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from ...domain.agents import AgentQuota, AgentTask, Capabilities, QuotaBucket
+from ...domain.agents import (
+    ANTIGRAVITY_TOOL_POLICIES as TOOL_POLICIES,
+)
+from ...domain.agents import (
+    AgentQuota,
+    AgentTask,
+    Capabilities,
+    QuotaBucket,
+)
 from ..acp import AcpRuntime
 from ..exec import QUOTA_READ_SECONDS, RunFiles
 
@@ -91,10 +104,20 @@ class AntigravityRuntime(AcpRuntime):
     default_env_allow = ("GEMINI_*", "GOOGLE_*", "ANTIGRAVITY_*", "AGY_*")
 
     def __init__(
-        self, name: str | None = None, *, sandbox: bool = True, **kwargs: Any
+        self,
+        name: str | None = None,
+        *,
+        sandbox: bool = True,
+        tool_policy: str | None = None,
+        **kwargs: Any,
     ) -> None:
         super().__init__(name, **kwargs)
+        if tool_policy is not None and tool_policy not in TOOL_POLICIES:
+            raise ValueError(
+                f"tool_policy is one of {', '.join(TOOL_POLICIES)}, not {tool_policy!r}"
+            )
         self.sandbox = sandbox
+        self.tool_policy = tool_policy
 
     def capabilities(self) -> Capabilities:
         return super().capabilities().model_copy(update={"skill_dirs": True})
@@ -103,8 +126,14 @@ class AntigravityRuntime(AcpRuntime):
         argv = [binary, "acp", "--disable-telemetry"]
         if task.permissions == "bypass":
             argv.append("--dangerously-skip-permissions")
-        elif task.mode == "read_only" and self.sandbox:
-            argv.append("--sandbox")
+        else:
+            if task.mode == "read_only" and self.sandbox:
+                argv.append("--sandbox")
+            if self.tool_policy:
+                argv += [
+                    "--settings",
+                    json.dumps({"autoExecutionPolicy": self.tool_policy}),
+                ]
         for directory in [*task.skill_dirs, *task.extra_dirs, *task.reference_dirs]:
             argv += ["--add-dir", str(directory)]
         return argv
@@ -114,7 +143,15 @@ class AntigravityRuntime(AcpRuntime):
     ) -> list[tuple[str, dict[str, Any]]]:
         calls: list[tuple[str, dict[str, Any]]] = []
         if task.permissions != "bypass":
-            mode = "accept-edits" if task.mode == "workspace_write" else "default"
+            offered = {
+                str(m.get("id"))
+                for m in ((session.get("modes") or {}).get("availableModes") or [])
+                if isinstance(m, dict)
+            }
+            if task.permissions == "auto" and "auto" in offered:
+                mode = "auto"
+            else:
+                mode = "accept-edits" if task.mode == "workspace_write" else "default"
             calls.append(("session/set_mode", {"modeId": mode}))
         model = task.model or self.model
         if model:

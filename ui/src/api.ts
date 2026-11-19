@@ -1030,6 +1030,8 @@ export interface SecretInfo {
 export interface SettingsAgent {
   name: string;
   adapter: string;
+  /** Adapter options from the settings, such as Antigravity's ``tool_policy``. */
+  options?: Record<string, unknown>;
   enabled: boolean;
   model: string | null;
   /** A faster model for quick tasks (triage, scores, CI classification, comment checks). */

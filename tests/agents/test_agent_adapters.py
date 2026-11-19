@@ -19,6 +19,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from auto_maintainer.agents.adapters.antigravity import AntigravityRuntime
 from auto_maintainer.agents.adapters.claude_code import ClaudeCodeRuntime
 from auto_maintainer.agents.adapters.codex import CodexRuntime
@@ -165,6 +167,46 @@ def test_codex_runs_the_app_server(tmp_path: Path) -> None:
         ]
         == "user"
     )
+
+
+def test_antigravity_runs_its_own_auto_mode_and_tool_policy(tmp_path: Path) -> None:
+    """In auto mode agy runs its own ``auto`` mode where it offers one (1.5.11),
+    so only what it asks about reaches the service; its tool execution policy is
+    set for the session alone, never saved."""
+    files = _files(tmp_path)
+    offered = {
+        "modes": {
+            "availableModes": [
+                {"id": "default"},
+                {"id": "accept-edits"},
+                {"id": "auto"},
+                {"id": "plan"},
+            ]
+        }
+    }
+    agy = AntigravityRuntime(tool_policy="always-proceed")
+    auto = _task(tmp_path, permissions="auto")
+    assert agy.session_setup(auto, offered)[0] == (
+        "session/set_mode",
+        {"modeId": "auto"},
+    )
+    assert agy.session_setup(auto, {})[0] == (
+        "session/set_mode",
+        {"modeId": "default"},
+    ), "an agy without auto mode keeps the service's rules"
+    restricted = _task(tmp_path, permissions="restricted", mode="workspace_write")
+    assert agy.session_setup(restricted, offered)[0] == (
+        "session/set_mode",
+        {"modeId": "accept-edits"},
+    ), "a restricted task asks for everything"
+    argv = agy.build_invocation(auto, files, "agy").argv
+    assert json.loads(_after(argv, "--settings")) == {
+        "autoExecutionPolicy": "always-proceed"
+    }
+    bypass = agy.build_invocation(_task(tmp_path, permissions="bypass"), files, "agy")
+    assert "--settings" not in bypass.argv
+    with pytest.raises(ValueError):
+        AntigravityRuntime(tool_policy="whenever")
 
 
 def test_acp_runtimes_start_their_servers(tmp_path: Path) -> None:

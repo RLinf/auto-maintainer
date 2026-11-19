@@ -30,7 +30,7 @@ import yaml
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from ..domain.agents import AgentTask, TaskKind
+from ..domain.agents import ANTIGRAVITY_TOOL_POLICIES, AgentTask, TaskKind
 from ..domain.ids import new_id
 from ..domain.labs import owns
 from ..domain.memory import MemoryChangeState
@@ -143,6 +143,7 @@ async def settings_view(service: Service, user: User) -> dict[str, Any]:
                         "permissions",
                         "binary",
                         "approve_commands",
+                        "options",
                     },
                 ),
                 "can_bypass": can_bypass(cfg),
@@ -247,6 +248,12 @@ async def settings_view(service: Service, user: User) -> dict[str, Any]:
             for name, state in service.installs.items()
         },
     }
+
+
+class AgentToolPolicyBody(BaseModel):
+    tool_policy: str | None = None
+    """Antigravity's tool execution policy (``adapters/antigravity.TOOL_POLICIES``);
+    ``None`` keeps the CLI's own setting."""
 
 
 class AgentModeBody(BaseModel):
@@ -661,6 +668,39 @@ def build_router() -> APIRouter:
             DocumentBody(
                 yaml=_with_agent_mode(text, name, body.permissions),
                 title=f"settings: {name} runs in {mode} mode",
+            ),
+            user,
+        )
+
+    @r.put("/agents/{name}/tool-policy")
+    async def set_agent_tool_policy(
+        request: Request,
+        name: str,
+        body: AgentToolPolicyBody,
+        user: User = Depends(current_user),
+    ) -> dict[str, Any]:
+        """Set an Antigravity agent's tool execution policy for every session it
+        runs, such as ``always-proceed``, so auto mode runs commands without asking;
+        ``None`` keeps the CLI's own setting. A settings change like any other."""
+        service = service_of(request)
+        text, legacy = await service.settings_text()
+        agents = effective_agents(service.service_config, legacy)
+        if name not in agents:
+            raise HTTPException(404, f"there is no agent named {name!r}")
+        if agents[name].adapter != "antigravity":
+            raise HTTPException(422, f"{name} has no tool execution policy to set")
+        policies = ANTIGRAVITY_TOOL_POLICIES
+        if body.tool_policy is not None and body.tool_policy not in policies:
+            raise HTTPException(422, f"the tool policy is one of {', '.join(policies)}")
+        options = {k: v for k, v in agents[name].options.items() if k != "tool_policy"}
+        if body.tool_policy:
+            options["tool_policy"] = body.tool_policy
+        return await save(
+            request,
+            DocumentBody(
+                yaml=_with_agent_fields(text, name, {"options": options or None}),
+                title=f"settings: {name} runs tools with "
+                f"{body.tool_policy or 'its own policy'}",
             ),
             user,
         )

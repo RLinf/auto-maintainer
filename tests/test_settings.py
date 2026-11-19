@@ -948,3 +948,28 @@ async def test_a_person_chooses_their_default_among_the_services_agents_and_thei
         assert (await maria.get("/api/me/agents")).json()["default"] is None, (
             "each person's own"
         )
+
+
+async def test_antigravitys_tool_policy_is_set_through_the_gate(demo) -> None:
+    h, app = demo
+    url = "/api/settings/agents/antigravity/tool-policy"
+    async with _client(app, "maria") as maria:
+        bad = await maria.put(url, json={"tool_policy": "whenever"})
+        assert bad.status_code == 422
+        other = await maria.put(
+            "/api/settings/agents/codex/tool-policy",
+            json={"tool_policy": "always-proceed"},
+        )
+        assert other.status_code == 422, "only Antigravity has one"
+        applied = (await maria.put(url, json={"tool_policy": "always-proceed"})).json()
+        assert applied["approved"] is True
+        [agy] = [
+            a
+            for a in (await maria.get("/api/settings")).json()["agents"]
+            if a["name"] == "antigravity"
+        ]
+        assert agy["options"] == {"tool_policy": "always-proceed"}
+        agents, _ = h.service.a.reconfigure.calls[-1]
+        assert agents["antigravity"].options == {"tool_policy": "always-proceed"}
+        await maria.put(url, json={"tool_policy": None})
+    assert "options" not in (h.service.service_config.agents.get("antigravity") or {})

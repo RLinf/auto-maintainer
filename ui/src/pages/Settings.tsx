@@ -608,6 +608,17 @@ function AgentVersion({ v, name, installed }: { v: SettingsView; name: string; i
   );
 }
 
+/** Antigravity's tool execution policies: whether its terminal commands run without
+ * asking (the service's auto mode then stays out of the way), ask for review, are held
+ * strictly, or run without asking inside its sandbox. */
+const TOOL_POLICIES: [string | null, string][] = [
+  [null, "The CLI's own setting"],
+  ["always-proceed", "Always proceed"],
+  ["proceed-in-sandbox", "Proceed in its sandbox"],
+  ["request-review", "Ask for review"],
+  ["strict", "Strict"],
+];
+
 /** What an agent does less often: its permission mode, looking again for a newer
  * version, and asking the settings agent for anything else. */
 function AgentMenu({ agent, v, ask }: { agent: SettingsAgent; v: SettingsView; ask: (p: string, send?: boolean) => void }) {
@@ -620,6 +631,11 @@ function AgentMenu({ agent, v, ask }: { agent: SettingsAgent; v: SettingsView; a
     [["settings"], ["memory"]],
   );
   const check = useAct(() => api.get<LatestVersions>("/api/settings/agents/latest?refresh=true"), []);
+  const policy = useAct(
+    (tool_policy: string | null) => api.put<{ approved: boolean }>(`/api/settings/agents/${agent.name}/tool-policy`, { tool_policy }),
+    [["settings"], ["memory"]],
+  );
+  const current = (agent.options?.tool_policy as string | undefined) ?? null;
   const done = (r: { approved: boolean }) => toast({ title: r.approved ? t("Saved") : t("Change proposed"), icon: r.approved ? "check" : "inbox" });
   return (
     <Popover
@@ -712,6 +728,29 @@ function AgentMenu({ agent, v, ask }: { agent: SettingsAgent; v: SettingsView; a
                   {t("Skip permission checks")}…
                 </button>
               ))}
+            {agent.adapter === "antigravity" && (
+              <>
+                <div className="menu-sep" />
+                <span className="menu-label" title={t("Whether its terminal commands run without asking. With Always proceed, auto mode runs them without bypassing the permission checks.")}>
+                  {t("Tool execution")}
+                </span>
+                {TOOL_POLICIES.map(([id, label]) => (
+                  <button
+                    key={id ?? "own"}
+                    className="menu-item"
+                    role="menuitemradio"
+                    aria-checked={current === id}
+                    disabled={policy.isPending}
+                    onClick={() => policy.mutate(id, { onSuccess: (r) => (close(), done(r)) })}
+                  >
+                    <span style={{ width: 14, display: "inline-flex" }}>{current === id && <Icon name="check" size={14} />}</span>
+                    {t(label)}
+                  </button>
+                ))}
+                <ErrorBox error={policy.error} />
+                <div className="menu-sep" />
+              </>
+            )}
             <button
               className="menu-item"
               role="menuitem"
