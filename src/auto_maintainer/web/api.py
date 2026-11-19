@@ -1278,6 +1278,13 @@ async def may_answer(service: Service, user: User, question: AgentQuestion) -> b
     return await is_maintainer(service, user, question.repo)
 
 
+def addressed_to(question: AgentQuestion, login: str) -> bool:
+    """Whether ``question`` waits on ``login``: it is for them (``asked_for``) or for
+    nobody in particular. The waiting counts and Home's feed show only these; other
+    people's questions stay answerable on the Questions page by whoever ``may_answer``."""
+    return not question.asked_for or question.asked_for.lower() == login.lower()
+
+
 class DeployBody(BaseModel):
     sha: str = Field(min_length=7, max_length=40, pattern=r"^[0-9a-f]+$")
 
@@ -1443,7 +1450,8 @@ def build_router() -> APIRouter:
                 [
                     q
                     for q in await service.store.list_questions(QuestionState.PENDING)
-                    if await may_answer(service, user, q)
+                    if addressed_to(q, user.login)
+                    and await may_answer(service, user, q)
                 ]
             ),
         }
