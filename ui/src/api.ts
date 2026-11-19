@@ -164,6 +164,12 @@ export interface AgentQuestion {
   answer: AgentAnswer | null;
 }
 
+/** Whether ``q`` waits on ``login``: it is for them or for nobody in particular
+ * (``web/api.py:addressed_to``). Others' questions show only on the Questions page. */
+export function addressedTo(q: Pick<AgentQuestion, "asked_for">, login: string): boolean {
+  return !q.asked_for || q.asked_for.toLowerCase() === login.toLowerCase();
+}
+
 export interface Assignee {
   login: string;
   /** "owner": answers for the whole PR's progress; "reviewer": reviews it. */
