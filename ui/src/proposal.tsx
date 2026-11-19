@@ -121,11 +121,15 @@ export function ProposalCard({
   compact = false,
   selected,
   onSelect,
+  collapsed = false,
+  onToggleCollapse,
 }: {
   proposal: ProposalWithAction;
   compact?: boolean;
   selected?: boolean;
   onSelect?: () => void;
+  collapsed?: boolean;
+  onToggleCollapse?: () => void;
 }) {
   const t = useT();
   const me = useMe().data;
@@ -176,7 +180,7 @@ export function ProposalCard({
   // A fix is pushed only by a person; the service's own account never pushes to a repository.
   const postAsMe = isFix || onlyAsMe || !!reviewAuthor || (canAsMe && asMe);
   const hasComments = Array.isArray(payload.comments) && (payload.comments as unknown[]).length > 0;
-  const diff = usePrDiff(action?.repo ?? "", action?.number, expanded && hasComments);
+  const diff = usePrDiff(action?.repo ?? "", action?.number, expanded && !collapsed && hasComments);
   const files = useMemo(() => (diff.data ? parseDiff(diff.data.diff) : null), [diff.data]);
 
   const editedPayload = (): Record<string, unknown> => ({
@@ -238,6 +242,8 @@ export function ProposalCard({
             setScript(str(payload.script));
             setSetup(str(payload.setup));
             setComments(Array.isArray(payload.comments) ? (payload.comments as InlineComment[]) : []);
+          } else if (collapsed) {
+            onToggleCollapse?.();
           }
           setExpanded(true);
           setRaw(false);
@@ -322,6 +328,18 @@ export function ProposalCard({
   return (
     <div className="proposal">
       <div className="row">
+        {onToggleCollapse && (
+          <button
+            type="button"
+            className="ghost icon sm"
+            aria-expanded={!collapsed}
+            aria-label={collapsed ? t("Expand") : t("Collapse")}
+            title={collapsed ? t("Expand") : t("Collapse")}
+            onClick={onToggleCollapse}
+          >
+            <Icon name={collapsed ? "chevronRight" : "chevronDown"} size={14} />
+          </button>
+        )}
         {onSelect && !done && decides && <input type="checkbox" aria-label={`Select ${kindLabel(kind)}`} checked={!!selected} onChange={onSelect} />}
         <strong>{isNewPr ? (isDraftPr ? t("Open a draft PR") : t("Open a PR")) : t(kindLabel(kind))}</strong>
         {action.number != null && (
@@ -337,35 +355,39 @@ export function ProposalCard({
           <When at={proposal.created_at} />
         </span>
       </div>
-      {action.rationale && <div className="small muted">{action.rationale}</div>}
-      {proposal.warnings.length > 0 && (
-        <ul className="small" style={{ margin: 0, paddingLeft: 18, color: "var(--warn)" }}>
-          {proposal.warnings.map((w) => (
-            <li key={w}>{w}</li>
-          ))}
-        </ul>
-      )}
-      {compact && !expanded ? (
-        <button className="ghost sm" style={{ alignSelf: "flex-start" }} onClick={() => setExpanded(true)}>
-          <Icon name="chevronRight" size={14} />
-          {t("Show what will happen")}
-        </button>
-      ) : (
+      {!collapsed && (
         <>
-          {details}
-          {POSTED_BODY.has(kind) && typeof payload.body === "string" && !editing && (
-            <button className="ghost sm" style={{ alignSelf: "flex-start" }} onClick={() => setRaw(!raw)}>
-              {raw ? t("Show as it will look") : t("Show the Markdown")}
+          {action.rationale && <div className="small muted">{action.rationale}</div>}
+          {proposal.warnings.length > 0 && (
+            <ul className="small" style={{ margin: 0, paddingLeft: 18, color: "var(--warn)" }}>
+              {proposal.warnings.map((w) => (
+                <li key={w}>{w}</li>
+              ))}
+            </ul>
+          )}
+          {compact && !expanded ? (
+            <button className="ghost sm" style={{ alignSelf: "flex-start" }} onClick={() => setExpanded(true)}>
+              <Icon name="chevronRight" size={14} />
+              {t("Show what will happen")}
             </button>
-          )}
-          {(kind === "review.post" || kind === "review.update") && typeof payload.body === "string" && !editing && (
-            <TranslateReview
-              actionId={action.id}
-              places={Array.isArray(payload.comments) ? (payload.comments as InlineComment[]).map((c) => `${c.path}:${c.line}`) : []}
-            />
-          )}
-          {(kind === "review.post" || kind === "review.update") && typeof payload.body === "string" && !editing && (
-            <FinalOutput jobId={action.provenance?.job_id} />
+          ) : (
+            <>
+              {details}
+              {POSTED_BODY.has(kind) && typeof payload.body === "string" && !editing && (
+                <button className="ghost sm" style={{ alignSelf: "flex-start" }} onClick={() => setRaw(!raw)}>
+                  {raw ? t("Show as it will look") : t("Show the Markdown")}
+                </button>
+              )}
+              {(kind === "review.post" || kind === "review.update") && typeof payload.body === "string" && !editing && (
+                <TranslateReview
+                  actionId={action.id}
+                  places={Array.isArray(payload.comments) ? (payload.comments as InlineComment[]).map((c) => `${c.path}:${c.line}`) : []}
+                />
+              )}
+              {(kind === "review.post" || kind === "review.update") && typeof payload.body === "string" && !editing && (
+                <FinalOutput jobId={action.provenance?.job_id} />
+              )}
+            </>
           )}
         </>
       )}
@@ -462,8 +484,8 @@ export function ProposalCard({
           )}
         </div>
       )}
-      {isFix && !done && decides && me && !me.can_post_as_me && <span className="small muted">{t("Sign in with GitHub to open it as yourself.")}</span>}
-      {kind === "review.update" && !!payload.revises && !done && (
+      {!collapsed && isFix && !done && decides && me && !me.can_post_as_me && <span className="small muted">{t("Sign in with GitHub to open it as yourself.")}</span>}
+      {!collapsed && kind === "review.update" && !!payload.revises && !done && (
         <span className="small muted">
           {reviewAuthor
             ? notTheAuthor
@@ -473,7 +495,7 @@ export function ProposalCard({
           {t("Comments already posted on lines of the diff stay as they are.")}
         </span>
       )}
-      {proposal.edited && !editing && !done && <span className="small muted">{t("Edited; posting sends the saved version.")}</span>}
+      {!collapsed && proposal.edited && !editing && !done && <span className="small muted">{t("Edited; posting sends the saved version.")}</span>}
       <ErrorBox error={approve.error || reject.error || save.error} />
     </div>
   );

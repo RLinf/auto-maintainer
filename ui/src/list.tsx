@@ -208,10 +208,12 @@ export type ListState<T> = ReturnType<typeof useList<T>>;
 export function ListToolbar<T>({
   list,
   placeholder = "Search",
+  beforeGroup,
   children,
 }: {
   list: ListState<T>;
   placeholder?: string;
+  beforeGroup?: ReactNode;
   children?: ReactNode;
 }) {
   const t = useT();
@@ -355,6 +357,7 @@ export function ListToolbar<T>({
         </button>
       )}
       <span className="spacer" />
+      {beforeGroup}
       {list.groups.length > 0 && (
         <Popover
           align="right"
