@@ -53,7 +53,11 @@ async def test_many_views_at_once_read_the_forge_once(tmp_path: Path) -> None:
         assert reads.count("repo") == 2, "read again once it is old"
         h.clock.advance(minutes=11)
         await h.service.view_repo("acme/widget")
-        assert reads.count("repo") == 3, "too old to show: waited for"
+        await asyncio.sleep(0.05)
+        assert reads.count("repo") == 3, "shown at once while it is read again"
+        h.clock.advance(minutes=31)
+        await h.service.view_repo("acme/widget")
+        assert reads.count("repo") == 4, "too old to show: waited for"
     finally:
         await h.close()
 
@@ -242,9 +246,81 @@ async def test_a_kept_permission_is_read_again_before_it_runs_out(
         assert await permission(h.service, bob, "acme/widget") == Permission.READ
 
         h.forge.set_permission("acme/widget", "bob", Permission.NONE)
-        h.clock.advance(minutes=11)
+        h.clock.advance(minutes=31)
         assert await permission(h.service, bob, "acme/widget") == Permission.NONE, (
-            "never older than ten minutes"
+            "never older than thirty minutes"
         )
+    finally:
+        await h.close()
+
+
+async def test_an_agents_sign_in_shows_at_once_while_its_cli_is_asked_again(
+    tmp_path: Path,
+) -> None:
+    """Asking a CLI whether it is signed in starts it in a container: a page shows
+    the kept answer while it is asked again, and waits only for one never asked or
+    older than ``VIEW_STALE_LIMIT``."""
+    h = await build_demo(tmp_path)
+    try:
+        answers = iter([True, False, True])
+        release = asyncio.Event()
+        asked: list[Any] = []
+
+        class Runtime:
+            provider = None
+
+            async def signed_in(self, home: Any) -> bool:
+                asked.append(home)
+                if len(asked) == 2:
+                    await release.wait()
+                return next(answers)
+
+        runtime = Runtime()
+        h.service.runtime = lambda name, account=None: runtime  # type: ignore[method-assign]
+        h.service.agent_ready = lambda name: True  # type: ignore[method-assign]
+        assert await h.service.signed_in("codex") is True, "never asked: waited for"
+        h.clock.advance(minutes=2)
+        shown = await asyncio.wait_for(h.service.signed_in("codex"), 1)
+        await asyncio.sleep(0.01)
+        assert shown is True and len(asked) == 2, "the kept answer, at once"
+        assert await h.service.signed_in("codex") is True and len(asked) == 2, (
+            "one CLI at a time"
+        )
+        release.set()
+        await asyncio.sleep(0.05)
+        assert await h.service.signed_in("codex") is False, "the new answer next"
+        h.clock.advance(minutes=31)
+        assert await h.service.signed_in("codex") is True, "too old to show"
+    finally:
+        await h.close()
+
+
+async def test_a_start_warms_what_the_first_pages_would_wait_for(
+    tmp_path: Path,
+) -> None:
+    """Soon after a start, the service reads each repository's settings and the
+    roles of the people it served in the last day, so their first pages after a
+    deploy do not wait on the forge."""
+    from auto_maintainer.web.api import permission
+    from auto_maintainer.web.auth import User
+
+    h = await build_demo(tmp_path)
+    try:
+        await permission(h.service, User(login="bob"), "acme/widget")
+        h.service._views.clear()  # as a new process starts
+        reads: list[str] = []
+        get_repo = h.forge.get_repo
+
+        async def counted(repo: str) -> Any:
+            reads.append(repo)
+            return await get_repo(repo)
+
+        h.forge.get_repo = counted  # type: ignore[method-assign]
+        await h.service.warm_views(delay=0)
+        assert "acme/widget" in reads
+        assert ("access", "acme/widget", "bob") in h.service._views
+        before = len(reads)
+        await h.service.view_repo("acme/widget")
+        assert len(reads) == before, "the first page finds it read"
     finally:
         await h.close()

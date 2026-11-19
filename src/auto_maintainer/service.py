@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import copy
+import functools
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -143,10 +144,17 @@ VIEW_CACHE_SECONDS = 300
 ACCESS_SECONDS = 60.0
 """How long a person's role and permissions are reused (``Service.access_for``): a
 change of ``config/access.yaml`` or the People record drops them at once; one on
-the forge shows within this."""
-VIEW_STALE_FACTOR = 2
-"""A kept view value up to this many of its windows old is shown at once while it is
-read again behind the view (``Service.view_cached``); an older one is waited for."""
+the forge shows on the first view after this."""
+VIEW_STALE_LIMIT = 1800.0
+"""The oldest kept value a page still gets at once while it is read again behind the
+page: a view's forge reads (``Service.view_cached``), and agents' sign-in and quota
+readings. A page waits on the forge or an agent's CLI only for what it never read, or
+read longer ago than this; what the service acts on reads live."""
+WARM_DELAY_SECONDS = 10.0
+"""How long after a start the service reads again what the dashboard's first pages
+would wait for (``Service.warm_views``)."""
+WARM_USERS_SINCE = timedelta(days=1)
+"""Whose views are warmed at a start: people the dashboard served this recently."""
 """How long whether an agent CLI is signed in is shown before it is asked again."""
 QUOTA_SECONDS = 300
 """How long an agent's quota reading is shown before its CLI is asked again."""
@@ -299,6 +307,9 @@ class Service:
         self.logins: dict[str, Any] = {}
         """Agent sign-ins started from the dashboard, by id (``agents/login.py``)."""
         self._signed_in: dict[tuple[str, str | None], tuple[datetime, bool | None]] = {}
+        self._signed_in_reads: dict[
+            tuple[str, str | None], asyncio.Future[bool | None]
+        ] = {}
         self._views: dict[tuple[str, ...], tuple[datetime, Any]] = {}
         self._views_dropped = 0
         """How many times ``forget_views`` dropped kept views: a read that started
@@ -368,6 +379,7 @@ class Service:
         self.restart_requested = asyncio.Event()
         """Set after a deploy; ``am serve`` then exits for its supervisor to restart it."""
         self._confirming: asyncio.Task[None] | None = None
+        self._warming: asyncio.Task[None] | None = None
         self._polls: dict[str, asyncio.Task[None]] = {}
         """Polls started because a repository's approved profile changed, by repository."""
         self._scope_grant: ScopeGrant | None = None
@@ -632,9 +644,43 @@ class Service:
         self._confirming = asyncio.create_task(
             self._confirm_deploy(), name="confirm-deploy"
         )
+        self._warming = asyncio.create_task(self.warm_views(), name="warm-views")
         self.bus.start()
         self.engine.start()
         self.scheduler.start()
+
+    async def warm_views(self, delay: float = WARM_DELAY_SECONDS) -> None:
+        """Read, soon after a start, what the dashboard's first pages would otherwise
+        wait for: each repository's settings on the forge, the roles of the people it
+        served in the last ``WARM_USERS_SINCE``, and each agent's sign-in and quota
+        readings. It only fills the views' caches; a read that fails is read again by
+        the first page that needs it."""
+        await asyncio.sleep(delay)
+        repos = {r.repo for r in await self.store.list_repos() if r.active}
+        since = self.clock.now() - WARM_USERS_SINCE
+        reads: list[Callable[[], Awaitable[Any]]] = [
+            functools.partial(self.view_repo, repo) for repo in sorted(repos)
+        ]
+        for user in await self.store.list_users():
+            for repo, checked in user.permissions_checked.items():
+                if repo in repos and checked >= since:
+                    reads.append(functools.partial(self.access_for, user.login, repo))
+        for name in sorted(getattr(self.a.agents, "runtimes", None) or {}):
+            if self.agent_ready(name):
+                reads.append(functools.partial(self.signed_in, name))
+                reads.append(functools.partial(self.agent_quota, name))
+        # A few at a time, so the forge and the host see no burst after a deploy.
+        gate = asyncio.Semaphore(4)
+
+        async def one(read: Callable[[], Awaitable[Any]]) -> None:
+            async with gate:
+                try:
+                    await read()
+                except Exception:  # the first view that needs it reads it again
+                    log.debug("warming a view failed", exc_info=True)
+
+        await asyncio.gather(*(one(read) for read in reads))
+        log.info("warmed %d views", len(reads))
 
     async def end_cut_off_turns(self) -> None:
         """A conversation's turn (in chat, about a review or a change, with a person)
@@ -666,6 +712,7 @@ class Service:
             t
             for t in [
                 self._confirming,
+                self._warming,
                 *self._polls.values(),
                 *self._checks.values(),
                 *self._install_tasks,
@@ -1518,7 +1565,9 @@ class Service:
 
     async def signed_in(self, name: str, account: str | None = None) -> bool | None:
         """Whether agent ``name``'s CLI is signed in for ``account``; ``None`` when it
-        cannot tell. Kept for ``SIGNED_IN_SECONDS``."""
+        cannot tell. Kept for ``SIGNED_IN_SECONDS``; up to ``VIEW_STALE_LIMIT``, the
+        kept answer comes at once while the CLI is asked again behind it. A sign-in
+        since the answer asks at once."""
         kept = self._signed_in.get((name, account))
         now = self.clock.now()
         signed_since = any(
@@ -1529,16 +1578,31 @@ class Service:
             and p.state.started_at >= kept[0]
             for p in self.logins.values()
         )
-        if (
-            kept is not None
-            and not signed_since
-            and (now - kept[0]).total_seconds() < SIGNED_IN_SECONDS
-        ):
+        age = (now - kept[0]).total_seconds() if kept is not None else None
+        if kept is not None and not signed_since and age < SIGNED_IN_SECONDS:
             return kept[1]
         runtime = self.runtime(name)
         check = getattr(runtime, "signed_in", None)
         if check is None or not self.agent_ready(name):
             return None
+        key = (name, account)
+        asking = self._signed_in_reads.get(key)
+        if asking is None:
+            asking = asyncio.ensure_future(self._ask_signed_in(name, account, check))
+            self._signed_in_reads[key] = asking
+            asking.add_done_callback(lambda _: self._signed_in_reads.pop(key, None))
+            # A check nobody waits for may fail; the next view asks again.
+            asking.add_done_callback(lambda f: f.cancelled() or f.exception())
+        if kept is not None and not signed_since and age < VIEW_STALE_LIMIT:
+            return kept[1]
+        return await asyncio.shield(asking)
+
+    async def _ask_signed_in(
+        self, name: str, account: str | None, check: Any
+    ) -> bool | None:
+        """Ask agent ``name``'s CLI whether ``account`` is signed in, and keep it."""
+        now = self.clock.now()
+        runtime = self.runtime(name)
         found = await check(self.account_home(account))
         self._signed_in[(name, account)] = (now, found)
         signed_out = getattr(self.a.agents, "signed_out", None)
@@ -1555,9 +1619,9 @@ class Service:
         """What agent ``name``'s CLI says is left of ``account``'s limits (the
         service's own by default); ``None`` when it cannot report them, or has not
         yet. A reading is kept for ``QUOTA_SECONDS``, or ``QUOTA_FRESH_SECONDS`` when
-        ``fresh``. Past that, up to twice that age, a view gets the kept one at once
-        while the CLI is asked again in the background; an older or missing one waits
-        at most ``QUOTA_WAIT_SECONDS`` for the new reading. The CLI is asked at most
+        ``fresh``. Past that, up to ``VIEW_STALE_LIMIT``, a view gets the kept one at
+        once while the CLI is asked again in the background; an older or missing one
+        waits at most ``QUOTA_WAIT_SECONDS`` for the new reading. The CLI is asked at most
         once per ``QUOTA_SECONDS`` unless ``fresh``, which waits for its answer."""
         read = getattr(self.runtime(name, account), "quota", None)
         if read is None or not self.agent_ready(name):
@@ -1600,7 +1664,7 @@ class Service:
             reading.add_done_callback(lambda f: f.cancelled() or f.exception())
         if fresh:
             return await asyncio.shield(reading)
-        if kept is not None and age is not None and age < 2 * QUOTA_SECONDS:
+        if kept is not None and age is not None and age < VIEW_STALE_LIMIT:
             return kept
         if not started:
             return kept  # the view that asked the CLI waited for it; others do not
@@ -1705,9 +1769,9 @@ class Service:
     ) -> Any:
         """What ``read`` returns, kept under ``key`` for ``seconds``, for what the
         dashboard's views show; what the service acts on reads live. A value older
-        than ``seconds`` but within ``VIEW_STALE_FACTOR`` windows is shown at once
-        while it is read again, so a page never waits on the forge for what it showed
-        a moment ago; an older one, or none, is waited for."""
+        than ``seconds`` but younger than ``VIEW_STALE_LIMIT`` is shown at once while
+        it is read again, so a page does not wait on the forge for what it showed
+        before; an older one, or none, is waited for."""
         now = self.clock.now()
         hit = self._views.get(key)
         age = (now - hit[0]).total_seconds() if hit is not None else None
@@ -1728,7 +1792,7 @@ class Service:
                     self._views[key] = (now, done.result())
 
             reading.add_done_callback(kept)
-        if hit is not None and age is not None and age < seconds * VIEW_STALE_FACTOR:
+        if hit is not None and age is not None and age < max(seconds, VIEW_STALE_LIMIT):
             return hit[1]
         return await asyncio.shield(reading)
 

@@ -726,8 +726,8 @@ def build_router() -> APIRouter:
                 and pr.state == PrState.OPEN
                 and (not pr.is_draft or profile.scope.include_drafts)
             ]
-            # Every reviewer's permission in one parallel read: once their ten minutes
-            # run out, reading them PR by PR held the page for tens of seconds.
+            # Every reviewer's permission in one parallel read: once their cache time
+            # runs out, reading them PR by PR held the page for tens of seconds.
             known = await permissions_of(
                 service, repo, [r.author for pr in unarmed for r in pr.reviews]
             )

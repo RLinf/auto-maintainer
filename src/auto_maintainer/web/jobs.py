@@ -169,16 +169,15 @@ async def _work_batch(service: Service, jobs: list[Job]) -> _WorkBatch:
         for p in await service.store.list_proposals(ProposalState.PENDING)
     }
     repos = sorted({j.repo for j in jobs if j.repo})
-    earliest = min(j.created_at for j in jobs)
     actions_by_job: dict[str, list[ActionRecord]] = {}
     snapshots: dict[tuple[str, int], PrSnapshot | None] = {}
+    for record in await service.store.list_actions(
+        job_ids=[j.id for j in jobs], limit=10_000, payload=[]
+    ):
+        jid = record.action.provenance.job_id
+        if jid:
+            actions_by_job.setdefault(jid, []).append(record)
     for repo_name in repos:
-        for record in await service.store.list_actions(
-            repo=repo_name, since=earliest, limit=2000, payload=[]
-        ):
-            jid = record.action.provenance.job_id
-            if jid:
-                actions_by_job.setdefault(jid, []).append(record)
         for snap in await service.store.list_snapshots(repo_name, open_only=True):
             snapshots[(repo_name, snap.number)] = snap
     return _WorkBatch(

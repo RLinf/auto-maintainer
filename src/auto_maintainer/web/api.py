@@ -144,8 +144,9 @@ from ..profiles.skills import (
 from ..service import Service
 from .auth import User, current_user
 
-PERMISSION_TTL = timedelta(minutes=10)
-"""The oldest kept permission a view shows: past it, the view reads it again first."""
+PERMISSION_TTL = timedelta(minutes=30)
+"""The oldest kept permission a view shows (``service.VIEW_STALE_LIMIT``): past it,
+the view reads it again first."""
 PERMISSION_REFRESH = timedelta(minutes=7)
 """From this age a view still shows the kept permission at once, and it is read again
 in the background, so pages people keep open never wait for the forge."""

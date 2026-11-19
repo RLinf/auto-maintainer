@@ -823,11 +823,13 @@ class Store(Protocol):
         since: datetime | None = None,
         limit: int = 500,
         payload: Sequence[str] | None = None,
+        job_ids: Sequence[str] | None = None,
     ) -> list[ActionRecord]:
         """Actions newest first. With ``payload``, each action's payload holds only
         those dotted paths (``result.quality``; none for ``[]``): for views that read
         a few fields of many records. Such a record is for reading only: never
-        execute or save one."""
+        execute or save one. With ``job_ids``, only the actions those jobs made
+        (``Provenance.job_id``)."""
         ...
 
     async def count_actions(
@@ -965,6 +967,10 @@ class Store(Protocol):
     # users, audit, service state
     async def save_user(self, user: UserRecord) -> None: ...
     async def get_user(self, login: str) -> UserRecord | None: ...
+    async def list_users(self) -> list[UserRecord]:
+        """Everyone the dashboard has served, with the permissions it read for them."""
+        ...
+
     async def add_audit(self, entry: AuditEntry) -> None: ...
     async def list_audit(
         self, repo: str | None = None, limit: int = 200

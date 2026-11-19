@@ -643,10 +643,18 @@ class SqliteStore:
         since: datetime | None = None,
         limit: int = 500,
         payload: Sequence[str] | None = None,
+        job_ids: Sequence[str] | None = None,
     ) -> list[ActionRecord]:
         stmt = select(
             m.actions.c.data if payload is None else _trimmed(payload).label("data")
         )
+        if job_ids is not None:
+            # Filtered by SQLite, so the rows of other jobs are never parsed.
+            stmt = stmt.where(
+                func.json_extract(m.actions.c.data, "$.action.provenance.job_id").in_(
+                    list(job_ids)
+                )
+            )
         if repo:
             stmt = stmt.where(m.actions.c.repo == repo)
         if number is not None:
@@ -1231,6 +1239,9 @@ class SqliteStore:
             UserRecord,
             await self._one(select(m.users.c.data).where(m.users.c.login == login)),
         )
+
+    async def list_users(self) -> list[UserRecord]:
+        return _many(UserRecord, await self._fetch(select(m.users.c.data)))
 
     async def add_audit(self, entry: AuditEntry) -> None:
         await self._exec(

@@ -144,7 +144,7 @@ async def test_a_changed_permission_shows_within_the_cache_time_on_every_reposit
         assert await visible_repos(h.service, sam) == [REPO], "cached for a while"
         # Each repository's entry expires on its own, so refreshing the first
         # repository's never keeps the second's old value alive.
-        h.clock.advance(minutes=11)
+        h.clock.advance(minutes=31)
         assert await visible_repos(h.service, sam) == [REPO, other]
     finally:
         await h.close()
