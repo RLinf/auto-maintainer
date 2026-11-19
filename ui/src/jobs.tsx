@@ -10,6 +10,7 @@ import { ApiError, api, type AgentJob, type JobSlot, type JobStep } from "./api"
 import { agentName } from "./agentPicker";
 import { ErrorBox, FinalText, prPath, useAct, When } from "./components";
 import { useMe, useProposals, useQuestions } from "./data";
+import { FlatButton, ResizeEdge, usePanelLayout } from "./panelLayout";
 import { useT } from "./i18n";
 import { Icon, type IconName } from "./icons";
 import { Markdown } from "./markdown";
@@ -333,62 +334,12 @@ function stepLine(step: JobStep, t: (s: string) => string): string {
   }
 }
 
-/** How the live view of a job shows: a panel beside the page, as wide as the person
- * dragged it, or flat over the whole page for reading. The last choice is remembered
- * in this browser and is how the next one opens. */
-interface JobLayout {
-  mode: "panel" | "flat";
-  width: number;
-}
-
-const LAYOUT_KEY = "am.job-panel";
-const MIN_WIDTH = 380;
-
-function readLayout(): JobLayout {
-  try {
-    const kept = JSON.parse(localStorage.getItem(LAYOUT_KEY) ?? "null") as Partial<JobLayout> | null;
-    return { mode: kept?.mode === "flat" ? "flat" : "panel", width: Math.max(MIN_WIDTH, Number(kept?.width) || 560) };
-  } catch {
-    return { mode: "panel", width: 560 };
-  }
-}
-
-function keepLayout(layout: JobLayout) {
-  try {
-    localStorage.setItem(LAYOUT_KEY, JSON.stringify(layout));
-  } catch {
-    // A private window: the layout lasts for this page only.
-  }
-}
-
 /** The live view of a job, in a panel beside the page; ``?job=<id>`` opens it. */
 export function JobDrawer() {
   const t = useT();
   const [params, setParams] = useSearchParams();
   const id = params.get("job");
-  const [layout, setLayout] = useState<JobLayout>(readLayout);
-  const change = (next: JobLayout) => {
-    setLayout(next);
-    keepLayout(next);
-  };
-  // Dragging the panel's left edge sets its width, up to all but a strip of the page.
-  const startResize = (e: React.PointerEvent) => {
-    e.preventDefault();
-    const handle = e.currentTarget as HTMLElement;
-    handle.setPointerCapture(e.pointerId);
-    let width = layout.width;
-    const move = (ev: PointerEvent) => {
-      width = Math.round(Math.min(window.innerWidth - 48, Math.max(MIN_WIDTH, window.innerWidth - 12 - ev.clientX)));
-      setLayout((l) => ({ ...l, width }));
-    };
-    const up = () => {
-      handle.removeEventListener("pointermove", move);
-      handle.removeEventListener("pointerup", up);
-      keepLayout({ mode: "panel", width });
-    };
-    handle.addEventListener("pointermove", move);
-    handle.addEventListener("pointerup", up);
-  };
+  const panel = usePanelLayout("am.job-panel", 560, 380);
   const close = () =>
     setParams(
       (prev) => {
@@ -405,25 +356,10 @@ export function JobDrawer() {
     return () => window.removeEventListener("keydown", onKey);
   });
   if (!id) return null;
-  const flat = layout.mode === "flat";
   return (
-    <aside
-      className={`job-panel open ${flat ? "flat" : ""}`}
-      aria-label={t("Agent's work")}
-      style={flat ? undefined : { width: `min(${layout.width}px, calc(100vw - 24px))` }}
-    >
-      {!flat && (
-        <div
-          className="job-panel-resize"
-          role="separator"
-          aria-orientation="vertical"
-          aria-label={t("Drag to resize")}
-          title={t("Drag to resize")}
-          onPointerDown={startResize}
-          onDoubleClick={() => change({ ...layout, width: 560 })}
-        />
-      )}
-      <JobView key={id} id={id} onClose={close} flat={flat} onFlat={() => change({ ...layout, mode: flat ? "panel" : "flat" })} />
+    <aside className={`job-panel open ${panel.flat ? "flat" : ""}`} aria-label={t("Agent's work")} style={panel.style}>
+      {!panel.flat && <ResizeEdge onStart={panel.startResize} onReset={panel.reset} />}
+      <JobView key={id} id={id} onClose={close} flat={panel.flat} onFlat={panel.toggleFlat} />
     </aside>
   );
 }
@@ -468,9 +404,7 @@ function JobView({ id, onClose, flat, onFlat }: { id: string; onClose: () => voi
           {d?.title && <span className="small muted ellipsis">{d.title}</span>}
         </div>
         {d && <JobStatus job={d} />}
-        <button className="ghost icon" onClick={onFlat} aria-pressed={flat} aria-label={flat ? t("Show beside the page") : t("Show over the whole page")} title={flat ? t("Show beside the page") : t("Show over the whole page")}>
-          <Icon name={flat ? "shrink" : "expand"} />
-        </button>
+        <FlatButton flat={flat} onClick={onFlat} />
         <button className="ghost icon" onClick={onClose} aria-label={t("Close")} title={t("Close")}>
           <Icon name="x" />
         </button>

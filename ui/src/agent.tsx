@@ -20,6 +20,7 @@ import { AgentPicker, agentName } from "./agentPicker";
 import { api, type ChatMessage, type ChatRequest, type ChatSteps, type ChatThread } from "./api";
 import { ErrorBox, GrowingTextarea, StopButton } from "./components";
 import { useProposals } from "./data";
+import { FlatButton, ResizeEdge, usePanelLayout } from "./panelLayout";
 import { useT } from "./i18n";
 import { Markdown } from "./markdown";
 import { Icon, type IconName } from "./icons";
@@ -231,6 +232,12 @@ function AgentPanel({
   const navigate = useNavigate();
   const ref = useRef<HTMLElement>(null);
   const overridden = ctxKey(context) !== ctxKey(pageContext);
+  const panel = usePanelLayout("am.agent-panel", 440, 360);
+  // The page reflows beside the panel as wide as it is (styles.css: body.agent-open).
+  useEffect(() => {
+    document.body.style.setProperty("--agent-w", `${panel.flat ? 0 : panel.layout.width}px`);
+    document.body.classList.toggle("agent-flat", isOpen && panel.flat);
+  }, [isOpen, panel.flat, panel.layout.width]);
   // Mounted from the first opening on, so closing the panel does not drop a reply in flight.
   const [mounted, setMounted] = useState(false);
   useEffect(() => {
@@ -241,13 +248,15 @@ function AgentPanel({
   return (
     <aside
       ref={ref}
-      className={`agent-panel ${isOpen ? "open" : ""}`}
+      className={`agent-panel ${isOpen ? "open" : ""} ${panel.flat ? "flat" : ""}`}
+      style={panel.style}
       aria-label={t("Agent")}
       aria-hidden={!isOpen}
       onKeyDown={(e) => {
         if (e.key === "Escape") onClose();
       }}
     >
+      {!panel.flat && <ResizeEdge onStart={panel.startResize} onReset={panel.reset} />}
       <div className="agent-head">
         <span className="avatar-ai">
           <Icon name="sparkles" size={16} />
@@ -280,6 +289,7 @@ function AgentPanel({
         <button className="ghost icon sm" title={t("New conversation")} aria-label={t("New conversation")} onClick={() => onThread(null)}>
           <Icon name="plus" size={16} />
         </button>
+        <FlatButton flat={panel.flat} onClick={panel.toggleFlat} className="ghost icon sm" />
         <button className="ghost icon sm" title={`${t("Close")} (Esc)`} aria-label={t("Close")} onClick={onClose}>
           <Icon name="x" size={16} />
         </button>

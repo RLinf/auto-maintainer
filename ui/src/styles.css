@@ -576,7 +576,7 @@ label.field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; 
 
 /* ---- agent panel ------------------------------------------------------------------------ */
 .agent-panel {
-  position: fixed; top: calc(var(--header-h) + 10px); right: 12px; bottom: 12px; width: min(440px, calc(100vw - 24px)); z-index: 50;
+  position: fixed; top: calc(var(--header-h) + 10px); right: 12px; bottom: 12px; width: min(var(--panel-w, 440px), calc(100vw - 24px)); z-index: 50;
   background: var(--surface); border: 1px solid var(--border); border-radius: 18px; box-shadow: var(--shadow-lg);
   display: flex; flex-direction: column; overflow: hidden; transform: translateX(calc(100% + 24px)); transition: transform 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
 }
@@ -611,7 +611,7 @@ label.field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; 
 @media (min-width: 1180px) {
   body.agent-open .content {
     margin-left: max(0px, calc((100vw - 1784px) / 2));
-    margin-right: calc(464px + max(0px, calc((100vw - 1784px) / 2)));
+    margin-right: calc(var(--agent-w, 440px) + 24px + max(0px, calc((100vw - 1784px) / 2)));
   }
 }
 .convo { display: flex; flex-direction: column; height: calc(100vh - var(--header-h) - 64px); min-height: 460px; }
@@ -810,21 +810,24 @@ textarea.mono-input { width: 100%; }
 
 /* the live view of a job */
 .job-panel {
-  position: fixed; top: calc(var(--header-h) + 10px); right: 12px; bottom: 12px; width: min(560px, calc(100vw - 24px)); z-index: 55;
+  position: fixed; top: calc(var(--header-h) + 10px); right: 12px; bottom: 12px; width: min(var(--panel-w, 560px), calc(100vw - 24px)); z-index: 55;
   background: var(--surface); border: 1px solid var(--border); border-radius: 18px; box-shadow: var(--shadow-lg);
   display: flex; flex-direction: column; overflow: hidden; animation: am-slide-in 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 @keyframes am-slide-in { from { transform: translateX(calc(100% + 24px)); } to { transform: none; } }
 @media (prefers-reduced-motion: reduce) { .job-panel { animation: none; } }
 @media (max-width: 640px) { .job-panel { top: 0; right: 0; bottom: 0; left: 0; width: auto; border-radius: 0; } }
-/* The panel's left edge, dragged to resize it (``JobDrawer``). */
-.job-panel-resize { position: absolute; left: 0; top: 0; bottom: 0; width: 8px; cursor: ew-resize; z-index: 2; touch-action: none; }
-.job-panel-resize:hover, .job-panel-resize:active { background: linear-gradient(to right, var(--accent-soft, rgba(0,0,0,0.08)), transparent); }
+/* A panel's left edge, dragged to resize it (``panelLayout.tsx``). */
+.panel-resize { position: absolute; left: 0; top: 0; bottom: 0; width: 8px; cursor: ew-resize; z-index: 2; touch-action: none; }
+.panel-resize:hover, .panel-resize:active { background: linear-gradient(to right, var(--accent-soft, rgba(0,0,0,0.08)), transparent); }
 /* Flat: over the whole page under the header, without the card's frame, the text in a
    readable column. */
 .job-panel.flat { top: var(--header-h); right: 0; bottom: 0; left: 0; width: auto; border-radius: 0; border: none; box-shadow: none; animation: none; }
 .job-panel.flat .agent-head, .job-panel.flat .agent-body { padding-left: max(16px, calc((100vw - 1000px) / 2)); padding-right: max(16px, calc((100vw - 1000px) / 2)); }
-@media (max-width: 640px) { .job-panel-resize { display: none; } .job-panel.flat { top: 0; } }
+@media (max-width: 640px) { .panel-resize { display: none; } .job-panel.flat, .agent-panel.flat { top: 0; } }
+/* The agent laid flat, like the live view of a job. */
+.agent-panel.flat { top: var(--header-h); right: 0; bottom: 0; left: 0; width: auto; border-radius: 0; border: none; box-shadow: none; }
+.agent-panel.flat .agent-head, .agent-panel.flat .agent-body, .agent-panel.flat .agent-foot { padding-left: max(16px, calc((100vw - 1000px) / 2)); padding-right: max(16px, calc((100vw - 1000px) / 2)); }
 .steps-live { list-style: none; margin: 0; padding: 0 0 0 4px; display: flex; flex-direction: column; gap: 10px; position: relative; }
 .steps-live::before { content: ""; position: absolute; left: 8px; top: 6px; bottom: 6px; width: 1px; background: var(--border); }
 .step { display: flex; gap: 12px; align-items: flex-start; position: relative; min-width: 0; }
