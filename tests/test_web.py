@@ -209,6 +209,40 @@ async def test_a_settings_change_lists_its_profile_before_and_after(demo) -> Non
     assert profile["after"]["merge"]["enabled"] is False
 
 
+async def test_memory_changes_include_file_diffs_against_current_memory(demo) -> None:
+    from auto_maintainer.domain.memory import MemoryChange, Tier, repo_dir
+
+    h, app = demo
+    lessons_path = f"{repo_dir('acme/widget')}/knowledge/review_lessons.md"
+    new_path = f"{repo_dir('acme/widget')}/knowledge/extra.md"
+    gone_path = f"{repo_dir('acme/widget')}/knowledge/old.md"
+    h.memory.files[lessons_path] = "# Review lessons\n- Keep PRs focused.\n"
+    h.memory.files[gone_path] = "obsolete\n"
+    change = MemoryChange(
+        tier=Tier.T1,
+        title="update lessons",
+        files={
+            lessons_path: "# Review lessons\n- Keep PRs focused.\n- Skip style nits.\n",
+            new_path: "fresh file\n",
+            gone_path: None,
+        },
+        repos=["acme/widget"],
+    )
+    await h.store.save_memory_change(change)
+    async with _client(app, "walt") as walt:
+        listed = (await walt.get("/api/memory/changes")).json()
+        single = (await walt.get(f"/api/memory/changes/{change.id}")).json()
+    found = next(c for c in listed if c["id"] == change.id)
+    for item in (found, single):
+        diffs = item["diffs"]
+        assert "+- Skip style nits." in diffs[lessons_path]
+        assert f"--- a/{lessons_path}" in diffs[lessons_path]
+        assert "--- /dev/null" in diffs[new_path]
+        assert "+fresh file" in diffs[new_path]
+        assert "+++ /dev/null" in diffs[gone_path]
+        assert "-obsolete" in diffs[gone_path]
+
+
 async def test_saving_settings_reports_a_failed_memory_write(demo) -> None:
     h, app = demo
 

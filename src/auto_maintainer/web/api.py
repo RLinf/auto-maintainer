@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import difflib
 import json
 import logging
 import re
@@ -226,6 +227,32 @@ async def _profile_changes(
                 }
             )
     return out
+
+
+async def _file_diffs(
+    service: Service,
+    change: MemoryChange,
+    cache: dict[str, str | None] | None = None,
+) -> dict[str, str]:
+    """Unified diff of each file in ``change`` against its current text in memory."""
+    diffs: dict[str, str] = {}
+    for path, after in change.files.items():
+        if cache is not None and path in cache:
+            before = cache[path]
+        else:
+            before = await service.a.memory.read_text(path)
+            if cache is not None:
+                cache[path] = before
+        diffs[path] = "\n".join(
+            difflib.unified_diff(
+                (before or "").splitlines(),
+                (after or "").splitlines(),
+                fromfile="/dev/null" if before is None else f"a/{path}",
+                tofile="/dev/null" if after is None else f"b/{path}",
+                lineterm="",
+            )
+        )
+    return diffs
 
 
 async def _merge_memory(merge: Awaitable[T]) -> T:
@@ -4329,10 +4356,12 @@ def build_router() -> APIRouter:
     ) -> list[dict[str, Any]]:
         service = service_of(request)
         visible = set(await visible_repos(service, user))
+        cache: dict[str, str | None] = {}
         return [
             {
                 **c.model_dump(mode="json"),
                 "profiles": await _profile_changes(service, c),
+                "diffs": await _file_diffs(service, c, cache),
             }
             for c in await service.store.list_memory_changes(state)
             if set(c.repos) <= visible and c.repos
@@ -4357,6 +4386,7 @@ def build_router() -> APIRouter:
         return {
             **change.model_dump(mode="json"),
             "profiles": await _profile_changes(service, change),
+            "diffs": await _file_diffs(service, change),
         }
 
     @r.post("/memory/changes/{change_id}/approve")

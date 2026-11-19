@@ -97,12 +97,19 @@ export function SettingsChangeCard({ change, compact = false }: { change: Memory
             <div className="stack" style={{ marginTop: 6 }}>
               {Object.entries(change.files)
                 .filter(([path]) => !path.endsWith("profile.lock.yaml"))
-                .map(([path, text]) => (
-                  <div key={path} className="stack" style={{ gap: 4 }}>
-                    <span className="mono">{path}</span>
-                    {text !== null && <Pre text={text} />}
-                  </div>
-                ))}
+                .map(([path, text]) => {
+                  const diff = change.diffs?.[path];
+                  const showDiff = diff !== undefined && (change.state === "open" || diff !== "");
+                  return (
+                    <div key={path} className="stack" style={{ gap: 4 }}>
+                      <span className="mono">
+                        {path}
+                        {text === null ? ` (${t("deleted")})` : ""}
+                      </span>
+                      {showDiff ? <Diff text={diff} /> : text !== null && <Pre text={text} />}
+                    </div>
+                  );
+                })}
             </div>
           </details>
         </>

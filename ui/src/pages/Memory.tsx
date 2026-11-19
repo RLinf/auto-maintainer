@@ -3,7 +3,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { api, qs, type MemoryChange } from "../api";
-import { CaughtUp, Empty, ErrorBox, PageHead, Pre, RejectButton, Section, Status, timeOf, useAct, When } from "../components";
+import { CaughtUp, Diff, Empty, ErrorBox, PageHead, Pre, RejectButton, Section, Status, timeOf, useAct, When } from "../components";
 import { useMemoryChanges } from "../data";
 import { ChangeProfiles } from "../profileView";
 import { useT } from "../i18n";
@@ -104,20 +104,24 @@ export function ChangeCard({ change, compact = false }: { change: MemoryChange; 
         {t("Approved by")}: {approvals.length ? approvals.map(([repo, logins]) => `${logins.join(", ")} (${repo})`).join("; ") : t("none yet")}
       </div>
       {!compact && <ChangeProfiles change={change} />}
-      <details>
+      <details open={!compact && !change.profiles?.length}>
         <summary className="small">
           {Object.keys(change.files).length} {t("files")}
         </summary>
         <div className="stack" style={{ marginTop: 8 }}>
-          {Object.entries(change.files).map(([path, text]) => (
-            <div key={path} className="stack" style={{ gap: 4 }}>
-              <span className="mono">
-                {path}
-                {text === null ? ` (${t("deleted")})` : ""}
-              </span>
-              {text !== null && <Pre text={text} />}
-            </div>
-          ))}
+          {Object.entries(change.files).map(([path, text]) => {
+            const diff = change.diffs?.[path];
+            const showDiff = diff !== undefined && (change.state === "open" || diff !== "");
+            return (
+              <div key={path} className="stack" style={{ gap: 4 }}>
+                <span className="mono">
+                  {path}
+                  {text === null ? ` (${t("deleted")})` : ""}
+                </span>
+                {showDiff ? <Diff text={diff} /> : text !== null && <Pre text={text} />}
+              </div>
+            );
+          })}
         </div>
       </details>
       {!done && (

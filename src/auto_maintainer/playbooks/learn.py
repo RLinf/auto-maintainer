@@ -33,25 +33,38 @@ from pydantic import BaseModel, Field
 from ..domain.actions import ActionKind, MemoryChangePayload, ProposalState, make_action
 from ..domain.agents import AgentTask, TaskKind
 from ..domain.events import Event, EventKind
-from ..domain.memory import MemoryChange, Tier, repo_dir
+from ..domain.memory import MemoryChange, Tier
 from ..domain.profile import RepoProfile
 from ..domain.records import ChatMessage, ChatThread
 from .base import Playbook, PlaybookContext, PlaybookResult
 from .feedback import EXCERPT_CHARS
+from .lessons import (
+    LESSONS_HEADER,
+    apply_lessons,
+    global_lesson_items,
+    pending_lesson_items,
+    review_lessons_path,
+)
 from .prompts import schema_hint, untrusted
-
-LESSONS_HEADER = "# Review lessons\n"
 
 
 class LearnResult(BaseModel):
     disposition: Literal["PR_SPECIFIC", "LESSON", "ALREADY_KNOWN"] = Field(
         description="PR_SPECIFIC: the reason is about this PR only. LESSON: it states "
-        "a rule for this repository's future PRs. ALREADY_KNOWN: a current lesson says it."
+        "a rule for this repository's future PRs not already covered. ALREADY_KNOWN: "
+        "a current, global, or pending lesson already says it (even with different "
+        "wording)."
     )
     lesson: str = Field(
         "",
         description="For LESSON: the rule in one or two sentences that stand on their "
         "own, naming the labels or kinds of change it is about; no PR number.",
+    )
+    replaces: list[str] = Field(
+        default_factory=list,
+        description="For LESSON: exact text of any existing bullets in the "
+        "repository's current review lessons that this lesson supersedes, merges, or "
+        "makes redundant.",
     )
     why: str = Field("", description="One sentence on the choice.")
     message: str = Field(
@@ -98,22 +111,46 @@ class LearnFromRejection(Playbook):
             if action.number
             else None
         )
-        path = f"{repo_dir(event.repo)}/knowledge/review_lessons.md"
-        current = await ctx.memory.read_text(path) or LESSONS_HEADER
+        path = review_lessons_path(event.repo)
+        current = await ctx.memory.read_text(path) or ""
+        pending = await pending_lesson_items(ctx, event.repo, current)
+        global_text, global_items = await global_lesson_items(
+            ctx, profile.memory.use_global
+        )
         prompt = "\n\n".join(
-            [
+            part
+            for part in [
                 f"A reviewer of {event.repo} turned down something the service "
                 f"proposed on PR #{action.number} and said why. The PR remembers "
                 "this already. Decide whether the reason also teaches a rule for this "
                 "repository's future PRs, such as what a label means here.",
-                "Never turn a reason about this PR alone into a rule. Write the lesson "
-                f"in {profile.languages.internal}.",
+                "Never turn a reason about this PR alone into a rule. Return "
+                "ALREADY_KNOWN if a current lesson, global lesson, or pending lesson "
+                "awaiting approval already covers the rule, even with different "
+                "wording. If a new lesson supersedes, narrows, or merges existing "
+                "redundant bullets in the repository's current review lessons, list "
+                "those exact existing bullets in `replaces` so they are consolidated "
+                f"instead of repeated. Write the lesson in {profile.languages.internal}.",
                 untrusted("pr.title", pr.title if pr else "", 300),
                 f"What was proposed: {untrusted('proposal', proposed, 2000)}",
                 f"The reviewer's reason: {untrusted('reviewer.reason', reason, 2000)}",
-                f"The repository's current review lessons:\n{untrusted('lessons', current, 8000)}",
+                "The repository's current review lessons:\n"
+                + untrusted("lessons", current or LESSONS_HEADER, 8000),
+                "Pending review lessons awaiting approval (do not repeat these):\n"
+                + untrusted(
+                    "lessons.pending",
+                    "\n".join(f"- {item}" for item in pending),
+                    4000,
+                )
+                if pending
+                else "",
+                "Shared global review lessons already in effect:\n"
+                + untrusted("lessons.global", global_text, 4000)
+                if global_text.strip()
+                else "",
                 schema_hint(LearnResult.model_json_schema()),
             ]
+            if part
         )
         task = AgentTask(
             kind=TaskKind.LEARN,
@@ -130,14 +167,28 @@ class LearnFromRejection(Playbook):
         if result.disposition != "LESSON" or not result.lesson.strip():
             return PlaybookResult(result=done)
 
-        lesson = result.lesson.strip()
-        item = "\n  ".join(line.rstrip() for line in lesson.splitlines())
+        updated, accepted = apply_lessons(
+            current,
+            [(result.lesson, result.replaces)],
+            pending=pending,
+            global_lessons=global_items,
+            header=LESSONS_HEADER,
+        )
+        if updated is None or not accepted:
+            return PlaybookResult(
+                result={
+                    **done,
+                    "disposition": "ALREADY_KNOWN",
+                    "skipped": "already covered by current or pending lessons",
+                }
+            )
+        lesson = accepted[0]
         by = proposal.decided_by or "a reviewer"
         change = MemoryChange(
             tier=Tier.T1,
             title=f"lesson from {by}'s rejection on #{action.number}",
             description=f"{lesson}\n\nFrom the reason: {reason}",
-            files={path: current.rstrip() + f"\n- {item}\n"},
+            files={path: updated},
             repos=[event.repo],
             requested_by=proposal.decided_by,
             created_at=ctx.clock.now(),
