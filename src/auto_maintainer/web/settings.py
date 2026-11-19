@@ -40,6 +40,7 @@ from ..domain.settings import (
     PROVIDER_ID,
     PROVIDER_PROTOCOLS,
     SECRET_NAME,
+    DeployChecks,
     LabMachine,
     ModelSpec,
     Provider,
@@ -227,6 +228,7 @@ async def settings_view(service: Service, user: User) -> dict[str, Any]:
             "max_public_writes_per_hour": service.settings.write_caps[0],
             "max_repo_public_writes_per_hour": service.settings.write_caps[1],
             "agent_slots": service.engine.slots("agent")["size"],
+            "deploy_checks": system.deploy_checks or "local",
             "agent_slots_in_use": {
                 k: service.engine.slots("agent")[k] for k in ("people", "service")
             },
@@ -349,6 +351,11 @@ def _with_token_limits(text: str, limits: TokenLimits) -> str:
         # A person's ``{}`` stays: it means no limit for them.
         data["token_limits"] = {k: v for k, v in value.items() if v}
     return yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
+
+
+class DeployChecksBody(BaseModel):
+    mode: DeployChecks | None = None
+    """``None`` keeps the default, testing on this host."""
 
 
 class AgentSlotsBody(BaseModel):
@@ -797,6 +804,34 @@ def build_router() -> APIRouter:
             DocumentBody(
                 yaml=_with_token_limits(text, body.limits),
                 title="settings: token limits per person",
+            ),
+            user,
+        )
+
+    @r.put("/deploy-checks")
+    async def set_deploy_checks(
+        request: Request, body: DeployChecksBody, user: User = Depends(current_user)
+    ) -> dict[str, Any]:
+        """How a deploy of the service's own code checks the commit first: wait for
+        its CI on the forge, test it here, or deploy it untested. A settings change
+        like any other: the owner's applies at once."""
+        service = service_of(request)
+        text, _ = await service.settings_text()
+        data = _settings_data(text)
+        system = dict(data.get("system") or {})
+        if body.mode is None:
+            system.pop("deploy_checks", None)
+        else:
+            system["deploy_checks"] = body.mode
+        if system:
+            data["system"] = system
+        else:
+            data.pop("system", None)
+        return await save(
+            request,
+            DocumentBody(
+                yaml=yaml.safe_dump(data, sort_keys=False, allow_unicode=True),
+                title=f"settings: deploys check commits by {body.mode or 'local'} tests",
             ),
             user,
         )

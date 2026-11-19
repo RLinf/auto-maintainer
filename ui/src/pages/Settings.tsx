@@ -6,6 +6,7 @@
 // Agents and Model providers tabs also hold the signed-in person's own agents and
 // model APIs, which are theirs alone.
 
+import { DeployChecksSelect } from "../deployChecks";
 import { AgentOptionsForm, setCount } from "../agentOptions";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState, type ReactNode } from "react";
@@ -1569,6 +1570,16 @@ function SystemTab({ v, ask }: { v: SettingsView; ask: (p: string, send?: boolea
             value={<strong>{v.system.max_repo_public_writes_per_hour}</strong>}
           />
           <AgentSlotsRow v={v} custom={custom.has("agent_slots")} />
+          <Row
+            icon="upload"
+            title={
+              <span className="row" style={{ gap: 6 }}>
+                {t("Before deploying the service's code")} <FromSettings on={custom.has("deploy_checks")} />
+              </span>
+            }
+            sub={t("How a deploy on the Service page checks the commit first")}
+            value={<DeployChecksSelect />}
+          />
         </div>
       </Section>
       <Section

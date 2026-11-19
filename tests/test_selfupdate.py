@@ -124,6 +124,21 @@ async def test_failing_tests_keep_the_running_code(repos, tmp_path: Path) -> Non
     assert not result.ok and git(checkout, "rev-parse", "HEAD") == before
 
 
+async def test_a_commit_checked_elsewhere_deploys_without_its_tests(
+    repos, tmp_path: Path
+) -> None:
+    """With ``test=False`` (its CI passed, or the owner deploys untested) the tests
+    do not run, and the commit still deploys only from the default branch."""
+    _, checkout, other = repos
+    target = _push_change(other, "v2\n")
+    result = await _updater(checkout, tmp_path, test=["false"]).deploy(
+        target, test=False
+    )
+    assert result.ok, result.log
+    assert git(checkout, "rev-parse", "HEAD") == target
+    assert "not tested here" in result.log
+
+
 async def test_only_commits_on_the_default_branch_deploy(repos, tmp_path: Path) -> None:
     _, checkout, other = repos
     git(other, "checkout", "-q", "-b", "side")

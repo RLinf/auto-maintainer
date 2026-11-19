@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -62,7 +63,14 @@ from ..domain.memory import MemoryChange, MemoryChangeState
 from ..domain.ports import ReviewCommentSpec
 from ..domain.profile import RepoProfile
 from ..domain.records import AuditEntry, ChatMessage, ReviewRecord
-from ..domain.snapshot import Mergeable, PrSnapshot
+from ..domain.snapshot import (
+    FAILED_CONCLUSIONS,
+    CheckRun,
+    CiVerdict,
+    Mergeable,
+    PrSnapshot,
+    ci_verdict,
+)
 from ..domain.visibility import PublicText
 from ..policy.leak_guard import mentioned
 from .context import ExecContext
@@ -1046,7 +1054,18 @@ async def _service_deploy(
             "this service does not run from a git checkout it can update"
         )
     p = ServiceDeployPayload.model_validate(action.payload)
-    result = await x.updater.deploy(p.sha)
+    mode = x.deploy_checks()
+    checked = "local" if mode != "none" else "none"
+    if mode == "ci" and x.code_repo:
+        verdict, checks = await _wait_for_ci(x, x.code_repo, p.sha)
+        if verdict == "failed":
+            failed = [c.name for c in checks if c.conclusion in FAILED_CONCLUSIONS]
+            raise RuntimeError(
+                f"CI failed on {p.sha[:12]} ({', '.join(failed[:5])}); not deployed"
+            )
+        if verdict == "passed":
+            checked = "ci"
+    result = await x.updater.deploy(p.sha, test=checked == "local")
     if not result.ok:
         raise RuntimeError(f"deploying {p.sha[:12]} stopped: {result.log[-1500:]}")
     if x.request_restart is not None:
@@ -1055,7 +1074,32 @@ async def _service_deploy(
         "sha": result.sha,
         "previous_sha": result.previous_sha,
         "approved_by": p.approved_by,
+        "checked": checked,
     }
+
+
+CI_WAIT_SECONDS = 2700.0
+"""How long a deploy waits for the commit's CI to finish (``deploy_checks: ci``)
+before it tests the commit on this host instead."""
+CI_POLL_SECONDS = 30.0
+
+
+async def _wait_for_ci(
+    x: ExecContext, repo: str, sha: str
+) -> tuple[CiVerdict, list[CheckRun]]:
+    """The verdict of commit ``sha``'s checks once they finish, or ``unknown`` past
+    ``CI_WAIT_SECONDS`` or when the forge does not answer."""
+    waited = 0.0
+    while True:
+        try:
+            checks = await x.reader.commit_checks(repo, sha)
+        except Exception:  # the forge did not answer: test here instead
+            return "unknown", []
+        verdict = ci_verdict(checks)
+        if verdict != "pending" or waited >= CI_WAIT_SECONDS:
+            return ("unknown" if verdict == "pending" else verdict), checks
+        await asyncio.sleep(CI_POLL_SECONDS)
+        waited += CI_POLL_SECONDS
 
 
 async def _notify(

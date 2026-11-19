@@ -340,6 +340,37 @@ async def test_collaborators_with_their_roles(client, router):
     assert await reader.list_collaborators("acme/secret") == []
 
 
+async def test_a_commits_checks_and_statuses(client, router):
+    """A commit's check runs and outside statuses, as a deploy waits on them."""
+    from auto_maintainer.domain.snapshot import ci_verdict
+
+    router.get("/repos/acme/widget/commits/abc/check-runs").respond(
+        200,
+        json={
+            "total_count": 1,
+            "check_runs": [
+                {
+                    "id": 7,
+                    "name": "Tests",
+                    "status": "completed",
+                    "conclusion": "success",
+                }
+            ],
+        },
+    )
+    router.get("/repos/acme/widget/commits/abc/status").respond(
+        200, json={"statuses": [{"context": "docs", "state": "pending"}]}
+    )
+    checks = await GitHubReader(client).commit_checks("acme/widget", "abc")
+    assert [(c.name, c.status, c.conclusion) for c in checks] == [
+        ("Tests", "completed", "success"),
+        ("docs", "in_progress", None),
+    ]
+    assert ci_verdict(checks) == "pending"
+    assert ci_verdict(checks[:1]) == "passed"
+    assert ci_verdict([]) == "unknown"
+
+
 async def test_team_membership(client, router):
     router.get("/orgs/acme/teams/core/memberships/alice").respond(
         200, json={"state": "active"}

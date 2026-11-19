@@ -66,6 +66,7 @@ from .records import (
 from .scoring import Evaluation
 from .settings import LabMachine, Provider, SecretInfo, UserToken
 from .snapshot import (
+    CheckRun,
     CommentRef,
     IssueSnapshot,
     MergedPrSummary,
@@ -120,6 +121,10 @@ class ForgeReader(Protocol):
         ...
 
     async def get_permission(self, repo: str, login: str) -> Permission: ...
+
+    async def commit_checks(self, repo: str, sha: str) -> list[CheckRun]:
+        """Every check and commit status reported on commit ``sha`` of ``repo``."""
+        ...
 
     async def list_collaborators(self, repo: str) -> list[tuple[str, Permission]]:
         """Everyone the forge gives access to ``repo`` (directly, through a team, or
@@ -552,8 +557,10 @@ class ServiceUpdater(Protocol):
         (``previous_sha``, ``sha``, ``rolled_back``) the first time, else ``None``."""
         ...
 
-    async def deploy(self, sha: str) -> DeployResult:
-        """Test ``sha`` in a staging worktree, then switch the service's checkout to it.
+    async def deploy(self, sha: str, *, test: bool = True) -> DeployResult:
+        """Test ``sha`` in a staging worktree (unless ``test`` is false: its CI
+        passed, or the owner chose to deploy untested), then switch the service's
+        checkout to it.
 
         The caller restarts the service after a successful deploy.
         """

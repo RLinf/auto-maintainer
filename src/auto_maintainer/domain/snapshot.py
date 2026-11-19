@@ -23,6 +23,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Sequence
 from datetime import datetime
 from enum import StrEnum
 from typing import Literal
@@ -170,6 +171,37 @@ class CheckConclusion(StrEnum):
     ACTION_REQUIRED = "action_required"
     STALE = "stale"
     STARTUP_FAILURE = "startup_failure"
+
+
+CiVerdict = Literal["passed", "failed", "pending", "unknown"]
+
+FAILED_CONCLUSIONS = frozenset(
+    {
+        "failure",
+        "timed_out",
+        "startup_failure",
+        "action_required",
+    }
+)
+
+
+def ci_verdict(checks: Sequence[CheckRun]) -> CiVerdict:
+    """What a commit's checks say as a whole: ``failed`` once one failed, else
+    ``pending`` while one runs, ``passed`` when every one succeeded (or was neutral
+    or skipped) and at least one succeeded, else ``unknown``: no checks, or one was
+    cancelled or went stale (a newer push cancels an older commit's run)."""
+    if any(c.conclusion in FAILED_CONCLUSIONS for c in checks):
+        return "failed"
+    if any(c.status != CheckStatus.COMPLETED for c in checks):
+        return "pending"
+    ok = {CheckConclusion.SUCCESS, CheckConclusion.NEUTRAL, CheckConclusion.SKIPPED}
+    if (
+        checks
+        and all(c.conclusion in ok for c in checks)
+        and any(c.conclusion == CheckConclusion.SUCCESS for c in checks)
+    ):
+        return "passed"
+    return "unknown"
 
 
 class CheckRun(_Model):

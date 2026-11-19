@@ -1226,6 +1226,8 @@ export interface SettingsView {
     agent_slots: number;
     /** Agent jobs running now: for people's requests, and the service's own. */
     agent_slots_in_use: { people: number; service: number };
+    /** How a deploy of the service's code checks the commit first. */
+    deploy_checks?: "ci" | "local" | "none";
     from_settings: string[];
   };
   host: {

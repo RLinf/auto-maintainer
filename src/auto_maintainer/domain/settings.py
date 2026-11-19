@@ -372,6 +372,18 @@ class LabMachine(BaseModel):
         return not self.repos or repo in self.repos
 
 
+DeployChecks = Literal["ci", "local", "none"]
+DEPLOY_CHECKS: dict[str, str] = {
+    "ci": "wait for the commit's CI on the forge: passed deploys at once, failed "
+    "stops, and none, cancelled, or not done within the wait tests here instead",
+    "local": "run the tests in a staging worktree on this host (the default)",
+    "none": "deploy without testing; am supervise still rolls back a version that "
+    "fails to start",
+}
+"""How a deploy of the service's own code may check the commit
+(``SystemSettings.deploy_checks``)."""
+
+
 class SystemSettings(BaseModel):
     """Service-wide values; each unset one keeps the host's value."""
 
@@ -386,6 +398,9 @@ class SystemSettings(BaseModel):
     agent_slots: int | None = Field(default=None, ge=1, le=16)
     """Agent jobs (reviews, fixes, diagnoses, ...) that run at once for people's
     requests; the service's own background work takes only slots nobody uses."""
+    deploy_checks: DeployChecks | None = None
+    """How a deploy of the service's own code checks the commit first
+    (``DEPLOY_CHECKS``); unset tests it on this host (``local``)."""
 
 
 class TokenLimit(BaseModel):

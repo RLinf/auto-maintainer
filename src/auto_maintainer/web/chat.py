@@ -67,6 +67,7 @@ from ..domain.review import review_quality
 from ..domain.run_ci import latest_checks
 from ..domain.secrets import redact_secrets
 from ..domain.settings import (
+    DEPLOY_CHECKS,
     PROVIDER_PROTOCOLS,
     SettingsError,
     effective_agents,
@@ -1327,7 +1328,10 @@ async def _settings_block(service: Any, user: User) -> str:
             "routing: {<task>: {primary, fallback: [...], verifier, model, effort, "
             "timeout_seconds, permissions: auto | restricted}}\n"
             "system: {poll_seconds, max_public_writes_per_hour, max_repo_public_writes_per_hour, "
-            "agent_slots: <agent jobs that run at once for people's requests, 1-16>}\n"
+            "agent_slots: <agent jobs that run at once for people's requests, 1-16>, "
+            "deploy_checks: <how a deploy of the service's code checks the commit: "
+            + "; ".join(f"{k}: {v}" for k, v in DEPLOY_CHECKS.items())
+            + ">}\n"
             "token_limits: {default: {daily_tokens, weekly_tokens, monthly_tokens}, "
             "people: {<login>: {...the same; {} is no limit}}}: tokens each person's "
             "requests may use on the service's agents and model APIs, rolling day, 7 "

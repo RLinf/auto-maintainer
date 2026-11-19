@@ -374,6 +374,66 @@ async def test_a_failed_deploy_keeps_the_service_running(
     )
 
 
+async def test_a_deploy_checks_the_commit_as_the_settings_say(
+    h: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``deploy_checks``: GitHub CI that passed deploys without the tests here, CI
+    that failed stops the deploy, no verdict tests here; ``none`` deploys untested;
+    the default tests here."""
+    from auto_maintainer.actuator import handlers
+    from auto_maintainer.domain.snapshot import CheckConclusion, CheckRun, CheckStatus
+
+    monkeypatch.setattr(handlers, "CI_POLL_SECONDS", 0.0)
+    updater = h.service.a.updater
+    app = create_app(h.service, data_dir=tmp_path, allow_dev_login=True)
+
+    def check(conclusion: str | None, status: str = "completed") -> CheckRun:
+        return CheckRun(
+            id=1,
+            name="Tests and Ruff",
+            status=CheckStatus(status),
+            conclusion=CheckConclusion(conclusion) if conclusion else None,
+        )
+
+    async def deploy(sha: str) -> tuple[ActionStatus, str]:
+        async with _client(app, "maria") as maria:
+            await maria.post("/api/service/deploy", json={"sha": sha})
+            await h.settle()
+        records = await h.store.list_actions(
+            repo=CODE, kinds=[ActionKind.SERVICE_DEPLOY]
+        )
+        [record] = [r for r in records if r.action.payload["sha"] == sha]
+        return record.status, record.error or ""
+
+    async with _client(app, "maria") as maria:
+        put = await maria.put("/api/settings/deploy-checks", json={"mode": "ci"})
+        assert put.json()["approved"] is True
+    assert h.service.service_config.system.deploy_checks == "ci"
+
+    h.forge.commit_check_runs[(CODE, "a" * 40)] = [check("success")]
+    assert (await deploy("a" * 40))[0] == ActionStatus.EXECUTED
+    assert updater.tested[-1] is False, "CI passed: no tests here"  # type: ignore[union-attr]
+
+    h.forge.commit_check_runs[(CODE, "b" * 40)] = [check("failure")]
+    status, error = await deploy("b" * 40)
+    assert status == ActionStatus.FAILED and "CI failed" in error
+    assert updater.deployed[-1] != "b" * 40  # type: ignore[union-attr]
+
+    h.forge.commit_check_runs[(CODE, "c" * 40)] = [check("cancelled")]
+    assert (await deploy("c" * 40))[0] == ActionStatus.EXECUTED
+    assert updater.tested[-1] is True, "a cancelled run is no verdict"  # type: ignore[union-attr]
+
+    async with _client(app, "maria") as maria:
+        await maria.put("/api/settings/deploy-checks", json={"mode": "none"})
+    assert (await deploy("d" * 40))[0] == ActionStatus.EXECUTED
+    assert updater.tested[-1] is False  # type: ignore[union-attr]
+
+    async with _client(app, "maria") as maria:
+        await maria.put("/api/settings/deploy-checks", json={"mode": None})
+    assert (await deploy("e" * 40))[0] == ActionStatus.EXECUTED
+    assert updater.tested[-1] is True, "the default tests here"  # type: ignore[union-attr]
+
+
 async def test_the_agent_offers_to_add_a_repository_and_a_maintainer_approves(
     h: Harness, tmp_path: Path
 ) -> None:

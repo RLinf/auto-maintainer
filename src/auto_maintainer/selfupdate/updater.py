@@ -15,8 +15,9 @@
 """The service updates its own checkout, only to commits on its default branch.
 
 A deploy checks the target commit out in a staging worktree, syncs its environment,
-and runs its tests there. Only when they pass does the service's own checkout move to
-the commit (a fast-forward of the branch, or a detached checkout), after which the
+and runs its tests there, unless the caller says the commit is checked already (its
+CI passed) or is to go untested (``SystemSettings.deploy_checks``). Only when they
+pass does the service's own checkout move to the commit (a fast-forward of the branch, or a detached checkout), after which the
 environment is synced again and the dashboard rebuilt when Node is available. The
 previous commit is written to ``deploy.json`` so that ``am supervise`` can roll back
 if the new version fails to start. The caller then restarts the service: ``am serve``
@@ -224,7 +225,7 @@ class GitServiceUpdater:
             dirty=dirty,
         )
 
-    async def deploy(self, sha: str) -> DeployResult:
+    async def deploy(self, sha: str, *, test: bool = True) -> DeployResult:
         log: list[str] = []
         previous = await self._git("rev-parse", "HEAD")
         if await self._git("status", "--porcelain", "--untracked-files=no"):
@@ -253,6 +254,19 @@ class GitServiceUpdater:
                 previous_sha=previous,
                 log=f"{target[:12]} is not on {self.branch} of {self.repo}",
             )
+        if test:
+            failed = await self._test(target, previous, log)
+            if failed is not None:
+                return failed
+        else:
+            log.append(f"{target[:12]} not tested here")
+        return await self._switch(target, previous, log)
+
+    async def _test(
+        self, target: str, previous: str, log: list[str]
+    ) -> DeployResult | None:
+        """Run the tests of ``target`` in a staging worktree; the failed result, or
+        ``None`` when they pass."""
         staging = self.state_dir / "releases" / target[:12]
         shutil.rmtree(staging, ignore_errors=True)
         staging.parent.mkdir(parents=True, exist_ok=True)
@@ -273,7 +287,11 @@ class GitServiceUpdater:
                 cwd=self.checkout,
             )
             shutil.rmtree(staging, ignore_errors=True)
+        return None
 
+    async def _switch(self, target: str, previous: str, log: list[str]) -> DeployResult:
+        """Move the checkout to ``target``, sync it, build the dashboard, and record
+        the previous commit for ``am supervise`` to roll back to."""
         branch = await self._git("rev-parse", "--abbrev-ref", "HEAD")
         if branch == self.branch:
             await self._git("merge", "--ff-only", "-q", target)

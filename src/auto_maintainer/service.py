@@ -439,6 +439,7 @@ class Service:
             publisher=adapters.publisher,
             workspace=adapters.workspace,
             updater=adapters.updater,
+            deploy_checks=lambda: self.service_config.system.deploy_checks or "local",
             request_restart=self.request_restart,
             writer_as=self.user_writer,
             publisher_as=self.user_publisher,

@@ -111,6 +111,9 @@ class ExecContext:
     """Pushes self-improvement branches to the code repo."""
     updater: ServiceUpdater | None = None
     """Moves the service's own checkout to a new commit."""
+    deploy_checks: Callable[[], str] = lambda: "local"
+    """How a deploy checks the commit first, as the service settings say now
+    (``SystemSettings.deploy_checks``): ``ci``, ``local``, or ``none``."""
     request_restart: Callable[[], None] | None = None
     """Asks ``am serve`` to exit for its supervisor to start the new code."""
     workspace: Workspace | None = None

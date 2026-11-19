@@ -600,6 +600,15 @@ class GitLabReader:
             if m.get("username") and m.get("state", "active") == "active"
         ]
 
+    async def commit_checks(self, repo: str, sha: str) -> list[CheckRun]:
+        """Every job and outside status on the commit (GitLab reports its own jobs
+        as commit statuses too)."""
+        statuses = await self._client.paginate(
+            f"/projects/{project_id(repo)}/repository/commits/{quote(sha, safe='')}/statuses",
+            allow=OPTIONAL,
+        )
+        return [_status(s) for s in statuses or [] if s.get("id") is not None]
+
     async def is_team_member(self, repo: str, team: str, login: str) -> bool:
         """Whether ``login`` belongs to the group ``team`` (a group path)."""
         user_id = await self._user_id(login)

@@ -61,6 +61,7 @@ from ..domain.settings import (
     UserToken,
 )
 from ..domain.snapshot import (
+    CheckRun,
     CommentRef,
     IssueComment,
     IssueSnapshot,
@@ -92,6 +93,8 @@ class FakeForge:
         """PR diffs by (repo, number); without one, a diff is made from the files."""
         self.permissions: dict[tuple[str, str], Permission] = {}
         self.teams: dict[str, set[str]] = {}
+        self.commit_check_runs: dict[tuple[str, str], list[CheckRun]] = {}
+        """Checks on commits by (repository, sha), as ``commit_checks`` reads them."""
         self.path_changers: dict[tuple[str, str], str] = {}
         self.job_logs: dict[int, str] = {}
         self.status_logs: dict[str, str] = {}
@@ -197,6 +200,9 @@ class FakeForge:
 
     async def get_permission(self, repo: str, login: str) -> Permission:
         return self.permissions.get((repo, login.lower()), Permission.NONE)
+
+    async def commit_checks(self, repo: str, sha: str) -> list[CheckRun]:
+        return list(self.commit_check_runs.get((repo, sha), []))
 
     async def list_collaborators(self, repo: str) -> list[tuple[str, Permission]]:
         return sorted(
@@ -859,6 +865,8 @@ class FakeUpdater:
         self.upstream: str | None = running
         self.pending: list[Any] = []
         self.deployed: list[str] = []
+        self.tested: list[bool] = []
+        """Whether each deploy ran the tests here."""
         self.fail = False
 
     async def status(self) -> UpdateStatus:
@@ -872,9 +880,10 @@ class FakeUpdater:
     async def confirm(self) -> dict[str, Any] | None:
         return None
 
-    async def deploy(self, sha: str) -> DeployResult:
+    async def deploy(self, sha: str, *, test: bool = True) -> DeployResult:
         self.deployed.append(sha)
-        if self.fail:
+        self.tested.append(test)
+        if self.fail and test:
             return DeployResult(
                 ok=False, sha=sha, previous_sha=self.running, log="tests failed"
             )

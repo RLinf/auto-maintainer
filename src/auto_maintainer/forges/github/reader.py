@@ -989,6 +989,43 @@ class GitHubReader:
             if p.get("login")
         ]
 
+    async def commit_checks(self, repo: str, sha: str) -> list[CheckRun]:
+        ref = quote(sha, safe="")
+        runs = await self._client.paginate(
+            f"/repos/{repo}/commits/{ref}/check-runs",
+            repo=repo,
+            item_key="check_runs",
+            allow_404=True,
+        )
+        checks = [
+            CheckRun(
+                id=int(cr["id"]),
+                name=cr.get("name") or "",
+                status=map_check_status(cr.get("status")),
+                conclusion=map_check_conclusion(cr.get("conclusion")),
+                details_url=cr.get("details_url") or cr.get("html_url"),
+                started_at=_dt(cr.get("started_at")),
+                completed_at=_dt(cr.get("completed_at")),
+            )
+            for cr in runs or []
+        ]
+        combined = await self._client.get(
+            f"/repos/{repo}/commits/{ref}/status", repo=repo, allow=(404,)
+        )
+        for st in (combined or {}).get("statuses") or []:
+            state = (st.get("state") or "").upper()
+            done = state in _STATUS_CONCLUSION
+            checks.append(
+                CheckRun(
+                    id=status_id(st.get("context") or ""),
+                    name=st.get("context") or "",
+                    status=CheckStatus.COMPLETED if done else CheckStatus.IN_PROGRESS,
+                    conclusion=_STATUS_CONCLUSION.get(state),
+                    details_url=st.get("target_url"),
+                )
+            )
+        return checks
+
     async def is_team_member(self, repo: str, team: str, login: str) -> bool:
         org, _, team_slug = team.partition("/")
         if not team_slug:

@@ -1,6 +1,7 @@
 // The service's own code: what it runs, what waits on its default branch, and the
 // self-improvement PRs it opened. Only maintainers of its repository merge and deploy.
 
+import { DeployChecksSelect } from "../deployChecks";
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
@@ -127,15 +128,20 @@ export default function ServicePage() {
         <Section
           title={t("Updates")}
           aside={
-            v.can_approve && s?.upstream_sha && s.pending.length > 0 ? (
-              <button
-                className="primary"
-                disabled={deploy.isPending || s.dirty}
-                onClick={() => deploy.mutate(s.upstream_sha!, { onSuccess: () => toast({ title: t("Deploy started"), body: t("The service tests the commit, then restarts on it."), icon: "upload" }) })}
-              >
-                <Icon name="upload" size={14} />
-                {t("Deploy")} {s.upstream_sha.slice(0, 8)}
-              </button>
+            v.can_approve && s ? (
+              <span className="row" style={{ gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                <DeployChecksSelect compact />
+                {s.upstream_sha && s.pending.length > 0 && (
+                  <button
+                    className="primary"
+                    disabled={deploy.isPending || s.dirty}
+                    onClick={() => deploy.mutate(s.upstream_sha!, { onSuccess: () => toast({ title: t("Deploy started"), body: t("The service checks the commit as chosen, then restarts on it."), icon: "upload" }) })}
+                  >
+                    <Icon name="upload" size={14} />
+                    {t("Deploy")} {s.upstream_sha.slice(0, 8)}
+                  </button>
+                )}
+              </span>
             ) : null
           }
         >

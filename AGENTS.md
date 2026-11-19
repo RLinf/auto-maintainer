@@ -91,7 +91,7 @@ These hold everywhere. Reviewers reject changes that break them; `tests/test_lay
 
 - A reviewer's `improve` request in chat becomes a request card; once the person who asked approves it (a member of a repository the service manages: `web/chat.py:_may_decide`), or the owner does, `playbooks/self_improve.py` runs: an agent edits a worktree of `code_repo`, the playbook runs the tests and Ruff (in a container of the agents' image when the host has one) and sends what fails back to the agent while that changes what fails, and only a change that passes becomes a PR: the actuator pushes `am/self/...` and opens it (design 5.12). Never start an agent on the service's own code without that approval. Write that agent's instructions here, in this file: it reads `AGENTS.md` first.
 - Updating a self-improvement branch (`code.update`), merging (`code.merge`), and deploying (`service.deploy`) need the owner, checked live in `web/api.py:code_maintainer`. Never add a path that updates, merges, or deploys without that check, for operators, for chat, or for the service itself. Deploys fetch the default branch of `code_repo` itself (`selfupdate/updater.py`), never whatever remote the checkout has.
-- A deploy only moves the service's checkout to a commit on the default branch, after that commit's tests pass in a staging worktree; `am supervise` rolls back a deploy whose code fails to start.
+- A deploy only moves the service's checkout to a commit on the default branch, after that commit's tests pass in a staging worktree, or its CI on the forge passed, or untested where the owner chose that (`system.deploy_checks`); `am supervise` rolls back a deploy whose code fails to start.
 
 ## Extending
 
