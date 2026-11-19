@@ -817,6 +817,14 @@ textarea.mono-input { width: 100%; }
 @keyframes am-slide-in { from { transform: translateX(calc(100% + 24px)); } to { transform: none; } }
 @media (prefers-reduced-motion: reduce) { .job-panel { animation: none; } }
 @media (max-width: 640px) { .job-panel { top: 0; right: 0; bottom: 0; left: 0; width: auto; border-radius: 0; } }
+/* The panel's left edge, dragged to resize it (``JobDrawer``). */
+.job-panel-resize { position: absolute; left: 0; top: 0; bottom: 0; width: 8px; cursor: ew-resize; z-index: 2; touch-action: none; }
+.job-panel-resize:hover, .job-panel-resize:active { background: linear-gradient(to right, var(--accent-soft, rgba(0,0,0,0.08)), transparent); }
+/* Flat: over the whole page under the header, without the card's frame, the text in a
+   readable column. */
+.job-panel.flat { top: var(--header-h); right: 0; bottom: 0; left: 0; width: auto; border-radius: 0; border: none; box-shadow: none; animation: none; }
+.job-panel.flat .agent-head, .job-panel.flat .agent-body { padding-left: max(16px, calc((100vw - 1000px) / 2)); padding-right: max(16px, calc((100vw - 1000px) / 2)); }
+@media (max-width: 640px) { .job-panel-resize { display: none; } .job-panel.flat { top: 0; } }
 .steps-live { list-style: none; margin: 0; padding: 0 0 0 4px; display: flex; flex-direction: column; gap: 10px; position: relative; }
 .steps-live::before { content: ""; position: absolute; left: 8px; top: 6px; bottom: 6px; width: 1px; background: var(--border); }
 .step { display: flex; gap: 12px; align-items: flex-start; position: relative; min-width: 0; }

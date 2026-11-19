@@ -43,6 +43,8 @@ const PATHS: Record<string, ReactElement> = {
     </>
   ),
   external: <path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5" />,
+  expand: <path d="M14 4h6v6M10 20H4v-6M20 4l-6 6M4 20l6-6" />,
+  shrink: <path d="M20 10h-6V4M4 14h6v6M14 10l6-6M10 14l-6 6" />,
   pause: <path d="M9 5v14M15 5v14" />,
   stop: <rect x="6" y="6" width="12" height="12" rx="2" />,
   play: <path d="M7 4.5v15l12-7.5z" />,
