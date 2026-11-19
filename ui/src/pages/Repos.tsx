@@ -8,6 +8,7 @@ import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom"
 import { api, type Agreement, type GateDecision, type MemoryChange, type ProfileResponse, type RepoRow, type ReviewGuides } from "../api";
 import { useAgent } from "../agent";
 import { RepoMachinesSection, useRepoMachines } from "../machines";
+import { LessonsTab } from "../lessons";
 import { PeopleTab } from "../people";
 import { UsageTab } from "../usage";
 import { ProfileChanges, type Profile } from "../profileView";
@@ -228,6 +229,7 @@ export function RepoDetailPage() {
   const tabs = [
     { id: "overview", label: t("Overview") },
     { id: "people", label: t("People") },
+    { id: "lessons", label: t("Lessons") },
     { id: "labs", label: t("Test machines"), count: usedMachines },
     { id: "usage", label: t("Usage") },
     { id: "candidate", label: t("Profile change"), count: candidateHash ? 1 : 0 },
@@ -400,6 +402,7 @@ export function RepoDetailPage() {
       )}
 
       {tab === "people" && <PeopleTab repo={full} />}
+      {tab === "lessons" && <LessonsTab repo={full} />}
 
       {tab === "labs" && <RepoMachinesSection repo={full} />}
       {tab === "usage" && <UsageTab repo={full} />}

@@ -10,9 +10,9 @@ import { type QueryClient, useQueryClient } from "@tanstack/react-query";
 const INVALIDATES: Record<string, string[][]> = {
   "proposal.created": [["proposals"], ["pr"], ["prs"], ["repos"]],
   "proposal.decided": [["proposals"], ["pr"], ["repos"]],
-  "action.executed": [["pr"], ["prs"], ["proposals"], ["audit"], ["service"], ["settings"], ["memory"]],
+  "action.executed": [["pr"], ["prs"], ["proposals"], ["audit"], ["service"], ["settings"], ["memory"], ["lessons"]],
   "action.failed": [["pr"], ["proposals"], ["audit"], ["service"]],
-  "memory.changed": [["memory"], ["profile"], ["repos"], ["settings"], ["my-agents"]],
+  "memory.changed": [["memory"], ["profile"], ["repos"], ["settings"], ["my-agents"], ["lessons"]],
   "pr.opened": [["prs"], ["repos"], ["merge-schedule"]],
   "pr.synchronized": [["prs"], ["pr"], ["merge-schedule"]],
   "pr.updated": [["prs"], ["pr"], ["merge-schedule"]],

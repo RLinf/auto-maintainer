@@ -50,6 +50,7 @@ from . import (
     governance,
     jobs,
     learning,
+    lessons,
     merge_schedule,
     my_agents,
     my_machines,
@@ -170,6 +171,7 @@ def create_app(
     app.include_router(merge_schedule.build_router())
     app.include_router(learning.build_router())
     app.include_router(governance.build_router())
+    app.include_router(lessons.build_router())
     app.include_router(people_talk.build_router())
     app.include_router(translate.build_router())
     app.include_router(my_agents.build_router())

@@ -49,6 +49,15 @@ GLOBAL_AGENT_LESSONS = "global/knowledge/agent_lessons.md"
 MACHINE_LESSONS = "global/knowledge/machines/{name}.md"
 """The same about one test machine, as the service's owner approved it."""
 
+LESSON_FILES: dict[str, tuple[str, str]] = {
+    "review": (LESSONS, "Review lessons"),
+    "priority": (PRIORITY_LESSONS, "Priority lessons"),
+    "agent": (AGENT_LESSONS, "Agent lessons"),
+}
+"""A repository's lessons files by kind: the path in its memory folder and the
+file's heading. Its maintainers read, edit, and summarize them on the repository's
+Lessons tab (``web/lessons.py``)."""
+
 
 def machine_lessons_path(name: str) -> str:
     """Where the lessons about test machine ``name`` live in the memory repo."""

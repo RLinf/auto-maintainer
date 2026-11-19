@@ -1498,3 +1498,11 @@ details.pv-section[open] > summary { margin-bottom: 6px; }
 .people-add-row:last-child { border-bottom: none; }
 .people-add-row select { max-width: 220px; }
 @media (max-width: 560px) { .people-add-row { flex-wrap: wrap; } .people-add-row select { max-width: 100%; flex: 1 1 100%; } }
+
+/* A repository's lessons (``lessons.tsx``): each one with who approved it beneath. */
+.lessons { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 8px; }
+.lessons li { display: flex; flex-direction: column; gap: 2px; }
+.lessons .lesson-text > :first-child { margin-top: 0; }
+.lessons .lesson-text > :last-child { margin-bottom: 0; }
+.lessons-edit { border-left: 2px solid var(--border); padding-left: 10px; }
+.lessons-edit textarea { font-family: var(--sans); font-size: 14px; }
