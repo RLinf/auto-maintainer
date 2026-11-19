@@ -736,7 +736,11 @@ class ExecRuntime:
         """What ``choices`` last found, or the adapter's known list, without asking
         the CLI again."""
         cached = getattr(self, "_choices", None)
-        return cached[1] if cached is not None else self.known_choices
+        return (
+            cached[1]
+            if cached is not None and cached[1] is not None
+            else self.known_choices
+        )
 
     async def quota(self) -> AgentQuota | None:
         """What the CLI says is left of its account's limits, as its own ``/usage``

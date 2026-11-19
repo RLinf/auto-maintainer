@@ -562,6 +562,72 @@ async def test_an_acp_cli_reports_its_models_and_levels_without_a_prompt(
     assert await runtime.choices() is choices, "kept for an hour"
 
 
+async def test_acp_choices_fall_back_to_known_and_flatten_groups(
+    tmp_path: Path, talking_cli
+) -> None:
+    """When an ACP CLI fails to answer ``session/new`` it falls back to its
+    adapter's ``known_choices`` (retrying sooner); grouped select options are
+    flattened, and missing efforts are filled from ``known_choices``."""
+    from auto_maintainer.agents.adapters.antigravity import AntigravityRuntime
+    from auto_maintainer.agents.adapters.dsh import DshRuntime
+    from auto_maintainer.agents.adapters.pi import PiRuntime
+
+    broken = tmp_path / "broken-agy"
+    broken.write_text("#!/bin/sh\nexit 1\n")
+    broken.chmod(0o755)
+    failed_rt = AntigravityRuntime(binary=str(broken), runs_dir=tmp_path / "runs")
+    fallback = await failed_rt.choices()
+    assert fallback is not None and fallback.source == "known"
+    assert fallback.efforts == ["low", "medium", "high"]
+    assert failed_rt.cached_choices() == fallback
+
+    grouped_session = {
+        "sessionId": "s2",
+        "configOptions": [
+            {
+                "id": "model",
+                "category": "model",
+                "currentValue": "gemini-4-argon",
+                "options": [
+                    {
+                        "group": "google",
+                        "options": [
+                            {"value": "gemini-4-argon", "name": "Gemini 4 Argon"}
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+    cli = talking_cli(
+        [
+            {
+                "wait": '"initialize"',
+                "emit": [{"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": 1}}],
+            },
+            {
+                "wait": '"session/new"',
+                "emit": [{"jsonrpc": "2.0", "id": 2, "result": grouped_session}],
+            },
+            {"wait": '"session/prompt"', "emit": []},
+        ]
+    )
+    rt = AntigravityRuntime(binary=str(cli.path), runs_dir=tmp_path / "runs2")
+    merged = await rt.choices()
+    assert merged is not None and merged.source == "cli"
+    assert [m.id for m in merged.models] == ["gemini-4-argon"]
+    assert merged.efforts == ["low", "medium", "high"]
+
+    assert PiRuntime("pi").cached_choices().efforts == [
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+    ]
+    assert DshRuntime("dsh").cached_choices().efforts == ["low", "high", "max"]
+
+
 async def test_a_background_read_only_task_is_not_left_waiting_on_people(
     tmp_path: Path,
 ) -> None:

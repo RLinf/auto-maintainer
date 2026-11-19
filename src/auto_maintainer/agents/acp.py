@@ -140,7 +140,11 @@ class AcpRuntime(ExecRuntime):
         with tempfile.TemporaryDirectory(prefix="am-acp-probe-") as tmp:
             root = Path(tmp)
             task = AgentTask(
-                kind="probe", prompt="", workdir=root, mode="workspace_write"
+                kind="probe",
+                prompt="",
+                workdir=root,
+                mode="workspace_write",
+                permissions="bypass" if self.container_sandbox is not None else "auto",
             )
             files = RunFiles.create(root, "probe")
             argv = [*self.acp_argv(task, files, binary), *self.extra_args]
@@ -160,10 +164,11 @@ class AcpRuntime(ExecRuntime):
                 session = await _open_session(run.argv, run.env, run.cwd)
             finally:
                 await run.end()
-        found = choices_from_session(session) if session is not None else None
+        live = choices_from_session(session) if session is not None else None
+        found = _with_known_choices(live, self.known_choices)
         # A CLI that did not answer (still starting, not signed in) is asked again
-        # within a minute instead of an hour.
-        kept = time.monotonic() - (0 if found else CHOICES_TTL - CHOICES_RETRY)
+        # within a minute instead of an hour, while its known choices still show.
+        kept = time.monotonic() - (0 if live else CHOICES_TTL - CHOICES_RETRY)
         self._choices = (kept, found)
         return found
 
@@ -198,6 +203,39 @@ CHOICES_RETRY = 60.0
 """Seconds before asking again a CLI that did not report them."""
 
 
+def _with_known_choices(
+    live: AgentChoices | None, known: AgentChoices | None
+) -> AgentChoices | None:
+    """``live`` from ``session/new`` with missing models or reasoning levels filled
+    from ``known``; ``known`` itself when the CLI did not answer."""
+    if live is None:
+        return known
+    if known is None:
+        return live
+    if live.models and live.efforts:
+        return live
+    return live.model_copy(
+        update={
+            "models": live.models or list(known.models),
+            "efforts": live.efforts or list(known.efforts),
+            "source": "cli" if (live.models or live.efforts) else known.source,
+        }
+    )
+
+
+def _select_options(raw: Any) -> list[dict[str, Any]]:
+    """Flatten ACP select options, which may be flat or grouped under ``options``."""
+    out: list[dict[str, Any]] = []
+    for item in raw or []:
+        if not isinstance(item, dict):
+            continue
+        if isinstance(item.get("options"), list):
+            out.extend(o for o in item["options"] if isinstance(o, dict))
+        else:
+            out.append(item)
+    return out
+
+
 def choices_from_session(session: dict[str, Any]) -> AgentChoices:
     """The models and reasoning levels in a ``session/new`` result: its config
     options of category ``model`` and ``thought_level``, else its ``models``."""
@@ -212,8 +250,8 @@ def choices_from_session(session: dict[str, Any]) -> AgentChoices:
             ModelChoice(
                 id=str(o.get("value") or o.get("id")), name=str(o.get("name") or "")
             )
-            for o in option.get("options") or []
-            if isinstance(o, dict) and (o.get("value") or o.get("id"))
+            for o in _select_options(option.get("options"))
+            if o.get("value") or o.get("id")
         ]
         kind = option.get("category") or option.get("id")
         current = option.get("currentValue")

@@ -724,29 +724,48 @@ class AgentRouter:
     async def _account(
         self, runtime: AgentRuntime, task: AgentTask
     ) -> tuple[AgentRuntime, AgentTask]:
-        """``runtime`` and ``task``, or a copy of the runtime on the account of the
-        person who asked for ``task``, when they turned their own account on for this
-        agent: their CLI sign-in, or one of their own model APIs with the model and
-        reasoning level they chose for it, which then win over the route's. Nobody
-        else's task ever runs on them. Only where each run gets a container of its
-        own, which mounts only that person's sign-in: on the host, every run could
-        read every person's."""
+        """``runtime`` and ``task``, adjusted for the person who asked for ``task``.
+
+        When they turned their own account on for this agent (``use_own``), a copy of
+        the runtime runs on their CLI sign-in or one of their own model APIs, with the
+        model and reasoning level they chose winning over the route's; this happens
+        only where each run gets a container of its own, which mounts only that
+        person's sign-in. When they leave the agent on the service's account, any
+        model or reasoning level they chose for it still applies to their own task
+        without touching ``runtime`` or anyone else's runs.
+        """
         login = task.requested_by
+        if self.people is None or not login:
+            return runtime, task
+        try:
+            setup = (await self.people.get(login)).get(runtime.name)
+        except ValueError:
+            return runtime, task
+        if setup is None:
+            return runtime, task
+        if not setup.use_own:
+            updates: dict[str, Any] = {}
+            if setup.model:
+                service_provider = getattr(runtime, "provider", None)
+                if (
+                    service_provider is None
+                    or not service_provider.models
+                    or setup.model in service_provider.models
+                ):
+                    updates["model"] = setup.model
+            if setup.effort and task.budget != "quick":
+                updates["effort"] = setup.effort
+            return runtime, task.model_copy(update=updates) if updates else task
         if (
-            self.people is None
-            or task.service_account
-            or not login
+            task.service_account
             or getattr(runtime, "container_sandbox", None) is None
             or not hasattr(runtime, "account_home")
         ):
             return runtime, task
         try:
-            setup = (await self.people.get(login)).get(runtime.name)
-            apis = await self.people.providers(login) if setup else {}
+            apis = await self.people.providers(login)
         except ValueError:
-            return runtime, task
-        if setup is None or not setup.use_own:
-            return runtime, task
+            apis = {}
         mine = copy.copy(runtime)
         mine.account = login.lower()  # type: ignore[attr-defined]
         mine.account_home = self.people.home(login)  # type: ignore[attr-defined]
@@ -765,6 +784,9 @@ class AgentRouter:
             if api is not None
             else None
         )
+        effort = (
+            task.effort if task.budget == "quick" else (setup.effort or task.effort)
+        )
         if api is not None and setup.provider and protocol is not None:
             mine.provider = ProviderBinding(  # type: ignore[attr-defined]
                 id=f"own-{login.lower()}",
@@ -776,13 +798,17 @@ class AgentRouter:
                 specs=tuple(api.models),
             )
             mine.model = model  # type: ignore[attr-defined]
-            task = task.model_copy(
-                update={"model": model, "effort": setup.effort or task.effort}
-            )
+            task = task.model_copy(update={"model": model, "effort": effort})
         else:
-            if getattr(runtime, "provider", None) is not None:
-                # The service's model belongs to its provider, not to this sign-in.
-                mine.model = None  # type: ignore[attr-defined]
+            if setup.model and not setup.provider:
+                mine.model = setup.model  # type: ignore[attr-defined]
+                task = task.model_copy(update={"model": setup.model, "effort": effort})
+            else:
+                if getattr(runtime, "provider", None) is not None:
+                    # The service's model belongs to its provider, not to this sign-in.
+                    mine.model = None  # type: ignore[attr-defined]
+                if effort != task.effort:
+                    task = task.model_copy(update={"effort": effort})
             mine.provider = None  # type: ignore[attr-defined]
         return mine, task
 

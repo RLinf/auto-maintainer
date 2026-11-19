@@ -20,7 +20,7 @@ import { Icon, type IconName } from "../icons";
 import { agentName } from "../agentPicker";
 import { useAgentsData } from "./Agents";
 import { SettingsChangeCard } from "../settingsChange";
-import { MyAgentsSection, MyApisSection, MyDefaultChoice, ServiceSignIn } from "../agentAccounts";
+import { ModelInput, MyAgentsSection, MyApisSection, MyDefaultChoice, ServiceSignIn } from "../agentAccounts";
 import { MyMachinesSection } from "../myMachines";
 import { MyNotesSection } from "../personNotes";
 import { ApiForm, ApiSummary, modelsFor, PROTOCOLS } from "../providerForm";
@@ -311,10 +311,17 @@ function ModelControls({
   const nameOf = (id: string | null | undefined) => (id ? cliModels.find((m) => m.id === id)?.name || id : null);
   const cliModel = nameOf(choices?.default_model);
   const spec = provider?.models.find((m) => m.id === (agent.model ?? providerModels[0]?.id));
-  const efforts = provider ? (spec?.reasoning.length ? spec.reasoning : []) : (choices?.efforts ?? []);
+  const efforts = provider
+    ? spec?.reasoning.length
+      ? spec.reasoning
+      : spec?.tested_at
+        ? []
+        : (choices?.efforts ?? [])
+    : (choices?.efforts ?? []);
   const cliEffort = provider ? null : choices?.default_effort;
   const disabled = !canChange || set.isPending;
   const title = canChange ? undefined : t("Only the owner of this service changes agents.");
+  const canPickModel = agent.adapter !== "generic";
   const quickModels = provider ? providerModels.map((m) => ({ id: m.id, name: m.id })) : cliModels;
   return (
     <span className="row model-controls" style={{ gap: 6 }}>
@@ -366,8 +373,17 @@ function ModelControls({
           ))}
           {agent.model && !cliModels.some((m) => m.id === agent.model) && <option value={agent.model}>{agent.model}</option>}
         </select>
+      ) : canPickModel ? (
+        <ModelInput
+          value={agent.model}
+          disabled={disabled}
+          ariaLabel={`${agent.name}: ${t("Model")}`}
+          placeholder={`${t("Model")}: ${cliModel ?? t("the CLI's default")}`}
+          title={title ?? t("Model name for this CLI; leave empty for the default. Press Enter to save.")}
+          onSave={(next) => set.mutate({ model: next, effort: agent.effort }, { onSuccess: done })}
+        />
       ) : null}
-      {quickModels.length > 0 && (
+      {quickModels.length > 0 ? (
         <select
           value={agent.quick_model ?? ""}
           disabled={disabled}
@@ -387,8 +403,17 @@ function ModelControls({
             </option>
           )}
         </select>
-      )}
-      {efforts.length > 0 ? (
+      ) : !provider && canPickModel ? (
+        <ModelInput
+          value={agent.quick_model}
+          disabled={disabled}
+          ariaLabel={`${agent.name}: ${t("Quick tasks")}`}
+          placeholder={t("Quick tasks: same model")}
+          title={title ?? t("Model name for quick tasks; leave empty to use the same model. Press Enter to save.")}
+          onSave={(next) => set.mutate({ model: agent.model, effort: agent.effort, quick_model: next }, { onSuccess: done })}
+        />
+      ) : null}
+      {efforts.length > 0 || agent.effort ? (
         <select
           value={agent.effort ?? ""}
           disabled={disabled}
@@ -402,6 +427,11 @@ function ModelControls({
               {t("Thinking")}: {e}
             </option>
           ))}
+          {agent.effort && !efforts.includes(agent.effort) && (
+            <option value={agent.effort}>
+              {t("Thinking")}: {agent.effort}
+            </option>
+          )}
         </select>
       ) : null}
     </span>
@@ -788,7 +818,7 @@ function AgentsTab({ v, ask }: { v: SettingsView; ask: (p: string, send?: boolea
         {v.agents.map((a) => {
           const provider = v.providers.find((p) => p.id === a.provider);
           const h = byName.get(a.name);
-          const choices = h?.choices;
+          const choices = h?.choices ?? a.choices;
           const budget = [a.budget.daily_usd != null ? `$${a.budget.daily_usd}/${t("day")}` : null, a.budget.daily_runs != null ? `${a.budget.daily_runs} ${t("runs/day")}` : null]
             .filter(Boolean)
             .join(" · ");

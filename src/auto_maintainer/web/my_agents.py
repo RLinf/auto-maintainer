@@ -45,7 +45,7 @@ from ..service import Service
 from .api import service_of, visible_repos
 from .auth import User, current_user
 from .model_apis import ApiForm, ProbeBody, list_models, refused_address
-from .settings import can_sign_in, examined, provider_row
+from .settings import can_sign_in, examined, provider_row, runtime_choices
 
 
 class SetupBody(BaseModel):
@@ -111,6 +111,24 @@ async def _providers(service: Service, user: User) -> list[dict[str, Any]]:
     ]
 
 
+def _service_provider_models(runtime: Any) -> list[dict[str, Any]] | None:
+    """Model ids and reasoning levels of the service provider ``runtime`` runs on,
+    when it runs on one; never includes URLs or keys."""
+    provider = getattr(runtime, "provider", None)
+    if provider is None:
+        return None
+    specs = {s.id: s for s in getattr(provider, "specs", ())}
+    ids = list(getattr(provider, "models", ())) or list(specs)
+    return [
+        {
+            "id": mid,
+            "reasoning": list(specs[mid].reasoning) if mid in specs else [],
+            "tested_at": specs[mid].tested_at if mid in specs else None,
+        }
+        for mid in ids
+    ]
+
+
 async def _agent_row(service: Service, user: User, name: str) -> dict[str, Any]:
     runtime = service.runtime(name)
     people = service.a.people
@@ -137,6 +155,10 @@ async def _agent_row(service: Service, user: User, name: str) -> dict[str, Any]:
         "isolated": service.agents_isolated(name),
         # Whether the service's own account of it can run: signed in, or on a provider.
         "service_usable": service.agent_usable(name),
+        "choices": runtime_choices(runtime),
+        "service_model": getattr(runtime, "model", None),
+        "service_effort": getattr(runtime, "effort", None),
+        "service_provider_models": _service_provider_models(runtime),
         "setup": (setup or PersonalAgent(agent=name)).model_dump(mode="json"),
         "login": login.model_dump(mode="json") if login else None,
         # The CLI settings it offers, and the service's, which the person's own
@@ -214,14 +236,25 @@ def build_router() -> APIRouter:
     async def set_my_agent(
         request: Request, name: str, body: SetupBody, user: User = Depends(current_user)
     ) -> dict[str, Any]:
-        """Turn the user's own account for agent ``name`` on or off, and choose
-        whether it runs on their CLI sign-in or on one of their own model APIs, with
-        which model and reasoning level."""
+        """Choose what agent ``name`` runs the user's requests on (the service's
+        account, their CLI sign-in, or one of their own model APIs) and the model
+        and reasoning level they prefer for it."""
         service = service_of(request)
-        if not await service.access_anywhere(user.login, Grant.OWN_AGENTS):
+        if body.use_own:
+            if not await service.access_anywhere(user.login, Grant.OWN_AGENTS):
+                raise HTTPException(
+                    403,
+                    "your role does not let you use your own agent accounts; the service's owner or a "
+                    "service admin can change that",
+                )
+        elif not (
+            await service.access_anywhere(user.login, Grant.OWN_AGENTS)
+            or await service.access_anywhere(user.login, Grant.USE_AGENTS)
+            or await service.access_anywhere(user.login, Grant.USE_MODELS)
+        ):
             raise HTTPException(
                 403,
-                "your role does not let you use your own agent accounts; the service's owner or a "
+                "your role does not let you configure agents; the service's owner or a "
                 "service admin can change that",
             )
         _ready(service, name)
@@ -232,41 +265,61 @@ def build_router() -> APIRouter:
                 "agents run on the host here, where every run could read every "
                 "person's sign-in, so personal accounts are off",
             )
-        if body.effort and body.effort not in REASONING_LEVELS:
+        effort = (body.effort or "").strip() or None
+        if effort and effort not in REASONING_LEVELS:
             raise HTTPException(
                 422, f"the reasoning level is one of {', '.join(REASONING_LEVELS)}"
             )
-        model = body.model or None
-        if body.provider:
-            api = (await people.providers(user.login)).get(body.provider)
+        model = (body.model or "").strip() or None
+        provider_id = body.provider or None if body.use_own else None
+        if provider_id:
+            api = (await people.providers(user.login)).get(provider_id)
             if api is None:
-                raise HTTPException(422, f"you have no model API {body.provider!r}")
+                raise HTTPException(422, f"you have no model API {provider_id!r}")
             model = model or (api.model_ids[0] if api.models else None)
             if api.models and model not in api.model_ids:
-                raise HTTPException(422, f"{body.provider} lists no model {model!r}")
+                raise HTTPException(422, f"{provider_id} lists no model {model!r}")
             spec = api.model(model)
             adapter = _adapter(service.runtime(name), name)
             if protocol_for(adapter, api.protocol, spec) is None:
                 raise HTTPException(
-                    422, f"{name} cannot use {model or body.provider} over its APIs"
+                    422, f"{name} cannot use {model or provider_id} over its APIs"
                 )
-            if (
-                body.effort
-                and spec
-                and spec.reasoning
-                and body.effort not in spec.reasoning
-            ):
+            if effort and spec and spec.reasoning and effort not in spec.reasoning:
                 raise HTTPException(
                     422,
                     f"{model} takes the reasoning levels {', '.join(spec.reasoning)}",
                 )
+        elif not body.use_own:
+            runtime = service.runtime(name)
+            service_provider = getattr(runtime, "provider", None)
+            if service_provider is not None:
+                if (
+                    model
+                    and service_provider.models
+                    and model not in service_provider.models
+                ):
+                    raise HTTPException(
+                        422, f"{name}'s service provider lists no model {model!r}"
+                    )
+                chosen_model = (
+                    model
+                    or getattr(runtime, "model", None)
+                    or (service_provider.models[0] if service_provider.models else None)
+                )
+                spec = service_provider.spec(chosen_model)
+                if effort and spec and spec.reasoning and effort not in spec.reasoning:
+                    raise HTTPException(
+                        422,
+                        f"{chosen_model} takes the reasoning levels {', '.join(spec.reasoning)}",
+                    )
         kept = (await people.get(user.login)).get(name)
         setup = PersonalAgent(
             agent=name,
             use_own=body.use_own,
-            provider=body.provider or None,
-            model=model if body.provider else None,
-            effort=body.effort or None,
+            provider=provider_id,
+            model=model,
+            effort=effort,
             options=kept.options if kept else {},
         )
         await people.put(user.login, setup)

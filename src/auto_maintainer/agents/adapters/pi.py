@@ -49,7 +49,13 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from ...domain.agents import AgentEvent, AgentEventType, AgentTask, Capabilities
+from ...domain.agents import (
+    AgentChoices,
+    AgentEvent,
+    AgentEventType,
+    AgentTask,
+    Capabilities,
+)
 from ...domain.settings import ModelSpec
 from ..exec import ExecRuntime, Invocation, RunFiles, write_private
 from . import partial, short
@@ -117,6 +123,8 @@ def model_entry(model: str, spec: ModelSpec | None) -> dict[str, Any]:
 
 class PiRuntime(ExecRuntime):
     """pi in print mode, one task per run."""
+
+    known_choices = AgentChoices(efforts=list(_LEVELS))
 
     default_name = "pi"
     default_binary = "pi"

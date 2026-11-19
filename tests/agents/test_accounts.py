@@ -229,6 +229,82 @@ async def test_a_task_runs_on_its_requesters_own_account_only_in_a_container(
     )
 
 
+async def test_personal_model_and_effort_apply_for_cli_sign_in_and_service_account(
+    tmp_path: Path,
+) -> None:
+    """Personal model and effort preferences apply on a person's own CLI sign-in
+    (in a container) and on the service's account (even without a container),
+    without affecting anyone else or breaking a quick task's low-effort cap."""
+    from auto_maintainer.domain.settings import ProviderBinding
+
+    people = PeopleAgents(tmp_path / "people")
+    await people.put(
+        "walt",
+        PersonalAgent(
+            agent="claude-code", use_own=False, model="sonnet", effort="high"
+        ),
+    )
+    await people.put(
+        "maria",
+        PersonalAgent(agent="claude-code", use_own=True, model="opus", effort="xhigh"),
+    )
+    runtime = ClaudeCodeRuntime(model="haiku", effort="low")
+    router = AgentRouter({"claude-code": runtime})
+    router.people = people
+
+    def task(
+        by: str | None, *, budget: str = "normal", service_account: bool = False
+    ) -> AgentTask:
+        return AgentTask(
+            kind=TaskKind.REVIEW,
+            prompt="p",
+            workdir=tmp_path,
+            requested_by=by,
+            effort="low",
+            budget=budget,
+            service_account=service_account,
+        )
+
+    # Service account preference works without a container and leaves runtime untouched.
+    rt_walt, t_walt = await router._account(runtime, task("walt"))
+    assert rt_walt is runtime
+    assert (t_walt.model, t_walt.effort) == ("sonnet", "high")
+    assert (runtime.model, runtime.effort) == ("haiku", "low")
+
+    # Quick tasks keep their low effort cap.
+    _, t_quick = await router._account(runtime, task("walt", budget="quick"))
+    assert (t_quick.model, t_quick.effort) == ("sonnet", "low")
+
+    # Stale personal model not in a service provider's list is ignored.
+    runtime.provider = ProviderBinding(
+        id="gw",
+        name="Gateway",
+        protocol="anthropic",
+        base_url="https://gw.example",
+        models=("m1",),
+        api_key="sk",
+    )
+    _, t_stale = await router._account(runtime, task("walt"))
+    assert t_stale.model is None and t_stale.effort == "high"
+    runtime.provider = None
+
+    # Personal CLI sign-in needs a container, and applies model & effort on a copy.
+    assert (await router._account(runtime, task("maria")))[0] is runtime
+    runtime.container_sandbox = object()
+    rt_maria, t_maria = await router._account(runtime, task("maria"))
+    assert rt_maria is not runtime and rt_maria.account == "maria"
+    assert (rt_maria.model, t_maria.model, t_maria.effort) == ("opus", "opus", "xhigh")
+
+    # Explicitly choosing the service's account does not apply own-account model/effort.
+    rt_svc, t_svc = await router._account(runtime, task("maria", service_account=True))
+    assert rt_svc is runtime and t_svc.model is None and t_svc.effort == "low"
+
+    # Nobody else is affected.
+    for other in ("oscar", None):
+        rt_other, t_other = await router._account(runtime, task(other))
+        assert rt_other is runtime and t_other.model is None and t_other.effort == "low"
+
+
 def test_a_persons_run_mounts_their_sign_in_and_not_the_services(
     tmp_path: Path,
 ) -> None:
