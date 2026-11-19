@@ -867,6 +867,28 @@ export function MergeBaseForm({
   );
 }
 
+/** For a PR that conflicts with its base, where the schedule did not resolve it (the
+ *  Merge page's failure lane): the PR page's Resolve conflicts, in place. An agent
+ *  merges the base in; the person who asked reads the merge and pushes it, and the
+ *  new commit brings the PR back into the schedule. */
+export function ResolveConflictsButton({ repo, number, base, canPush, size }: { repo: string; number: number; base: string; canPush: boolean; size?: "sm" }) {
+  const t = useT();
+  return (
+    <Popover
+      align="right"
+      label={`${t("Resolve conflicts with")} ${base}`}
+      trigger={(isOpen, toggle) => (
+        <button className={[size, isOpen ? "on" : ""].filter(Boolean).join(" ")} aria-expanded={isOpen} title={`${t("Have an agent merge")} ${base} ${t("into it and resolve the conflicts, for you to push")}`} onClick={toggle}>
+          <Icon name="merge" size={14} />
+          {t("Resolve conflicts")}
+        </button>
+      )}
+    >
+      {(close) => <MergeBaseForm repo={repo} number={number} base={base} conflicting canPush={canPush} onClose={close} />}
+    </Popover>
+  );
+}
+
 export function MergeBaseButton({
   repo,
   number,

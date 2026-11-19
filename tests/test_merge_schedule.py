@@ -2172,8 +2172,10 @@ async def test_a_lint_failure_is_fixed_on_its_turn_and_pushed_as_the_scheduler(
 
 
 async def test_a_conflict_in_code_goes_to_a_person_without_an_agent(
-    harness: Harness,
+    harness: Harness, tmp_path: Path
 ) -> None:
+    """A conflict the schedule does not resolve sets the PR aside, and the failure
+    lane offers to resolve it: the row says it conflicts with its base."""
     h = harness
     _conflicting(h, path="src/core.py")
     await _schedule(h, 42)
@@ -2181,8 +2183,14 @@ async def test_a_conflict_in_code_goes_to_a_person_without_an_agent(
     failed = await _phase(h, 42)
     assert failed.phase == "failed"
     assert "src/core.py is not of a kind the schedule resolves" in failed.detail
+    assert "Resolve conflicts here" in failed.detail
     assert not [t for t in h.runner.tasks if str(t.kind) == "fix"]
     assert not await h.store.list_actions(repo=REPO, kinds=[ActionKind.PR_FIX])
+    app = create_app(h.service, data_dir=tmp_path, allow_dev_login=True)
+    async with _as(app, "maria") as maria:
+        view = (await maria.get(f"/api/merge-schedule/{REPO}/view")).json()
+    [row] = view["failed"]
+    assert (row["number"], row["conflict"], row["base"]) == (42, True, "main")
 
 
 async def test_a_resolution_that_writes_something_new_is_not_pushed(

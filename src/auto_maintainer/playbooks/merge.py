@@ -389,8 +389,9 @@ class MergePlaybook(Playbook):
                 state,
                 f"it conflicts with {pr.base_ref}"
                 + (f", which the schedule did not resolve: {why}" if why else "")
-                + f". Merge {pr.base_ref} into it (Resolve conflicts on the PR "
-                "page), then retry",
+                + f". Resolve the conflicts (Resolve conflicts here or on the PR "
+                f"page has an agent merge {pr.base_ref} in for you to push): once "
+                "the merge is pushed, it takes its turn again",
             )
         ready = ready_conditions(profile, arm)
         back = [

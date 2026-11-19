@@ -5,6 +5,7 @@
 // arranging merges needs a maintainer, and the settings go through the configuration
 // gate (a non-maintainer's change becomes a proposal).
 
+import { ResolveConflictsButton } from "../proposal";
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
@@ -36,6 +37,9 @@ interface Row {
   url: string;
   updated_at: string | null;
   behind: boolean;
+  /** It conflicts with its base branch (``base``). */
+  conflict: boolean;
+  base: string;
   ci: CiSummary;
 }
 
@@ -63,7 +67,6 @@ interface Scheduled extends Row {
 
 interface NotReady extends Row {
   reasons: string[];
-  conflict: boolean;
 }
 
 interface CiStart {
@@ -707,6 +710,7 @@ function FailureLane({ v }: { v: MergeView }) {
             <CheckOneButton check={check} number={f.number} />
             {v.can_arrange && (
               <div className="row merge-actions">
+                {f.conflict && <ResolveConflictsButton repo={v.repo} number={f.number} base={f.base} canPush={v.signed_in} size="sm" />}
                 <FixCiButton repo={v.repo} number={f.number} failed={f.failed_jobs.length ? f.failed_jobs : f.ci.failed} canPush={v.signed_in} size="sm" />
                 <button className="sm" disabled={retry.isPending} onClick={() => retry.mutate(f.number)}>
                   {t("Retry")}

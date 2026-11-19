@@ -397,6 +397,10 @@ def _row(pr: PrSnapshot, profile: RepoProfile) -> dict[str, Any]:
         "url": pr.url,
         "updated_at": pr.updated_at.isoformat() if pr.updated_at else None,
         "behind": bool(pr.behind_base),
+        # Conflicting with its base: the page offers to resolve it (an agent merges
+        # the base in, and the person who asked pushes it).
+        "conflict": pr.mergeable == Mergeable.CONFLICTING,
+        "base": pr.base_ref,
         "ci": {
             "state": view.state,
             "passed": view.passed,
@@ -739,7 +743,6 @@ def build_router() -> APIRouter:
                     candidates.append(row)
                 else:
                     row["reasons"] = [_item(i.name, i.detail) for i in back[:3]]
-                    row["conflict"] = pr.mergeable == Mergeable.CONFLICTING
                     not_ready.append(row)
             draft = await service.store.get_state(DRAFT_KEY.format(repo=repo))
             own_patterns = await _own_pattern_ids(service, repo)
