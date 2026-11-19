@@ -14,8 +14,8 @@ import { Icon } from "../icons";
 import { ProposalCard, ServiceMergeBaseButton } from "../proposal";
 import { Skeleton, useRememberedView, useTab } from "../ui";
 import { ACTIVE, useWork } from "../jobs";
-import { GuideHello } from "./Guide";
 import { AgentWork, GettingStarted, ReviewCard } from "./homeParts";
+import { ToursCard } from "../tour";
 import { ChangeCard } from "./Memory";
 import { QuestionCard } from "./Questions";
 
@@ -158,7 +158,7 @@ export default function HomePage({ me }: { me: Me }) {
       </div>
 
       <RepoTabs names={names} scope={scope} onPick={setScope} count={(repo) => allRows.filter((p) => p.repo === repo && NEEDS_REVIEW.has(p.review_state)).length} />
-      <GuideHello />
+      <ToursCard welcome />
       <GettingStarted repos={repoRows} prs={rows} />
       <AgentWork me={me} />
       <ReviewCard rows={needs} all={rows} loading={prs.isLoading} me={me} searchParams={viewParams} />

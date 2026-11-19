@@ -126,6 +126,7 @@ export default function ServicePage() {
 
       <div className="grid2">
         <Section
+          tour="service-updates"
           title={t("Updates")}
           aside={
             v.can_approve && s ? (

@@ -11,6 +11,8 @@ import { Empty, ErrorBox } from "./components";
 import { useMe, useMemoryChanges, useNewBuild, useProposals } from "./data";
 import { ACTION_EVENT, QUESTION_EVENT, useLiveEvents, type ActionOutcome } from "./events";
 import { JobDrawer } from "./jobs";
+import { startTour, TourLayer } from "./tour";
+import { TOURS } from "./tours";
 import { useLang, useT } from "./i18n";
 import { Icon } from "./icons";
 import { Logo } from "./logo";
@@ -159,6 +161,14 @@ function Shell({ me }: { me: Me }) {
       },
       { id: "keys", group: "Commands", label: t("Keyboard shortcuts"), sub: "?", icon: "keyboard", run: () => setHelp(true) },
       { id: "guide", group: "Commands", label: t("Open the guide"), sub: "g g", icon: "compass", keywords: "help how tutorial docs manual 帮助 教程 指南", run: () => navigate("/guide") },
+      ...TOURS.map((tour) => ({
+        id: `tour-${tour.id}`,
+        group: "Commands",
+        label: `${t("Walk through:")} ${tour.title[lang]}`,
+        icon: "compass" as const,
+        keywords: `tour walkthrough onboarding tutorial 导览 引导 ${tour.title.en} ${tour.title.zh}`,
+        run: () => startTour(tour.id),
+      })),
       { id: "signout", group: "Commands", label: t("Sign out"), icon: "logout", run: () => void signOut() },
     ];
     if (canNotify) {
@@ -182,7 +192,7 @@ function Shell({ me }: { me: Me }) {
             <span className="grow">{t("Search")}</span>
             <span className="kbd">⌘K</span>
           </button>
-          <button className="agent hide-narrow" onClick={() => agent.toggle()} title={`${t("Ask agent")} (⌘J)`}>
+          <button className="agent hide-narrow" data-tour="ask-agent" onClick={() => agent.toggle()} title={`${t("Ask agent")} (⌘J)`}>
             <Icon name="sparkles" />
             {t("Ask agent")}
           </button>
@@ -190,7 +200,7 @@ function Shell({ me }: { me: Me }) {
             align="right"
             label={t("Waiting on you")}
             trigger={(_, toggle) => (
-              <button className="ghost icon" onClick={toggle} aria-label={`${t("Waiting on you")}: ${waiting}`} style={{ position: "relative" }}>
+              <button className="ghost icon" data-tour="bell" onClick={toggle} aria-label={`${t("Waiting on you")}: ${waiting}`} style={{ position: "relative" }}>
                 <Icon name="bell" />
                 {waiting > 0 && (
                   <span className="pill" style={{ position: "absolute", top: 1, right: -2, padding: "0 5px", lineHeight: "16px", fontSize: 10.5, background: "var(--bad)", color: "#fff" }}>
@@ -293,6 +303,9 @@ function Shell({ me }: { me: Me }) {
                 <MenuItem icon="compass" hint="g g" onClick={() => (navigate("/guide"), close())}>
                   {t("Guide")}
                 </MenuItem>
+                <MenuItem icon="play" onClick={() => (navigate("/guide#tours"), close())}>
+                  {t("Walkthroughs")}
+                </MenuItem>
                 <MenuItem icon="keyboard" hint="?" onClick={() => (setHelp(true), close())}>
                   {t("Keyboard shortcuts")}
                 </MenuItem>
@@ -387,9 +400,10 @@ function Shell({ me }: { me: Me }) {
         </Routes>
       </main>
       <JobDrawer />
+      <TourLayer me={me} />
 
       {!agent.isOpen && (
-        <button className="agent fab" onClick={() => agent.open()} aria-label={t("Ask agent")}>
+        <button className="agent fab" data-tour="ask-agent" onClick={() => agent.open()} aria-label={t("Ask agent")}>
           <Icon name="sparkles" size={18} />
           <span className="fab-label">{t("Ask agent")}</span>
         </button>

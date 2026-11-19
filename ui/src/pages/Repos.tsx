@@ -311,7 +311,7 @@ export function RepoDetailPage() {
           </button>
         </div>
       )}
-      <Tabs tabs={tabs} active={tab} onChange={setTab} />
+      <Tabs tabs={tabs} active={tab} onChange={setTab} tour="repo-tabs" />
 
       {tab === "overview" && (
         <div className="grid2">
@@ -448,6 +448,7 @@ function SettingsEditor({
   );
   return (
     <Section
+      tour="repo-settings"
       title={t("Repository settings")}
       hint={t("the private layer of the profile")}
       aside={

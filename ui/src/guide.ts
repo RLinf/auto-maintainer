@@ -189,6 +189,10 @@ export const TOPICS: Topic[] = [
         zh: "[[询问智能体]]（或 {{⌘}} {{J}}）会在当前页面旁打开智能体。它能看到你在这一页看到的内容，它建议的任何改动都要等人批准。",
       },
       {
+        en: "To see it on the real pages instead, take a walkthrough: the account menu's [[Walkthroughs]], or the list at the top of the [Guide](/guide). Each step points at one control and says what it does.",
+        zh: "想在真实页面上看，可以跟着导览走一遍：账户菜单里的 [[导览]]，或 [指南](/guide) 顶部的列表。每一步指出一个控件并说明它的作用。",
+      },
+      {
         en: "Each page has a [[Guide]] button beside its title that opens this guide at that page.",
         zh: "每个页面标题旁都有 [[指南]] 按钮，会打开本指南中讲这一页的部分。",
       },

@@ -157,7 +157,7 @@ def test_approvals_collapse_wiring_and_translations() -> None:
             "function KindBody"
         )
     ]
-    header_idx = card_src.index('<div className="proposal">')
+    header_idx = card_src.index('<div className="proposal"')
     collapse_btn_idx = card_src.index("{onToggleCollapse && (", header_idx)
     checkbox_idx = card_src.index('type="checkbox"', header_idx)
     collapsed_body_idx = card_src.index("{!collapsed && (", checkbox_idx)

@@ -214,9 +214,9 @@ export function useRememberedView(view: ViewId, repo?: string): URLSearchParams 
   return params;
 }
 
-export function Tabs({ tabs, active, onChange }: { tabs: TabDef[]; active: string; onChange: (id: string) => void }) {
+export function Tabs({ tabs, active, onChange, tour }: { tabs: TabDef[]; active: string; onChange: (id: string) => void; tour?: string }) {
   return (
-    <div className="tabs" role="tablist">
+    <div className="tabs" role="tablist" data-tour={tour}>
       {tabs.map((t) => (
         <button key={t.id} role="tab" aria-selected={t.id === active} className={t.id === active ? "active" : ""} onClick={() => onChange(t.id)}>
           {t.label}

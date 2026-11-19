@@ -147,7 +147,7 @@ export function PeopleTab({ repo }: { repo: string }) {
   const open = person ? (gov.members ?? []).find((m) => m.login === person) : undefined;
 
   return (
-    <div className="stack people" style={{ gap: 14 }}>
+    <div className="stack people" style={{ gap: 14 }} data-tour="repo-people">
       {draft && (
         <div className="strip question">
           <Icon name="shield" />

@@ -66,7 +66,7 @@ export function LessonsTab({ repo }: { repo: string }) {
   if (q.isLoading) return <Skeleton rows={6} />;
   if (!q.data) return <ErrorBox error={q.error} />;
   return (
-    <div className="stack" style={{ gap: 16 }}>
+    <div className="stack" style={{ gap: 16 }} data-tour="repo-lessons">
       <span className="small muted">{t("Lessons are approved one at a time, as reviewers teach them. Edit them here, or have an agent summarize a list: it merges repeats and groups the rest, and a maintainer applies what it drafts.")}</span>
       {q.data.files.map((f) => (
         <LessonsCard key={f.kind} repo={repo} file={f} canConfigure={q.data.can_configure} hasProfile={q.data.has_profile} />

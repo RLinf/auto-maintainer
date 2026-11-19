@@ -68,15 +68,18 @@ export function Section({
   aside,
   hint,
   flush,
+  tour,
 }: {
   title: ReactNode;
   children: ReactNode;
   aside?: ReactNode;
   hint?: ReactNode;
   flush?: boolean;
+  /** Where a walkthrough points at it (``tours.ts``). */
+  tour?: string;
 }) {
   return (
-    <section className={`card ${flush ? "flush" : ""}`}>
+    <section className={`card ${flush ? "flush" : ""}`} data-tour={tour}>
       <header className="card-head" style={flush ? { padding: "14px 18px 0" } : undefined}>
         <div className="row" style={{ gap: 8 }}>
           <h2>{title}</h2>

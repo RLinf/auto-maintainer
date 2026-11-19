@@ -258,6 +258,7 @@ export function ProposalCard({
   const discuss = talkJob && openedJob !== talkJob && (
     <button
       className="ghost"
+      data-tour="draft-discuss"
       title={
         kind === "pr.fix" || kind === "pr.edit"
           ? t("Talk with the agent about this change: ask why, or have it change the diff")
@@ -326,7 +327,7 @@ export function ProposalCard({
   );
 
   return (
-    <div className="proposal">
+    <div className="proposal" data-tour={kind === "review.post" ? "draft" : undefined}>
       <div className="row">
         {onToggleCollapse && (
           <button
@@ -408,7 +409,7 @@ export function ProposalCard({
       )}
       {!done && decides && (
         <div className="row">
-          <div className="split-button">
+          <div className="split-button" data-tour="draft-post">
             <button
               className="primary"
               disabled={approve.isPending || ((isFix || onlyAsMe || !!reviewAuthor) && !me?.can_post_as_me) || notTheAuthor}

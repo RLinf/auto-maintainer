@@ -813,7 +813,7 @@ function AgentsTab({ v, ask }: { v: SettingsView; ask: (p: string, send?: boolea
     return <Status value="executed" label={t("Ready")} />;
   };
   return (
-    <Section title={t("Agents")} hint={t("The coding agent CLIs the service runs on this host")} aside={<ChangeButton onClick={() => ask(t("Change the agents: "))} />}>
+    <Section tour="settings-agents" title={t("Agents")} hint={t("The coding agent CLIs the service runs on this host")} aside={<ChangeButton onClick={() => ask(t("Change the agents: "))} />}>
       <div className="list">
         {v.agents.map((a) => {
           const provider = v.providers.find((p) => p.id === a.provider);
@@ -1031,7 +1031,7 @@ function ProviderRow({ p, canEdit }: { p: SettingsProvider; canEdit: boolean }) 
 function AgentChoice({ v }: { v: SettingsView; ask: (p: string, send?: boolean) => void }) {
   const t = useT();
   return (
-    <Section title={t("Which agent runs")} hint={t("When nobody picks an agent. A repository's own routes, and an agent picked for one request, come first.")}>
+    <Section tour="settings-agent-choice" title={t("Which agent runs")} hint={t("When nobody picks an agent. A repository's own routes, and an agent picked for one request, come first.")}>
       <div className="stack" style={{ gap: 14 }}>
         <MyDefaultChoice />
         <ServiceDefaultChoice v={v} />
@@ -1091,6 +1091,7 @@ function RoutingTab({ v, ask }: { v: SettingsView; ask: (p: string, send?: boole
   const t = useT();
   return (
     <Section
+      tour="settings-routing"
       title={t("Task routing")}
       hint={t("Which agent does each job; a repository's own settings can override these")}
       aside={<ChangeButton onClick={() => ask(t("Change which agent does which task: "))} />}
@@ -1620,7 +1621,7 @@ function SystemTab({ v, ask }: { v: SettingsView; ask: (p: string, send?: boolea
   const h = v.host;
   return (
     <div className="grid2">
-      <Section title={t("Behavior")} aside={<ChangeButton onClick={() => ask(t("Change the system settings: "))} />}>
+      <Section tour="settings-system" title={t("Behavior")} aside={<ChangeButton onClick={() => ask(t("Change the system settings: "))} />}>
         <div className="list">
           <Row
             icon="clock"

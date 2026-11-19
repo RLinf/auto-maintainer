@@ -201,7 +201,7 @@ export default function PrPage({ me }: { me: Me }) {
         }
         actions={
           <>
-            <div className="split-button">
+            <div className="split-button" data-tour="pr-review">
               <button
                 className="primary"
                 disabled={review.isPending}
@@ -319,7 +319,7 @@ export default function PrPage({ me }: { me: Me }) {
       <div className="split">
         <div className="stack" style={{ gap: 16, minWidth: 0 }}>
           <PrWork repo={full} number={pr.number} me={me.login} />
-          <Tabs tabs={tabs} active={tab} onChange={setTab} />
+          <Tabs tabs={tabs} active={tab} onChange={setTab} tour="pr-tabs" />
           {tab === "overview" && <Overview d={d} ciActions={ciControls} repo={full} canPush={canPush} />}
           {tab === "progress" && <ReviewProgressPanel repo={full} number={pr.number} me={me.login} />}
           {tab === "files" && <Files d={d} />}
@@ -1356,6 +1356,7 @@ function PrActionsButton({
         <button
           type="button"
           className={open ? "on" : ""}
+          data-tour="pr-actions"
           aria-label={t("More actions")}
           title={t("More actions")}
           aria-expanded={open}

@@ -58,7 +58,9 @@ export default function AuditPage() {
           <Skeleton rows={8} />
         </div>
       ) : (
-        <DataTable list={list} columns={columns} empty={t("Nothing recorded yet.")} />
+        <div data-tour="audit">
+          <DataTable list={list} columns={columns} empty={t("Nothing recorded yet.")} />
+        </div>
       )}
     </>
   );

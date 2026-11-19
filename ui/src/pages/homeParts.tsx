@@ -291,7 +291,7 @@ export function ReviewCard({
     });
   const allChecked = shown.length > 0 && shown.every((p) => selected.has(prKey(p)));
   return (
-    <section id="review" className="card">
+    <section id="review" className="card" data-tour="home-review">
       <div className="row" style={{ marginBottom: 10 }}>
         <input
           type="checkbox"
@@ -499,7 +499,7 @@ export function AgentWork({ me }: { me: Me }) {
     { id: "done", label: t("Finished") },
   ];
   return (
-    <section id="work" className="card">
+    <section id="work" className="card" data-tour="home-work">
       <div className="row" style={{ marginBottom: 8, flexWrap: "wrap" }}>
         <h2>{t("Agents' work")}</h2>
         <div className="segmented" role="tablist">

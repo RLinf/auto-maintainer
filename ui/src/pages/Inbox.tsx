@@ -92,7 +92,7 @@ export default function InboxPage({ me }: { me: Me }) {
           ))}
         </section>
       )}
-      <Tabs tabs={tabs} active={tab} onChange={setTab} />
+      <Tabs tabs={tabs} active={tab} onChange={setTab} tour="inbox-tabs" />
       <ListToolbar
         list={list}
         placeholder={t("Search proposals")}

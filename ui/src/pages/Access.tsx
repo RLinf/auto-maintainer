@@ -593,7 +593,7 @@ function RolesSection({ v, draft, setDraft }: DraftProps) {
   };
   const roles = v.roles.filter((r) => r.id !== "blocked");
   return (
-    <Section title={t("Roles")} hint={t("What each role lets people do. A check is the default; press a cell to turn it on or off for everyone with the role, and again for the default.")}>
+    <Section tour="access-roles" title={t("Roles")} hint={t("What each role lets people do. A check is the default; press a cell to turn it on or off for everyone with the role, and again for the default.")}>
       <div className="access-grid-wrap">
         <table className="access-grid">
           <thead>

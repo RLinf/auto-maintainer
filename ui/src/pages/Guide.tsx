@@ -4,7 +4,9 @@
 // is about, and the agent one click away. What a reader has opened is remembered in this
 // browser only (a convenience; the guide works without it).
 
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { Rich } from "../rich";
+import { ToursCard } from "../tour";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useAgent } from "../agent";
 import { Empty, PageHead } from "../components";
@@ -27,7 +29,17 @@ import { Icon } from "../icons";
 
 const READ_KEY = "am.guide.read";
 const ROLE_KEY = "am.guide.role";
-const HELLO_KEY = "am.guide.hello";
+const BROWSE_KEY = "am.guide.browse";
+/** How many topics of a reading path show before the whole path is asked for. */
+const PATH_SHOWN = 4;
+
+function readBrowse(): boolean {
+  try {
+    return localStorage.getItem(BROWSE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
 
 function readSet(): Set<string> {
   try {
@@ -78,32 +90,6 @@ function useText(): (text: Text) => string {
   return (text) => text[lang];
 }
 
-const TOKEN = /(\[\[[^\]]+\]\]|\{\{[^}]+\}\}|\[[^\]]+\]\([^)\s]+\)|\*\*[^*]+\*\*|`[^`]+`)/g;
-
-/** The guide's markup: [[button]], {{key}}, [link](/path), **emphasis**, `code`. */
-export function Rich({ text }: { text: string }) {
-  const parts = text.split(TOKEN);
-  return (
-    <>
-      {parts.map((part, i) => {
-        if (i % 2 === 0) return part;
-        if (part.startsWith("[[")) return <span key={i} className="ui-chip">{part.slice(2, -2)}</span>;
-        if (part.startsWith("{{")) return <span key={i} className="kbd">{part.slice(2, -2)}</span>;
-        if (part.startsWith("**")) return <strong key={i}>{part.slice(2, -2)}</strong>;
-        if (part.startsWith("`")) return <code key={i}>{part.slice(1, -1)}</code>;
-        const link = /^\[([^\]]+)\]\(([^)]+)\)$/.exec(part);
-        return link ? (
-          <Link key={i} to={link[2]}>
-            {link[1]}
-          </Link>
-        ) : (
-          part
-        );
-      })}
-    </>
-  );
-}
-
 export default function GuidePage() {
   const { topic } = useParams();
   return topic ? <TopicPage id={topic} /> : <Landing />;
@@ -118,10 +104,24 @@ function Landing() {
   const [read, , reset] = useRead();
   const [query, setQuery] = useState("");
   const location = useLocation();
-  // A crumb links to a group of the landing page (#group-…): scroll to it once shown.
+  // Every topic folds away until asked for, so a first visit shows only where to start;
+  // a crumb to a group (#group-…) opens them.
+  const [browse, setBrowseState] = useState(() => readBrowse() || location.hash.startsWith("#group-"));
+  const setBrowse = (open: boolean) => {
+    setBrowseState(open);
+    try {
+      localStorage.setItem(BROWSE_KEY, open ? "1" : "0");
+    } catch {
+      // the choice then lasts for this page only
+    }
+  };
+  useEffect(() => {
+    if (location.hash.startsWith("#group-")) setBrowseState(true);
+  }, [location.hash]);
+  // A crumb links to a part of the landing page (#group-…, #tours): scroll to it once shown.
   useEffect(() => {
     if (location.hash) document.getElementById(location.hash.slice(1))?.scrollIntoView({ block: "start" });
-  }, [location.hash]);
+  }, [location.hash, browse]);
   const found = useMemo(() => (query.trim() ? searchTopics(query, lang) : null), [query, lang]);
   const faqs = useMemo(() => {
     const words = query.toLowerCase().split(/\s+/).filter(Boolean);
@@ -160,23 +160,33 @@ function Landing() {
         <SearchResults topics={found} faqs={faqs} query={query} read={read} />
       ) : (
         <>
+          <ToursCard />
           <StartHere read={read} onReset={reset} />
-          {GROUPS.map((g) => (
-            <section key={g.id} className="stack" style={{ gap: 10 }} id={`group-${g.id}`}>
-              <div className="guide-group-head">
-                <Icon name={g.icon} />
-                <h2>{tx(g.title)}</h2>
-                <span className="small muted">{tx(g.blurb)}</span>
-              </div>
-              <div className="guide-tiles">
-                {TOPICS.filter((topic) => topic.group === g.id).map((topic) => (
-                  <TopicTile key={topic.id} topic={topic} read={read.has(topic.id)} />
-                ))}
-              </div>
-            </section>
-          ))}
-          <FaqSection faqs={FAQ} />
-          <GlossarySection />
+          <button className="guide-browse" aria-expanded={browse} onClick={() => setBrowse(!browse)}>
+            <Icon name={browse ? "chevronDown" : "chevronRight"} size={15} />
+            {browse ? t("Hide the other topics") : `${t("Browse every topic")} (${TOPICS.length})`}
+            <span className="small muted">{t("Questions people ask and the words the dashboard uses are there too.")}</span>
+          </button>
+          {browse && (
+            <>
+              {GROUPS.map((g) => (
+                <section key={g.id} className="stack" style={{ gap: 10 }} id={`group-${g.id}`}>
+                  <div className="guide-group-head">
+                    <Icon name={g.icon} />
+                    <h2>{tx(g.title)}</h2>
+                    <span className="small muted">{tx(g.blurb)}</span>
+                  </div>
+                  <div className="guide-tiles">
+                    {TOPICS.filter((topic) => topic.group === g.id).map((topic) => (
+                      <TopicTile key={topic.id} topic={topic} read={read.has(topic.id)} />
+                    ))}
+                  </div>
+                </section>
+              ))}
+              <FaqSection faqs={FAQ} />
+              <GlossarySection />
+            </>
+          )}
           <p className="small muted guide-foot">
             <Icon name="keyboard" size={14} /> {t("Press ? anywhere for every keyboard shortcut.")}
           </p>
@@ -199,9 +209,13 @@ function StartHere({ read, onReset }: { read: Set<string>; onReset: () => void }
       // the choice then lasts for this page only
     }
   };
+  const [whole, setWhole] = useState(false);
   const path = PATHS.find((p) => p.role === role) ?? PATHS[0];
   const done = path.topics.filter((id) => read.has(id)).length;
   const next = path.topics.find((id) => !read.has(id));
+  // A few topics from the next one to read; the whole path on request.
+  const from = Math.max(0, next ? path.topics.indexOf(next) : 0);
+  const shown = whole ? path.topics : path.topics.slice(from, from + PATH_SHOWN);
   return (
     <section className="card guide-start">
       <div className="row" style={{ marginBottom: 12, flexWrap: "wrap" }}>
@@ -247,7 +261,8 @@ function StartHere({ read, onReset }: { read: Set<string>; onReset: () => void }
       </div>
 
       <ol className="guide-path">
-        {path.topics.map((id, i) => {
+        {shown.map((id) => {
+          const i = path.topics.indexOf(id);
           const topic = topicById(id);
           if (!topic) return null;
           const isRead = read.has(id);
@@ -264,6 +279,11 @@ function StartHere({ read, onReset }: { read: Set<string>; onReset: () => void }
           );
         })}
       </ol>
+      {path.topics.length > PATH_SHOWN && (
+        <button className="ghost sm" onClick={() => setWhole(!whole)}>
+          {whole ? t("Show only the next topics") : `${t("Show the whole path")} (${path.topics.length})`}
+        </button>
+      )}
     </section>
   );
 }
@@ -550,45 +570,3 @@ function Toc({ current, read }: { current: string; read: Set<string> }) {
   );
 }
 
-// ---- for other pages ----------------------------------------------------------------------
-
-/** A newcomer's way into the guide, on Home, until they open a topic or hide it. */
-export function GuideHello(): ReactNode {
-  const t = useT();
-  const navigate = useNavigate();
-  const [hidden, setHidden] = useState(() => {
-    try {
-      return localStorage.getItem(HELLO_KEY) === "hidden" || readSet().size > 0;
-    } catch {
-      return false;
-    }
-  });
-  if (hidden) return null;
-  const hide = () => {
-    setHidden(true);
-    try {
-      localStorage.setItem(HELLO_KEY, "hidden");
-    } catch {
-      // it then shows again on the next visit
-    }
-  };
-  return (
-    <section className="card start guide-hello">
-      <span className="guide-tile-icon big">
-        <Icon name="compass" size={20} />
-      </span>
-      <div className="stack grow" style={{ gap: 2, minWidth: 0 }}>
-        <strong style={{ fontSize: 15 }}>{t("New here?")}</strong>
-        <span className="small muted">{t("The guide walks you through the dashboard: what to do first, and where everything is. A few minutes is enough.")}</span>
-      </div>
-      <div className="row" style={{ gap: 6 }}>
-        <button className="primary" onClick={() => navigate("/guide")}>
-          {t("Open the guide")}
-        </button>
-        <button className="ghost" onClick={hide}>
-          {t("Hide")}
-        </button>
-      </div>
-    </section>
-  );
-}

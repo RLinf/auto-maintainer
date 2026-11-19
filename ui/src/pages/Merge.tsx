@@ -383,7 +383,7 @@ function TurnOn({ v }: { v: MergeView }) {
   const t = useT();
   const save = useSaveSettings(v.repo);
   return (
-    <Section title={t("Merge scheduling is off for this repository")}>
+    <Section tour="merge-schedule" title={t("Merge scheduling is off for this repository")}>
       <div className="stack" style={{ gap: 10 }}>
         <span className="small muted">
           {t("Turned on, the PRs a maintainer schedules here merge through the service: it runs their CI and merges the ones that pass. Nothing merges that nobody scheduled.")}
@@ -555,7 +555,7 @@ function ScheduleSection({ v }: { v: MergeView }) {
     order.mutate([...numbers, ...v.failed.map((f) => f.number)], { onError: (e) => toast({ title: t("Not moved"), body: String((e as Error).message), icon: "x" }) });
   };
   return (
-    <Section title={t("Schedule")} hint={`${v.scheduled.length}`}>
+    <Section tour="merge-schedule" title={t("Schedule")} hint={`${v.scheduled.length}`}>
       {v.scheduled.length === 0 ? (
         <Empty icon="merge">{v.candidates.length ? t("Nothing scheduled. Schedule a ready PR below.") : t("Nothing scheduled.")}</Empty>
       ) : (
@@ -684,7 +684,7 @@ function FailureLane({ v }: { v: MergeView }) {
   const remove = useAct((n: number) => api.del(`/api/merge-schedule/${v.repo}/${n}`), [["merge-schedule"]]);
   const check = useCheckOne(v.repo);
   return (
-    <Section title={t("Failure lane")} hint={t("Set aside after their CI really failed; the next PR took the turn.")}>
+    <Section tour="merge-failed" title={t("Failure lane")} hint={t("Set aside after their CI really failed; the next PR took the turn.")}>
       <div className="list">
         {v.failed.map((f) => (
           <div key={f.number} className="list-row merge-row">
