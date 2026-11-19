@@ -340,8 +340,8 @@ export const TOPICS: Topic[] = [
         zh: "点 [[查看进展]] 可以看智能体如何阅读代码。工作期间可以告诉它要检查什么：消息会送到它那里，完成的评审会回应你的消息。",
       },
       {
-        en: "When it is done, the review comes back to you as a **draft**. Find it on the PR's page, on Home, and under [Approvals](/inbox) → [[Your review drafts]].",
-        zh: "完成后，评审会作为 **草稿** 回到你这里。在 PR 页面、首页，以及 [待审批](/inbox) → [[你的评审草稿]] 都能找到。",
+        en: "When it is done, the review comes back to you as a **draft**. Find it on the PR's page, on Home, and under [Approvals](/inbox) → [[Waiting on me]].",
+        zh: "完成后，评审会作为 **草稿** 回到你这里。在 PR 页面、首页，以及 [待审批](/inbox) → [[等我处理]] 都能找到。",
       },
     ],
     tips: [
@@ -1348,8 +1348,8 @@ export const FAQ: { q: Text; a: Text }[] = [
   {
     q: { en: "Where did my review draft go?", zh: "我的评审草稿去哪了？" },
     a: {
-      en: "Approvals → Your review drafts, the PR's page, and Home. Once it is posted or rejected, the PR's Timeline tab shows what happened.",
-      zh: "在 待审批 → 你的评审草稿、PR 页面和首页都能找到。发布或拒绝之后，PR 的时间线标签页会显示处理结果。",
+      en: "Approvals → Waiting on me, the PR's page, and Home. Once it is posted or rejected, the PR's Timeline tab shows what happened.",
+      zh: "在 待审批 → 等我处理、PR 页面和首页都能找到。发布或拒绝之后，PR 的时间线标签页会显示处理结果。",
     },
   },
   {

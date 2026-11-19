@@ -23,14 +23,17 @@ export default function InboxPage({ me }: { me: Me }) {
   const agent = useAgent();
   const proposals = useProposals();
   const rows = proposals.data ?? [];
-  const mine = rows.filter((p) => p.requested_by === me.login);
+  // What the bell counts: drafts for this person or asked by them, the service's own
+  // work, and its code changes for its owner; "All" adds what others asked for.
+  const waiting = rows.filter((p) => p.waits_on_me ?? p.can_decide !== false);
   const tabs = [
+    { id: "waiting", label: t("Waiting on me"), count: waiting.length },
     { id: "all", label: t("All"), count: rows.length },
-    { id: "mine", label: t("Your review drafts"), count: mine.length },
-    { id: "service", label: t("From the service"), count: rows.length - mine.length },
   ];
   const [tab, setTab] = useTab(tabs);
-  const source = tab === "mine" ? mine : tab === "service" ? rows.filter((p) => p.requested_by !== me.login) : rows;
+  const source = tab === "all" ? rows : waiting;
+  const me_ = me.login.toLowerCase();
+  const askedBy = (p: ProposalWithAction) => (!p.requester ? t("The service") : p.requester.toLowerCase() === me_ ? t("Me") : p.requester);
   const list = useList<ProposalWithAction>({
     rows: source,
     key: (p) => p.id,
@@ -38,6 +41,7 @@ export default function InboxPage({ me }: { me: Me }) {
       `${p.repo} ${p.action?.action.kind ?? ""} ${kindLabel(p.action?.action.kind ?? "")} ${p.action?.action.rationale ?? ""} #${p.action?.action.number ?? ""} ${String(p.action?.action.payload.body ?? "")}`,
     facets: [
       { id: "repo", label: t("Repository"), values: (p) => p.repo },
+      { id: "by", label: t("Asked by"), values: askedBy },
       { id: "kind", label: t("Action"), values: (p) => t(kindLabel(p.action?.action.kind ?? "unknown")) },
       { id: "warn", label: t("Warnings"), values: (p) => (p.warnings.length ? t("Has warnings") : t("No warnings")) },
     ],
@@ -110,7 +114,7 @@ export default function InboxPage({ me }: { me: Me }) {
         </div>
       ) : !list.count ? (
         <div className="card">
-          <CaughtUp>{list.filtering ? t("Nothing matches these filters.") : t("No proposals wait for you.")}</CaughtUp>
+          <CaughtUp>{list.filtering ? t("Nothing matches these filters.") : tab === "all" ? t("Nothing waits for a decision.") : t("No proposals wait for you.")}</CaughtUp>
         </div>
       ) : (
         <div className="stack">
