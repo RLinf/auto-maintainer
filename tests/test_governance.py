@@ -35,6 +35,7 @@ from auto_maintainer.domain.governance import (
     with_history,
 )
 from auto_maintainer.domain.permissions import Permission
+from auto_maintainer.domain.settings import UserToken
 from auto_maintainer.profiles.governance import (
     GovernanceRecords,
     check,
@@ -442,3 +443,93 @@ async def test_the_record_read_is_always_the_stored_one() -> None:
     memory.files[path] = "members: [unclosed"
     broken = await records.load("acme/widget")
     assert broken.error and broken.stored
+
+
+async def test_people_with_access_on_github_show_with_a_role_to_add_them_as(
+    demo,
+) -> None:
+    """The People tab lists everyone GitHub gives access to the repository, each
+    with the role their permission suggests; who has signed in is shown only to a
+    maintainer."""
+    h, app = demo
+    h.forge.set_permission(REPO, "tara", Permission.TRIAGE)
+    async with _as(app, "walt") as walt:
+        page = (await walt.get(f"/api/repos/{REPO}/governance")).json()
+    on_github = {p["login"]: p for p in page["github"]}
+    assert on_github["walt"] == {
+        "login": "walt",
+        "permission": "write",
+        "role": "reviewer",
+    }
+    assert on_github["maria"]["role"] == "owner", "an admin, as the skeleton's owner"
+    assert on_github["tara"]["role"] is None, "no role expects triage"
+    assert page["signed_in"] == []
+    await h.service.a.user_tokens.set("nina", UserToken(token="t"))
+    async with _as(app, "maria") as maria:
+        page = (await maria.get(f"/api/repos/{REPO}/governance")).json()
+    assert page["signed_in"] == ["nina"]
+
+
+async def test_a_maintainer_adds_people_at_once_and_a_reviewer_proposes_them(
+    demo,
+) -> None:
+    h, app = demo
+    url = f"/api/repos/{REPO}/governance/members"
+    async with _as(app, "walt") as walt:
+        out = await walt.post(
+            url, json={"people": [{"login": "@walt", "role": "reviewer"}]}
+        )
+        assert out.status_code == 200, out.text
+        assert out.json()["applied"] is False, "a reviewer's addition waits"
+        page = (await walt.get(f"/api/repos/{REPO}/governance")).json()
+        assert page["stored"] is False and len(page["pending"]) == 1
+        refused = await walt.post(
+            url, json={"people": [{"login": "bob", "role": "chief"}]}
+        )
+        assert refused.status_code == 422 and "no role" in refused.text
+    async with _as(app, "maria") as maria:
+        out = await maria.post(
+            url,
+            json={
+                "people": [
+                    {"login": "maria", "role": "owner"},
+                    {"login": "bob", "role": "reviewer", "note": "web UI"},
+                ]
+            },
+        )
+        assert out.status_code == 200, out.text
+        assert out.json()["on_draft"] is True, "it builds on walt's waiting draft"
+        assert out.json()["applied"] is False, "which nobody approved yet"
+        page = (await maria.get(f"/api/repos/{REPO}/governance")).json()
+        [pending] = page["pending"]
+        assert {(c["login"], c["to"]) for c in pending["role_changes"]} == {
+            ("walt", "reviewer"),
+            ("maria", "owner"),
+            ("bob", "reviewer"),
+        }
+        approved = await maria.post(f"/api/memory/changes/{pending['id']}/approve")
+        assert approved.json()["state"] == "merged"
+        listed = await maria.post(
+            url, json={"people": [{"login": "Bob", "role": "owner"}]}
+        )
+        assert listed.status_code == 422 and "listed already" in listed.text
+
+        h.forge.set_permission(REPO, "nina", Permission.WRITE)
+        out = await maria.post(
+            url, json={"people": [{"login": "nina", "role": "reviewer"}]}
+        )
+        assert out.json()["applied"] is True, "a maintainer's own addition applies"
+        page = (await maria.get(f"/api/repos/{REPO}/governance")).json()
+    members = {(m["login"], m["role"]) for m in page["governance"]["members"]}
+    assert members == {
+        ("walt", "reviewer"),
+        ("maria", "owner"),
+        ("bob", "reviewer"),
+        ("nina", "reviewer"),
+    }
+    history = page["governance"]["history"]
+    assert {(c["login"], c["to_role"], c["by"]) for c in history} >= {
+        ("nina", "reviewer", "maria"),
+        ("walt", "reviewer", "walt"),
+    }, "every addition is recorded"
+    assert not page["pending"]

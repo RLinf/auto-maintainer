@@ -12,13 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""The People page of a repository (design 2.6): its governance record, where the
-record and GitHub disagree, the changes to it that wait for a maintainer, and asking
-the agent to fill it in or to check who should change role.
+"""The People page of a repository (design 2.6): its governance record, everyone
+with access to the repository on GitHub, where the two disagree, the changes to the
+record that wait for a maintainer, adding people to it, and asking the agent to fill
+it in or to check who should change role.
 
-Everyone who may see the repository (write access) may read the record and ask the
-agent; what the agent drafts is a memory change that only a maintainer of the
-repository approves, on the Memory page or here.
+Everyone who may see the repository (write access) may read the record, add people,
+and ask the agent. What they add, and what the agent drafts, is a memory change that
+only a maintainer of the repository approves, on the Memory page or here; a
+maintainer's own addition to the applied record is approved by making it.
 """
 
 from __future__ import annotations
@@ -29,11 +31,15 @@ from typing import Any, Literal
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from ..domain.actions import ActionKind, MemoryChangePayload, make_action
 from ..domain.events import Event, EventKind
-from ..domain.governance import role_changes
+from ..domain.forges import parse_person
+from ..domain.governance import Member, role_changes, suggested_role
 from ..domain.memory import MemoryChangeState
 from ..domain.permissions import Permission
+from ..domain.records import AuditEntry
 from ..domain.secrets import redact_secrets
+from ..playbooks.governance import base_record, revised
 from ..profiles.governance import check, governance_path
 from ..service import Service
 from .api import (
@@ -48,6 +54,17 @@ from .auth import User, current_user
 
 MAX_CHECKED = 60
 """Members whose GitHub permission the page reads; a larger record is checked in part."""
+
+
+class NewMember(BaseModel):
+    login: str = Field(min_length=1, max_length=100)
+    role: str = Field(min_length=1, max_length=100)
+    areas: list[str] = Field(default_factory=list, max_length=50)
+    note: str = Field(default="", max_length=500)
+
+
+class AddBody(BaseModel):
+    people: list[NewMember] = Field(min_length=1, max_length=200)
 
 
 class AskBody(BaseModel):
@@ -66,14 +83,38 @@ async def _codeowners(service: Service, repo: str, path: str | None) -> set[str]
     }
 
 
+async def _collaborators(
+    service: Service, repo: str
+) -> dict[str, tuple[str, Permission]]:
+    """Everyone with access to ``repo`` on its forge, by lowercase login: the login
+    as the forge spells it and their permission, as the views keep it
+    (``Service.view_cached``); empty when the service may not list them."""
+
+    async def read() -> dict[str, tuple[str, Permission]]:
+        found = await service.a.forge.list_collaborators(repo)
+        return {login.lower(): (login, perm) for login, perm in found}
+
+    try:
+        return await service.view_cached(("collaborators", repo), read)
+    except Exception:  # a forge hiccup: the tab shows the record alone
+        return {}
+
+
 async def _permissions(
-    service: Service, repo: str, logins: list[str]
+    service: Service,
+    repo: str,
+    logins: list[str],
+    collaborators: dict[str, Permission],
 ) -> dict[str, Permission]:
-    """Members' permissions on ``repo`` as the views keep them (``api.permission``:
-    read at most every ten minutes, and never waited for when read today), so the
-    People tab does not read the forge once per member on every load."""
+    """Members' permissions on ``repo``: from the forge's list of collaborators, and
+    for a member it does not list (someone reading a public repository, or every
+    member when the list is not open to the service) as the views keep them
+    (``api.permission``), so the tab does not read the forge once per member on
+    every load."""
 
     async def one(login: str) -> tuple[str, Permission | None]:
+        if login.lower() in collaborators:
+            return login.lower(), collaborators[login.lower()]
         try:
             return login.lower(), await permission(service, User(login=login), repo)
         except Exception:  # an unknown login or a forge hiccup leaves it unchecked
@@ -99,8 +140,10 @@ def build_router() -> APIRouter:
         loaded = await service.governance.load(repo)
         gov = loaded.governance
         logins = sorted({m.login for m in gov.members}, key=str.lower)
+        on_forge = await _collaborators(service, repo)
+        collaborators = {low: perm for low, (_, perm) in on_forge.items()}
         permissions, codeowners = await asyncio.gather(
-            _permissions(service, repo, logins),
+            _permissions(service, repo, logins, collaborators),
             _codeowners(service, repo, profile.people.codeowners if profile else None),
         )
         path = governance_path(repo)
@@ -122,9 +165,32 @@ def build_router() -> APIRouter:
                 }
             )
         gate = await shows_gate(service, user, repo, profile) if profile else None
+        # Additions build on the draft that waits, else on the record: suggest roles
+        # from the roles it has.
+        _, base, _ = await base_record(
+            service.governance,
+            repo,
+            await service.store.list_memory_changes(MemoryChangeState.OPEN),
+        )
+        on_github = [
+            {
+                "login": login,
+                "permission": str(perm),
+                "role": suggested_role(base, perm),
+            }
+            for _, (login, perm) in sorted(on_forge.items())
+        ]
+        configures = bool(gate and gate.allowed)
+        signed_in = (
+            sorted(await service.a.user_tokens.logins(), key=str.lower)
+            if configures
+            else []
+        )
         return {
             "repo": repo,
             "governance": gov.dump(),
+            "github": on_github,
+            "signed_in": signed_in,
             "stored": loaded.stored,
             "error": loaded.error,
             "checks": [
@@ -133,8 +199,123 @@ def build_router() -> APIRouter:
             ],
             "permissions": {login: str(p) for login, p in permissions.items()},
             "pending": pending,
-            "can_configure": bool(gate and gate.allowed),
+            "can_configure": configures,
             "has_profile": profile is not None,
+        }
+
+    @r.post("/{repo:path}/governance/members")
+    async def add(
+        request: Request, repo: str, body: AddBody, user: User = Depends(current_user)
+    ) -> dict[str, Any]:
+        """Add people to the record, each with a role (and areas, for a role held by
+        area). It builds on the draft that waits, as a new draft that replaces it,
+        else on the record; a maintainer's addition to the record applies at once,
+        anyone else's waits for a maintainer (``ConfigGate``)."""
+        service = service_of(request)
+        repo = _repo(repo)
+        await require_view(service, user, repo)
+        profile = await service.profiles.active(repo)
+        if profile is None:
+            raise HTTPException(409, f"{repo} has no approved profile yet")
+        loaded, base, replaced = await base_record(
+            service.governance,
+            repo,
+            await service.store.list_memory_changes(MemoryChangeState.OPEN),
+        )
+        if loaded.error and replaced is None:
+            raise HTTPException(
+                409, f"the stored record does not read ({loaded.error}); fix it first"
+            )
+        today = service.clock.now().date()
+        listed = {m.login.lower(): m for m in base.members}
+        members = list(base.members)
+        added: list[str] = []
+        for person in body.people:
+            try:
+                login = parse_person(person.login).name
+            except ValueError as e:
+                raise HTTPException(422, str(e)) from e
+            role = base.role(person.role)
+            if role is None:
+                raise HTTPException(422, f"the record has no role {person.role!r}")
+            if login.lower() in listed:
+                held = base.role(listed[login.lower()].role)
+                raise HTTPException(
+                    422,
+                    f"@{login} is listed already, as "
+                    f"{held.name if held else listed[login.lower()].role}; ask the "
+                    "agent to change their role",
+                )
+            areas = [a.strip() for a in person.areas if a.strip()]
+            members.append(
+                Member(
+                    login=login,
+                    role=role.id,
+                    areas=areas if role.scoped else [],
+                    since=today,
+                    note=redact_secrets(person.note.strip())[0],
+                )
+            )
+            listed[login.lower()] = members[-1]
+            added.append(login)
+        after = revised(
+            base,
+            base.model_copy(update={"members": members}),
+            repo=repo,
+            questions=[],
+            by=user.login,
+            on=today,
+            reason="added on the People tab",
+        )
+        names = ", ".join(f"@{x}" for x in added[:5]) + (
+            f" and {len(added) - 5} more" if len(added) > 5 else ""
+        )
+        change = service.governance.draft(
+            repo,
+            after,
+            title=f"people: add {names} to {repo}",
+            description=f"Added on the People tab by {user.login}: "
+            + "; ".join(f"@{m.login} as {m.role}" for m in members if m.login in added)
+            + "."
+            + (
+                " Builds on the draft that waited, which it replaces."
+                if replaced
+                else ""
+            ),
+            requested_by=user.login,
+        )
+        change.author = user.login
+        await service.store.save_memory_change(change)
+        await service.store.add_audit(
+            AuditEntry(
+                kind="config",
+                actor=user.login,
+                summary=f"people: added {len(added)} to {repo}",
+                data={"change": change.id, "added": added},
+            )
+        )
+        await service.pipeline.submit(
+            make_action(
+                ActionKind.MEMORY_CHANGE,
+                repo,
+                MemoryChangePayload(
+                    change_id=change.id, replaces=replaced.id if replaced else None
+                ),
+                discriminator=change.id,
+            )
+        )
+        await service.actuator.drain()
+        state = None
+        if replaced is None:
+            decision = await service.gate.check(repo, user.login, profile, person=True)
+            if decision.allowed:
+                _, state = await service.approve_memory_change(change.id, user.login)
+        stored = await service.store.get_memory_change(change.id)
+        return {
+            "change": change.id,
+            "added": added,
+            "applied": (stored.state if stored else state) == MemoryChangeState.MERGED,
+            "on_draft": replaced is not None,
         }
 
     @r.post("/{repo:path}/governance/agent")

@@ -316,6 +316,30 @@ async def test_permission_mapping(client, router):
     assert await reader.get_permission("acme/widget", "nobody") == Permission.NONE
 
 
+async def test_collaborators_with_their_roles(client, router):
+    """Everyone with access, through any affiliation, with their role; nothing when
+    the service's sign-in may not list them."""
+    route = router.get("/repos/acme/widget/collaborators").respond(
+        200,
+        json=[
+            {"login": "alice", "role_name": "admin"},
+            {"login": "bob", "role_name": "write"},
+            {"login": "carol", "role_name": "triage"},
+        ],
+    )
+    router.get("/repos/acme/secret/collaborators").respond(
+        403, json={"message": "Must have push access to view repository collaborators."}
+    )
+    reader = GitHubReader(client)
+    assert await reader.list_collaborators("acme/widget") == [
+        ("alice", Permission.ADMIN),
+        ("bob", Permission.WRITE),
+        ("carol", Permission.TRIAGE),
+    ]
+    assert route.calls.last.request.url.params["affiliation"] == "all"
+    assert await reader.list_collaborators("acme/secret") == []
+
+
 async def test_team_membership(client, router):
     router.get("/orgs/acme/teams/core/memberships/alice").respond(
         200, json={"state": "active"}

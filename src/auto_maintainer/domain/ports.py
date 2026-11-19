@@ -121,6 +121,12 @@ class ForgeReader(Protocol):
 
     async def get_permission(self, repo: str, login: str) -> Permission: ...
 
+    async def list_collaborators(self, repo: str) -> list[tuple[str, Permission]]:
+        """Everyone the forge gives access to ``repo`` (directly, through a team, or
+        through its organization or group), with their permission there; empty when
+        the service's sign-in may not list them."""
+        ...
+
     async def is_team_member(self, repo: str, team: str, login: str) -> bool:
         """Whether ``login`` belongs to ``team`` on ``repo``'s forge, as CODEOWNERS
         names it without the ``@``: ``org/team`` on GitHub, a group path on GitLab."""

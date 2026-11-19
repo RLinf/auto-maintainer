@@ -198,6 +198,13 @@ class FakeForge:
     async def get_permission(self, repo: str, login: str) -> Permission:
         return self.permissions.get((repo, login.lower()), Permission.NONE)
 
+    async def list_collaborators(self, repo: str) -> list[tuple[str, Permission]]:
+        return sorted(
+            (login, perm)
+            for (r, login), perm in self.permissions.items()
+            if r == repo and perm != Permission.NONE
+        )
+
     async def is_team_member(self, repo: str, team: str, login: str) -> bool:
         return login in self.teams.get(team, set())
 

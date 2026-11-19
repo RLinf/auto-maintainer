@@ -1,9 +1,11 @@
 // A repository's People tab (design 2.6): its roles, what each is responsible for,
-// how people move between roles and who decides, who holds each role, and the history
-// of changes. It starts as a skeleton. Reviewers talk with the agent that keeps it:
-// where the process is written, rules, answers to its questions, members, or a check
-// of who should change role. What the agent drafts waits here as a memory change that
-// a maintainer of the repository applies. The holders of a role that maintains are the
+// how people move between roles and who decides, who holds each role, everyone with
+// access on GitHub, and the history of changes. It starts as a skeleton. Reviewers add
+// people (from GitHub, or by login) and talk with the agent that keeps it: where the
+// process is written, rules, answers to its questions, members, or a check of who
+// should change role. What they add and what the agent drafts waits here as a memory
+// change that a maintainer of the repository applies; a maintainer's own addition to
+// the record applies at once. The holders of a role that maintains are the
 // repository's maintainers in the service, and every member may use its dashboard.
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -11,7 +13,7 @@ import { Fragment, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { AgentPicker, agentName } from "./agentPicker";
 import { api, type ChatMessage, type JobStep } from "./api";
-import { ErrorBox, Section, GrowingTextarea, StopButton } from "./components";
+import { ErrorBox, Section, GrowingTextarea, StopButton, useAct } from "./components";
 import { useQuestions } from "./data";
 import { useT } from "./i18n";
 import { Icon } from "./icons";
@@ -20,7 +22,7 @@ import { Markdown } from "./markdown";
 import { QuestionCard } from "./pages/Questions";
 import { ChangeById } from "./settingsChange";
 import { DataTable, ListToolbar, useList, type Column } from "./list";
-import { Skeleton, Tabs, useTab } from "./ui";
+import { Skeleton, Tabs, useTab, useToast } from "./ui";
 import { Avatar } from "./avatar";
 import { forgeOf, links } from "./forges";
 
@@ -93,6 +95,10 @@ interface PeopleResponse {
   error: string | null;
   checks: { kind: string; login: string | null; text: string }[];
   permissions: Record<string, string>;
+  /** Everyone GitHub gives access to the repository, with the role their permission suggests. */
+  github: { login: string; permission: string; role: string | null }[];
+  /** Who has signed in to the service, for a maintainer adding someone by login. */
+  signed_in: string[];
   pending: { id: string; governance: Governance | null; role_changes: { login: string; from: string | null; to: string | null }[] }[];
   can_configure: boolean;
   has_profile: boolean;
@@ -171,7 +177,12 @@ export function PeopleTab({ repo }: { repo: string }) {
       {d.pending.length > 0 && <PendingChanges pending={d.pending} name={name} canConfigure={d.can_configure} />}
       <Ladder roles={roles} members={gov.members ?? []} onPick={pickRole} />
       <Tabs tabs={views} active={view} onChange={(v) => setView(v)} />
-      {view === "members" && <MembersView repo={repo} gov={gov} roles={roles} checks={viewingDraft ? [] : d.checks} permissions={d.permissions} onOpen={setPerson} />}
+      {view === "members" && (
+        <>
+          <MembersView repo={repo} gov={gov} roles={roles} checks={viewingDraft ? [] : d.checks} permissions={d.permissions} onOpen={setPerson} />
+          {d.has_profile && <AddPeople repo={repo} gov={draft?.governance ?? d.governance} roles={roles} github={d.github} signedIn={d.signed_in} canConfigure={d.can_configure} onDraft={!!draft} />}
+        </>
+      )}
       {view === "roles" && <RolesView repo={repo} gov={gov} roles={roles} name={name} />}
       {view === "history" && <HistoryView gov={gov} name={name} onOpen={setPerson} />}
       {view === "talk" && (
@@ -391,7 +402,7 @@ function MembersView({
         list={list}
         columns={columns}
         onOpen={(r) => onOpen(r.login)}
-        empty={(gov.members ?? []).length ? t("Nobody matches.") : t("Nobody is listed yet. Tell the agent who holds each role.")}
+        empty={(gov.members ?? []).length ? t("Nobody matches.") : t("Nobody is listed yet. Add the people GitHub gives access to below, or tell the agent who holds each role.")}
       />
       <span className="small muted">
         {t("Holders of a role that maintains are this repository's maintainers here; until the record names some, its GitHub admins are. Every member may use its dashboard.")} {Object.keys(permissions).length > 0 && `${t("Checked against GitHub for")} ${Object.keys(permissions).length} ${t("people")}.`}{" "}
@@ -400,6 +411,163 @@ function MembersView({
         </a>
       </span>
     </div>
+  );
+}
+
+interface Addition {
+  login: string;
+  role: string;
+  areas?: string[];
+  note?: string;
+}
+
+/** Adding people to the record: everyone GitHub gives access to who is not in it yet,
+ * each with the role their permission suggests, and anyone else by login. A
+ * maintainer's addition to the record applies at once; anyone else's, and any added
+ * to a draft that waits, waits for a maintainer. */
+function AddPeople({
+  repo,
+  gov,
+  roles,
+  github,
+  signedIn,
+  canConfigure,
+  onDraft,
+}: {
+  repo: string;
+  gov: Governance;
+  roles: Role[];
+  github: PeopleResponse["github"];
+  signedIn: string[];
+  canConfigure: boolean;
+  onDraft: boolean;
+}) {
+  const t = useT();
+  const toast = useToast();
+  const listed = new Set((gov.members ?? []).map((m) => m.login.toLowerCase()));
+  const outside = github.filter((p) => !listed.has(p.login.toLowerCase()));
+  const [picked, setPicked] = useState<Record<string, string>>({});
+  const [chosen, setChosen] = useState<Set<string>>(new Set());
+  // Each person's role: what the person picked, else the suggestion.
+  const roleOf = (p: PeopleResponse["github"][number]) => picked[p.login] ?? p.role ?? "";
+  const [login, setLogin] = useState("");
+  const [role, setRole] = useState("");
+  const [areas, setAreas] = useState("");
+  const add = useAct((people: Addition[]) => api.post<{ added: string[]; applied: boolean; on_draft: boolean }>(`/api/repos/${repo}/governance/members`, { people }), [["people", repo], ["memory"]]);
+  const send = (people: Addition[], done: () => void) =>
+    add.mutate(people, {
+      onSuccess: (out) => {
+        toast({
+          title: out.applied ? `${t("Added to the record")}: ${out.added.length}` : t("Waiting for a maintainer"),
+          body: out.applied ? undefined : out.on_draft ? t("Added to the draft that waits for a maintainer to apply it.") : t("A maintainer applies it on this tab or the Memory page."),
+          icon: out.applied ? "check" : "inbox",
+        });
+        done();
+      },
+      onError: (e) => toast({ title: t("Not added"), body: String((e as Error).message), icon: "x" }),
+    });
+  const ready = outside.filter((p) => chosen.has(p.login) && roleOf(p));
+  const manualRole = roles.find((r) => r.id === role);
+  const suggestions = [...new Set([...signedIn, ...outside.map((p) => p.login)])].filter((l) => !listed.has(l.toLowerCase()));
+  const roleSelect = (value: string, onChange: (v: string) => void, label: string) => (
+    <select value={value} onChange={(e) => onChange(e.target.value)} aria-label={label}>
+      <option value="">{t("Choose a role")}</option>
+      {roles.map((r) => (
+        <option key={r.id} value={r.id}>
+          {r.name}
+        </option>
+      ))}
+    </select>
+  );
+  return (
+    <Section
+      title={t("Add people")}
+      hint={onDraft ? t("added to the draft that waits") : canConfigure ? t("you are a maintainer: added at once") : t("a maintainer approves what you add")}
+    >
+      <div className="stack" style={{ gap: 14 }}>
+        {outside.length > 0 && (
+          <div className="stack" style={{ gap: 8 }}>
+            <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+              <strong className="small">
+                {t("On GitHub, not in the record")} · {outside.length}
+              </strong>
+              <span className="spacer" />
+              <button className="ghost sm" onClick={() => setChosen(chosen.size === outside.length ? new Set() : new Set(outside.map((p) => p.login)))}>
+                {chosen.size === outside.length ? t("Select none") : t("Select all")}
+              </button>
+              <button
+                className="sm primary"
+                disabled={!ready.length || add.isPending}
+                onClick={() => send(ready.map((p) => ({ login: p.login, role: roleOf(p) })), () => setChosen(new Set()))}
+              >
+                <Icon name="plus" size={13} /> {t("Add")} {ready.length || ""}
+              </button>
+            </div>
+            <div className="people-add-list" role="list">
+              {outside.map((p) => (
+                <label key={p.login} className="people-add-row" role="listitem">
+                  <input
+                    type="checkbox"
+                    checked={chosen.has(p.login)}
+                    onChange={() => {
+                      const next = new Set(chosen);
+                      if (next.has(p.login)) next.delete(p.login);
+                      else next.add(p.login);
+                      setChosen(next);
+                    }}
+                  />
+                  <Avatar login={p.login} />
+                  <strong className="ellipsis">@{p.login}</strong>
+                  <span className="pill tag" title={t("Permission on GitHub")}>
+                    {p.permission}
+                  </span>
+                  <span className="spacer" />
+                  {roleSelect(
+                    roleOf(p),
+                    (v) => {
+                      setPicked({ ...picked, [p.login]: v });
+                      if (v) setChosen(new Set(chosen).add(p.login));
+                    },
+                    `${t("Role")}: @${p.login}`,
+                  )}
+                </label>
+              ))}
+            </div>
+          </div>
+        )}
+        <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+          <input
+            className="mono"
+            style={{ flex: "1 1 180px", maxWidth: 260 }}
+            list={`people-logins-${repo}`}
+            value={login}
+            placeholder={t("GitHub login")}
+            aria-label={t("GitHub login")}
+            onChange={(e) => setLogin(e.target.value)}
+          />
+          <datalist id={`people-logins-${repo}`}>
+            {suggestions.map((l) => (
+              <option key={l} value={l} />
+            ))}
+          </datalist>
+          {roleSelect(role, setRole, t("Role"))}
+          {manualRole?.scoped && <input style={{ flex: "1 1 200px" }} value={areas} placeholder={t("Areas, comma-separated paths")} aria-label={t("Areas")} onChange={(e) => setAreas(e.target.value)} />}
+          <button
+            className="sm"
+            disabled={!login.trim() || !role || add.isPending}
+            onClick={() =>
+              send([{ login: login.trim().replace(/^@/, ""), role, areas: areas.split(",").map((a) => a.trim()).filter(Boolean) }], () => {
+                setLogin("");
+                setAreas("");
+              })
+            }
+          >
+            <Icon name="plus" size={13} /> {t("Add someone")}
+          </button>
+        </div>
+        {!github.length && <span className="small muted">{t("GitHub does not list who has access to this repository for the service, so add people by login.")}</span>}
+      </div>
+    </Section>
   );
 }
 

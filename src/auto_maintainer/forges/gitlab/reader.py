@@ -587,6 +587,19 @@ class GitLabReader:
             else Permission.NONE
         )
 
+    async def list_collaborators(self, repo: str) -> list[tuple[str, Permission]]:
+        members = await self._client.paginate(
+            f"/projects/{project_id(repo)}/members/all", allow=OPTIONAL
+        )
+        return [
+            (
+                self._person(m),
+                ROLES.get(int(m.get("access_level") or 0), Permission.NONE),
+            )
+            for m in members or []
+            if m.get("username") and m.get("state", "active") == "active"
+        ]
+
     async def is_team_member(self, repo: str, team: str, login: str) -> bool:
         """Whether ``login`` belongs to the group ``team`` (a group path)."""
         user_id = await self._user_id(login)

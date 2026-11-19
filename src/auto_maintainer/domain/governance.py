@@ -289,6 +289,19 @@ def role_changes(
     return changes
 
 
+def suggested_role(gov: Governance, permission: Permission) -> str | None:
+    """The role someone with ``permission`` on GitHub most likely holds in ``gov``:
+    the lowest role that expects exactly that permission, else the highest whose
+    expected permission they meet; ``None`` when no role expects one they have.
+    Only a suggestion: a person decides who holds which role."""
+    expecting = [r for r in gov.roles if r.github_permission]
+    exact = [r for r in expecting if r.github_permission == permission]
+    if exact:
+        return min(exact, key=lambda r: r.level).id
+    met = [r for r in expecting if permission.at_least(r.github_permission)]
+    return max(met, key=lambda r: r.level).id if met else None
+
+
 def with_history(
     before: Governance, after: Governance, *, by: str, on: date, reason: str
 ) -> Governance:

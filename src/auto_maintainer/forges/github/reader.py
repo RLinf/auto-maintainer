@@ -973,6 +973,22 @@ class GitHubReader:
             return Permission.NONE
         return Permission.parse(data.get("role_name") or data.get("permission"))
 
+    async def list_collaborators(self, repo: str) -> list[tuple[str, Permission]]:
+        try:
+            people = await self._client.paginate(
+                f"/repos/{repo}/collaborators",
+                repo=repo,
+                params={"affiliation": "all"},
+                allow_404=True,
+            )
+        except GitHubError:  # listing them takes push access to the repository
+            return []
+        return [
+            (str(p["login"]), Permission.parse(p.get("role_name")))
+            for p in people or []
+            if p.get("login")
+        ]
+
     async def is_team_member(self, repo: str, team: str, login: str) -> bool:
         org, _, team_slug = team.partition("/")
         if not team_slug:

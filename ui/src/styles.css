@@ -1488,3 +1488,10 @@ details.pv-section[open] > summary { margin-bottom: 6px; }
 .md div.md-math { margin: 0.6em 0; overflow-x: auto; overflow-y: hidden; }
 .md div.md-math math { display: block math; }
 .md .md-math-source { white-space: pre-wrap; }
+
+/* The People tab's list of people on GitHub to add to the record (``AddPeople``). */
+.people-add-list { display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: var(--r); max-height: 420px; overflow: auto; }
+.people-add-row { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--border); min-width: 0; cursor: pointer; }
+.people-add-row:last-child { border-bottom: none; }
+.people-add-row select { max-width: 220px; }
+@media (max-width: 560px) { .people-add-row { flex-wrap: wrap; } .people-add-row select { max-width: 100%; flex: 1 1 100%; } }
