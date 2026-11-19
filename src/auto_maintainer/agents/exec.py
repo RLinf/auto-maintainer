@@ -56,6 +56,7 @@ from collections.abc import (
     Callable,
     Iterable,
     Iterator,
+    Mapping,
     Sequence,
 )
 from dataclasses import dataclass, field
@@ -461,8 +462,13 @@ class ExecRuntime:
         provider: ProviderBinding | None = None,
         permissions: str | None = None,
         approve_commands: Iterable[str] = (),
+        options: Mapping[str, Any] | None = None,
     ) -> None:
         self.name = name or self.default_name
+        self.options: dict[str, Any] = dict(options or {})
+        """The CLI's settings for each run (``domain/agent_options.py``): the
+        service's, or on a person's own account theirs over the service's. Adapters
+        apply them to the run alone, never to the CLI's own configuration."""
         self.approve_commands = [shlex.split(c) for c in approve_commands]
         """Commands the service approves for this agent without asking, as words
         (``RuntimeConfig.approve_commands``)."""

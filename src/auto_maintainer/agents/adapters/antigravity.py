@@ -22,11 +22,12 @@ edits and safe commands itself, asks before irreversible actions). A task in aut
 mode runs in ``auto`` where the CLI offers it, so only what agy itself asks about
 reaches the automatic rules and reviewers; elsewhere, and for a restricted task,
 tasks that may write run in ``accept-edits`` and read-only tasks in ``default``.
-Read-only tasks also get ``--sandbox``, which restricts terminal commands; on hosts
-where ``agy``'s sandbox server cannot start, every command then fails, and operators
-set the runtime option ``sandbox: false``. The runtime option ``tool_policy`` sets
+Read-only tasks also get ``--sandbox``, which restricts terminal commands; the option
+``sandbox`` gives it to every task or to none instead (on hosts where agy's sandbox
+server cannot start, every command run in it fails). The option ``tool_policy`` sets
 agy's tool execution policy for each session (``--settings``, never saved), such as
-``always-proceed``, under which terminal commands run without asking.
+``always-proceed``, under which terminal commands run without asking; unset, agy
+keeps its own, ``request-review``.
 The model and the reasoning level are session config options (``model``,
 ``thought_level``). ``--dangerously-skip-permissions`` is bypass mode.
 """
@@ -38,9 +39,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from ...domain.agents import (
-    ANTIGRAVITY_TOOL_POLICIES as TOOL_POLICIES,
-)
 from ...domain.agents import (
     AgentQuota,
     AgentTask,
@@ -60,12 +58,8 @@ _LEVELS = {
 
 
 class AntigravityRuntime(AcpRuntime):
-    """Antigravity's ACP server.
-
-    Args:
-        sandbox: Pass ``--sandbox`` for read-only tasks.
-        **kwargs: Passed to ``ExecRuntime``.
-    """
+    """Antigravity's ACP server, with the options ``sandbox`` and ``tool_policy``
+    (``agent_options.ANTIGRAVITY``)."""
 
     max_prompt_bytes = 150_000
     """Antigravity 1.5 cuts a prompt past about 200 KB without saying so, losing its
@@ -103,22 +97,6 @@ class AntigravityRuntime(AcpRuntime):
     default_binary = "agy"
     default_env_allow = ("GEMINI_*", "GOOGLE_*", "ANTIGRAVITY_*", "AGY_*")
 
-    def __init__(
-        self,
-        name: str | None = None,
-        *,
-        sandbox: bool = True,
-        tool_policy: str | None = None,
-        **kwargs: Any,
-    ) -> None:
-        super().__init__(name, **kwargs)
-        if tool_policy is not None and tool_policy not in TOOL_POLICIES:
-            raise ValueError(
-                f"tool_policy is one of {', '.join(TOOL_POLICIES)}, not {tool_policy!r}"
-            )
-        self.sandbox = sandbox
-        self.tool_policy = tool_policy
-
     def capabilities(self) -> Capabilities:
         return super().capabilities().model_copy(update={"skill_dirs": True})
 
@@ -127,12 +105,15 @@ class AntigravityRuntime(AcpRuntime):
         if task.permissions == "bypass":
             argv.append("--dangerously-skip-permissions")
         else:
-            if task.mode == "read_only" and self.sandbox:
+            sandbox = self.options.get("sandbox") or "read_only"
+            if sandbox == "always" or (
+                sandbox == "read_only" and task.mode == "read_only"
+            ):
                 argv.append("--sandbox")
-            if self.tool_policy:
+            if self.options.get("tool_policy"):
                 argv += [
                     "--settings",
-                    json.dumps({"autoExecutionPolicy": self.tool_policy}),
+                    json.dumps({"autoExecutionPolicy": self.options["tool_policy"]}),
                 ]
         for directory in [*task.skill_dirs, *task.extra_dirs, *task.reference_dirs]:
             argv += ["--add-dir", str(directory)]

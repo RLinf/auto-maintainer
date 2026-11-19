@@ -222,13 +222,55 @@ class ClaudeCodeRuntime(ExecRuntime):
             env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(spec.max_output)
         return env
 
+    def option_env(self) -> dict[str, str]:
+        """The options Claude Code reads from its environment (``agent_options``)."""
+        o, env = self.options, {}
+        if o.get("web_fetch") is False:
+            env["CLAUDE_CODE_DISABLE_WEB_FETCH"] = "1"
+        if o.get("nonessential_traffic") is False:
+            env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
+        for key, name in (
+            ("bash_timeout_seconds", "BASH_DEFAULT_TIMEOUT_MS"),
+            ("bash_max_timeout_seconds", "BASH_MAX_TIMEOUT_MS"),
+        ):
+            if o.get(key) is not None:
+                env[name] = str(int(float(o[key]) * 1000))
+        return env
+
+    def cli_settings(self) -> dict[str, Any]:
+        """The options passed as ``--settings`` for this run alone: only those set, so
+        the CLI's own defaults stand for the rest (runs load no settings file)."""
+        o, settings = self.options, {}
+        sandbox: dict[str, Any] = {}
+        for key, name in (
+            ("sandbox", "enabled"),
+            ("sandbox_auto_allow", "autoAllowBashIfSandboxed"),
+            ("sandbox_weaker_nested", "enableWeakerNestedSandbox"),
+        ):
+            if isinstance(o.get(key), bool):
+                sandbox[name] = o[key]
+        if o.get("sandbox_allowed_domains"):
+            sandbox["network"] = {"allowedDomains": list(o["sandbox_allowed_domains"])}
+        if sandbox:
+            settings["sandbox"] = sandbox
+        if isinstance(o.get("thinking"), bool):
+            settings["alwaysThinkingEnabled"] = o["thinking"]
+        if isinstance(o.get("auto_compact"), bool):
+            settings["autoCompactEnabled"] = o["auto_compact"]
+        if o.get("attribution") is False:
+            settings["attribution"] = {"commit": "", "pr": ""}
+        return settings
+
     def task_env(self, task: AgentTask) -> dict[str, str]:
-        """Pin auxiliary and subagent model variables to the task's effective model
-        when running on a custom provider."""
+        """The options read from the environment, and on a custom provider the
+        auxiliary and subagent model variables pinned to the task's model."""
         p = self.provider
         if p is None:
-            return {}
-        env: dict[str, str] = {"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"}
+            return self.option_env()
+        env: dict[str, str] = {
+            **self.option_env(),
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+        }
         model = task.model or self.model
         if model:
             for name in _PROVIDER_MODEL_VARS:
@@ -268,6 +310,9 @@ class ClaudeCodeRuntime(ExecRuntime):
             else:
                 argv += ["--allowedTools", *self.write_allowed]
         argv += ["--setting-sources", self.setting_sources]
+        settings = self.cli_settings()
+        if settings:
+            argv += ["--settings", json.dumps(settings, separators=(",", ":"))]
         argv.append("--strict-mcp-config")
         if task.output_schema is not None:
             argv += [
@@ -286,6 +331,8 @@ class ClaudeCodeRuntime(ExecRuntime):
             argv += ["--model", model]
         if task.effort:
             argv += ["--effort", task.effort]
+        if self.options.get("fallback_model"):
+            argv += ["--fallback-model", str(self.options["fallback_model"])]
         argv += self.extra_args
         return Invocation(argv=argv)
 

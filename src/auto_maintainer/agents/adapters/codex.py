@@ -144,8 +144,34 @@ class CodexRuntime(ExecRuntime):
         self, task: AgentTask, files: RunFiles, binary: str
     ) -> Invocation:
         return Invocation(
-            argv=[binary, "app-server", *self.provider_args(), *self.extra_args]
+            argv=[
+                binary,
+                "app-server",
+                *self.provider_args(),
+                *self.option_args(),
+                *self.extra_args,
+            ]
         )
+
+    def option_args(self) -> list[str]:
+        """``-c`` overrides for the options set (``agent_options``): they hold for
+        this app server alone and are never written to ``config.toml``."""
+        o, pairs = self.options, []
+        if isinstance(o.get("network_access"), bool):
+            pairs.append(
+                ("sandbox_workspace_write.network_access", o["network_access"])
+            )
+        for key, name in (
+            ("web_search", "web_search"),
+            ("reasoning_summary", "model_reasoning_summary"),
+            ("verbosity", "model_verbosity"),
+        ):
+            if o.get(key):
+                pairs.append((name, o[key]))
+        args: list[str] = []
+        for name, value in pairs:
+            args += ["-c", f"{name}={json.dumps(value)}"]
+        return args
 
     def provider_args(self) -> list[str]:
         """``-c`` overrides that define and select ``self.provider``; the key itself is
@@ -190,7 +216,8 @@ class CodexRuntime(ExecRuntime):
         return {
             "sandbox": sandbox,
             "approvalPolicy": "on-request",
-            "approvalsReviewer": self.approvals_reviewer,
+            "approvalsReviewer": self.options.get("approvals_reviewer")
+            or self.approvals_reviewer,
         }
 
 

@@ -2,6 +2,7 @@
 // owner; for oneself, by anyone), and each person's own agents: their own sign-in or
 // one of their own model APIs, used only for the work they ask for.
 
+import { AgentOptionsForm, setCount } from "./agentOptions";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { api, type AgentLogin, type MyAgent, type MyProvider, type SignInOption } from "./api";
@@ -9,7 +10,7 @@ import { copyText } from "./clipboard";
 import { Empty, ErrorBox, Section, Status, useAct } from "./components";
 import { useT } from "./i18n";
 import { Icon } from "./icons";
-import { Skeleton } from "./ui";
+import { Skeleton, useToast } from "./ui";
 import { agentName } from "./prActions";
 import { ApiForm, ApiSummary, KeyState, modelsFor, PROTOCOLS } from "./providerForm";
 import { AgentsUsageSection } from "./usage";
@@ -422,7 +423,38 @@ function MyAgentRow({ agent: a, apis }: { agent: MyAgent; apis: MyProvider[] }) 
       </span>
       {!a.isolated && <span className="small muted">{t("Agents run on the host here, where every run could read every person's sign-in, so personal accounts are off.")}</span>}
       {login && <SignInFlow login={login} onEnd={() => setLogin(null)} />}
+      {a.isolated && a.option_schema.length > 0 && <MyAgentOptions agent={a} />}
       <ErrorBox error={save.error || signOut.error} />
     </div>
+  );
+}
+
+/** The CLI settings of this person's own account of an agent, over the service's:
+ * they reach only the runs of the work this person asks for on their own account. */
+function MyAgentOptions({ agent: a }: { agent: MyAgent }) {
+  const t = useT();
+  const toast = useToast();
+  const save = useAct((options: Record<string, unknown>) => api.put<MyAgent>(`/api/me/agents/${a.name}/options`, { options }), [["my-agents"]]);
+  const n = setCount(a.setup.options, a.option_schema);
+  return (
+    <details className="agent-options-box" style={{ width: "100%" }}>
+      <summary className="small">
+        {t("CLI settings for my account")} · {n ? `${n} ${t("set")}` : t("as the service's")}
+      </summary>
+      <p className="small muted" style={{ margin: "6px 0 10px" }}>
+        {a.setup.use_own
+          ? t("Your runs on your own account use them; one you leave unset takes the service's. Nobody else's runs see them.")
+          : t("They apply once your requests run on your own account; one you leave unset takes the service's.")}
+      </p>
+      <AgentOptionsForm
+        schema={a.option_schema}
+        value={a.setup.options ?? {}}
+        inherited={a.service_options}
+        canChange
+        saving={save.isPending}
+        error={save.error}
+        onSave={(options) => save.mutate(options, { onSuccess: () => toast({ title: t("Saved"), icon: "check" }) })}
+      />
+    </details>
   );
 }

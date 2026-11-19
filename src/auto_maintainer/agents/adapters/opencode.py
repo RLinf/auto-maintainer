@@ -17,7 +17,8 @@
 ``opencode run --auto`` approves everything that is not denied and cannot ask the
 caller, so the service runs ``opencode acp`` (see ``agents.acp``). Its ACP server has
 no modes; which tools ask first comes from OpenCode's ``permission`` config, passed
-inline in ``OPENCODE_CONFIG_CONTENT``. Outside bypass mode edits, shell commands, web
+inline in ``OPENCODE_CONFIG_CONTENT`` with the options that are set
+(``agent_options.OPENCODE``). Outside bypass mode edits, shell commands, web
 fetches, and paths outside the worktree all ask, so the automatic rules and reviewers
 see each one; read-only tasks deny edits outright. The model is the session config
 option ``model``. On this host the handshake passed; prompts could not be run because
@@ -119,10 +120,29 @@ class OpenCodeRuntime(AcpRuntime):
                 "webfetch": "ask",
                 "external_directory": "ask",
             }
-        config: dict[str, Any] = {"permission": permission}
+        config: dict[str, Any] = {"permission": permission, **self.option_config()}
         if self.provider is not None:
             config["provider"] = {self._provider_id(): self._provider_config()}
         return {"OPENCODE_CONFIG_CONTENT": json.dumps(config)}
+
+    def option_config(self) -> dict[str, Any]:
+        """The options set (``agent_options.OPENCODE``), as OpenCode's config keys; they
+        travel inline with the run and are never written to its config file."""
+        o, config = self.options, {}
+        if o.get("share"):
+            config["share"] = o["share"]
+        if isinstance(o.get("snapshot"), bool):
+            config["snapshot"] = o["snapshot"]
+        compaction = {
+            name: o[key]
+            for key, name in (("auto_compact", "auto"), ("prune", "prune"))
+            if isinstance(o.get(key), bool)
+        }
+        if compaction:
+            config["compaction"] = compaction
+        if o.get("update_check") is False:
+            config["autoupdate"] = False
+        return config
 
     def _provider_id(self) -> str:
         assert self.provider is not None

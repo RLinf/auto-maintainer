@@ -37,6 +37,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from ..domain.access import Grant
+from ..domain.agent_options import option_problems, options_of, set_options
 from ..domain.agents import AgentLogin, PersonalAgent, PersonalDefault
 from ..domain.ports import PersonalAgents
 from ..domain.settings import PROVIDER_PROTOCOLS, REASONING_LEVELS, protocol_for
@@ -53,6 +54,10 @@ class SetupBody(BaseModel):
     """One of the user's own model APIs; none, the CLI's own sign-in."""
     model: str | None = Field(default=None, max_length=200)
     effort: str | None = None
+
+
+class OptionsBody(BaseModel):
+    options: dict[str, Any]
 
 
 class DefaultBody(BaseModel):
@@ -134,6 +139,12 @@ async def _agent_row(service: Service, user: User, name: str) -> dict[str, Any]:
         "service_usable": service.agent_usable(name),
         "setup": (setup or PersonalAgent(agent=name)).model_dump(mode="json"),
         "login": login.model_dump(mode="json") if login else None,
+        # The CLI settings it offers, and the service's, which the person's own
+        # account takes for any they leave unset.
+        "option_schema": [
+            o.model_dump(mode="json") for o in options_of(_adapter(runtime, name))
+        ],
+        "service_options": dict(getattr(runtime, "options", {}) or {}),
     }
 
 
@@ -249,14 +260,48 @@ def build_router() -> APIRouter:
                     422,
                     f"{model} takes the reasoning levels {', '.join(spec.reasoning)}",
                 )
+        kept = (await people.get(user.login)).get(name)
         setup = PersonalAgent(
             agent=name,
             use_own=body.use_own,
             provider=body.provider or None,
             model=model if body.provider else None,
             effort=body.effort or None,
+            options=kept.options if kept else {},
         )
         await people.put(user.login, setup)
+        return await _agent_row(service, user, name)
+
+    @r.put("/me/agents/{name}/options")
+    async def set_my_agent_options(
+        request: Request,
+        name: str,
+        body: OptionsBody,
+        user: User = Depends(current_user),
+    ) -> dict[str, Any]:
+        """The CLI settings the user's own account of agent ``name`` runs with, over
+        the service's; an option left out takes the service's. They apply to this
+        person's runs alone, passed with each run, never written to the CLI's own
+        configuration."""
+        service = service_of(request)
+        if not await service.access_anywhere(user.login, Grant.OWN_AGENTS):
+            raise HTTPException(
+                403,
+                "your role does not let you use your own agent accounts; the service's owner or a "
+                "service admin can change that",
+            )
+        _ready(service, name)
+        adapter = _adapter(service.runtime(name), name)
+        chosen = set_options(adapter, body.options)
+        problems = option_problems(adapter, chosen)
+        unknown = set(body.options) - {o.key for o in options_of(adapter)}
+        if unknown:
+            problems.append(f"{name} has no option {', '.join(sorted(unknown))}")
+        if problems:
+            raise HTTPException(422, "; ".join(problems))
+        people = _people(service)
+        setup = (await people.get(user.login)).get(name) or PersonalAgent(agent=name)
+        await people.put(user.login, setup.model_copy(update={"options": chosen}))
         return await _agent_row(service, user, name)
 
     @r.put("/me/providers/{provider_id}")

@@ -431,6 +431,34 @@ def _own(name: str, script: list) -> ScriptedAgentRuntime:
     return runtime
 
 
+async def test_a_persons_cli_settings_reach_their_own_runs_alone() -> None:
+    """On their own account a person's settings win over the service's, on a copy
+    of the runtime for that run; the service's runtime keeps its own."""
+    from auto_maintainer.domain.agents import PersonalAgent
+
+    runtime = _own("b", [])
+    runtime.options = {"web_search": "cached", "network_access": False}  # type: ignore[attr-defined]
+    router, _ = _router(runtime)
+
+    class People(_People):
+        async def get(self, login: str) -> dict[str, object]:
+            return {
+                "b": PersonalAgent(
+                    agent="b", use_own=True, options={"network_access": True}
+                )
+            }
+
+    router.people = People()  # type: ignore[assignment]
+    mine, _ = await router._account(runtime, _task(requested_by="maria"))
+    assert mine is not runtime
+    assert mine.options == {"web_search": "cached", "network_access": True}  # type: ignore[attr-defined]
+    assert runtime.options == {"web_search": "cached", "network_access": False}  # type: ignore[attr-defined]
+    service, _ = await router._account(
+        runtime, _task(requested_by="maria", service_account=True)
+    )
+    assert service is runtime, "the service's account runs with the service's"
+
+
 async def test_what_a_person_asks_for_tries_their_own_agents_first() -> None:
     """Their own agent goes first, unless they chose the agent, the task resumes a
     session, or it verifies (a second opinion from the route's agent); nobody

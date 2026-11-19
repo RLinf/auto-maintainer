@@ -47,6 +47,7 @@ from ..domain.actions import (
     RerunPayload,
     make_action,
 )
+from ..domain.agent_options import options_of
 from ..domain.agents import AgentResult, AgentTask, TaskKind
 from ..domain.events import Event, EventKind
 from ..domain.ids import check_repo, new_id
@@ -1233,6 +1234,21 @@ async def _settings_block(service: Any, user: User) -> str:
             f"reasoning levels: {levels} (its default: {choices.default_effort or 'unknown'})"
         )
 
+    def cli_options(adapter: str, options: dict[str, Any]) -> str:
+        """The CLI settings it offers under ``options`` (``domain/agent_options.py``),
+        each with its value or the default that applies unset."""
+        offered_options = options_of(adapter)
+        if not offered_options:
+            return ""
+        return "; CLI settings under options (unset keeps the default): " + ", ".join(
+            f"{o.key}={options[o.key]!r}"
+            if o.key in options
+            else f"{o.key} (default {o.default}"
+            + (", the service's" if o.by_service else "")
+            + ")"
+            for o in offered_options
+        )
+
     agent_lines = [
         f"- {name}: {a.adapter}, {'enabled' if a.enabled else 'disabled'}, "
         f"{'installed' if service.agent_ready(name) else 'NOT installed on this host'}, "
@@ -1253,6 +1269,7 @@ async def _settings_block(service: Any, user: User) -> str:
         + "; custom providers it can use: "
         f"{', '.join(sorted(PROVIDER_PROTOCOLS.get(a.adapter, ()))) or 'none'}"
         + offered(name)
+        + cli_options(a.adapter, a.options)
         for name, a in agents.items()
     ]
     route_lines = [

@@ -1046,8 +1046,10 @@ export interface SecretInfo {
 export interface SettingsAgent {
   name: string;
   adapter: string;
-  /** Adapter options from the settings, such as Antigravity's ``tool_policy``. */
+  /** Its CLI settings, and the adapter's own arguments (``RuntimeConfig.options``). */
   options?: Record<string, unknown>;
+  /** The CLI settings it offers (``domain/agent_options.py``). */
+  option_schema: import("./agentOptions").AgentOption[];
   enabled: boolean;
   model: string | null;
   /** A faster model for quick tasks (triage, scores, CI classification, comment checks). */
@@ -1178,8 +1180,11 @@ export interface MyAgent {
   /** Whether each run gets a container of its own here, which a personal account needs. */
   isolated: boolean;
   adapter: string;
-  setup: { agent: string; use_own: boolean; provider: string | null; model: string | null; effort: string | null };
+  setup: { agent: string; use_own: boolean; provider: string | null; model: string | null; effort: string | null; options?: Record<string, unknown> };
   login: AgentLogin | null;
+  /** The CLI settings it offers, and the service's, which unset ones take. */
+  option_schema: import("./agentOptions").AgentOption[];
+  service_options: Record<string, unknown>;
 }
 
 export interface AgentInstall {

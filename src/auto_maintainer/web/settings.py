@@ -30,7 +30,8 @@ import yaml
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from ..domain.agents import ANTIGRAVITY_TOOL_POLICIES, AgentTask, TaskKind
+from ..domain.agent_options import option_problems, options_of, set_options
+from ..domain.agents import AgentTask, TaskKind
 from ..domain.ids import new_id
 from ..domain.labs import owns
 from ..domain.memory import MemoryChangeState
@@ -153,6 +154,9 @@ async def settings_view(service: Service, user: User) -> dict[str, Any]:
                         "options",
                     },
                 ),
+                "option_schema": [
+                    o.model_dump(mode="json") for o in options_of(cfg.adapter)
+                ],
                 "can_bypass": can_bypass(cfg),
                 "installed": service.agent_ready(name) if cfg.enabled else None,
                 "usable": service.agent_usable(name) if cfg.enabled else False,
@@ -259,10 +263,10 @@ async def settings_view(service: Service, user: User) -> dict[str, Any]:
     }
 
 
-class AgentToolPolicyBody(BaseModel):
-    tool_policy: str | None = None
-    """Antigravity's tool execution policy (``adapters/antigravity.TOOL_POLICIES``);
-    ``None`` keeps the CLI's own setting."""
+class AgentOptionsBody(BaseModel):
+    options: dict[str, Any]
+    """The agent's options (``domain/agent_options.py``) by key; an absent or empty
+    one keeps the default."""
 
 
 class AgentModeBody(BaseModel):
@@ -681,35 +685,41 @@ def build_router() -> APIRouter:
             user,
         )
 
-    @r.put("/agents/{name}/tool-policy")
-    async def set_agent_tool_policy(
+    @r.put("/agents/{name}/options")
+    async def set_agent_options(
         request: Request,
         name: str,
-        body: AgentToolPolicyBody,
+        body: AgentOptionsBody,
         user: User = Depends(current_user),
     ) -> dict[str, Any]:
-        """Set an Antigravity agent's tool execution policy for every session it
-        runs, such as ``always-proceed``, so auto mode runs commands without asking;
-        ``None`` keeps the CLI's own setting. A settings change like any other."""
+        """Set the CLI settings an agent runs every task on the service's accounts
+        with (its sandbox, network access, web search, and the like); an option left
+        out keeps the default. They are passed with each run, never written to the
+        CLI's own configuration. A settings change like any other."""
         service = service_of(request)
         text, legacy = await service.settings_text()
         agents = effective_agents(service.service_config, legacy)
         if name not in agents:
             raise HTTPException(404, f"there is no agent named {name!r}")
-        if agents[name].adapter != "antigravity":
-            raise HTTPException(422, f"{name} has no tool execution policy to set")
-        policies = ANTIGRAVITY_TOOL_POLICIES
-        if body.tool_policy is not None and body.tool_policy not in policies:
-            raise HTTPException(422, f"the tool policy is one of {', '.join(policies)}")
-        options = {k: v for k, v in agents[name].options.items() if k != "tool_policy"}
-        if body.tool_policy:
-            options["tool_policy"] = body.tool_policy
+        adapter = agents[name].adapter
+        chosen = set_options(adapter, body.options)
+        problems = option_problems(adapter, chosen)
+        unknown = set(body.options) - {o.key for o in options_of(adapter)}
+        if unknown:
+            problems.append(f"{name} has no option {', '.join(sorted(unknown))}")
+        if problems:
+            raise HTTPException(422, "; ".join(problems))
+        schema = {o.key for o in options_of(adapter)}
+        # Keys outside the schema are the adapter's own arguments; they stay.
+        options = {
+            **{k: v for k, v in agents[name].options.items() if k not in schema},
+            **chosen,
+        }
         return await save(
             request,
             DocumentBody(
                 yaml=_with_agent_fields(text, name, {"options": options or None}),
-                title=f"settings: {name} runs tools with "
-                f"{body.tool_policy or 'its own policy'}",
+                title=f"settings: {name}'s CLI settings",
             ),
             user,
         )

@@ -820,6 +820,7 @@ async def test_people_run_agents_on_their_own_accounts_and_nobody_elses(
             "provider": "gw",
             "model": "m1",
             "effort": "high",
+            "options": {},
         }
 
         async def own(login: str) -> list[str]:
@@ -977,26 +978,68 @@ async def test_a_person_chooses_their_default_among_the_services_agents_and_thei
         )
 
 
-async def test_antigravitys_tool_policy_is_set_through_the_gate(demo) -> None:
+async def test_an_agents_cli_settings_are_set_through_the_gate(
+    demo, tmp_path: Path
+) -> None:
+    """The owner sets an agent's CLI settings for the service's accounts; a value
+    outside its choices, or an option it does not have, is refused; and a person
+    sets their own, which reach only their own runs."""
+    from auto_maintainer.agents.adapters.claude_code import ClaudeCodeRuntime
+    from auto_maintainer.store.people import PeopleAgents
+
     h, app = demo
-    url = "/api/settings/agents/antigravity/tool-policy"
+    cli = tmp_path / "claude"
+    cli.write_text("#!/bin/sh\n")
+    cli.chmod(0o755)
+    h.runner.runtimes = {"claude-code": ClaudeCodeRuntime(binary=str(cli))}
+    h.service.a.people = PeopleAgents(tmp_path / "people")
+    url = "/api/settings/agents/antigravity/options"
     async with _client(app, "maria") as maria:
-        bad = await maria.put(url, json={"tool_policy": "whenever"})
+        bad = await maria.put(url, json={"options": {"tool_policy": "whenever"}})
         assert bad.status_code == 422
         other = await maria.put(
-            "/api/settings/agents/codex/tool-policy",
-            json={"tool_policy": "always-proceed"},
+            "/api/settings/agents/codex/options",
+            json={"options": {"tool_policy": "always-proceed"}},
         )
-        assert other.status_code == 422, "only Antigravity has one"
-        applied = (await maria.put(url, json={"tool_policy": "always-proceed"})).json()
-        assert applied["approved"] is True
+        assert other.status_code == 422, "only Antigravity has a tool policy"
+        applied = await maria.put(
+            url, json={"options": {"tool_policy": "always-proceed", "sandbox": "off"}}
+        )
+        assert applied.json()["approved"] is True
         [agy] = [
             a
             for a in (await maria.get("/api/settings")).json()["agents"]
             if a["name"] == "antigravity"
         ]
-        assert agy["options"] == {"tool_policy": "always-proceed"}
+        assert agy["options"] == {"tool_policy": "always-proceed", "sandbox": "off"}
+        assert {o["key"] for o in agy["option_schema"]} == {"sandbox", "tool_policy"}
         agents, _ = h.service.a.reconfigure.calls[-1]
-        assert agents["antigravity"].options == {"tool_policy": "always-proceed"}
-        await maria.put(url, json={"tool_policy": None})
+        assert agents["antigravity"].options == {
+            "tool_policy": "always-proceed",
+            "sandbox": "off",
+        }
+        await maria.put(url, json={"options": {}})
     assert "options" not in (h.service.service_config.agents.get("antigravity") or {})
+    async with _client(app, "walt") as walt:
+        refused = await walt.put(url, json={"options": {"sandbox": "off"}})
+        assert refused.status_code == 200 and refused.json()["approved"] is False, (
+            "only the owner applies the service's"
+        )
+        mine = await walt.put(
+            "/api/me/agents/claude-code/options", json={"options": {"sandbox": True}}
+        )
+        assert mine.status_code == 200, mine.text
+        assert mine.json()["setup"]["options"] == {"sandbox": True}
+        assert {o["key"] for o in mine.json()["option_schema"]} >= {"sandbox"}
+        assert (
+            await walt.put(
+                "/api/me/agents/claude-code/options", json={"options": {"sandbox": "x"}}
+            )
+        ).status_code == 422
+        kept = await walt.put("/api/me/agents/claude-code", json={"use_own": False})
+        assert kept.json()["setup"]["options"] == {"sandbox": True}, (
+            "changing the account keeps the settings"
+        )
+    assert "sandbox" not in (h.service.runtime("claude-code").options or {}), (
+        "a person's settings never reach the service's runtime"
+    )

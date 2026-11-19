@@ -19,8 +19,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
-
 from auto_maintainer.agents.adapters.antigravity import AntigravityRuntime
 from auto_maintainer.agents.adapters.claude_code import ClaudeCodeRuntime
 from auto_maintainer.agents.adapters.codex import CodexRuntime
@@ -184,7 +182,7 @@ def test_antigravity_runs_its_own_auto_mode_and_tool_policy(tmp_path: Path) -> N
             ]
         }
     }
-    agy = AntigravityRuntime(tool_policy="always-proceed")
+    agy = AntigravityRuntime(options={"tool_policy": "always-proceed"})
     auto = _task(tmp_path, permissions="auto")
     assert agy.session_setup(auto, offered)[0] == (
         "session/set_mode",
@@ -205,8 +203,6 @@ def test_antigravity_runs_its_own_auto_mode_and_tool_policy(tmp_path: Path) -> N
     }
     bypass = agy.build_invocation(_task(tmp_path, permissions="bypass"), files, "agy")
     assert "--settings" not in bypass.argv
-    with pytest.raises(ValueError):
-        AntigravityRuntime(tool_policy="whenever")
 
 
 def test_acp_runtimes_start_their_servers(tmp_path: Path) -> None:

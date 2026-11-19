@@ -6,6 +6,7 @@
 // Agents and Model providers tabs also hold the signed-in person's own agents and
 // model APIs, which are theirs alone.
 
+import { AgentOptionsForm, setCount } from "../agentOptions";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
@@ -608,16 +609,34 @@ function AgentVersion({ v, name, installed }: { v: SettingsView; name: string; i
   );
 }
 
-/** Antigravity's tool execution policies: whether its terminal commands run without
- * asking (the service's auto mode then stays out of the way), ask for review, are held
- * strictly, or run without asking inside its sandbox. */
-const TOOL_POLICIES: [string | null, string][] = [
-  [null, "The CLI's own setting"],
-  ["always-proceed", "Always proceed"],
-  ["proceed-in-sandbox", "Proceed in its sandbox"],
-  ["request-review", "Ask for review"],
-  ["strict", "Strict"],
-];
+/** The CLI settings an agent runs every task on the service's accounts with,
+ * passed with each run: only the owner changes them. */
+function ServiceAgentOptions({ agent, canChange }: { agent: SettingsAgent; canChange: boolean }) {
+  const t = useT();
+  const toast = useToast();
+  const save = useAct((options: Record<string, unknown>) => api.put<{ approved: boolean }>(`/api/settings/agents/${agent.name}/options`, { options }), [["settings"], ["memory"]]);
+  const schema = agent.option_schema;
+  const value = Object.fromEntries(Object.entries(agent.options ?? {}).filter(([k]) => schema.some((o) => o.key === k)));
+  const n = setCount(value, schema);
+  return (
+    <details className="agent-options-box">
+      <summary className="small">
+        {t("CLI settings")} · {n ? `${n} ${t("set")}` : t("all at their defaults")}
+      </summary>
+      <p className="small muted" style={{ margin: "6px 0 10px" }}>
+        {t("For tasks on the service's accounts. Each run gets them on its own; the CLI's configuration files are never changed, and a person's own account can set its own.")}
+      </p>
+      <AgentOptionsForm
+        schema={schema}
+        value={value}
+        canChange={canChange}
+        saving={save.isPending}
+        error={save.error}
+        onSave={(options) => save.mutate(options, { onSuccess: (r) => toast({ title: r.approved ? t("Saved") : t("Change proposed"), icon: r.approved ? "check" : "inbox" }) })}
+      />
+    </details>
+  );
+}
 
 /** What an agent does less often: its permission mode, looking again for a newer
  * version, and asking the settings agent for anything else. */
@@ -631,11 +650,6 @@ function AgentMenu({ agent, v, ask }: { agent: SettingsAgent; v: SettingsView; a
     [["settings"], ["memory"]],
   );
   const check = useAct(() => api.get<LatestVersions>("/api/settings/agents/latest?refresh=true"), []);
-  const policy = useAct(
-    (tool_policy: string | null) => api.put<{ approved: boolean }>(`/api/settings/agents/${agent.name}/tool-policy`, { tool_policy }),
-    [["settings"], ["memory"]],
-  );
-  const current = (agent.options?.tool_policy as string | undefined) ?? null;
   const done = (r: { approved: boolean }) => toast({ title: r.approved ? t("Saved") : t("Change proposed"), icon: r.approved ? "check" : "inbox" });
   return (
     <Popover
@@ -728,29 +742,6 @@ function AgentMenu({ agent, v, ask }: { agent: SettingsAgent; v: SettingsView; a
                   {t("Skip permission checks")}…
                 </button>
               ))}
-            {agent.adapter === "antigravity" && (
-              <>
-                <div className="menu-sep" />
-                <span className="menu-label" title={t("Whether its terminal commands run without asking. With Always proceed, auto mode runs them without bypassing the permission checks.")}>
-                  {t("Tool execution")}
-                </span>
-                {TOOL_POLICIES.map(([id, label]) => (
-                  <button
-                    key={id ?? "own"}
-                    className="menu-item"
-                    role="menuitemradio"
-                    aria-checked={current === id}
-                    disabled={policy.isPending}
-                    onClick={() => policy.mutate(id, { onSuccess: (r) => (close(), done(r)) })}
-                  >
-                    <span style={{ width: 14, display: "inline-flex" }}>{current === id && <Icon name="check" size={14} />}</span>
-                    {t(label)}
-                  </button>
-                ))}
-                <ErrorBox error={policy.error} />
-                <div className="menu-sep" />
-              </>
-            )}
             <button
               className="menu-item"
               role="menuitem"
@@ -827,7 +818,7 @@ function AgentsTab({ v, ask }: { v: SettingsView; ask: (p: string, send?: boolea
                 <span className="spacer" />
                 <AgentMenu agent={a} v={v} ask={ask} />
               </div>
-              {(ready || (v.installable[a.name] && a.installed === false) || notes.length > 0 || a.approve_commands.length > 0) && (
+              {(ready || (v.installable[a.name] && a.installed === false) || notes.length > 0 || a.approve_commands.length > 0 || a.option_schema.length > 0) && (
                 <div className="agent-row-body">
                   {ready && <ModelControls agent={a} choices={choices} providers={v.providers} canChange={v.access.allowed} />}
                   {ready && <ServiceSignIn name={a.name} options={a.sign_in_options} canSignIn={a.can_sign_in} canChange={v.access.allowed} />}
@@ -835,6 +826,7 @@ function AgentsTab({ v, ask }: { v: SettingsView; ask: (p: string, send?: boolea
                     <InstallButton name={a.name} source={v.installable[a.name]} state={v.installs[a.name]} canInstall={v.access.allowed} />
                   )}
                   {notes.length > 0 && <span className="small muted">{notes.join(" · ")}</span>}
+                  {a.option_schema.length > 0 && <ServiceAgentOptions agent={a} canChange={v.access.allowed} />}
                   {a.approve_commands.length > 0 && (
                     <span className="small muted">
                       {t("Runs without asking")}:{" "}

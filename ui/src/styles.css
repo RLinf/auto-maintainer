@@ -1506,3 +1506,10 @@ details.pv-section[open] > summary { margin-bottom: 6px; }
 .lessons .lesson-text > :last-child { margin-bottom: 0; }
 .lessons-edit { border-left: 2px solid var(--border); padding-left: 10px; }
 .lessons-edit textarea { font-family: var(--sans); font-size: 14px; }
+
+/* An agent CLI's settings (``agentOptions.tsx``): a label with its meaning, beside its control. */
+.agent-options-box > summary { cursor: pointer; }
+.agent-options { display: grid; grid-template-columns: minmax(0, 1fr) minmax(200px, 300px); gap: 10px 16px; align-items: start; }
+.agent-option { display: contents; }
+.agent-option select, .agent-option input, .agent-option textarea { width: 100%; }
+@media (max-width: 640px) { .agent-options { grid-template-columns: 1fr; } }

@@ -750,6 +750,10 @@ class AgentRouter:
         mine = copy.copy(runtime)
         mine.account = login.lower()  # type: ignore[attr-defined]
         mine.account_home = self.people.home(login)  # type: ignore[attr-defined]
+        if setup.options and isinstance(getattr(runtime, "options", None), dict):
+            # Their settings over the service's, on this copy alone: the service's
+            # runtime and everyone else's runs keep their own.
+            mine.options = {**runtime.options, **setup.options}  # type: ignore[attr-defined]
         api = apis.get(setup.provider) if setup.provider else None
         model = setup.model or (api.model_ids[0] if api and api.models else None)
         protocol = (

@@ -21,6 +21,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from ..domain.agent_options import normalized, options_of
 from ..domain.ports import AgentRuntime
 from ..domain.settings import (
     DEFAULT_RUNTIMES,
@@ -97,8 +98,14 @@ def build_runtime(
         "permissions": config.permissions,
         "command_prefix": config.command_prefix,
         "approve_commands": config.approve_commands,
-        **config.options,
     }
+    # Options the adapter's schema names go to every run (``ExecRuntime.options``);
+    # others are the adapter's own keyword arguments, such as Claude Code's
+    # ``setting_sources``.
+    schema = {o.key for o in options_of(config.adapter)}
+    raw = normalized(config.adapter, config.options)
+    kwargs["options"] = {k: v for k, v in raw.items() if k in schema}
+    kwargs.update({k: v for k, v in raw.items() if k not in schema})
     if config.binary:
         kwargs["binary"] = config.binary
     if cls is GenericRuntime:

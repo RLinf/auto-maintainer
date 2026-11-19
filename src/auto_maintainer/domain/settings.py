@@ -35,6 +35,7 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from .agent_options import normalized, option_problems, options_of
 from .agents import TaskKind
 from .profile import Route
 
@@ -126,7 +127,9 @@ class RuntimeConfig(BaseModel):
     extra_args: list[str] = Field(default_factory=list)
     budget: Budget = Field(default_factory=Budget)
     options: dict[str, Any] = Field(default_factory=dict)
-    """Adapter-specific keyword arguments, such as ``setting_sources`` for Claude Code."""
+    """The CLI's settings for every run on the service's accounts, by the keys its
+    adapter offers (``domain/agent_options.py``, checked by ``check_settings``), and
+    the adapter's own keyword arguments, such as ``setting_sources`` for Claude Code."""
     allow_bypass: bool = False
     """Whether routes that ask for bypass mode may run this CLI with every permission
     check skipped. Off by default; without it such routes run in ``auto`` mode."""
@@ -621,6 +624,14 @@ def check_settings(
                 f"providers.{pid}: ids are lowercase words joined by hyphens, such as my-gateway"
             )
     for name, agent in agents.items():
+        schema = {o.key for o in options_of(agent.adapter)}
+        raw = normalized(agent.adapter, agent.options)
+        problems += [
+            f"agents.{name}.options: {p}"
+            for p in option_problems(
+                agent.adapter, {k: v for k, v in raw.items() if k in schema}
+            )
+        ]
         if agent.adapter == "generic" and agent.enabled and not agent.command:
             problems.append(f"agents.{name}: the generic adapter needs a command")
         if agent.permissions == "bypass" and not can_bypass(agent):
