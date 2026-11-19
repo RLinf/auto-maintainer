@@ -86,7 +86,7 @@ from .domain.ports import (
     Workspace,
 )
 from .domain.profile import Route
-from .domain.records import AuditEntry, ChatMessage, Job, RepoRecord
+from .domain.records import AuditEntry, ChatMessage, ChatThread, Job, RepoRecord
 from .domain.secrets import find_secrets, redact_secrets
 from .domain.settings import (
     KEEPS_OWN_PRIMARY,
@@ -380,6 +380,11 @@ class Service:
         """Set after a deploy; ``am serve`` then exits for its supervisor to restart it."""
         self._confirming: asyncio.Task[None] | None = None
         self._warming: asyncio.Task[None] | None = None
+        self.turn_resumers: list[Callable[[ChatThread], Awaitable[bool]]] = []
+        """Who takes up a conversation's turn a restart cut off (the dashboard's
+        conversations about a review or a change, ``web/review_talk.py``): each
+        returns whether it took the thread; any other gets ``end_cut_off_turns``'s
+        note."""
         self._polls: dict[str, asyncio.Task[None]] = {}
         """Polls started because a repository's approved profile changed, by repository."""
         self._scope_grant: ScopeGrant | None = None
@@ -685,10 +690,24 @@ class Service:
     async def end_cut_off_turns(self) -> None:
         """A conversation's turn (in chat, about a review or a change, with a person)
         runs in the dashboard request that took the message, so none outlives the
-        process: each conversation a stopped process left answering says the answer
-        was lost and takes a message again, instead of showing an agent at work
-        that nothing runs."""
+        process. A turn about a review or a change is taken up again in the agent's
+        session (``turn_resumers``); each other conversation a stopped process left
+        answering says the answer was lost and takes a message again, instead of
+        showing an agent at work that nothing runs."""
         for thread in await self.store.answering_threads():
+            taken = False
+            for resume in self.turn_resumers:
+                try:
+                    taken = await resume(thread)
+                except Exception:  # it gets the note instead
+                    log.warning("taking up %s failed", thread.id, exc_info=True)
+                if taken:
+                    break
+            if taken:
+                log.info(
+                    "took up turn %s of %s after a restart", thread.live_run, thread.id
+                )
+                continue
             run = thread.live_run
             thread.live_run = None
             await self.store.save_thread(thread)

@@ -31,6 +31,7 @@ resolution of the conflicted files (``resolved``), which is what the merge commi
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -67,7 +68,14 @@ from ..playbooks.person_notes import load_notes, notes_block, remember_said
 from ..playbooks.prompts import forge_note, schema_hint, untrusted
 from ..service import Service
 from .auth import User
-from .chat import keep_session, stopped_message, turn_route
+from .chat import (
+    RESUMED_TURN,
+    Resumed,
+    keep_session,
+    resumed_route,
+    stopped_message,
+    turn_route,
+)
 from .live_turns import LiveTurns, Stopped
 from .records import open_door, reading_line
 
@@ -239,9 +247,12 @@ async def fix_turn(
     route: Route,
     door: Any = None,
     live: LiveTurns | None = None,
+    *,
+    resumed: Resumed | None = None,
 ) -> dict[str, Any]:
     """One turn of the conversation about a fix: ``user``'s message and the agent's
-    answer, which may change the files (design 5.5)."""
+    answer, which may change the files (design 5.5); ``resumed``, the turn a restart
+    cut off, whose message the conversation has already."""
     assert job.repo
     first = job.events[0] if job.events else {}
     asked = (first.get("payload") if isinstance(first, dict) else None) or {}
@@ -265,21 +276,22 @@ async def fix_turn(
         )
 
     text, removed = redact_secrets(said)
-    message = ChatMessage(
-        thread_id=thread.id, role="user", text=text, author=user.login
-    )
-    await service.store.add_message(message)
-    await remember_said(
-        service.store,
-        user.login,
-        text,
-        repo=job.repo,
-        number=job.number,
-        where="fix discussion",
-        kind=SignalKind.REVIEW_DISCUSSION,
-        action_kind=ActionKind.PR_FIX,
-        message_id=message.id,
-    )
+    if resumed is None:
+        message = ChatMessage(
+            thread_id=thread.id, role="user", text=text, author=user.login
+        )
+        await service.store.add_message(message)
+        await remember_said(
+            service.store,
+            user.login,
+            text,
+            repo=job.repo,
+            number=job.number,
+            where="fix discussion",
+            kind=SignalKind.REVIEW_DISCUSSION,
+            action_kind=ActionKind.PR_FIX,
+            message_id=message.id,
+        )
     history = await service.store.list_messages(thread.id)
     workdir = await _checkout(
         service, thread, job.repo, job.number, info.default_branch, base, patch
@@ -360,6 +372,9 @@ async def fix_turn(
         )
     )
     turn, resume = await turn_route(service, user.login, thread, route)
+    turn, resume = resumed_route(service, turn, resumed, resume)
+    if resumed is not None and resume:
+        prompt = f"{RESUMED_TURN}\n\n{prompt}"
     run = new_id("run")
     token, door_env = await open_door(door, user.login)
     task = AgentTask(
@@ -373,7 +388,10 @@ async def fix_turn(
         pr=job.number,
         job_id=run,
         requested_by=user.login,
-        agent_chosen=bool(thread.agent),
+        # The agent that made the change answers for it, before the person's own.
+        agent_chosen=bool(thread.agent)
+        or resumed is not None
+        or (payload is not None and turn.primary == payload.runtime),
         untrusted_input=untrusted_input,
         resume_session=resume,
         records_token=token,
@@ -382,6 +400,7 @@ async def fix_turn(
     )
     thread.live_run = run
     await service.store.save_thread(thread)
+    cut_off = False
     try:
         outcome = await (live or LiveTurns()).run(run, service.a.agents.run(task, turn))
         if isinstance(outcome, Stopped):
@@ -389,11 +408,16 @@ async def fix_turn(
                 mode="json"
             )
         result = outcome
+    except asyncio.CancelledError:
+        # The stopping service cut it off: it stays answering, for the next start.
+        cut_off = service.closing.is_set()
+        raise
     finally:
         if door is not None:
             door.revoke(token)
-        thread.live_run = None
-        await service.store.save_thread(thread)
+        if not cut_off:
+            thread.live_run = None
+            await service.store.save_thread(thread)
     if not result.ok:
         await service.store.add_message(
             ChatMessage(

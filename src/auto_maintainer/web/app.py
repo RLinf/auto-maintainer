@@ -131,6 +131,10 @@ def create_app(
     app.state.records = RecordsDoor(app, data_dir / "sandbox" / "records.sock")
     """The agents' read-only door to this dashboard, started by the first conversation."""
     app.state.live_turns = LiveTurns()
+    # A restart takes up the conversations about a review or a change it cut off.
+    service.turn_resumers.append(
+        lambda thread: review_talk.resume_cut_off(service, app, thread)
+    )
     app.state.recent = Recent(RECENT_SECONDS, lambda: service.bus.count)
 
     install_csrf(app)

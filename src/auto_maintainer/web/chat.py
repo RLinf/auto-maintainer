@@ -214,6 +214,36 @@ async def stopped_message(
     return message
 
 
+class Resumed(BaseModel):
+    """A conversation's turn a restart cut off, taken up again: the run it was, and
+    the agent session it had (``progress.agent_session_key``), when one was kept."""
+
+    run: str
+    session: str | None = None
+    runtime: str | None = None
+
+
+RESUMED_TURN = "The service restarted while you were answering the newest message below. This is the same session: go on from where you were. Whatever was still running when the service stopped was stopped; run it again if you need its result. Then answer as the task below asks."
+
+
+def resumed_route(
+    service: Service, route: Route, resumed: Resumed | None, resume: str | None
+) -> tuple[Route, str | None]:
+    """The route and session of a turn taken up after a restart: the agent that was
+    answering, in its session, when it is ready; else ``route`` and ``resume``."""
+    if (
+        resumed is None
+        or not resumed.runtime
+        or not service.agent_ready(resumed.runtime)
+    ):
+        return route, resume
+    rest = [a for a in [route.primary, *route.fallback] if a != resumed.runtime]
+    model = route.model if route.primary == resumed.runtime else None
+    return route.model_copy(
+        update={"primary": resumed.runtime, "fallback": rest, "model": model}
+    ), resumed.session or resume
+
+
 def keep_session(thread: ChatThread, result: AgentResult) -> None:
     """Remember the session and agent of a conversation's last turn; a session
     belongs to the agent that made it."""
