@@ -1183,6 +1183,18 @@ def proposal_requester(proposal: Proposal, record: ActionRecord | None) -> str |
     return record.action.provenance.requested_by if record else None
 
 
+def waits_on(proposal: Proposal, record: ActionRecord | None, login: str) -> bool:
+    """Whether ``proposal`` waits on ``login``, among the people who may decide it:
+    they asked for it (or it is drafted for them), or nobody in particular did (the
+    service's own work, for its maintainers), or it changes the service's code (for
+    its owner). The waiting count and Home's feed show only these; the Approvals page
+    lists every proposal its viewer may decide or see."""
+    if record is not None and record.action.kind == ActionKind.CODE_UPDATE:
+        return True
+    requester = proposal_requester(proposal, record)
+    return not requester or requester.lower() == login.lower()
+
+
 async def may_decide(
     service: Service,
     user: User,
@@ -3863,6 +3875,7 @@ def build_router() -> APIRouter:
                     "action": record.model_dump(mode="json") if record else None,
                     "requester": proposal_requester(p, record),
                     "can_decide": can_decide,
+                    "waits_on_me": bool(can_decide) and waits_on(p, record, user.login),
                     "can_edit": can_edit,
                     "can_push": await _can_push(service, user, record)
                     if record is not None and record.action.kind == ActionKind.PR_FIX

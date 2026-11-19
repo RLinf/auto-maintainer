@@ -1634,3 +1634,33 @@ async def test_new_pr_change_that_touches_no_files_drafts_nothing(demo) -> None:
             for m in messages
             if m["role"] == "assistant"
         )
+
+
+async def test_the_waiting_count_holds_ones_own_drafts_not_every_reviewers(
+    demo,
+) -> None:
+    """A maintainer may decide every reviewer's draft, but only their own, and what
+    nobody in particular asked for, wait on them."""
+    h, app = demo
+    await _review(app, "maria", 42)
+    await _review(app, "walt", 43)
+    await h.settle()
+    async with _as(app, "maria") as maria:
+        listed = (await maria.get("/api/proposals")).json()
+    drafts = {
+        p["action"]["action"]["number"]: p
+        for p in listed
+        if p["action"]["action"]["kind"] == "review.post"
+    }
+    assert drafts[42]["can_decide"] and drafts[42]["waits_on_me"]
+    assert drafts[43]["can_decide"], "she maintains the repository"
+    assert not drafts[43]["waits_on_me"], "walt's draft waits on walt"
+    unasked = [p for p in listed if not p["requester"] and p["can_decide"]]
+    assert all(p["waits_on_me"] for p in unasked), "the service's own: its maintainers'"
+    async with _as(app, "walt") as walt:
+        mine = {
+            p["action"]["action"]["number"]: p["waits_on_me"]
+            for p in (await walt.get("/api/proposals")).json()
+            if p["action"]["action"]["kind"] == "review.post"
+        }
+    assert mine.get(43) is True and not mine.get(42)
