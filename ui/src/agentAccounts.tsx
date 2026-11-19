@@ -181,14 +181,11 @@ export function MyAgentsSection() {
         ) : q.data.agents.length === 0 ? (
           <Empty icon="cpu">{t("No agents on this host yet.")}</Empty>
         ) : (
-          <>
-            <MyDefault data={q.data} />
-            <div className="list">
-              {q.data.agents.map((a) => (
-                <MyAgentRow key={a.name} agent={a} apis={q.data.providers} />
-              ))}
-            </div>
-          </>
+          <div className="list">
+            {q.data.agents.map((a) => (
+              <MyAgentRow key={a.name} agent={a} apis={q.data.providers} />
+            ))}
+          </div>
         )}
       </Section>
       <AgentsUsageSection mine />
@@ -196,49 +193,52 @@ export function MyAgentsSection() {
   );
 }
 
-/** The agent what the person asks for tries first when they pick none: any of the
- * service's agents, or one they run on their own account; by default, their own
+/** The agent what the person asks for runs on when they pick none: any agent here
+ * on the service's account (those not signed in for the service are shown but
+ * cannot be chosen), or one they run on their own account; by default, their own
  * agents first and then the service's default. */
-function MyDefault({ data }: { data: MyAgents }) {
+export function MyDefaultChoice() {
   const t = useT();
+  const q = useMine();
   const set = useAct((body: { agent: string | null; own: boolean }) => api.put("/api/me/agents-default", body), [["my-agents"]]);
+  if (!q.data) return q.error ? <ErrorBox error={q.error} /> : <Skeleton rows={1} />;
+  const data = q.data;
   const mine = data.agents.filter((a) => a.setup.use_own);
   const value = data.default ? `${data.default.own ? "own" : "service"}:${data.default.agent}` : "";
   const service = agentName(data.service_default) || t("none");
   return (
-    <div className="strip default-agent" style={{ marginBottom: 12 }}>
-      <Icon name="cpu" />
-      <span>
-        {t("My requests try first")}:{" "}
-        <select
-          value={value}
-          disabled={set.isPending}
-          aria-label={t("My requests try first")}
-          onChange={(e) => {
-            const [account, ...name] = e.target.value.split(":");
-            set.mutate(e.target.value ? { agent: name.join(":"), own: account === "own" } : { agent: null, own: false });
-          }}
-        >
-          <option value="">{mine.length ? `${t("my own agents, then")} ${service}` : `${service} (${t("the service's default")})`}</option>
-          <optgroup label={t("On the service's account")}>
-            {data.agents.map((a) => (
-              <option key={`service:${a.name}`} value={`service:${a.name}`}>
+    <div className="agent-choice">
+      <label className="agent-choice-label" htmlFor="my-default-agent">
+        {t("What I ask for runs on")}
+      </label>
+      <select
+        id="my-default-agent"
+        value={value}
+        disabled={set.isPending}
+        onChange={(e) => {
+          const [account, ...name] = e.target.value.split(":");
+          set.mutate(e.target.value ? { agent: name.join(":"), own: account === "own" } : { agent: null, own: false });
+        }}
+      >
+        <option value="">{mine.length ? `${t("my own agents, then")} ${service}` : `${service} (${t("the service's default")})`}</option>
+        <optgroup label={t("On the service's account")}>
+          {data.agents.map((a) => (
+            <option key={`service:${a.name}`} value={`service:${a.name}`} disabled={a.service_usable === false && value !== `service:${a.name}`}>
+              {a.service_usable === false ? `${agentName(a.name)} (${t("not signed in for the service")})` : agentName(a.name)}
+            </option>
+          ))}
+        </optgroup>
+        {mine.length > 0 && (
+          <optgroup label={t("On my own account")}>
+            {mine.map((a) => (
+              <option key={`own:${a.name}`} value={`own:${a.name}`}>
                 {agentName(a.name)}
               </option>
             ))}
           </optgroup>
-          {mine.length > 0 && (
-            <optgroup label={t("On my own account")}>
-              {mine.map((a) => (
-                <option key={`own:${a.name}`} value={`own:${a.name}`}>
-                  {agentName(a.name)}
-                </option>
-              ))}
-            </optgroup>
-          )}
-        </select>
-      </span>
-      <span className="small muted">{t("What you ask for runs on it when you pick no agent; when it cannot run, the service's other agents take over.")}</span>
+        )}
+      </select>
+      <span className="small muted">{t("What you ask for runs on it when you pick no agent; when it cannot run, the service's other agents take over. Your own accounts run only what you ask for.")}</span>
       <ErrorBox error={set.error} />
     </div>
   );

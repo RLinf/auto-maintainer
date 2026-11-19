@@ -130,6 +130,8 @@ async def _agent_row(service: Service, user: User, name: str) -> dict[str, Any]:
         "adapter": _adapter(runtime, name),
         "protocols": sorted(PROVIDER_PROTOCOLS.get(_adapter(runtime, name), ())),
         "isolated": service.agents_isolated(name),
+        # Whether the service's own account of it can run: signed in, or on a provider.
+        "service_usable": service.agent_usable(name),
         "setup": (setup or PersonalAgent(agent=name)).model_dump(mode="json"),
         "login": login.model_dump(mode="json") if login else None,
     }

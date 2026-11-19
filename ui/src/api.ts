@@ -1151,6 +1151,8 @@ export interface AgentLogin {
 
 export interface MyAgent {
   name: string;
+  /** Whether the service's own account of it can run: signed in, or on a model provider. */
+  service_usable?: boolean;
   can_sign_in: boolean;
   sign_in_options: SignInOption[];
   signed_in: boolean | null;

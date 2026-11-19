@@ -1445,3 +1445,32 @@ details.pv-section[open] > summary { margin-bottom: 6px; }
     background: var(--surface);
   }
 }
+
+/* Which agent runs: a label, its picker, and a line on what it means, per row. */
+.agent-choice {
+  display: grid;
+  grid-template-columns: minmax(180px, 220px) minmax(0, 560px);
+  gap: 4px 12px;
+  align-items: center;
+}
+.agent-choice > select {
+  width: 100%;
+  max-width: 320px;
+}
+.agent-choice > .small,
+.agent-choice > .error-box {
+  grid-column: 2;
+}
+.agent-choice-label {
+  font-weight: 600;
+}
+@media (max-width: 640px) {
+  .agent-choice {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .agent-choice > .small,
+  .agent-choice > .error-box {
+    grid-column: 1;
+  }
+}
+

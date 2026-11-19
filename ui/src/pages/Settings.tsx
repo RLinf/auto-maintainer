@@ -18,7 +18,7 @@ import { Icon, type IconName } from "../icons";
 import { agentName } from "../agentPicker";
 import { useAgentsData } from "./Agents";
 import { SettingsChangeCard } from "../settingsChange";
-import { MyAgentsSection, MyApisSection, ServiceSignIn } from "../agentAccounts";
+import { MyAgentsSection, MyApisSection, MyDefaultChoice, ServiceSignIn } from "../agentAccounts";
 import { MyMachinesSection } from "../myMachines";
 import { MyNotesSection } from "../personNotes";
 import { ApiForm, ApiSummary, modelsFor, PROTOCOLS } from "../providerForm";
@@ -147,6 +147,7 @@ export default function SettingsPage() {
       <Tabs tabs={tabs} active={tab} onChange={setTab} />
       {tab === "agents" && (
         <div className="stack" style={{ gap: 16 }}>
+          <AgentChoice v={v} ask={ask} />
           <AgentsTab v={v} ask={ask} />
           <MyAgentsSection />
           <MyNotesSection />
@@ -752,7 +753,6 @@ function AgentsTab({ v, ask }: { v: SettingsView; ask: (p: string, send?: boolea
   };
   return (
     <Section title={t("Agents")} hint={t("The coding agent CLIs the service runs on this host")} aside={<ChangeButton onClick={() => ask(t("Change the agents: "))} />}>
-      <DefaultAgent v={v} ask={ask} />
       <div className="list">
         {v.agents.map((a) => {
           const provider = v.providers.find((p) => p.id === a.provider);
@@ -963,47 +963,64 @@ function ProviderRow({ p, canEdit }: { p: SettingsProvider; canEdit: boolean }) 
   );
 }
 
-/** The agent every task tries first, where it was chosen, and a way to change it. */
-function DefaultAgent({ v }: { v: SettingsView; ask: (p: string, send?: boolean) => void }) {
+/** Which agent runs, in one place: what the signed-in person asks for (their own
+ * choice, among the service's agents and their own accounts), and what the service
+ * does on its own (the service's default, which its owner changes). */
+function AgentChoice({ v }: { v: SettingsView; ask: (p: string, send?: boolean) => void }) {
+  const t = useT();
+  return (
+    <Section title={t("Which agent runs")} hint={t("When nobody picks an agent. A repository's own routes, and an agent picked for one request, come first.")}>
+      <div className="stack" style={{ gap: 14 }}>
+        <MyDefaultChoice />
+        <ServiceDefaultChoice v={v} />
+      </div>
+    </Section>
+  );
+}
+
+/** The agent the service's own work runs on, and what people ask for when they chose
+ * nothing else: every agent installed here, those not signed in for the service shown
+ * but not chosen; only the service's owner changes it. */
+function ServiceDefaultChoice({ v }: { v: SettingsView }) {
   const t = useT();
   const toast = useToast();
   const { name, source } = v.default_agent;
   const set = useAct((agent: string | null) => api.put<{ approved: boolean }>("/api/settings/default-agent", { agent }), [["settings"], ["memory"]]);
-  // Only agents that can run here are offered.
-  const ready = v.agents.filter((a) => a.enabled && a.installed !== false && a.usable !== false);
+  const offered = v.agents.filter((a) => a.enabled && a.installed !== false);
   const runsOn = v.routing.find((r) => r.task === "review")?.runs_on;
+  const value = source === "settings" ? (name ?? "") : "";
   return (
-    <div className="strip default-agent">
-      <Icon name="cpu" />
-      <span>
-        {t("Default agent")}:{" "}
-        <select
-          value={source === "settings" ? (name ?? "") : ""}
-          disabled={!v.access.allowed || set.isPending}
-          title={v.access.allowed ? undefined : t("Only the owner of this service changes agents.")}
-          aria-label={t("Default agent")}
-          onChange={(e) =>
-            set.mutate(e.target.value || null, {
-              onSuccess: (r) => toast({ title: r.approved ? t("Saved") : t("Change proposed"), icon: r.approved ? "check" : "inbox" }),
-            })
-          }
-        >
-          <option value="">
-            {source === "setup" && name
-              ? `${agentName(name)} (${t("chosen during setup")})`
-              : `${runsOn ? agentName(runsOn) : t("none")} (${t("the first agent that can run")})`}
+    <div className="agent-choice">
+      <label className="agent-choice-label" htmlFor="service-default-agent">
+        {t("What the service runs on its own")}
+      </label>
+      <select
+        id="service-default-agent"
+        value={value}
+        disabled={!v.access.allowed || set.isPending}
+        title={v.access.allowed ? undefined : t("Only the owner of this service changes agents.")}
+        onChange={(e) =>
+          set.mutate(e.target.value || null, {
+            onSuccess: (r) => toast({ title: r.approved ? t("Saved") : t("Change proposed"), icon: r.approved ? "check" : "inbox" }),
+          })
+        }
+      >
+        <option value="">
+          {source === "setup" && name
+            ? `${agentName(name)} (${t("chosen during setup")})`
+            : `${runsOn ? agentName(runsOn) : t("none")} (${t("the first agent that can run")})`}
+        </option>
+        {offered.map((a) => (
+          <option key={a.name} value={a.name} disabled={a.usable === false && a.name !== value}>
+            {a.usable === false ? `${agentName(a.name)} (${t("not signed in for the service")})` : agentName(a.name)}
           </option>
-          {ready.map((a) => (
-            <option key={a.name} value={a.name}>
-              {agentName(a.name)}
-            </option>
-          ))}
-          {source === "settings" && name && !ready.some((a) => a.name === name) && (
-            <option value={name}>{`${agentName(name)} (${t("cannot run: not signed in, no model provider")})`}</option>
-          )}
-        </select>
+        ))}
+      </select>
+      <span className="small muted">
+        {v.access.allowed
+          ? t("Scans, scheduled work, and what people ask for when they chose nothing else run on it. An agent signs in for the service in its row under Agents below; a person's own sign-in runs only what that person asks for.")
+          : t("Only the owner of this service changes agents.")}
       </span>
-      <span className="small muted">{t("Every task tries it first; agents that are not signed in and have no model provider are passed over.")}</span>
     </div>
   );
 }
@@ -1017,8 +1034,8 @@ function RoutingTab({ v, ask }: { v: SettingsView; ask: (p: string, send?: boole
       aside={<ChangeButton onClick={() => ask(t("Change which agent does which task: "))} />}
       flush
     >
-      <div style={{ padding: "0 14px 10px" }}>
-        <DefaultAgent v={v} ask={ask} />
+      <div className="small muted" style={{ padding: "0 14px 10px" }}>
+        {t("Each task runs first on the service's default agent, chosen at the top of the Agents tab, unless a row below names another.")}
       </div>
       <div className="table-wrap">
         <table>
