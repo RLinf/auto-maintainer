@@ -254,6 +254,55 @@ async def test_a_kept_permission_is_read_again_before_it_runs_out(
         await h.close()
 
 
+async def test_a_refusal_is_read_again_before_it_is_shown(tmp_path: Path) -> None:
+    """Someone refused a repository and then given access on the forge sees it on
+    their next page load, not when the kept refusal runs out: a page with nothing
+    else to show waits for the read, one that shows other repositories reads in the
+    background and says so (``rechecking``), and opening the repository waits."""
+    from auto_maintainer.domain.permissions import Permission
+    from auto_maintainer.domain.ports import RepoRecord
+    from auto_maintainer.web.api import may_view, rechecking, visible_repos
+    from auto_maintainer.web.auth import User
+
+    h = await build_demo(tmp_path)
+    try:
+        await h.service.store.save_repo(RepoRecord(repo="acme/gadget"))
+        repos = [r.repo for r in await h.service.store.list_repos()]
+        assert len(repos) == 2
+        new = User(login="newcomer")
+        for repo in repos:
+            h.forge.set_permission(repo, "newcomer", Permission.NONE)
+        assert await visible_repos(h.service, new, recheck=True) == []
+
+        h.forge.set_permission(repos[0], "newcomer", Permission.WRITE)
+        h.clock.advance(seconds=30)
+        assert await visible_repos(h.service, new) == [], "a view keeps the refusal"
+        assert await visible_repos(h.service, new, recheck=True) == [repos[0]], (
+            "a page that would show nothing waits for the read"
+        )
+
+        h.forge.set_permission(repos[1], "newcomer", Permission.WRITE)
+        h.clock.advance(seconds=30)
+        assert await visible_repos(h.service, new, recheck=True) == [repos[0]]
+        assert rechecking(h.service, new), "read in the background, and said so"
+        for _ in range(50):
+            if not rechecking(h.service, new):
+                break
+            await asyncio.sleep(0.01)
+        assert await visible_repos(h.service, new) == repos[:2]
+
+        late = User(login="late")
+        h.forge.set_permission(repos[1], "late", Permission.NONE)
+        assert not await may_view(h.service, late, repos[1])
+        h.forge.set_permission(repos[1], "late", Permission.WRITE)
+        h.clock.advance(seconds=30)
+        assert await may_view(h.service, late, repos[1]), (
+            "opening it waits for the read"
+        )
+    finally:
+        await h.close()
+
+
 async def test_an_agents_sign_in_shows_at_once_while_its_cli_is_asked_again(
     tmp_path: Path,
 ) -> None:

@@ -30,7 +30,7 @@ import re
 import time
 from collections import deque
 from collections.abc import Awaitable
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, TypeVar
 
@@ -150,6 +150,9 @@ the view reads it again first."""
 PERMISSION_REFRESH = timedelta(minutes=7)
 """From this age a view still shows the kept permission at once, and it is read again
 in the background, so pages people keep open never wait for the forge."""
+REFUSAL_RECHECK = timedelta(seconds=10)
+"""A refusal is read again before it is shown (``permission(recheck=True)``) unless
+the kept permission is younger than this, so one page's requests share one read."""
 
 log = logging.getLogger(__name__)
 T = TypeVar("T")
@@ -766,32 +769,43 @@ async def approvals_of(
     return approval_status(pr, branch, owners, writers)
 
 
-async def permission(service: Service, user: User, repo: str) -> Permission:
-    """The user's permission on ``repo``, cached for at most ``PERMISSION_TTL`` per
-    repository, for viewing only; one older than ``PERMISSION_REFRESH`` is still
-    shown at once while it is read again in the background."""
-    now = service.clock.now()
-    record = await service.store.get_user(user.login)
+async def _kept_permission(
+    service: Service, user: User, repo: str
+) -> tuple[Any, Permission | None, datetime | None]:
+    """The user's record (a new one when the service has none), and the permission
+    on ``repo`` it keeps, with when that was read."""
     from ..domain.ports import UserRecord
 
-    if record is None:
-        record = UserRecord(
-            login=user.login, name=user.name, avatar_url=user.avatar_url
-        )
-    checked = record.permissions_checked.get(repo)
+    record = await service.store.get_user(user.login) or UserRecord(
+        login=user.login, name=user.name, avatar_url=user.avatar_url
+    )
     kept = Permission(record.permissions[repo]) if repo in record.permissions else None
-    if kept is not None and checked and now - checked < PERMISSION_REFRESH:
-        return kept
+    return record, kept, record.permissions_checked.get(repo)
+
+
+_SAVES: dict[str, asyncio.Lock] = {}
+"""One lock per person (lowercase login) for keeping a permission read on their
+record."""
+
+
+def _read_permission(
+    service: Service, user: User, repo: str, record: Any
+) -> asyncio.Future[Permission]:
+    """The read of the user's permission on ``repo`` from the forge, kept on their
+    record once it answers: the one under way, or a new one."""
     key = (repo, user.login.lower())
     reading = service._permission_reads.get(key)
     if reading is None:
 
         async def _load() -> Permission:
             perm = await service.a.forge.get_permission(repo, user.login)
-            latest = await service.store.get_user(user.login) or record
-            latest.permissions[repo] = perm.value
-            latest.permissions_checked[repo] = service.clock.now()
-            await service.store.save_user(latest)
+            # Reads for several repositories end at once: each saves onto the
+            # newest record, or one would drop what another just kept.
+            async with _SAVES.setdefault(user.login.lower(), asyncio.Lock()):
+                latest = await service.store.get_user(user.login) or record
+                latest.permissions[repo] = perm.value
+                latest.permissions_checked[repo] = service.clock.now()
+                await service.store.save_user(latest)
             return perm
 
         reading = asyncio.ensure_future(_load())
@@ -799,9 +813,48 @@ async def permission(service: Service, user: User, repo: str) -> Permission:
         reading.add_done_callback(lambda _: service._permission_reads.pop(key, None))
         # Read: a refresh nobody waits for may fail, and the next view tries again.
         reading.add_done_callback(lambda f: f.cancelled() or f.exception())
+    return reading
+
+
+async def permission(
+    service: Service, user: User, repo: str, *, recheck: bool = False
+) -> Permission:
+    """The user's permission on ``repo``, cached for at most ``PERMISSION_TTL`` per
+    repository, for viewing only; one older than ``PERMISSION_REFRESH`` is still
+    shown at once while it is read again in the background. With ``recheck`` (before
+    a refusal is shown) one older than ``REFUSAL_RECHECK`` is read again and waited
+    for, so someone given access on the forge has it on their next load; when that
+    read fails, the kept one stands."""
+    now = service.clock.now()
+    record, kept, checked = await _kept_permission(service, user, repo)
+    fresh_for = REFUSAL_RECHECK if recheck else PERMISSION_REFRESH
+    if kept is not None and checked and now - checked < fresh_for:
+        return kept
+    reading = _read_permission(service, user, repo, record)
+    if recheck and kept is not None:
+        try:
+            return await asyncio.shield(reading)
+        except Exception:  # the forge did not answer: the kept refusal stands
+            return kept
     if kept is not None and checked and now - checked < PERMISSION_TTL:
         return kept
     return await asyncio.shield(reading)
+
+
+async def recheck_later(service: Service, user: User, repo: str) -> bool:
+    """Read the user's permission on ``repo`` again in the background unless it was
+    read in the last ``REFUSAL_RECHECK``; whether a read is under way."""
+    record, kept, checked = await _kept_permission(service, user, repo)
+    if kept is not None and checked and service.clock.now() - checked < REFUSAL_RECHECK:
+        return (repo, user.login.lower()) in service._permission_reads
+    _read_permission(service, user, repo, record)
+    return True
+
+
+def rechecking(service: Service, user: User) -> bool:
+    """Whether a read of the user's permission is under way."""
+    login = user.login.lower()
+    return any(who == login for _, who in service._permission_reads)
 
 
 async def permissions_of(
@@ -820,17 +873,27 @@ async def permissions_of(
     return dict(zip(by_lower.keys(), resolved, strict=True))
 
 
-async def may_view(service: Service, user: User, repo: str) -> bool:
+async def may_view(
+    service: Service, user: User, repo: str, *, recheck: bool = True
+) -> bool:
     """Whether ``user`` may use the dashboard for ``repo`` (design 2.3): write access
     on GitHub, or a place in its People record with access to it, unless
-    ``config/access.yaml`` blocks them (design 2.7)."""
+    ``config/access.yaml`` blocks them (design 2.7). With ``recheck``, a refusal reads
+    their permission again first (``permission(recheck=True)``)."""
     if service.access.blocked(user.login, repo):
         return False
-    perm = await permission(service, user, repo)
-    if perm.at_least(Permission.WRITE):
+
+    async def allowed(perm: Permission) -> bool:
+        if perm.at_least(Permission.WRITE):
+            return True
+        return perm.at_least(Permission.READ) and (
+            user.login.lower() in await service.governance.members_of(repo)
+        )
+
+    if await allowed(await permission(service, user, repo)):
         return True
-    return perm.at_least(Permission.READ) and (
-        user.login.lower() in await service.governance.members_of(repo)
+    return recheck and await allowed(
+        await permission(service, user, repo, recheck=True)
     )
 
 
@@ -844,14 +907,33 @@ async def require_view(service: Service, user: User, repo: str) -> None:
         )
 
 
-async def visible_repos(service: Service, user: User) -> list[str]:
+async def visible_repos(
+    service: Service, user: User, *, recheck: bool = False
+) -> list[str]:
+    """The repositories ``user`` may see here, by their kept permissions. With
+    ``recheck`` (a page loading), each refusal is read again: waited for when they
+    would see none, else in the background for ``rechecking`` to report, so a page
+    never waits on the forge for a person who already sees something."""
     records = await service.store.list_repos()
     if not records:
         return []
+    repos = [record.repo for record in records]
     allowed = await asyncio.gather(
-        *(may_view(service, user, record.repo) for record in records)
+        *(may_view(service, user, repo, recheck=False) for repo in repos)
     )
-    return [record.repo for record, ok in zip(records, allowed, strict=True) if ok]
+    shown = {repo for repo, ok in zip(repos, allowed, strict=True) if ok}
+    refused = [
+        repo
+        for repo in repos
+        if repo not in shown and not service.access.blocked(user.login, repo)
+    ]
+    if recheck and refused and not shown:
+        again = await asyncio.gather(*(may_view(service, user, r) for r in refused))
+        shown |= {repo for repo, ok in zip(refused, again, strict=True) if ok}
+    elif recheck:
+        for repo in refused:
+            await recheck_later(service, user, repo)
+    return [repo for repo in repos if repo in shown]
 
 
 def _repo(repo: str) -> str:
@@ -1018,11 +1100,14 @@ async def sees_internals(service: Service, user: User) -> bool:
     return False
 
 
-async def access_of(service: Service, user: User, repo: str) -> Effective:
+async def access_of(
+    service: Service, user: User, repo: str, *, recheck: bool = False
+) -> Effective:
     """``user``'s role and permissions in ``repo`` (``Service.access_for``, design
-    2.7), with their permission read as the views read it."""
+    2.7), with their permission read as the views read it (``recheck``: read again,
+    before a refusal)."""
     return await service.access_for(
-        user.login, repo, await permission(service, user, repo)
+        user.login, repo, await permission(service, user, repo, recheck=recheck)
     )
 
 
@@ -1030,8 +1115,11 @@ async def require_grant(
     service: Service, user: User, repo: str, grant: Grant, doing: str
 ) -> Effective:
     """403 unless ``user`` holds ``grant`` in ``repo``; ``doing`` names what they
-    tried, for the message."""
+    tried, for the message. Someone with no role there has their permission read
+    again first."""
     effective = await access_of(service, user, repo)
+    if effective.role is None:  # no access at all: read their permission again
+        effective = await access_of(service, user, repo, recheck=True)
     if not effective.can(grant):
         why = effective.withheld.get(grant)
         role = (
@@ -1447,13 +1535,18 @@ def build_router() -> APIRouter:
 
     @r.get("/me")
     async def me(
-        request: Request, user: User = Depends(current_user)
+        request: Request, recheck: bool = False, user: User = Depends(current_user)
     ) -> dict[str, Any]:
+        """Who is signed in and what they see. A page asks with ``recheck`` when it
+        loads, so a repository they were just given shows (``visible_repos``);
+        ``rechecking`` says a read is still under way and the page asks again."""
         service = service_of(request)
+        repos = await visible_repos(service, user, recheck=recheck)
         return {
             **user.model_dump(),
             "operator": user.login in service.settings.operators,
-            "repos": await visible_repos(service, user),
+            "repos": repos,
+            "rechecking": rechecking(service, user),
             "dev_mode": service.settings.dev_mode,
             "standby": service.settings.standby,
             "paused": bool(await service.store.get_state("paused")),

@@ -2,6 +2,7 @@
 // pages read one cache entry each and the live event stream refreshes them all.
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useRef } from "react";
 import { openJob } from "./openJob";
 import {
   api,
@@ -16,14 +17,36 @@ import {
   type SettingsView,
 } from "./api";
 
+/** Whether this page load has asked for its repositories yet: the first ask reads
+ * again whatever the person was refused (``GET /api/me?recheck=1``). */
+let loaded = false;
+
 export function useMe() {
-  return useQuery({
+  const queryClient = useQueryClient();
+  const me = useQuery({
     queryKey: ["me"],
-    queryFn: () => api.get<Me>("/api/me"),
+    queryFn: () => {
+      const first = !loaded;
+      loaded = true;
+      return api.get<Me>(first ? "/api/me?recheck=1" : "/api/me");
+    },
     // Signed out, or the host is not set up: checking again when the tab regains focus
     // would redraw the sign-in or setup page from scratch, losing a code in progress.
     refetchOnWindowFocus: (query) => query.state.data !== undefined,
+    // A read of their access is under way: ask again shortly for what it found.
+    refetchInterval: (query) => (query.state.data?.rechecking ? 3000 : false),
   });
+  // A repository they were just given (or lost) changes what every page shows.
+  const repos = me.data?.repos.join("\n");
+  const seen = useRef(repos);
+  useEffect(() => {
+    if (repos === undefined) return;
+    if (seen.current !== undefined && seen.current !== repos) {
+      void queryClient.invalidateQueries({ predicate: (q) => q.queryKey[0] !== "me" });
+    }
+    seen.current = repos;
+  }, [repos, queryClient]);
+  return me;
 }
 
 /** The script this tab loaded, by name (``/assets/index-<hash>.js``); none under the

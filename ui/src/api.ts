@@ -88,6 +88,8 @@ export interface Me {
   paused: boolean;
   pending_questions: number;
   can_post_as_me?: boolean;
+  /** A read of their access on the forge is under way: ask again shortly. */
+  rechecking?: boolean;
 }
 
 export interface ServiceView {
