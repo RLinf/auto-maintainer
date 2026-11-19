@@ -21,7 +21,9 @@ it in the session's run folder on the machine, and its output streams back line 
 line, then a last record with the exit code. Nothing but an open session's token
 gets a command run, and the agent never holds the machine's SSH key. The server also
 closes sessions past their time limit, and on start cleans up the sessions a
-previous process left open.
+previous process left open. A review's agent asks here for the review skill's
+reproduction agent (``POST /reproduce``); the service decides, through the hook it
+installs (``on_reproduce``), whether the session's job may start one.
 """
 
 from __future__ import annotations
@@ -31,7 +33,7 @@ import contextlib
 import json
 import logging
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -50,14 +52,19 @@ END = "\x1e"
 
 JANITOR_SECONDS = 30
 
+ReproduceHook = Callable[[dict[str, Any], str], Awaitable[dict[str, Any]]]
+"""Starts the reproduction a session's job asks for: given who holds the session
+(its job, repository, PR, and machine) and the brief, what to tell the agent."""
+
 
 class LabSessionServer:
-    """Serves ``POST /run``, ``POST /sync``, ``POST /gpus``, and ``GET /session`` on
-    ``socket_path``."""
+    """Serves ``POST /run``, ``POST /sync``, ``POST /gpus``, ``POST /reproduce``, and
+    ``GET /session`` on ``socket_path``."""
 
     def __init__(self, socket_path: Path, labs: LabExecutor) -> None:
         self.socket_path = socket_path
         self.labs = labs
+        self.on_reproduce: ReproduceHook | None = None
         self._server: uvicorn.Server | None = None
         self._task: asyncio.Task[None] | None = None
         self._janitor: asyncio.Task[None] | None = None
@@ -67,6 +74,7 @@ class LabSessionServer:
                 Route("/session", self._session, methods=["GET"]),
                 Route("/sync", self._sync, methods=["POST"]),
                 Route("/gpus", self._gpus, methods=["POST"]),
+                Route("/reproduce", self._reproduce, methods=["POST"]),
             ]
         )
 
@@ -165,6 +173,25 @@ class LabSessionServer:
         except Exception as e:  # reported to the agent, not raised into the server
             log.exception("leasing GPUs for a session failed")
             out = {"error": f"could not lease GPUs: {e}"}
+        return JSONResponse(out)
+
+    async def _reproduce(self, request: Request) -> Response:
+        """``{"brief": ...}``: start the review skill's reproduction agent for the
+        session's job (``on_reproduce``)."""
+        owner = self.labs.session_owner(request.headers.get("x-lab-session", ""))
+        if owner is None:
+            return JSONResponse({"error": "no open session for this token"}, 403)
+        if self.on_reproduce is None:
+            return JSONResponse({"error": "this service starts no reproductions"}, 404)
+        try:
+            brief = str(json.loads(await request.body() or b"{}")["brief"])
+        except (ValueError, KeyError, TypeError):
+            return JSONResponse({"error": 'send {"brief": ...}'}, 400)
+        try:
+            out = await self.on_reproduce(owner, brief)
+        except Exception as e:  # reported to the agent, not raised into the server
+            log.exception("starting a review's reproduction failed")
+            out = {"error": f"the reproduction could not start: {e}"}
         return JSONResponse(out)
 
     async def _run(self, request: Request) -> Response:

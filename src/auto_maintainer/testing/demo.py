@@ -316,6 +316,8 @@ def _talk(task: AgentTask, kind: str) -> dict[str, Any]:
 
 
 REPRODUCED = "That reproduction has ended"
+FINISHED = "The reproduction you started has ended"
+"""How a review's agent is resumed with the record of the reproduction it started."""
 """In the prompt that adds a finished reproduction to the review it followed."""
 
 
@@ -505,6 +507,9 @@ def _answer(task: AgentTask) -> dict[str, Any]:
         return _talk(task, kind)
     if kind in ("review", "followup") and REPRODUCED in task.prompt:
         return _with_reproduction(kind)
+    if kind in ("review", "followup") and FINISHED in task.prompt:
+        # The review itself, now with the run's result.
+        return _with_reproduction(kind)["review" if kind == "review" else "followup"]
     if kind == "triage" and task.activity == "machine_choice":
         # The first machine listed: the asker's own come first.
         listed = task.prompt.split("Machines, in order:\n", 1)[-1]

@@ -15,19 +15,30 @@
 """A review's session on a test machine (design 5.5, 5.10).
 
 A review, or a follow-up, is one piece of work: the agent that reviews the PR also
-tests and reproduces it, as it sees fit, on a test machine the repository uses. Before
-the agent starts, the playbook asks for a session with a ``lab.review`` action (on by
-default, ``domain.actions.ON_BY_DEFAULT``; a repository sets it lower like any level)
-and waits until the actuator has opened it: the base and head code copied over, an
-idle GPU leased when there is one. The agent then reaches the machine with ``lab``,
-every command checked against the machine's rules, and the playbook closes the session
-when the agent is done. Without a machine, or when the rule holds the PR back, the
-review runs as before and says why nothing ran.
+tests it, as it sees fit, on a test machine the repository uses, whether or not
+someone asked for the review. Before the agent starts, the playbook asks for a session
+with a ``lab.review`` action (on by default, ``domain.actions.ON_BY_DEFAULT``; a
+repository sets it lower like any level) and waits until the actuator has opened it:
+the base and head code copied over, no GPU until a check takes one. The agent then
+reaches the machine with ``lab``, every command checked against the machine's rules:
+it runs the skill's checks and its own small experiments to confirm or rule out what
+it suspects. Without a machine, or when a rule holds the PR back, the review runs
+without one and says why nothing ran.
+
+Whether the PR needs a reproduction (its documented workflow run as a user would) is
+the agent's to decide, by its skill. The skill's reproduction agent is a fresh agent,
+apart from the one that read the code: the reviewer starts it with ``lab
+--reproduce`` and a brief (``Service.start_review_reproduction``), and it runs on the
+same machine while the review goes on (``reproduce.py``). When the reviewer's turn
+ends, the review waits for that run (``reproduction_outcome``), then resumes the same
+agent with the run's record (``FINISH``), so the review reports the reproduction in
+one piece. The session stays open meanwhile, for checks the run's result calls for.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from typing import Any
 
 from ..domain.actions import (
@@ -42,6 +53,7 @@ from ..domain.actions import (
 from ..domain.events import EventKind
 from ..domain.labs import setup_lines, time_limit
 from ..domain.profile import RepoProfile
+from ..domain.records import JobStatus
 from ..domain.snapshot import PrSnapshot
 from ..policy.engine import PolicyFacts, level_for
 from .base import PlaybookContext, PlaybookResult, Wait
@@ -57,6 +69,16 @@ OPEN_WAIT_SECONDS = 3600
 SESSION_GRACE_SECONDS = 600
 """How much longer than its session the agent's run may take, to write the review."""
 
+REVIEW_REPRODUCTION = "review_reproduction:{job}"
+"""The reproduction a review's agent started: the request's event id, the machine,
+and when; once the run ended, its ``record``; ``used`` once the review took it."""
+
+REPRODUCTION_WAIT_SECONDS = 1800
+"""How long a review waits at a time for its reproduction (a finished job wakes it)."""
+
+REPRODUCTION_GIVE_UP_SECONDS = 12 * 3600
+"""How long after it started a review stops waiting for its reproduction."""
+
 MACHINE = """Test machine {lab} is yours while you work: run on it whatever your skill has you run.
 - `lab -- 'COMMAND'` (one quoted string) runs COMMAND in a fresh shell in a copy of the PR's head on the machine, after the machine's own setup; `lab --side base -- 'COMMAND'` runs it in the code before the PR. Chain what needs one shell with `&&`.
 - Keep environments, downloaded checkpoints and datasets, and caches in `$AM_LAB_KEEP`, this PR's folder on the machine: later sessions of the PR get it too, while the copies of the code are fresh each session and removed with it. Look there first; an earlier session may have left what you need.
@@ -65,7 +87,14 @@ MACHINE = """Test machine {lab} is yours while you work: run on it whatever your
 - The working directory here is a checkout of the PR's head to read; the PR's code runs on the machine, through `lab`. To read GitHub (this PR, its reviews and CI, other PRs and issues), use gh; it reads only.
 - The machine is shared: it refuses commands that would reach beyond the session (sudo, shutting it down, killing processes it did not start, stopping every Ray job, writing system folders).{setup}{about}"""
 
-REPRODUCTION = """The skill's reproduction agent is not yours to start: the service runs one on {lab} alongside you, following the skill, and adds its record to your review. Where the skill asks how the PR was reproduced, say that a run following the PR's documentation is underway, when the PR needs one. It works in this PR's `$AM_LAB_KEEP` too: keep what you set up there in a folder of your own. It needs the machine's GPUs as well: take one only for a check that needs it, and give it back (`lab --gpus 0`) once that check is done."""
+EXPERIMENTS = """Use the machine to test what you read, not only to run the skill's checks: when you suspect a bug, a regression, or a claim that may not hold, write a small script or test that shows it, run it on the head (and with `--side base` to compare), and give what it showed as the finding's evidence. Report only what you ran and saw."""
+
+REPRODUCTION = """Whether this PR needs a reproduction is yours to decide, as the skill says. You do not reproduce it yourself: when it needs one, start the skill's reproduction agent with `lab --reproduce`, giving it on standard input the brief the skill describes (`lab --reproduce <<'EOF'` ... `EOF`). A fresh agent then runs it on {lab} while you review, so start it as soon as you know. When your review is written, you get the run's record to complete it; until then, where the skill asks how the PR was reproduced, say that the run is underway. That agent works in this PR's `$AM_LAB_KEEP` too, so keep what you set up there in a folder of your own, and it needs the machine's GPUs: take one only for a check that needs it, and give it back (`lab --gpus 0`) once that check is done."""
+
+FINISH = """The reproduction you started has ended; its record is below. Finish your review with it, as the skill says: fill in where the skill asks how the PR was reproduced from the record (the settings it used, the functional and the metric result, the first failure and every intervention, and whether the documentation could be followed), and change a finding or the verdict only where the run settles it.{session} Then give your whole review again, as before.
+
+{record}"""
+"""The turn that resumes a review's agent once its reproduction ended."""
 
 
 EARLIER = """What earlier agents did on test machines for this PR, newest first: when, at which commit, what they concluded, and the commands they ran with their exit codes. Start from it: what they set up for this PR may still be in `$AM_LAB_KEEP`; what they established at the same commit need not be shown again; what failed for a reason that still holds need not be tried the same way. It is a record of what ran, not a verdict: report only what you saw yourself."""
@@ -223,8 +252,9 @@ class ReviewMachine:
         return {"not_tested": self.note} if self.note else {}
 
     def testing(self, ctx: PlaybookContext, *, reproduce: bool) -> str:
-        """What the agent is told about its session: the machine's facts, and for a
-        review, that the service runs the skill's reproduction agent."""
+        """What the agent is told about its session: the machine's facts, that its
+        own experiments belong there, and, with ``reproduce``, how it starts the
+        skill's reproduction agent when it judges the PR needs one."""
         assert self.lab
         machine = ctx.service.machines.get(self.lab)
         binding = ctx.profile.labs.get(self.lab) if ctx.profile else None
@@ -236,7 +266,12 @@ class ReviewMachine:
             time_limit(machine, binding) // 60 if machine else None,
             machine.suited_for if machine else "",
         )
-        return facts + ("\n" + REPRODUCTION.format(lab=self.lab) if reproduce else "")
+        return (
+            facts
+            + "\n"
+            + EXPERIMENTS
+            + ("\n" + REPRODUCTION.format(lab=self.lab) if reproduce else "")
+        )
 
 
 async def machine_for(
@@ -400,3 +435,101 @@ async def close(ctx: PlaybookContext, machine: ReviewMachine) -> None:
         if closed is not None:
             machine.commands = list(closed.get("commands") or [])
     machine.session_id = machine.token = None
+
+
+# ---- the reproduction a review's agent starts ---------------------------------------
+
+
+async def give_record(
+    store: Any, review_job: str, request_id: str, record: dict[str, Any]
+) -> bool:
+    """Hand the record of the reproduction ``request_id`` to the review job that
+    started it, which waits for it; ``False`` when no review waits for this run."""
+    key = REVIEW_REPRODUCTION.format(job=review_job)
+    kept = await store.get_state(key)
+    if not isinstance(kept, dict) or kept.get("event") != request_id:
+        return False
+    await store.set_state(key, {**kept, "record": record})
+    return True
+
+
+def _record_text(record: dict[str, Any]) -> str:
+    if record.get("not_run"):
+        return f"The reproduction did not run: {record['not_run']}."
+    if record.get("conclusion") == "not_needed":
+        return (
+            "The reproduction agent judged that the PR needs no reproduction and ran "
+            "nothing: " + str(record.get("comment") or "")
+        )
+    return str(record.get("record_text") or record.get("comment") or "")
+
+
+async def reproduction_outcome(
+    ctx: PlaybookContext, pr: PrSnapshot
+) -> PlaybookResult | str | None:
+    """Where the reproduction this job's agent started stands: ``None`` when it
+    started none (or the review already took its record); a wait while it runs; once
+    it ended, its record for the agent's last turn (``FINISH``)."""
+    key = REVIEW_REPRODUCTION.format(job=ctx.job.id)
+    kept = await ctx.store.get_state(key)
+    if not isinstance(kept, dict) or not kept.get("event") or kept.get("used"):
+        return None
+    record = kept.get("record")
+    if not isinstance(record, dict):
+        job = await ctx.store.find_job(
+            "reproduce", f"reproduce:{pr.repo}#{pr.number}:req:{kept['event']}"
+        )
+        started = datetime.fromisoformat(str(kept.get("at")))
+        if job is not None and job.status in (JobStatus.DONE, JobStatus.FAILED):
+            record = {
+                "not_run": f"it ended without a record ({job.status.value})"
+                + (f": {job.error}" if job.error else "")
+            }
+        elif ctx.clock.now() - started > timedelta(
+            seconds=REPRODUCTION_GIVE_UP_SECONDS
+        ):
+            record = {
+                "not_run": "it had not finished "
+                f"{REPRODUCTION_GIVE_UP_SECONDS // 3600} hours after it started"
+            }
+        else:
+            return PlaybookResult(
+                wait=Wait(
+                    kinds=[EventKind.JOB_FINISHED],
+                    seconds=REPRODUCTION_WAIT_SECONDS,
+                    reason=f"waiting for the reproduction its agent started on "
+                    f"{kept.get('lab') or 'the test machine'}",
+                ),
+                result={"reproduction": kept["event"]},
+            )
+    return _record_text(record)
+
+
+async def reproduction_taken(ctx: PlaybookContext) -> None:
+    """Mark the reproduction's record as in the review, so a later try does not ask
+    the agent again."""
+    key = REVIEW_REPRODUCTION.format(job=ctx.job.id)
+    kept = await ctx.store.get_state(key)
+    if isinstance(kept, dict):
+        await ctx.store.set_state(key, {**kept, "used": True})
+
+
+async def reproduction_running(ctx: PlaybookContext) -> bool:
+    """Whether this job's agent started a reproduction whose record the review has
+    not taken yet."""
+    kept = await ctx.store.get_state(REVIEW_REPRODUCTION.format(job=ctx.job.id))
+    return isinstance(kept, dict) and bool(kept.get("event")) and not kept.get("used")
+
+
+def finish_prompt(record: str, machine: ReviewMachine) -> str:
+    """The agent's last turn: the run's record, and whether its session is still
+    open for a check the run calls for."""
+    session = (
+        f" Your session on {machine.lab} is still open, for a check the run's result "
+        "calls for."
+        if machine.token
+        else ""
+    )
+    return FINISH.format(
+        session=session, record=untrusted("reproduction", record, 40_000)
+    )

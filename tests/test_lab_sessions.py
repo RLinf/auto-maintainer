@@ -216,3 +216,42 @@ def test_the_machine_refuses_a_command_only_where_it_runs(
     from auto_maintainer.domain.labs import script_refusals
 
     assert script_refusals(command) == refused
+
+
+async def test_lab_asks_the_service_for_the_reviews_reproduction(door) -> None:
+    """`lab --reproduce` hands its brief and who holds the session to the service's
+    hook, and says what the service answered; without the hook it starts nothing."""
+    host, server, token = door
+    before = len(host.commands)
+    code, _, err = await _lab(server, token, "--reproduce", "--", "follow the docs")
+    assert code == 1 and "starts no reproductions" in err
+    asked: list[tuple[dict, str]] = []
+
+    async def start(owner: dict, brief: str) -> dict:
+        asked.append((owner, brief))
+        return {"started": True, "note": "it starts on gpu-01"}
+
+    server.on_reproduce = start
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable,
+        str(LAB_CLI),
+        "--reproduce",
+        env={"AM_LAB_SESSION": token, "AM_LAB_SOCKET": str(server.socket_path)},
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    out, _ = await proc.communicate(b"Run the quickstart on one GPU.\n")
+    assert proc.returncode == 0 and out.decode().strip() == "it starts on gpu-01"
+    [(owner, brief)] = asked
+    assert (owner["repo"], owner["number"], owner["lab"]) == (
+        "acme/widget",
+        42,
+        "gpu-01",
+    )
+    assert brief == "Run the quickstart on one GPU.\n"
+    code, _, err = await _lab(server, "not-a-token", "--reproduce", "--", "x")
+    assert code == 1 and "no open session" in err
+    assert len(asked) == 1 and len(host.commands) == before, (
+        "nothing ran on the machine"
+    )

@@ -516,6 +516,19 @@ class LabExecutor:
             "keep_dir": session.env.get(KEEP_VAR),
         }
 
+    def session_owner(self, token: str) -> dict[str, Any] | None:
+        """Who holds the session of ``token``, for the service rather than the agent:
+        the job whose agent works in it, its repository and PR, and the machine."""
+        session = self._by_token(token)
+        if session is None:
+            return None
+        return {
+            "job": session.job,
+            "repo": session.repo,
+            "number": session.number,
+            "lab": session.lab,
+        }
+
     async def run_in_session(
         self,
         token: str,

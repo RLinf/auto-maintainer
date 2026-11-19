@@ -350,4 +350,7 @@ async def build_service(cfg: HostConfig, dev: bool = False) -> Service:
         code_branch=cfg.self_update.branch,
         owner=cfg.owner,
     )
-    return Service(adapters, settings)
+    service = Service(adapters, settings)
+    # A review's agent starts the skill's reproduction through its session's socket.
+    lab_sessions.on_reproduce = service.start_review_reproduction
+    return service

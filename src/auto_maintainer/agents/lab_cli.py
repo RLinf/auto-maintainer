@@ -23,12 +23,16 @@ default, or ``base``) on the machine; its output streams here as it comes, and
 ``lab`` exits with the command's exit code. When the agent changes the code (fixing
 CI), ``lab --sync`` copies its working directory to the head side first. ``lab
 --gpus N`` makes the session hold N GPUs, waiting up to ``--wait MINUTES`` for them
-to be idle; the commands after it see all of them.
+to be idle; the commands after it see all of them. In a review's session, ``lab
+--reproduce`` asks the service to start the review skill's reproduction agent with
+the brief on standard input: a fresh agent that runs it on the same machine while
+the review goes on.
 
     lab [--side head|base] [--timeout MINUTES] -- COMMAND ...
     lab --gpus N [--wait MINUTES]
     lab --sync
     lab --info
+    lab --reproduce < BRIEF
 """
 
 from __future__ import annotations
@@ -97,6 +101,27 @@ def main(argv: list[str]) -> int:
                 file=sys.stderr,
             )
             return 1
+        return 0
+    if rest[:1] == ["--reproduce"]:
+        brief = " ".join(rest[2:]) if rest[1:2] == ["--"] else sys.stdin.read()
+        if not brief.strip():
+            print(
+                "lab: give the reproduction's brief on standard input", file=sys.stderr
+            )
+            return 2
+        conn = _UnixConnection(path)
+        conn.request(
+            "POST",
+            "/reproduce",
+            body=json.dumps({"brief": brief}),
+            headers={"x-lab-session": token, "content-type": "application/json"},
+        )
+        reply = conn.getresponse()
+        out = json.loads(reply.read().decode() or "{}")
+        if reply.status != 200 or out.get("error"):
+            print(f"lab: {out.get('error') or reply.status}", file=sys.stderr)
+            return 1
+        print(out.get("note") or "the reproduction started")
         return 0
     if rest[:1] == ["--sync"]:
         conn = _UnixConnection(path)

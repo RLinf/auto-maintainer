@@ -626,11 +626,53 @@ def _review_sessions(runner: Any) -> list[dict[str, Any]]:
 
 
 def _reviews(h: Any) -> list[Any]:
-    """The review agents' tasks, apart from revisions of their drafts."""
+    """The review agents' first turns, apart from their last turns with a
+    reproduction's record and revisions of their drafts."""
     return [
         t
         for t in h.runner.tasks
-        if t.kind == "review" and "That reproduction has ended" not in t.prompt
+        if t.kind == "review"
+        and "That reproduction has ended" not in t.prompt
+        and "The reproduction you started has ended" not in t.prompt
+        and not t.prompt.startswith("You judge the quality of PR")
+    ]
+
+
+BRIEF = "Follow docs/start.md as a user would, on one GPU, with the e2e config."
+
+
+def _starts_reproduction(h: Any) -> list[dict[str, Any]]:
+    """Have the review's agent start the skill's reproduction from its session, as
+    `lab --reproduce` does, then answer as the demo's agent does. Returns what the
+    service told it."""
+    answer = h.runner.handlers["review"]
+    told: list[dict[str, Any]] = []
+
+    async def reviewing(task: Any) -> Any:
+        if task.lab_session and "lab --reproduce" in task.prompt and not told:
+            told.append(
+                await h.service.start_review_reproduction(
+                    {
+                        "job": task.job_id,
+                        "repo": task.repo,
+                        "number": task.pr,
+                        "lab": "gpu-01",
+                    },
+                    BRIEF,
+                )
+            )
+        return answer(task)
+
+    h.runner.on("review", reviewing)
+    return told
+
+
+def _finishing(h: Any) -> list[Any]:
+    """The review agents' last turns, with their reproduction's record."""
+    return [
+        t
+        for t in h.runner.tasks
+        if t.kind == "review" and "The reproduction you started has ended" in t.prompt
     ]
 
 
@@ -653,44 +695,87 @@ async def test_a_review_tests_its_pr_in_its_own_session(demo) -> None:
     assert review.env["AM_LAB_SOCKET"] and review.min_timeout_seconds
     assert "Test machine gpu-01 is yours while you work" in review.prompt
     assert "lab --gpus N" in review.prompt, "it takes the GPUs it needs"
-    assert "reproduction agent is not yours to start" in review.prompt
+    assert "Use the machine to test what you read" in review.prompt
+    assert (
+        "start the skill's reproduction agent with `lab --reproduce`" in review.prompt
+    )
     assert "Do not run the PR's code here" not in review.prompt
+    assert not [t for t in h.runner.tasks if t.kind == "reproduce"], (
+        "a review whose agent starts none runs none"
+    )
     assert opened["session"] in runner.closed, "the session closes after the review"
     [job] = [j for j in await h.store.list_jobs() if j.playbook == "review"]
     assert job.result and job.result["tested_on"] == "gpu-01"
     assert job.result["commands"][0]["command"] == "python check.py"
 
 
-async def test_the_skills_reproduction_agent_runs_alongside_the_review(demo) -> None:
-    """The service starts the skill's reproduction agent with the review, on its
-    machine and under the rule the review's own session runs by; its record goes into
-    that review's draft once the review is written."""
+async def test_the_reviewer_starts_the_reproduction_and_finishes_with_it(demo) -> None:
+    """The review's agent judges that the PR needs a reproduction and starts the
+    skill's reproduction agent from its session: a fresh agent follows its brief on
+    the same machine, under the rule the review's own session runs by. The review
+    waits for it, then resumes the same agent with the run's record, so the draft
+    reports the run in one piece and nothing revises it afterwards."""
     h, app = demo
     runner = h.service.a.lab_runner
+    told = _starts_reproduction(h)
     async with _as(app, "maria") as maria:
-        draft = await _review(h, maria, 42)
+        await _review(h, maria, 42)
         assert not [
             p
             for p in (await maria.get("/api/proposals")).json()
             if p["action"]["action"]["kind"] in ("lab.review", "lab.reproduce")
         ], "nobody approves it"
+    assert told and told[0]["started"]
     sessions = await h.store.list_actions(repo=REPO, number=42, kinds=["lab.review"])
     assert len(sessions) == 2, "the review's own session, and the reproduction's"
     assert all(r.status == "executed" for r in sessions)
     [worker] = [t for t in h.runner.tasks if t.kind == "reproduce"]
     assert "You are the reproduction agent" in worker.prompt
-    assert "The PR's review runs while you work" in worker.prompt
-    assert "When they are busy, wait for them" in worker.prompt
-    assert len(runner.reproduced) == 2 and len(runner.closed) == 2
+    assert BRIEF in worker.prompt, "it follows the reviewer's brief"
+    [first] = _reviews(h)
+    [last] = _finishing(h)
+    assert "python check.py" in last.prompt, "the review finishes with its record"
+    assert last.lab_session == first.lab_session, "its session stayed open meanwhile"
+    [review] = [j for j in await h.store.list_jobs() if j.playbook == "review"]
     [job] = [j for j in await h.store.list_jobs() if j.playbook == "reproduce"]
-    assert job.result and job.result["revised"] == draft["action_id"]
-    [update] = [t for t in h.runner.tasks if "That reproduction has ended" in t.prompt]
-    assert "python check.py" in update.prompt, "the review is revised with its record"
+    assert job.result and job.result["for_review"] == review.id
+    assert review.status == JobStatus.DONE
+    assert not [t for t in h.runner.tasks if "That reproduction has ended" in t.prompt]
+    assert len(runner.reproduced) == 2 and len(runner.closed) == 2
+    again = await h.service.start_review_reproduction(
+        {"job": review.id, "lab": "gpu-01"}, BRIEF
+    )
+    assert "error" in again, "only a review that is working starts one"
 
 
-async def test_a_review_nobody_asked_for_runs_no_reproduction(demo) -> None:
-    """A scan's review keeps its own session on the machine but starts no
-    reproduction beside it, and its prompt says none runs."""
+async def test_a_review_nobody_asked_for_tests_and_reproduces_team_work(demo) -> None:
+    """A scan's review of a team member's PR gets the machine too, and its agent may
+    start the reproduction, which runs for nobody: the machine takes team code."""
+    from auto_maintainer.domain.events import Event, EventKind
+
+    h, _ = demo
+    told = _starts_reproduction(h)
+    await h.emit(
+        Event(
+            kind=EventKind.DASHBOARD_COMMAND,
+            repo=REPO,
+            number=44,
+            payload={"command": "review", "source": "scan"},
+        )
+    )
+    [review] = _reviews(h)
+    assert "lab --reproduce" in review.prompt
+    assert told and told[0]["started"]
+    [job] = [j for j in await h.store.list_jobs() if j.playbook == "reproduce"]
+    assert job.events[0]["payload"]["by"] is None, "nobody asked for it"
+    assert [t for t in h.runner.tasks if t.kind == "reproduce"]
+    [last] = _finishing(h)
+    assert "python check.py" in last.prompt
+
+
+async def test_outside_code_runs_only_for_someone_who_may_run_it(demo) -> None:
+    """A scan's review of an outside contributor's PR gets no session, since nobody
+    who may run outside code asked for it, so its agent can start no reproduction."""
     from auto_maintainer.domain.events import Event, EventKind
 
     h, _ = demo
@@ -703,24 +788,49 @@ async def test_a_review_nobody_asked_for_runs_no_reproduction(demo) -> None:
         )
     )
     [review] = _reviews(h)
-    assert "reproduction agent is not yours to start" not in review.prompt
+    assert not review.lab_session and "lab --reproduce" not in review.prompt
+    assert "outside the team" in review.prompt
     assert not [t for t in h.runner.tasks if t.kind == "reproduce"]
-    assert not [j for j in await h.store.list_jobs() if j.playbook == "reproduce"]
 
 
-async def test_a_reproduction_the_pr_needs_not_leaves_the_review_as_it_is(
-    demo,
-) -> None:
+async def test_a_reproduction_the_pr_needs_not_is_said_in_the_review(demo) -> None:
     h, app = demo
     h.runner.on(
         "reproduce",
         lambda t: {"conclusion": "not_needed", "comment": "Nothing user-facing."},
     )
+    _starts_reproduction(h)
     async with _as(app, "maria") as maria:
         await _review(h, maria, 42)
     [job] = [j for j in await h.store.list_jobs() if j.playbook == "reproduce"]
     assert job.result and "needs no reproduction" in job.result["skipped"]
-    assert not [t for t in h.runner.tasks if "That reproduction has ended" in t.prompt]
+    [last] = _finishing(h)
+    assert (
+        "needs no reproduction" in last.prompt and "Nothing user-facing" in last.prompt
+    )
+
+
+async def test_a_reproduction_that_does_not_run_is_said_in_the_review(demo) -> None:
+    """When the machine cannot take the reproduction, the review still finishes, and
+    its agent learns why no run happened."""
+    h, app = demo
+    runner = h.service.a.lab_runner
+    answer = h.runner.handlers["review"]
+
+    async def reviewing(task: Any) -> Any:
+        if task.lab_session and "lab --reproduce" in task.prompt:
+            runner.cannot_open = "every GPU is busy"
+            await h.service.start_review_reproduction(
+                {"job": task.job_id, "lab": "gpu-01"}, BRIEF
+            )
+        return answer(task)
+
+    h.runner.on("review", reviewing)
+    async with _as(app, "maria") as maria:
+        await _review(h, maria, 42)
+    assert not [t for t in h.runner.tasks if t.kind == "reproduce"]
+    [last] = _finishing(h)
+    assert "did not run" in last.prompt and "every GPU is busy" in last.prompt
 
 
 async def test_a_reproduction_that_ends_first_waits_for_its_review(demo) -> None:
@@ -1204,8 +1314,8 @@ async def test_a_reproduction_asked_for_goes_into_the_waiting_review(demo) -> No
         c for c in comments if c.action.payload.get("purpose") == "reproduction"
     ]
     updates = [t for t in h.runner.tasks if "That reproduction has ended" in t.prompt]
-    assert len(updates) == 2, "the review's own reproduction, then the one asked for"
-    assert "python check.py" in updates[-1].prompt, "the run's record reaches it"
+    [update] = updates
+    assert "python check.py" in update.prompt, "the run's record reaches it"
     [job] = [
         j
         for j in await h.store.list_jobs()
@@ -1392,3 +1502,45 @@ async def test_a_choice_that_fails_falls_back_to_the_first_machine(demo) -> None
     async with _as(app, "maria") as maria:
         await _review(h, maria, 42)
     assert h.service.a.lab_runner.reproduced[0]["payload"].lab == "gpu-01"
+
+
+async def test_a_follow_up_starts_the_reproduction_and_finishes_with_it(demo) -> None:
+    """A follow-up of new commits works as a review does: its agent may start the
+    skill's reproduction, and it finishes with the run's record."""
+    h, app = demo
+    answer = h.runner.handlers["followup"]
+    told: list[dict[str, Any]] = []
+
+    async def following(task: Any) -> Any:
+        if task.lab_session and "lab --reproduce" in task.prompt and not told:
+            told.append(
+                await h.service.start_review_reproduction(
+                    {"job": task.job_id, "lab": "gpu-01"}, BRIEF
+                )
+            )
+        return answer(task)
+
+    h.runner.on("followup", following)
+    async with _as(app, "maria") as maria:
+        await _posted(h, maria, 42)
+        pr = await h.forge.get_pr(REPO, 42)
+        assert pr is not None
+        h.forge.put_pr(pr.model_copy(update={"head_sha": "c" * 40}))
+        await h.poll()
+        await maria.post("/api/reviews", json={"prs": [{"repo": REPO, "number": 42}]})
+        await h.settle()
+    assert told and told[0]["started"]
+    [job] = [j for j in await h.store.list_jobs() if j.playbook == "reproduce"]
+    # The request hands the follow-up to the job for the new head; that one tests.
+    [follow] = [
+        j
+        for j in await h.store.list_jobs()
+        if j.playbook == "followup" and j.id == job.result["for_review"]
+    ]
+    [last] = [
+        t
+        for t in h.runner.tasks
+        if t.kind == "followup" and "The reproduction you started has ended" in t.prompt
+    ]
+    assert "python check.py" in last.prompt
+    assert follow.status == JobStatus.DONE

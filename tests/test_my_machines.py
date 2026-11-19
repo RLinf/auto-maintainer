@@ -114,11 +114,24 @@ async def test_only_the_owners_work_runs_on_their_machine(demo) -> None:
         assert checked.status_code in (404, 405), "not even routed to it"
         bound = await walt.put(f"/api/repos/{REPO}/labs/{MINE}", json={"use": True})
         assert bound.status_code in (404, 405), "no repository binds someone's own"
+    answer = h.runner.handlers["review"]
+
+    async def reviewing(task: Any) -> Any:
+        # Its agent judges the PR needs a reproduction, as `lab --reproduce` asks.
+        if task.lab_session and "lab --reproduce" in task.prompt:
+            await h.service.start_review_reproduction(
+                {"job": task.job_id, "lab": MINE}, "Follow the docs on one GPU."
+            )
+        return answer(task)
+
+    h.runner.on("review", reviewing)
     async with _as(app, "maria") as maria:
         await maria.post("/api/reviews", json={"prs": [{"repo": REPO, "number": 42}]})
         await h.settle()
     opened = runner.reproduced
-    assert len(opened) == 2, "the review's session, and its reproduction's beside it"
+    assert len(opened) == 2, (
+        "the review's session, and the reproduction its agent started"
+    )
     assert {o["payload"].lab for o in opened} == {MINE}, "both on her own machine"
     assert {o["payload"].requested_by for o in opened} == {"maria"}
 

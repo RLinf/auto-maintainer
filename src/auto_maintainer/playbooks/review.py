@@ -85,7 +85,6 @@ from .prompts import (
 )
 from .requests import (
     FOLLOWUP_STATES,
-    ReviewRequest,
     recorded_review,
     replaced,
     review_key,
@@ -98,6 +97,10 @@ from .review_session import (
     ReviewMachine,
     close,
     earlier_work,
+    finish_prompt,
+    reproduction_outcome,
+    reproduction_running,
+    reproduction_taken,
     review_machine,
     session_task_fields,
     testing_block,
@@ -213,11 +216,18 @@ class ReviewPlaybook(Playbook):
             c for c in label_choices(info.labels, profile, pr) if c not in declined
         ]
         limit = profile.review.max_suggested_labels
-        # A report this job's agent wrote already needs only its form filled in.
+        # A report this job's agent wrote already needs only its form filled in, or,
+        # when the agent started a reproduction, that run's record first.
         answer = await saved_report(ctx, pr.head_sha)
+        finishing: str | None = None
+        if answer is not None:
+            outcome = await reproduction_outcome(ctx, pr)
+            if isinstance(outcome, PlaybookResult):
+                return outcome
+            finishing = outcome
         machine = (
             ReviewMachine()
-            if answer is not None
+            if answer is not None and finishing is None
             else await review_machine(
                 ctx,
                 pr,
@@ -228,7 +238,8 @@ class ReviewPlaybook(Playbook):
             )
         )
         if machine.wait is not None:
-            return alongside(machine.wait, pr, request, ctx.job.id)
+            return machine.wait
+        held = False
         workdir = await ctx.workspace.prepare(
             pr.repo, pr.number, pr.head_sha, info.default_branch
         )
@@ -261,8 +272,33 @@ class ReviewPlaybook(Playbook):
                 )
                 if not answer.ok:
                     raise RuntimeError(f"review agent failed: {answer.error}")
-                await close(ctx, machine)
                 await keep_report(ctx, pr.head_sha, answer)
+                if await reproduction_running(ctx):
+                    # Its reproduction runs: the review waits for it, its session
+                    # open for what the run calls for.
+                    outcome = await reproduction_outcome(ctx, pr)
+                    if isinstance(outcome, PlaybookResult):
+                        held = True
+                        return outcome
+                    finishing = outcome
+            if finishing is not None:
+                answer = await ctx.ask(
+                    AgentTask(
+                        kind=TaskKind.REVIEW,
+                        prompt=finish_prompt(finishing, machine),
+                        workdir=workdir,
+                        skill_dirs=ctx.skill_dirs(),
+                        repo=pr.repo,
+                        messages=True,
+                        **session_task_fields(ctx, machine),
+                    ),
+                    after=answer,
+                )
+                if not answer.ok:
+                    raise RuntimeError(f"review agent failed: {answer.error}")
+                await keep_report(ctx, pr.head_sha, answer)
+                await reproduction_taken(ctx)
+            await close(ctx, machine)
             await ctx.keep_work_session(answer, workdir)
             form = await fill_form(
                 ctx,
@@ -284,8 +320,9 @@ class ReviewPlaybook(Playbook):
                 result = await self._verify(ctx, result, pr_block(pr, diff), workdir)
         finally:
             await ctx.workspace.release(workdir)
-            # A run the job's next try (or the next start) picks up keeps its session.
-            if not keeps_session(ctx, answer):
+            # A run the job's next try (or the next start) picks up keeps its session,
+            # and so does a review waiting for its reproduction.
+            if not held and not keeps_session(ctx, answer):
                 await close(ctx, machine)
         await forget_report(ctx)
 
@@ -463,7 +500,7 @@ async def review_prompt(
     review, then only what the skill cannot know: who it works for, the test machine,
     and what the maintainers taught or turned down."""
     if machine.token:
-        testing = machine.testing(ctx, reproduce=ctx.requested_by is not None)
+        testing = machine.testing(ctx, reproduce=True)
         earlier = await earlier_work(ctx, pr)
         testing = f"{testing}\n\n{earlier}" if earlier else testing
     else:
@@ -497,36 +534,6 @@ async def review_prompt(
         ]
         if part
     )
-
-
-def alongside(
-    wait: PlaybookResult,
-    pr: PrSnapshot,
-    request: ReviewRequest | None,
-    job_id: str,
-) -> PlaybookResult:
-    """The review's first wait for its session, which also starts the skill's
-    reproduction agent on the same machine when someone asked for the review: it runs
-    while the review does, and its record goes into this job's review
-    (``reproduce.py``)."""
-    lab = str(wait.actions[0].payload.get("lab") or "") if wait.actions else ""
-    if not lab or request is None or not request.manual:
-        # A review nobody asked for runs no reproduction beside it.
-        return wait
-    start = Event(
-        kind=EventKind.DASHBOARD_COMMAND,
-        repo=pr.repo,
-        number=pr.number,
-        sha=pr.head_sha,
-        payload={
-            "command": "reproduce",
-            "by": request.by if request else None,
-            "lab": lab,
-            "alongside": job_id,
-        },
-        source="review",
-    )
-    return wait.model_copy(update={"events": [*wait.events, start]})
 
 
 async def reproduction_record(store: Store, repo: str, number: int) -> str | None:

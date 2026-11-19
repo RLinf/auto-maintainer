@@ -17,9 +17,11 @@
 A reproduction is the review skill's reproduction agent: a fresh agent, apart from
 the one that reviewed the PR, that follows the brief the reviewer wrote (or what a
 person asked to have checked) as the skill says its reproduction agent works. It
-starts in one of two ways: a review whose skill calls for a reproduction returns the
-brief (``ReviewResult.reproduction``), or a person asks for one from the PR, naming a
-machine, or in the conversation about a review. Nobody approves it first: a review's
+starts in one of two ways: a review's agent that judges the PR needs one starts it
+with ``lab --reproduce`` and its brief (``Service.start_review_reproduction``), and
+the review waits for its record (``review_session.reproduction_outcome``); or a
+person asks for one from the PR, naming a machine, or in the conversation about a
+review. Nobody approves it first: a review's
 runs under the repository's ``lab.review`` rule, like the review's own session, and a
 person's request is its approval (``pipeline.RUN_ON_REQUEST``). In order, each step
 from fresh reads:
@@ -32,11 +34,12 @@ from fresh reads:
    and to the job's live view as it runs, and the agent takes more GPUs, waiting for
    them to be idle, when the run needs them (``lab --gpus``). The playbook closes
    the session when the agent is done.
-3. The agent's record goes into the PR's review: the review draft while it waits for
+3. The agent's record goes to the review that started it, which finishes with it;
+   for a person's request, into the PR's review: the review draft while it waits for
    a decision, an edit of the review once it was posted (made at once when the
-   service posted it or the review's author asked for the run), and, for a person's
-   request on a PR with no review, a comment drafted for them. Why a run did not
-   happen is the job's result.
+   service posted it or the review's author asked for the run), and, on a PR with no
+   review, a comment drafted for them. Why a run did not happen is the job's result,
+   and the waiting review's too.
 """
 
 from __future__ import annotations
@@ -90,7 +93,7 @@ from .review_revise import (
     revision_blocks,
     task_kind_of,
 )
-from .review_session import earlier_work, held_gpus, machine_facts
+from .review_session import earlier_work, give_record, held_gpus, machine_facts
 
 WAIT_SECONDS = 7 * 24 * 3600
 
@@ -382,6 +385,12 @@ class ReproducePlaybook(Playbook):
             "commands": [{k: v for k, v in c.items() if k != "tail"} for c in commands],
         }
         if report.conclusion == "not_needed":
+            await give_record(
+                ctx.store,
+                str(request.payload.get("alongside") or ""),
+                request.id,
+                {"conclusion": "not_needed", "comment": report.comment},
+            )
             return PlaybookResult(
                 result={**summary, "skipped": "the PR needs no reproduction"}
             )
@@ -429,6 +438,25 @@ class ReproducePlaybook(Playbook):
         else, for a person's request, in a comment drafted for them."""
         summary = dict(kept.get("summary") or {})
         alongside = str(request.payload.get("alongside") or "")
+        if alongside and await give_record(
+            ctx.store,
+            alongside,
+            request.id,
+            {
+                "record_text": kept.get("record_text"),
+                "comment": kept.get("comment"),
+                "conclusion": summary.get("conclusion"),
+            },
+        ):
+            # The review that started it waits for this record and finishes with it.
+            await ctx.store.set_state(REPORT_STATE.format(job=ctx.job.id), None)
+            return PlaybookResult(
+                result={
+                    **summary,
+                    "for_review": alongside,
+                    "comment": kept.get("comment"),
+                }
+            )
         if pr is not None:
             if alongside:
                 target = await self._review_of_job(ctx, pr, alongside)
@@ -515,12 +543,17 @@ class ReproducePlaybook(Playbook):
             info.default_branch,
         )
         note = str(request.payload.get("note") or "").strip()
-        asked = (
-            ALONGSIDE
-            if request.payload.get("alongside")
-            else "The reviewer's brief, which you follow:\n"
+        brief = (
+            "The reviewer's brief, which you follow:\n"
             + untrusted("review.brief", payload.brief, 8_000)
             if payload.brief
+            else ""
+        )
+        asked = (
+            "\n".join(x for x in (ALONGSIDE, brief) if x)
+            if request.payload.get("alongside")
+            else brief
+            if brief
             else f"{by} asked for this reproduction"
             + (
                 "; what they want checked:\n"
@@ -602,8 +635,14 @@ class ReproducePlaybook(Playbook):
         reason: str | None,
         **extra: object,
     ) -> PlaybookResult:
-        """End without a run. For a review, its draft says why and what a run would
-        need; for a maintainer, the job's result does."""
+        """End without a run: the review that started it is told why, and the job's
+        result says so."""
+        await give_record(
+            ctx.store,
+            str(request.payload.get("alongside") or ""),
+            request.id,
+            {"not_run": why},
+        )
         return PlaybookResult(result={"skipped": reason or why, **extra})
 
     async def _review_of(

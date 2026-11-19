@@ -25,7 +25,7 @@ import contextlib
 import copy
 import functools
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -86,7 +86,14 @@ from .domain.ports import (
     Workspace,
 )
 from .domain.profile import Route
-from .domain.records import AuditEntry, ChatMessage, ChatThread, Job, RepoRecord
+from .domain.records import (
+    AuditEntry,
+    ChatMessage,
+    ChatThread,
+    Job,
+    JobStatus,
+    RepoRecord,
+)
 from .domain.secrets import find_secrets, redact_secrets
 from .domain.settings import (
     KEEPS_OWN_PRIMARY,
@@ -123,6 +130,7 @@ from .playbooks.base import (
     ServiceInfo,
     author_is_team,
 )
+from .playbooks.review_session import REVIEW_REPRODUCTION
 from .profiles.gate import OWNER_APPROVAL, ConfigGate, GateDecision
 from .profiles.governance import GovernanceRecords
 from .profiles.knowledge import Knowledge
@@ -246,6 +254,10 @@ class Adapters:
     cleanup: Callable[[frozenset[Path]], Awaitable[None]] | None = None
     """Removes what the service no longer needs on disk (old run folders, the agent
     CLIs' old sessions, checkouts nothing uses), keeping the checkouts it is given."""
+
+
+REPRODUCTION_BRIEF_CHARS = 8_000
+"""How much of a review agent's brief its reproduction agent gets."""
 
 
 @dataclass
@@ -994,6 +1006,58 @@ class Service:
             models=any(e.can(Grant.USE_MODELS) for e in found),
             agent_names=names,
         )
+
+    async def start_review_reproduction(
+        self, owner: Mapping[str, Any], brief: str
+    ) -> dict[str, Any]:
+        """Start the review skill's reproduction agent that a review's agent asks for
+        from its session (``lab --reproduce``): a fresh agent with ``brief``, on the
+        session's machine, for the person who asked for the review (none for a review
+        nobody asked for, so its machine runs only team code, ``lab_refusal``). One per
+        review; the review waits for its record (``review_session``). ``owner`` is the
+        session's holder: its job, repository, PR, and machine."""
+        job = await self.a.store.get_job(str(owner.get("job") or ""))
+        if (
+            job is None
+            or job.playbook not in ("review", "followup")
+            or job.status != JobStatus.RUNNING
+        ):
+            return {
+                "error": "only a review's agent starts a reproduction, while it works"
+            }
+        key = REVIEW_REPRODUCTION.format(job=job.id)
+        kept = await self.a.store.get_state(key)
+        if isinstance(kept, dict) and kept.get("event"):
+            return {
+                "note": "A reproduction already runs for this review; its record comes "
+                "to you when your review is written."
+            }
+        if not brief.strip():
+            return {"error": "the brief is empty"}
+        lab = str(owner.get("lab") or "")
+        event = Event(
+            kind=EventKind.DASHBOARD_COMMAND,
+            repo=job.repo,
+            number=job.number,
+            payload={
+                "command": "reproduce",
+                "by": job.asked_by,
+                "lab": lab,
+                "brief": brief.strip()[:REPRODUCTION_BRIEF_CHARS],
+                "alongside": job.id,
+            },
+            source="review",
+        )
+        await self.a.store.set_state(
+            key, {"event": event.id, "lab": lab, "at": self.clock.now().isoformat()}
+        )
+        await self.bus.publish(event)
+        return {
+            "started": True,
+            "note": f"The reproduction agent starts on {lab} and runs while you review. "
+            "When your review is written, you get its record to complete it; until "
+            "then, say that the run is underway.",
+        }
 
     async def lab_refusal(self, action: Action, pr: PrSnapshot, lab: str) -> str | None:
         """Why a session for ``action`` may not open on test machine ``lab`` (design
