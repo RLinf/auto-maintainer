@@ -778,6 +778,8 @@ export interface MemoryChange {
   rejected_reason: string | null;
   /** For each repository whose profile the change locks: the approved profile and the new one. */
   profiles?: { repo: string; before: Record<string, unknown> | null; after: Record<string, unknown> }[];
+  /** Unified diff of each path in ``files`` against its current text in memory. */
+  diffs?: Record<string, string>;
 }
 
 export interface AgentHealth {

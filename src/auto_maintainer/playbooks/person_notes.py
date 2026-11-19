@@ -55,10 +55,19 @@ from ..domain.actions import (
 )
 from ..domain.agents import AgentTask, TaskKind
 from ..domain.events import Event, EventKind
-from ..domain.memory import MemoryChange, Signal, SignalKind, Tier, repo_dir
+from ..domain.memory import MemoryChange, Signal, SignalKind, Tier
 from ..domain.ports import Store
 from ..domain.profile import RepoProfile
 from .base import Playbook, PlaybookContext, PlaybookResult
+from .lessons import (
+    LESSONS_HEADER,
+    apply_lessons,
+    clean_lesson,
+    global_lesson_items,
+    normalize_lesson,
+    pending_lesson_items,
+    review_lessons_path,
+)
 from .prompts import schema_hint, untrusted
 
 NOTES_STATE = "person_notes:{login}"
@@ -85,7 +94,6 @@ LEARNED_FROM = frozenset(
 NOT_JOURNALED = "person_notes"
 """What a person says is consumed by their notes alone (``Signal.consumed_by``), so
 the journal never writes it to the memory repo."""
-LESSONS_HEADER = "# Review lessons\n"
 
 About = Literal["reviews", "conversations", "both"]
 
@@ -286,15 +294,31 @@ class LearnedNote(BaseModel):
     )
 
 
+class SharedLesson(BaseModel):
+    repo: str = Field(
+        description="The repository (`owner/repo`) from the evidence that this review "
+        "lesson applies to."
+    )
+    lesson: str = Field(
+        description="One concise rule for every review of that repository, not "
+        "already covered by its current or pending review lessons."
+    )
+    replaces: list[str] = Field(
+        default_factory=list,
+        description="Exact text of any existing bullets in that repository's current "
+        "review lessons that this rule supersedes, merges, or makes redundant.",
+    )
+
+
 class NotesAnswer(BaseModel):
     notes: list[LearnedNote] = Field(
         default_factory=list,
         description=f"Their learned notes as they should be now, at most {MAX_NOTES}.",
     )
-    shared: list[str] = Field(
+    shared: list[SharedLesson] = Field(
         default_factory=list,
         description="Notes of theirs about reviews that other people hold too and that "
-        "hold for every review of the repository, not as one person's taste.",
+        "hold for every review of a specific repository, not as one person's taste.",
     )
 
 
@@ -303,9 +327,9 @@ LEARN = """Keep the notes on what {login} wants from an automated service that h
 - Keep a note only for a habit the evidence shows more than once, or a preference they state; a question about one PR, one remark, or one edit is not a preference. A note says what to do, in one sentence, never names a PR, and holds for anything like it.
 - Say what each note is about: `reviews`, `conversations`, or `both`.
 - Update the learned notes below: keep those the evidence does not contradict (their support stands), merge duplicates, change those it contradicts, and add new ones. Return all of them, at most {limit}, strongest first, each with how much evidence backs it.
-- Do not repeat or contradict their own notes (they wrote those) or the repositories' review lessons.
+- Do not repeat or contradict their own notes (they wrote those) or each repository's current and pending review lessons.
 - Write in the language they write in.
-- In `shared`, list notes of theirs about reviews that other people's notes below also hold and that state a rule for every review of the repository, rather than one person's taste. Usually there are none."""
+- In `shared`, list notes of theirs about reviews that other people's notes below also hold and that state a rule for every review of a specific repository, rather than one person's taste. Name the repository (`repo`, one of the repositories listed below) that the evidence applies to. Never list a rule already covered—even with different wording—by that repository's current or pending review lessons. If the rule consolidates or supersedes redundant bullets in that repository's current review lessons, list those exact existing bullets in `replaces`. Usually `shared` is empty."""
 
 
 class LearnPersonNotes(Playbook):
@@ -342,9 +366,12 @@ class LearnPersonNotes(Playbook):
             evidence.insert(0, text)
             size += len(text)
         repos = sorted({s.repo for s in signals if s.repo})
-        lessons = "\n\n".join(
-            filter(None, [await _lessons(ctx, repo) for repo in repos])
-        )
+        active_repos: list[tuple[str, RepoProfile]] = []
+        for repo in repos:
+            profile = await ctx.profiles.active(repo)
+            if profile is not None:
+                active_repos.append((repo, profile))
+        lessons = await _repo_lessons_block(ctx, active_repos)
         others = []
         for other in await ctx.store.get_state(NOTES_INDEX) or []:
             if other != login.lower():
@@ -374,7 +401,7 @@ class LearnPersonNotes(Playbook):
                 )
                 if own
                 else "",
-                "The repositories' review lessons:\n"
+                "The repositories' review lessons (by repository):\n"
                 + untrusted("lessons", lessons, 8000)
                 if lessons
                 else "",
@@ -420,52 +447,122 @@ class LearnPersonNotes(Playbook):
         latest.notes = [n for n in latest.notes if n.source == "person"] + kept
         latest.learned_to = signals[-1].created_at
         latest.learned_at = ctx.clock.now()
-        actions = []
-        for text in found.shared:
-            text = text.strip()
-            if not text or text in latest.promoted:
+        profiles_by_repo = dict(active_repos)
+        by_repo: dict[str, list[SharedLesson]] = {}
+        for entry in found.shared:
+            repo = entry.repo.strip()
+            text = clean_lesson(entry.lesson)
+            if not text or repo not in profiles_by_repo:
                 continue
-            latest.promoted.append(text)
-            for repo in repos:
-                actions.append(await _propose_lesson(ctx, repo, text, login))
+            if not entry.replaces and _already_promoted(latest.promoted, repo, text):
+                continue
+            by_repo.setdefault(repo, []).append(entry)
+        actions = []
+        promoted_count = 0
+        for repo, entries in by_repo.items():
+            action, accepted = await _propose_lessons(
+                ctx, repo, profiles_by_repo[repo], entries, login
+            )
+            if action is None:
+                continue
+            actions.append(action)
+            promoted_count += len(accepted)
+            for text in accepted:
+                key = _promotion_key(repo, text)
+                if key not in latest.promoted:
+                    latest.promoted.append(key)
         await save_notes(ctx.store, latest)
         return PlaybookResult(
             actions=actions,
             result={
                 "notes": len(latest.notes),
                 "signals": len(signals),
-                "shared": len(found.shared),
+                "shared": promoted_count,
             },
         )
 
 
-async def _lessons(ctx: PlaybookContext, repo: str) -> str:
-    profile = await ctx.profiles.active(repo)
-    return await ctx.knowledge.review_lessons(repo, profile) if profile else ""
+def _promotion_key(repo: str, lesson: str) -> str:
+    return f"{repo.lower()}:{normalize_lesson(lesson)}"
 
 
-async def _propose_lesson(
-    ctx: PlaybookContext, repo: str, lesson: str, login: str
-) -> Action:
-    """``lesson`` as a change to ``repo``'s review lessons that waits for one of its
-    maintainers: the agent wrote it, so it carries nobody's approval."""
-    path = f"{repo_dir(repo)}/knowledge/review_lessons.md"
-    current = await ctx.memory.read_text(path) or LESSONS_HEADER
+def _already_promoted(promoted: list[str], repo: str, lesson: str) -> bool:
+    norm = normalize_lesson(lesson)
+    if not norm:
+        return True
+    key = f"{repo.lower()}:{norm}"
+    return any(
+        entry.lower() == key or normalize_lesson(entry) == norm for entry in promoted
+    )
+
+
+async def _repo_lessons_block(
+    ctx: PlaybookContext, active_repos: list[tuple[str, RepoProfile]]
+) -> str:
+    """Each repository's current review lessons and any open pending lessons, labeled
+    with its ``owner/repo`` name."""
+    sections: list[str] = []
+    for repo, profile in active_repos:
+        current = await ctx.memory.read_text(review_lessons_path(repo)) or ""
+        effective = await ctx.knowledge.review_lessons(repo, profile)
+        pending = await pending_lesson_items(ctx, repo, current)
+        parts = [f"## {repo}", effective.strip() or "(no review lessons yet)"]
+        if pending:
+            parts.append(
+                "Pending review lessons awaiting approval:\n"
+                + "\n".join(f"- {item}" for item in pending)
+            )
+        sections.append("\n".join(parts))
+    return "\n\n".join(sections)
+
+
+async def _propose_lessons(
+    ctx: PlaybookContext,
+    repo: str,
+    profile: RepoProfile,
+    entries: list[SharedLesson],
+    login: str,
+) -> tuple[Action | None, list[str]]:
+    """``entries`` as one consolidated change to ``repo``'s review lessons that waits
+    for one of its maintainers: the agent wrote it, so it carries nobody's approval."""
+    path = review_lessons_path(repo)
+    current = await ctx.memory.read_text(path) or ""
+    pending = await pending_lesson_items(ctx, repo, current)
+    _, global_items = await global_lesson_items(ctx, profile.memory.use_global)
+    updated, accepted = apply_lessons(
+        current,
+        [(entry.lesson, entry.replaces) for entry in entries],
+        pending=pending,
+        global_lessons=global_items,
+        header=LESSONS_HEADER,
+    )
+    if updated is None or not accepted:
+        return None, []
+    summary = (
+        accepted[0]
+        if len(accepted) == 1
+        else "\n".join(f"- {item}" for item in accepted)
+    )
     change = MemoryChange(
         tier=Tier.T1,
-        title="lesson several reviewers hold",
-        description=f"{lesson}\n\nLearned from what {login} and other reviewers "
+        title="lesson several reviewers hold"
+        if len(accepted) == 1
+        else "lessons several reviewers hold",
+        description=f"{summary}\n\nLearned from what {login} and other reviewers "
         "say and do with their review drafts.",
-        files={path: current.rstrip() + f"\n- {lesson}\n"},
+        files={path: updated},
         repos=[repo],
         created_at=ctx.clock.now(),
     )
     await ctx.store.save_memory_change(change)
-    return make_action(
-        ActionKind.MEMORY_CHANGE,
-        repo,
-        MemoryChangePayload(change_id=change.id),
-        discriminator=change.id,
+    return (
+        make_action(
+            ActionKind.MEMORY_CHANGE,
+            repo,
+            MemoryChangePayload(change_id=change.id),
+            discriminator=change.id,
+        ),
+        accepted,
     )
 
 

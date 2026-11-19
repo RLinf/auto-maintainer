@@ -129,7 +129,7 @@ async def test_everything_a_person_says_and_does_teaches_their_notes(demo) -> No
                     "evidence": 2,
                 },
             ],
-            "shared": ["Leave out style nits."],
+            "shared": [{"repo": REPO, "lesson": "Leave out style nits."}],
         }
 
     learned: list[Any] = []
@@ -311,3 +311,148 @@ async def test_the_owner_starts_learning_for_everyone_now(demo) -> None:
     await h.settle()
     assert out["started"] == ["maria"], "walt turned his learning off"
     assert learned == ["maria"]
+
+
+async def test_shared_lessons_are_scoped_per_repo_and_deduplicated(demo) -> None:
+    """Lessons in the prompt identify their repository (including open pending ones),
+    shared lessons apply only to their named repository, duplicates against existing
+    or pending lessons are dropped, and multiple lessons for one repo merge into one
+    change with consolidation via ``replaces``."""
+    from auto_maintainer.domain.memory import (
+        MemoryChange,
+        MemoryChangeState,
+        Tier,
+        repo_dir,
+    )
+    from auto_maintainer.domain.records import RepoRecord
+    from auto_maintainer.domain.snapshot import RepoInfo
+
+    h, app = demo
+    other = "acme/other"
+    h.forge.repos[other] = RepoInfo(name=other)
+    h.forge.set_permission(other, "maria", Permission.ADMIN)
+    await h.store.save_repo(RepoRecord(repo=other, active=True, added_by="maria"))
+    h.memory.files[f"{repo_dir(other)}/profile.yaml"] = "schema: 1\n"
+    state = await h.service.profiles.refresh(other)
+    assert state.candidate_hash is not None
+    _, lock_change = await h.service.profiles.approve_candidate(
+        other, "maria", state.candidate_hash
+    )
+    assert lock_change is not None
+    await h.memory.merge_change(lock_change)
+    h.service.profiles.invalidate(other)
+
+    widget_path = f"{repo_dir(REPO)}/knowledge/review_lessons.md"
+    other_path = f"{repo_dir(other)}/knowledge/review_lessons.md"
+    h.memory.files[widget_path] = (
+        "# Review lessons\n"
+        "- Skip minor style nits.\n"
+        "- Do not leave style nit comments.\n"
+        "- Require tests for bug fixes.\n"
+    )
+    h.memory.files[other_path] = "# Review lessons\n- Check API migrations.\n"
+    # An already-open pending change for acme/widget that should be shown & deduplicated.
+    await h.store.save_memory_change(
+        MemoryChange(
+            tier=Tier.T1,
+            title="pending widget lesson",
+            files={
+                widget_path: h.memory.files[widget_path]
+                + "- Always check lock ordering.\n"
+            },
+            repos=[REPO],
+        )
+    )
+
+    for i in range(5):
+        await h.store.add_signal(
+            Signal(
+                kind=SignalKind.CONVERSATION,
+                repo=REPO if i < 3 else other,
+                source="maria",
+                payload={"text": f"signal {i}", "where": "chat"},
+                created_at=h.clock.now(),
+            )
+        )
+    await add_note(h.store, "walt", "Skip style nits.", "reviews")
+
+    seen_prompts: list[str] = []
+
+    def learn(task: Any) -> dict[str, Any]:
+        seen_prompts.append(task.prompt)
+        return {
+            "notes": [{"text": "Skip style nits.", "about": "reviews", "evidence": 3}],
+            "shared": [
+                # Duplicate of existing widget lesson (different case/punctuation).
+                {"repo": REPO, "lesson": "require tests for bug fixes"},
+                # Duplicate of an open pending widget lesson.
+                {"repo": REPO, "lesson": "Always check lock ordering."},
+                # Consolidates two redundant widget bullets into one.
+                {
+                    "repo": REPO,
+                    "lesson": "Leave out minor style nits in reviews.",
+                    "replaces": [
+                        "Skip minor style nits.",
+                        "Do not leave style nit comments.",
+                    ],
+                },
+                # A second genuinely new widget lesson in the same run -> same change.
+                {"repo": REPO, "lesson": "Flag unclosed file handles."},
+                # Unknown repo -> ignored.
+                {"repo": "acme/unknown", "lesson": "Should be ignored."},
+            ],
+        }
+
+    h.runner.on("learn", learn)
+    await h.emit(_tick("evt_multi"))
+    await h.settle()
+
+    [prompt] = seen_prompts
+    assert f"## {REPO}" in prompt and f"## {other}" in prompt
+    assert "Check API migrations." in prompt
+    assert "Always check lock ordering." in prompt, "open pending lesson shown"
+
+    proposed = [
+        c
+        for c in await h.store.list_memory_changes(MemoryChangeState.OPEN)
+        if c.title.endswith("several reviewers hold")
+    ]
+    assert len(proposed) == 1, "one consolidated change for acme/widget, none for other"
+    change = proposed[0]
+    assert change.repos == [REPO]
+    text = change.files[widget_path]
+    assert text is not None
+    assert "- Leave out minor style nits in reviews." in text
+    assert "- Flag unclosed file handles." in text
+    assert "- Require tests for bug fixes." in text
+    assert "Skip minor style nits." not in text
+    assert "Do not leave style nit comments." not in text
+    assert "Always check lock ordering." not in text
+
+    # A second run proposing the same lesson for acme/widget is skipped via promoted.
+    h.clock.advance(hours=7)
+    for i in range(5):
+        await h.store.add_signal(
+            Signal(
+                kind=SignalKind.CONVERSATION,
+                repo=REPO,
+                source="maria",
+                payload={"text": f"more {i}", "where": "chat"},
+                created_at=h.clock.now(),
+            )
+        )
+    h.runner.on(
+        "learn",
+        lambda t: {
+            "notes": [],
+            "shared": [{"repo": REPO, "lesson": "flag unclosed file handles"}],
+        },
+    )
+    await h.emit(_tick("evt_multi2"))
+    await h.settle()
+    after = [
+        c
+        for c in await h.store.list_memory_changes(MemoryChangeState.OPEN)
+        if c.title.endswith("several reviewers hold")
+    ]
+    assert len(after) == 1, "normalized promoted key prevents duplicate re-proposal"

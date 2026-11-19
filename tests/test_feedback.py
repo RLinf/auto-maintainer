@@ -164,3 +164,99 @@ async def test_a_reason_about_the_pr_alone_teaches_nothing(h: Harness) -> None:
     assert not [
         c for c in await h.store.list_memory_changes() if c.title.startswith("lesson")
     ]
+
+
+async def test_rejection_learning_deduplicates_against_pending_and_consolidates(
+    h: Harness,
+) -> None:
+    from auto_maintainer.domain.memory import (
+        MemoryChange,
+        MemoryChangeState,
+        Tier,
+        repo_dir,
+    )
+
+    path = f"{repo_dir(REPO)}/knowledge/review_lessons.md"
+    h.memory.files[path] = (
+        "# Review lessons\n"
+        "- Use `feature` for new simulator support.\n"
+        "- New simulator support uses the `feature` label.\n"
+    )
+    pending_lesson = "Reserve `enhancement` for improvements to existing features."
+    await h.store.save_memory_change(
+        MemoryChange(
+            tier=Tier.T1,
+            title="pending rejection lesson",
+            files={path: h.memory.files[path] + f"- {pending_lesson}\n"},
+            repos=[REPO],
+        )
+    )
+
+    # First: agent repeats a lesson already waiting in an open memory change -> dropped.
+    h.runner.on(
+        "learn",
+        lambda t: {
+            "disposition": "LESSON",
+            "lesson": pending_lesson.lower().rstrip("."),
+            "why": "label rule",
+            "message": "Saved.",
+        },
+    )
+    await h.emit(_request())
+    proposal, _ = await _labels_proposal(h)
+    assert proposal is not None
+    await h.service.pipeline.reject(proposal.id, "maria", REASON)
+    await h.settle()
+
+    assert pending_lesson in _tasks(h, "learn")[-1].prompt
+    lesson_changes = [
+        c
+        for c in await h.store.list_memory_changes(MemoryChangeState.OPEN)
+        if c.title.startswith("lesson from")
+    ]
+    assert lesson_changes == [], "duplicate of pending lesson creates no new change"
+    assert await h.store.list_threads("maria") == []
+
+    # Second: agent consolidates the two redundant bullets in current review_lessons.md.
+    consolidated = (
+        "Use `feature` for new simulator support and `enhancement` for improvements."
+    )
+    h.runner.on(
+        "learn",
+        lambda t: {
+            "disposition": "LESSON",
+            "lesson": consolidated,
+            "replaces": [
+                "Use `feature` for new simulator support.",
+                "New simulator support uses the `feature` label.",
+            ],
+            "why": "consolidates duplicate label rules",
+            "message": "Consolidated the lesson.",
+        },
+    )
+    await h.emit(
+        Event(
+            kind=EventKind.DASHBOARD_COMMAND,
+            repo=REPO,
+            number=42,
+            payload={"command": "review", "by": "walt", "source": "dashboard"},
+        )
+    )
+    # Trigger a fresh rejection directly on a second review proposal.
+    review_prop = next(
+        p
+        for p in await h.store.list_proposals(ProposalState.PENDING, REPO)
+        if p.requested_by == "walt"
+    )
+    await h.service.pipeline.reject(review_prop.id, "walt", REASON)
+    await h.settle()
+
+    changes = [
+        c
+        for c in await h.store.list_memory_changes(MemoryChangeState.OPEN)
+        if c.title.startswith("lesson from")
+    ]
+    [change] = changes
+    text = change.files[path]
+    assert text is not None
+    assert text == f"# Review lessons\n- {consolidated}\n"
