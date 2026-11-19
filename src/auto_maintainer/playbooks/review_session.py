@@ -65,7 +65,7 @@ MACHINE = """Test machine {lab} is yours while you work: run on it whatever your
 - The working directory here is a checkout of the PR's head to read; the PR's code runs on the machine, through `lab`. To read GitHub (this PR, its reviews and CI, other PRs and issues), use gh; it reads only.
 - The machine is shared: it refuses commands that would reach beyond the session (sudo, shutting it down, killing processes it did not start, stopping every Ray job, writing system folders).{setup}{about}"""
 
-REPRODUCTION = """Where the review skill has you choose how the PR is reproduced, choose its reproduction agent, and do not start one yourself: the service runs it. Put its brief in `reproduction`, holding what the skill says a brief holds and the hardware the run needs (how many GPUs). Once your review is done, a fresh agent follows the brief on {lab}, and its record is added to the review. Leave `reproduction` empty when the skill says the PR needs no reproduction."""
+REPRODUCTION = """The skill's reproduction agent is not yours to start: the service runs one on {lab} alongside you, following the skill, and adds its record to your review. Where the skill asks how the PR was reproduced, say that a run following the PR's documentation is underway, when the PR needs one. It works in this PR's `$AM_LAB_KEEP` too: keep what you set up there in a folder of your own. It needs the machine's GPUs as well: take one only for a check that needs it, and give it back (`lab --gpus 0`) once that check is done."""
 
 
 EARLIER = """What earlier agents did on test machines for this PR, newest first: when, at which commit, what they concluded, and the commands they ran with their exit codes. Start from it: what they set up for this PR may still be in `$AM_LAB_KEEP`; what they established at the same commit need not be shown again; what failed for a reason that still holds need not be tried the same way. It is a record of what ran, not a verdict: report only what you saw yourself."""
@@ -294,7 +294,9 @@ async def review_machine(
                 summary=f"Review #{pr.number}: test and reproduce it as the reviewing "
                 "agent sees fit",
                 sides=["base", "head"],
-                wants_gpu=True,
+                # No GPU until a check needs one: the reproduction agent beside the
+                # review may need every GPU the machine has.
+                wants_gpu=False,
                 timeout_seconds=time_limit(machine, profile.labs.get(lab)),
                 requested_by=by,
             ),
@@ -381,24 +383,14 @@ def session_task_fields(ctx: PlaybookContext, machine: ReviewMachine) -> dict[st
     }
 
 
-def testing_block(machine: ReviewMachine, record: str | None) -> str:
-    """What the review says about running the PR: the reproduction on record (one a
-    maintainer asked for), and, without a session, why nothing ran this time."""
-    parts = []
-    if record:
-        parts.append(
-            "Reproduction on record, from the service's test machines, one a person "
-            "asked for (use it where the skill asks how the PR was reproduced; say "
-            "which commit it ran and whether that is the head you review): " + record
-        )
-    if not machine.token:
-        parts.append(
-            (machine.note or "Nothing ran.")
-            + " Where the skill asks how the PR was tested or reproduced, say that no "
-            "run was made in this review and what a run would need (hardware, data, "
-            "and the documented steps)."
-        )
-    return "\n\n".join(parts)
+def testing_block(record: str | None) -> str:
+    """The reproduction on record (one a person asked for), for the review."""
+    if not record:
+        return ""
+    return (
+        "A reproduction a person asked for is on record (use it where the skill asks "
+        "how the PR was reproduced, and say which commit it ran): " + record
+    )
 
 
 async def close(ctx: PlaybookContext, machine: ReviewMachine) -> None:

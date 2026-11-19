@@ -164,6 +164,12 @@ export interface AgentQuestion {
   answer: AgentAnswer | null;
 }
 
+/** Whether ``q`` waits on ``login``: it is for them or for nobody in particular
+ * (``web/api.py:addressed_to``). Others' questions show only on the Questions page. */
+export function addressedTo(q: Pick<AgentQuestion, "asked_for">, login: string): boolean {
+  return !q.asked_for || q.asked_for.toLowerCase() === login.toLowerCase();
+}
+
 export interface Assignee {
   login: string;
   /** "owner": answers for the whole PR's progress; "reviewer": reviews it. */
@@ -369,6 +375,8 @@ export interface ProposalWithAction extends Proposal {
   requester?: string | null;
   /** Whether the viewer may approve, edit, or reject it: a maintainer, or the person who asked. */
   can_decide?: boolean;
+  /** Whether it waits on the viewer: they may decide it, and it is theirs or nobody's in particular. */
+  waits_on_me?: boolean;
   /** Whether the viewer may change it: whoever decides it, and the owners of its PR. */
   can_edit?: boolean;
   /** For a fix or merge: whether the viewer may push to the PR's branch (``null``: unknown). */

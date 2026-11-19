@@ -262,3 +262,26 @@ async def test_agents_read_an_export_of_the_running_code(repos, tmp_path: Path) 
     newer = await export_source(checkout, tmp_path / "service-code")
     assert newer != out and not out.exists(), "an older export is removed"
     assert await export_source(tmp_path, tmp_path / "x") is None
+
+
+async def test_an_old_fetch_shows_at_once_while_the_branch_is_fetched_again(
+    repos, tmp_path: Path
+) -> None:
+    import asyncio
+
+    from auto_maintainer.selfupdate import updater as module
+
+    _, checkout, other = repos
+    first = _push_change(other, "v2\n")
+    updater = _updater(checkout, tmp_path)
+    assert (await updater.status()).upstream_sha == first
+    second = _push_change(other, "v3\n")
+    assert updater._fetched_at is not None
+    updater._fetched_at -= module.STATUS_FETCH_SECONDS + 1
+    assert (await updater.status()).upstream_sha == first, "the last fetch's, at once"
+    assert updater._fetching is not None
+    await asyncio.wait_for(asyncio.shield(updater._fetching), 30)
+    assert (await updater.status()).upstream_sha == second, "then the new one"
+    updater._fetched_at -= module.STATUS_STALE_SECONDS + 1
+    third = _push_change(other, "v4\n")
+    assert (await updater.status()).upstream_sha == third, "too old: waited for"

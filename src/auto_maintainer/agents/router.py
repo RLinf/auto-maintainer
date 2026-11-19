@@ -309,11 +309,21 @@ class AgentRouter:
             and not task.resume_session
             and str(task.kind) not in KEEPS_OWN_PRIMARY
         ):
-            own = await self.own_agents(task.requested_by)
-            names = list(dict.fromkeys([*own, *names]))
+            first, on_service = await self.firsts(task.requested_by)
+            names = list(dict.fromkeys([*first, *names]))
+        else:
+            on_service = set()
         skipped: list[str] = []
         last: AgentResult | None = None
+        whole = task
         for name in names:
+            # The person's default may name the service's account of an agent they
+            # also run on their own.
+            task = (
+                whole.model_copy(update={"service_account": True})
+                if name in on_service
+                else whole
+            )
             reason = await self._unusable(name, str(task.kind), task)
             if reason:
                 skipped.append(f"{name}: {reason}")
@@ -351,6 +361,24 @@ class AgentRouter:
             result = await self._run_structured(runtime, attempt, schema, output_model)
             if result.ok:
                 return result
+            if (
+                attempt.resume_session
+                and attempt.fresh_prompt
+                and result.error_kind not in ("timeout", "quota", "limit", "auth")
+            ):
+                # The CLI could not take the session up: the same agent, afresh.
+                fresh = attempt.model_copy(
+                    update={
+                        "prompt": attempt.fresh_prompt,
+                        "resume_session": None,
+                        "id": f"{task.id}-fresh",
+                    }
+                )
+                result = await self._run_structured(
+                    runtime, fresh, schema, output_model
+                )
+                if result.ok:
+                    return result
             last = result
         if last is not None:
             return last
@@ -472,6 +500,23 @@ class AgentRouter:
         return out
 
     # -- internals -------------------------------------------------------------------
+
+    async def firsts(self, login: str) -> tuple[list[str], set[str]]:
+        """The agents what ``login`` asks for tries first, and which of them run on
+        the service's account: their default (``PersonalDefault``) when they chose
+        one and it is ready, else every agent they run on their own accounts."""
+        if self.people is None:
+            return [], set()
+        try:
+            chosen = await self.people.default(login)
+        except ValueError:
+            chosen = None
+        if chosen is not None and self.ready(chosen.agent):
+            if not chosen.own:
+                return [chosen.agent], {chosen.agent}
+            if chosen.agent in await self.own_agents(login):
+                return [chosen.agent], set()
+        return await self.own_agents(login), set()
 
     async def own_agents(self, login: str) -> list[str]:
         """The agents ``login`` runs on their own accounts (``_account``) that are
@@ -665,6 +710,7 @@ class AgentRouter:
         """Whether ``task`` runs on its requester's own account of ``runtime``."""
         if (
             self.people is None
+            or task.service_account
             or not task.requested_by
             or getattr(runtime, "container_sandbox", None) is None
         ):
@@ -688,6 +734,7 @@ class AgentRouter:
         login = task.requested_by
         if (
             self.people is None
+            or task.service_account
             or not login
             or getattr(runtime, "container_sandbox", None) is None
             or not hasattr(runtime, "account_home")

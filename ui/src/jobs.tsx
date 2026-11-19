@@ -711,6 +711,7 @@ const CONCLUSION: Record<string, string> = {
   reproduced: "Reproduced",
   not_reproduced: "Not reproduced",
   inconclusive: "Inconclusive",
+  not_needed: "No reproduction needed",
 };
 
 

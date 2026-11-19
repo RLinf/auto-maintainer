@@ -240,6 +240,7 @@ class MergeBasePlaybook(Playbook):
                 if may_succeed_later(answer):
                     raise RuntimeError(f"the merge agent failed: {answer.error}")
                 return PlaybookResult(failed=f"the merge agent failed: {answer.error}")
+            await ctx.keep_work_session(answer, workdir)
             resolved: dict[str, str] = {}
             left: list[str] = []
             for name in attempt.conflicts:
@@ -445,6 +446,7 @@ class MergeBasePlaybook(Playbook):
                 if may_succeed_later(answer):
                     raise RuntimeError(f"the merge agent failed: {answer.error}")
                 return await refuse(f"the agent failed: {answer.error}")
+            await ctx.keep_work_session(answer, workdir)
             resolved: dict[str, str] = {}
             problems: list[str] = []
             for name in attempt.conflicts:

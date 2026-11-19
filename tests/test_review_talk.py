@@ -17,6 +17,7 @@ pending draft, lessons, who may take part, and drafts already decided."""
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -137,31 +138,72 @@ async def test_a_reviewer_talks_the_agent_out_of_a_finding(demo) -> None:
         assert (await eve.get(f"/api/jobs/{job['id']}/talk")).status_code == 403
 
 
-async def test_a_turn_a_restart_cut_off_says_so_and_takes_a_message_again(
-    demo,
-) -> None:
+async def test_a_turn_a_restart_cut_off_is_taken_up_in_its_session(demo) -> None:
+    """The next start takes up a review's conversation the stopping service cut
+    off: its agent answers the last message again, in the session the turn had,
+    without the message being added twice."""
+    from auto_maintainer.domain.progress import agent_session_key
+    from auto_maintainer.domain.records import ChatMessage
+    from auto_maintainer.web import review_talk
+
     h, app = demo
     async with _as(app, "maria") as maria:
         job = await _reviewed(h, maria, 42)
         url = f"/api/jobs/{job['id']}/talk"
         await maria.post(url, json={"text": "Why is F1 a finding?"})
-        # The process stopped while its agent answered the next message: the turn
-        # never cleared the conversation's live run.
+        # The process stopped while its agent answered the next message.
         thread = await h.store.get_thread(f"chat_{job['id']}")
         assert thread is not None
+        await h.store.add_message(
+            ChatMessage(
+                thread_id=thread.id, role="user", text="And F2?", author="maria"
+            )
+        )
         thread.live_run = "run_cut_off"
         await h.store.save_thread(thread)
-        assert (await maria.get(url)).json()["live_run"] == "run_cut_off"
+        runtime = h.runner.routes[-1].primary
+        await h.store.set_state(
+            agent_session_key("run_cut_off", "review"),
+            {"runtime": runtime, "session": "s-cut"},
+        )
 
         await h.service.end_cut_off_turns()  # as the next start does
+        await asyncio.gather(*review_talk._resuming)
+        turn = h.runner.tasks[-1]
+        assert turn.resume_session == "s-cut" and turn.agent_chosen
+        assert turn.prompt.startswith("The service restarted while you were answering")
+        assert "And F2?" in turn.prompt
         talk = (await maria.get(url)).json()
         assert talk["live_run"] is None
-        last = talk["messages"][-1]
-        assert last["role"] == "assistant" and last["run_id"] == "run_cut_off"
-        assert "Send your message again" in last["text"]
-        again = (await maria.post(url, json={"text": "Why is F1 a finding?"})).json()
-        assert "boundary at one item" in again["text"]
-        assert (await maria.get(url)).json()["live_run"] is None
+        said = [m["text"] for m in talk["messages"] if m["role"] == "user"]
+        assert said == ["Why is F1 a finding?", "And F2?"], "not added twice"
+        assert talk["messages"][-1]["role"] == "assistant"
+        assert "Send your message again" not in talk["messages"][-1]["text"]
+
+
+async def test_other_conversations_a_restart_cut_off_say_so(demo) -> None:
+    from auto_maintainer.domain.records import ChatThread
+
+    h, _ = demo
+    thread = ChatThread(owner="maria", title="chat", live_run="run_cut_off")
+    await h.store.save_thread(thread)
+    await h.service.end_cut_off_turns()
+    kept = await h.store.get_thread(thread.id)
+    assert kept is not None and kept.live_run is None
+    [note] = await h.store.list_messages(thread.id)
+    assert "Send your message again" in note.text
+
+
+async def test_the_agent_that_wrote_the_review_answers_for_it(demo) -> None:
+    """A person's own agents go first in what they ask for, but a review's
+    conversation keeps to the agent that wrote the review."""
+    h, app = demo
+    async with _as(app, "maria") as maria:
+        job = await _reviewed(h, maria, 42)
+        wrote = h.runner.routes[-1].primary
+        await maria.post(f"/api/jobs/{job['id']}/talk", json={"text": "Why F1?"})
+    turn, route = h.runner.tasks[-1], h.runner.routes[-1]
+    assert route.primary == wrote and turn.agent_chosen
 
 
 async def _role(h: Any, login: str, role: str = "reviewer", number: int = 42) -> None:
@@ -589,3 +631,53 @@ async def test_asking_for_a_run_in_the_conversation_starts_a_reproduction(demo) 
     [task] = [t for t in h.runner.tasks if t.kind == "reproduce"][-1:]
     assert "Load a batch of one item on the base and the head." in task.prompt
     assert task.requested_by == "maria"
+
+
+async def test_a_turn_the_stopping_service_cuts_off_stays_answering(demo) -> None:
+    """So that the next start finds it and takes it up."""
+    h, app = demo
+    working = asyncio.Event()
+
+    async def answering(task: Any) -> Any:
+        working.set()
+        await asyncio.Event().wait()
+
+    async with _as(app, "maria") as maria:
+        job = await _reviewed(h, maria, 42)
+        h.runner.on("review", answering)
+        posting = asyncio.create_task(
+            maria.post(f"/api/jobs/{job['id']}/talk", json={"text": "Why F1?"})
+        )
+        await asyncio.wait_for(working.wait(), 5)
+        h.service.closing.set()  # the service stops
+        posting.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await posting
+        h.service.closing.clear()
+    thread = await h.store.get_thread(f"chat_{job['id']}")
+    assert thread is not None and thread.live_run, "still answering, to take up"
+
+
+async def test_a_discussion_goes_on_in_the_session_its_review_ended_in(demo) -> None:
+    """The first turn's checkout sits where the review's was, and resumes the
+    session the reviewing agent ended in, so it answers with all it read; the
+    whole prompt is there for a CLI that cannot take the session up."""
+    from auto_maintainer.domain.progress import work_session_key
+
+    h, app = demo
+    async with _as(app, "maria") as maria:
+        job = await _reviewed(h, maria, 42)
+        review = next(
+            t
+            for t in h.runner.tasks
+            if t.kind == "review" and "That reproduction has ended" not in t.prompt
+        )
+        wrote = h.runner.routes[h.runner.tasks.index(review)].primary
+        await h.store.set_state(
+            work_session_key(job["id"]),
+            {"runtime": wrote, "session": "s-review", "workdir": str(review.workdir)},
+        )
+        await maria.post(f"/api/jobs/{job['id']}/talk", json={"text": "Why F1?"})
+        first = h.runner.tasks[-1]
+        assert first.workdir == review.workdir and first.resume_session == "s-review"
+        assert first.fresh_prompt and "Why F1?" in first.fresh_prompt

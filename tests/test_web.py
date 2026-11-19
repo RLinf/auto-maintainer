@@ -265,6 +265,39 @@ async def test_a_lesson_from_chat_stays_on_the_answer(demo) -> None:
     assert other.status_code == 404
 
 
+async def test_a_priority_lesson_stays_out_of_reviews(demo) -> None:
+    from auto_maintainer.domain.memory import repo_dir
+
+    h, app = demo
+    rule = "Keep P0 for blocking fixes and PRs that merge at once."
+    h.runner.on(
+        "chat",
+        lambda task: {
+            "reply": "Saved.",
+            "proposals": [
+                {
+                    "kind": "lesson",
+                    "repo": "acme/widget",
+                    "lesson": rule,
+                    "lesson_for": "priority",
+                }
+            ],
+        },
+    )
+    async with _client(app, "maria") as maria:
+        thread = (await maria.post("/api/chat/threads", json={"text": "hi"})).json()
+        await maria.post(
+            f"/api/chat/threads/{thread['id']}/messages", json={"text": "P0: few"}
+        )
+        await h.service.actuator.drain()
+    profile = await h.service.profiles.active("acme/widget")
+    assert profile is not None
+    path = f"{repo_dir('acme/widget')}/knowledge/priority_lessons.md"
+    assert rule in h.memory.files[path]
+    assert rule in await h.service.knowledge.priority_lessons("acme/widget", profile)
+    assert rule not in await h.service.knowledge.review_lessons("acme/widget", profile)
+
+
 async def test_edits_to_a_review_draft_are_saved_without_posting(demo) -> None:
     h, app = demo
     async with _client(app, "maria") as maria:

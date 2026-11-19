@@ -127,6 +127,33 @@ async def test_a_maintainer_answers_on_the_dashboard(demo, tmp_path: Path) -> No
     assert any(a.kind == "agent_question" and a.actor == "walt" for a in audit)
 
 
+async def test_waiting_counts_only_questions_for_the_person_or_nobody(
+    demo, tmp_path: Path
+) -> None:
+    h = demo
+    h.forge.set_permission(REPO, "mara", Permission.ADMIN)
+    app = create_app(h.service, data_dir=tmp_path, allow_dev_login=True)
+    for_walt = asyncio.create_task(
+        h.service.questions.ask(_question(asked_for="Walt"), 60)
+    )
+    await _pending(h.service.questions, h.store)
+    async with _client(app, "mara") as mara, _client(app, "walt") as walt:
+        assert (await mara.get("/api/me")).json()["pending_questions"] == 0
+        [row] = (await mara.get("/api/questions")).json()
+        assert row["asked_for"] == "Walt"
+        assert (await walt.get("/api/me")).json()["pending_questions"] == 1
+        unassigned = asyncio.create_task(h.service.questions.ask(_question(), 60))
+        for _ in range(100):
+            if len(await h.store.list_questions(QuestionState.PENDING)) == 2:
+                break
+            await asyncio.sleep(0.02)
+        assert (await mara.get("/api/me")).json()["pending_questions"] == 1
+        assert (await walt.get("/api/me")).json()["pending_questions"] == 1
+    for task in (for_walt, unassigned):
+        task.cancel()
+    await asyncio.gather(for_walt, unassigned, return_exceptions=True)
+
+
 async def _record(events: list, event) -> None:
     events.append(event)
 

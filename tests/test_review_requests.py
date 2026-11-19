@@ -45,6 +45,7 @@ from auto_maintainer.domain.records import ActionRecord, Job, JobStatus
 from auto_maintainer.domain.settings import UserToken
 from auto_maintainer.domain.snapshot import CheckConclusion, CheckRun, CheckStatus
 from auto_maintainer.testing.demo import build_demo
+from auto_maintainer.testing.fakes import report
 from auto_maintainer.web.app import create_app
 
 REPO = "acme/widget"
@@ -135,13 +136,14 @@ async def test_a_requested_review_follows_the_repos_skill_and_asks_the_requester
     started = await _review(app, "maria", 42, agent="codex")
     assert started["run"] == "review" and started["agent"] == "codex"
     await h.settle()
-    [i] = [i for i, t in enumerate(h.runner.tasks) if t.kind == TaskKind.REVIEW]
+    [i] = _reviews(h)
     task, route = h.runner.tasks[i], h.runner.routes[i]
-    assert ".agents/skills/code-review/SKILL.md" in task.prompt
-    assert (
-        "reviewing for maria" in task.prompt
-        and "Do not ask questions" not in task.prompt
+    assert task.prompt.startswith(
+        "Use the `code-review` skill (`.agents/skills/code-review/SKILL.md`) to "
+        "review PR #42 in acme/widget."
     )
+    assert "You review for maria" in task.prompt
+    assert "do not ask questions" not in task.prompt
     assert task.requested_by == "maria"
     assert route.primary == "codex" and route.fallback == []
 
@@ -236,7 +238,7 @@ async def test_a_prs_reviewer_gets_a_review_of_their_own_beside_anothers(
     started = await _review(app, "walt", 42)
     assert started["run"] == "review" and started.get("own") is True
     await h.settle()
-    reviews = [t for t in h.runner.tasks if t.kind == TaskKind.REVIEW]
+    reviews = [h.runner.tasks[i] for i in _reviews(h)]
     assert len(reviews) == 2 and reviews[-1].requested_by == "walt"
     async with _as(app, "walt") as walt:
         [mine] = [
@@ -304,7 +306,7 @@ async def test_a_full_review_runs_though_the_pr_was_reviewed(demo) -> None:
     assert started["run"] == "review" and started.get("full") is True
     await h.settle()
     kinds = [t.kind for t in h.runner.tasks]
-    assert kinds.count(TaskKind.REVIEW) == 2 and TaskKind.FOLLOWUP not in kinds
+    assert len(_reviews(h)) == 2 and TaskKind.FOLLOWUP not in kinds
     again = await _full(app, "walt", 42)
     assert again["run"] == "drafted" and again["by"] == "maria"
 
@@ -317,7 +319,7 @@ async def test_a_full_review_runs_though_the_pr_was_reviewed(demo) -> None:
     assert full["run"] == "review", "a follow-up in progress is not the full review"
     await h.settle()
     kinds = [t.kind for t in h.runner.tasks]
-    assert kinds.count(TaskKind.REVIEW) == 3 and kinds.count(TaskKind.FOLLOWUP) == 1
+    assert len(_reviews(h)) == 3 and kinds.count(TaskKind.FOLLOWUP) == 1
 
 
 def test_am_review_full_asks_for_a_full_review() -> None:
@@ -384,9 +386,9 @@ async def test_a_fix_is_drafted_for_the_reviewer_and_opened_as_them(demo) -> Non
                 "summary": "Adds the missing boundary test.",
                 "fixed": [{"id": "F1", "change": "added a test for one item"}],
             }
-        assert (
-            "reviewing" not in task.prompt
-            and "fixing a pull request for maria" in task.prompt
+        assert task.prompt.startswith("Fix PR #42 in acme/widget for maria")
+        assert "review skill" not in task.prompt and "SKILL.md" not in task.prompt, (
+            "a fix is not a review: it follows no review skill"
         )
         assert task.requested_by == "maria" and task.mode == "workspace_write"
         (Path(task.workdir) / "tests").mkdir(exist_ok=True)
@@ -750,11 +752,24 @@ async def test_a_merge_goes_as_a_pr_into_the_pr_when_its_fork_refuses_pushes(
 # -- labels the review suggests ----------------------------------------------------------
 
 
+def _reviews(h: Any) -> list[int]:
+    """Where the review agents' tasks are in the runner's list, apart from the
+    revisions of their drafts a reproduction asks for."""
+    return [
+        i
+        for i, t in enumerate(h.runner.tasks)
+        if t.kind == TaskKind.REVIEW and "That reproduction has ended" not in t.prompt
+    ]
+
+
 def _review_with_labels(labels: list[str]):
     from auto_maintainer.testing.demo import _answer
 
     def answer(task: Any) -> dict:
-        return {**_answer(task), "labels": labels}
+        return {
+            **_answer(task.model_copy(update={"kind": TaskKind.REVIEW})),
+            "labels": labels,
+        }
 
     return answer
 
@@ -762,8 +777,9 @@ def _review_with_labels(labels: list[str]):
 async def test_a_review_suggests_only_the_repositorys_own_labels(demo) -> None:
     h, app = demo
     pr = h.forge.prs[(REPO, 42)]
+    h.runner.on("review", lambda t: report())
     h.runner.on(
-        "review",
+        "form",
         _review_with_labels(
             [
                 "enhancement",
@@ -778,8 +794,8 @@ async def test_a_review_suggests_only_the_repositorys_own_labels(demo) -> None:
     )
     await _review(app, "maria", 42)
     await h.settle()
-    [task] = [t for t in h.runner.tasks if t.kind == TaskKind.REVIEW]
-    offered = task.prompt.split("Suggesting labels:")[1].split("Only these exist:")[1]
+    [task] = [t for t in h.runner.tasks if t.kind == TaskKind.FORM]
+    offered = task.prompt.split("source='repository.labels'")[1]
     offered = offered.split("</untrusted-data>")[0]
     assert "documentation" in offered and "enhancement" in offered
     assert "needs review" not in offered and "run-ci" not in offered
@@ -816,11 +832,12 @@ async def test_a_repository_can_turn_label_suggestions_off(demo) -> None:
     layer["review"] = {**(layer.get("review") or {}), "suggest_labels": False}
     h.memory.files[profile_path(REPO)] = dump_yaml(layer)
     await h.approve_directly(REPO, "maria")
-    h.runner.on("review", _review_with_labels(["enhancement"]))
+    h.runner.on("review", lambda t: report())
+    h.runner.on("form", _review_with_labels(["enhancement"]))
     await _review(app, "maria", 42)
     await h.settle()
-    [task] = [t for t in h.runner.tasks if t.kind == TaskKind.REVIEW]
-    assert "Suggesting labels:" not in task.prompt
+    [task] = [t for t in h.runner.tasks if t.kind == TaskKind.FORM]
+    assert "`labels`" not in task.prompt
     async with _as(app, "maria") as maria:
         assert not [
             p
@@ -867,12 +884,15 @@ async def test_a_review_posts_in_the_format_of_the_repositorys_skill(demo) -> No
     h, app = demo
     pr = h.forge.prs[(REPO, 42)]
     _skill(h, 42, pr.head_sha)
-    h.runner.on("review", _skill_review)
+    h.runner.on("review", lambda t: report())
+    h.runner.on("form", _skill_review)
     await _review(app, "maria", 42)
     await h.settle()
-    [task] = [t for t in h.runner.tasks if t.kind == TaskKind.REVIEW]
-    assert "fixes the main comment's format" in task.prompt
-    assert "The main review comment has these sections" not in task.prompt
+    [task] = [h.runner.tasks[i] for i in _reviews(h)]
+    [form] = [t for t in h.runner.tasks if t.kind == TaskKind.FORM]
+    assert "keyed by its heading word for word" in form.prompt
+    assert form.resume_session == "session-1", "the agent that wrote it fills it in"
+    assert "sections" not in task.prompt, "the review is the skill's alone"
     assert "Test machine gpu-01 is yours while you work" in task.prompt
     assert task.lab_session, "the reviewing agent tests the PR in its own session"
     async with _as(app, "maria") as maria:
@@ -946,8 +966,8 @@ async def test_a_review_reports_the_reproduction_on_record(demo) -> None:
     h.runner.on("review", _skill_review)
     await _review(app, "maria", 42)
     await h.settle()
-    [task] = [t for t in h.runner.tasks if t.kind == TaskKind.REVIEW]
-    record = task.prompt.split("Reproduction on record")[1]
+    [task] = [h.runner.tasks[i] for i in _reviews(h)]
+    record = task.prompt.split("is on record")[1]
     assert "gpu-01" in record and '"conclusion": "reproduced"' in record
     assert "Traceback" not in record, "run output stays with the job"
 
@@ -1321,7 +1341,7 @@ async def test_a_request_for_only_the_prs_title_drafts_an_edit_of_the_pr(
                 "pr_title": "feat(loader): batches of one",
                 "pr_body": "Handles one.",
             }
-        assert "When that is all they ask for, change no file." in task.prompt
+        assert "when that is all they want, change no file." in task.prompt
         return AgentResult(
             runtime="scripted", ok=True, text="Title: feat(loader): batches of one"
         )
@@ -1614,3 +1634,33 @@ async def test_new_pr_change_that_touches_no_files_drafts_nothing(demo) -> None:
             for m in messages
             if m["role"] == "assistant"
         )
+
+
+async def test_the_waiting_count_holds_ones_own_drafts_not_every_reviewers(
+    demo,
+) -> None:
+    """A maintainer may decide every reviewer's draft, but only their own, and what
+    nobody in particular asked for, wait on them."""
+    h, app = demo
+    await _review(app, "maria", 42)
+    await _review(app, "walt", 43)
+    await h.settle()
+    async with _as(app, "maria") as maria:
+        listed = (await maria.get("/api/proposals")).json()
+    drafts = {
+        p["action"]["action"]["number"]: p
+        for p in listed
+        if p["action"]["action"]["kind"] == "review.post"
+    }
+    assert drafts[42]["can_decide"] and drafts[42]["waits_on_me"]
+    assert drafts[43]["can_decide"], "she maintains the repository"
+    assert not drafts[43]["waits_on_me"], "walt's draft waits on walt"
+    unasked = [p for p in listed if not p["requester"] and p["can_decide"]]
+    assert all(p["waits_on_me"] for p in unasked), "the service's own: its maintainers'"
+    async with _as(app, "walt") as walt:
+        mine = {
+            p["action"]["action"]["number"]: p["waits_on_me"]
+            for p in (await walt.get("/api/proposals")).json()
+            if p["action"]["action"]["kind"] == "review.post"
+        }
+    assert mine.get(43) is True and not mine.get(42)

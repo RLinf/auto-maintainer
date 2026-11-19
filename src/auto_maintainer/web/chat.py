@@ -60,6 +60,7 @@ from ..domain.memory import (
     repo_dir,
 )
 from ..domain.profile import Route
+from ..domain.progress import work_session_key
 from ..domain.records import ChatMessage, ChatRequest, ChatThread, JobStatus
 from ..domain.review import review_quality
 from ..domain.run_ci import latest_checks
@@ -79,6 +80,7 @@ from ..playbooks.person_notes import (
 )
 from ..playbooks.prompts import schema_hint, untrusted
 from ..playbooks.quality import assessed_quality, quick_quality
+from ..profiles.knowledge import LESSONS, PRIORITY_LESSONS
 from ..profiles.layers import ProfileError, parse_yaml
 from ..service import Service
 from .api import (
@@ -213,6 +215,64 @@ async def stopped_message(
     return message
 
 
+class Resumed(BaseModel):
+    """A conversation's turn a restart cut off, taken up again: the run it was, and
+    the agent session it had (``progress.agent_session_key``), when one was kept."""
+
+    run: str
+    session: str | None = None
+    runtime: str | None = None
+
+
+RESUMED_TURN = "The service restarted while you were answering the newest message below. This is the same session: go on from where you were. Whatever was still running when the service stopped was stopped; run it again if you need its result. Then answer as the task below asks."
+
+
+def resumed_route(
+    service: Service, route: Route, resumed: Resumed | None, resume: str | None
+) -> tuple[Route, str | None]:
+    """The route and session of a turn taken up after a restart: the agent that was
+    answering, in its session, when it is ready; else ``route`` and ``resume``."""
+    if (
+        resumed is None
+        or not resumed.runtime
+        or not service.agent_ready(resumed.runtime)
+    ):
+        return route, resume
+    rest = [a for a in [route.primary, *route.fallback] if a != resumed.runtime]
+    model = route.model if route.primary == resumed.runtime else None
+    return route.model_copy(
+        update={"primary": resumed.runtime, "fallback": rest, "model": model}
+    ), resumed.session or resume
+
+
+async def work_session(service: Service, thread: ChatThread) -> dict[str, Any] | None:
+    """The session the agent finished the conversation's work in (a review, a
+    follow-up, a change: ``PlaybookContext.keep_work_session``), for the work's own
+    conversation to go on in; ``None`` for a copy, or work that kept none."""
+    if not thread.job_id or thread.forked_from:
+        return None
+    kept = await service.store.get_state(work_session_key(thread.job_id))
+    if not isinstance(kept, dict) or not kept.get("session") or not kept.get("workdir"):
+        return None
+    return kept
+
+
+def take_up_work(
+    service: Service, thread: ChatThread, kept: dict[str, Any] | None, path: Path
+) -> None:
+    """Make the conversation's first turn resume the work's session when its new
+    checkout sits where the work's did (the agent's CLI finds its session by that
+    path) and that agent is ready; otherwise it starts afresh."""
+    thread.session = None
+    if (
+        kept is not None
+        and str(path) == kept["workdir"]
+        and service.agent_ready(str(kept.get("runtime") or ""))
+    ):
+        thread.session = str(kept["session"])
+        thread.runtime = str(kept["runtime"])
+
+
 def keep_session(thread: ChatThread, result: AgentResult) -> None:
     """Remember the session and agent of a conversation's last turn; a session
     belongs to the agent that made it."""
@@ -270,9 +330,14 @@ class ProposedAction(BaseModel):
     )
     lesson: str = Field(
         default="",
-        description="For kind=lesson: a review lesson to remember for this repository. "
+        description="For kind=lesson: a lesson to remember for this repository. "
         "For kind=preference: what the person wants from the agents for themselves, "
         "in one sentence.",
+    )
+    lesson_for: Literal["reviews", "priority"] = Field(
+        default="reviews",
+        description="For kind=lesson: whether it is about how the repository's PRs "
+        "are reviewed (reviews) or how their priority is scored (priority).",
     )
     about: Literal["reviews", "conversations", "both"] = Field(
         default="both",
@@ -1316,11 +1381,17 @@ async def _evaluate(service: Any, user: User, p: ProposedAction) -> str:
 
 
 async def save_lesson(service: Any, user: User, p: ProposedAction) -> str:
-    """Save a review lesson for ``p.repo`` as a memory change and return its id. It
+    """Save a lesson for ``p.repo`` as a memory change and return its id: in its
+    review lessons, or its priority lessons, which only priority scoring reads. It
     carries ``user``'s approval when they may configure the repository, so it merges
     at once; otherwise it waits for a maintainer who may."""
-    path = f"{repo_dir(p.repo)}/knowledge/review_lessons.md"
-    current = await service.a.memory.read_text(path) or "# Review lessons\n"
+    name, header = (
+        (PRIORITY_LESSONS, "# Priority lessons\n")
+        if p.lesson_for == "priority"
+        else (LESSONS, "# Review lessons\n")
+    )
+    path = f"{repo_dir(p.repo)}/{name}"
+    current = await service.a.memory.read_text(path) or header
     lesson = p.lesson.strip()
     item = "\n  ".join(line.rstrip() for line in lesson.splitlines())
     change = MemoryChange(

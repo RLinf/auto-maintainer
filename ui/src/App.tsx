@@ -91,8 +91,9 @@ function Shell({ me }: { me: Me }) {
 
   const counts = {
     questions: me.pending_questions,
-    // What waits for this person: proposals they may decide, not every one they can see.
-    proposals: proposals.data?.filter((p) => p.can_decide !== false).length ?? 0,
+    // What waits for this person: proposals that are theirs or nobody's in particular,
+    // not every one a maintainer may decide.
+    proposals: proposals.data?.filter((p) => p.waits_on_me ?? p.can_decide !== false).length ?? 0,
     memory: memory.data?.length ?? 0,
   };
   const waiting = counts.questions + counts.proposals + counts.memory;

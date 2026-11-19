@@ -269,7 +269,12 @@ class GitWorkspace:
         return path
 
     async def prepare(
-        self, repo: str, number: int | None, sha: str, default_branch: str
+        self,
+        repo: str,
+        number: int | None,
+        sha: str,
+        default_branch: str,
+        at: Path | None = None,
     ) -> Path:
         lock = self._locks.setdefault(repo, asyncio.Lock())
         async with lock:
@@ -285,6 +290,14 @@ class GitWorkspace:
                 await self._git(repo, "fetch", "-q", "origin", sha, cwd=mirror)
             what = f"pr-{number}" if number is not None else default_branch
             path = self.repo_dir(repo) / f"{what}-{sha[:12]}-{uuid.uuid4().hex[:6]}"
+            # Only a free path among the repository's checkouts, where a released
+            # one was.
+            if (
+                at is not None
+                and Path(at).parent == self.repo_dir(repo)
+                and not Path(at).exists()
+            ):
+                path = Path(at)
             path.parent.mkdir(parents=True, exist_ok=True)
             await self._git(
                 repo, "worktree", "add", "-q", "--detach", str(path), sha, cwd=mirror

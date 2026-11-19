@@ -12,9 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Follow-up review (design 5.6): the status of every earlier finding, plus new ones."""
+"""Follow-up review (design 5.6): the review skill on the PR again, for the status of
+every earlier finding and the new ones, in two turns like a first review
+(``review_form``)."""
 
 from __future__ import annotations
+
+from pathlib import Path
 
 from ..domain.actions import (
     ActionHints,
@@ -44,26 +48,32 @@ from .base import (
     in_scope,
     keeps_session,
 )
-from .feedback import declined_labels, rejections_block, rejections_on
+from .feedback import Rejection, declined_labels, rejections_block, rejections_on
 from .person_notes import load_notes, notes_block
 from .prompts import (
+    FOLLOWUP_FORM,
+    NOTHING_RUNS,
     accepted_labels,
-    headless,
-    interactive,
+    checkout_line,
+    forge_note,
+    form_prompt,
     label_block,
     label_choices,
-    pr_block,
+    own_review_skill,
     quality_block,
-    review_skill_block,
-    schema_hint,
+    recommendations_line,
+    review_call,
+    review_instructions_block,
+    review_rules,
     untrusted,
-    without_generated,
     work_lessons_block,
     writing_block,
 )
 from .requests import FOLLOWUP_STATES, review_key, review_request, starts_review
 from .review import reproduction_record
+from .review_form import fill_form, forget_report, keep_report, saved_report
 from .review_session import (
+    ReviewMachine,
     close,
     earlier_work,
     review_machine,
@@ -145,114 +155,74 @@ class Followup(Playbook):
             c for c in label_choices(info.labels, profile, pr) if c not in declined
         ]
         limit = profile.review.max_suggested_labels
-        machine = await review_machine(
-            ctx,
-            pr,
-            profile,
-            event.id,
-            ctx.requested_by,
-            timed_out=wake.kind == EventKind.JOB_TIMEOUT,
+        # A report this job's agent wrote already needs only its form filled in.
+        answer = await saved_report(ctx, pr.head_sha)
+        machine = (
+            ReviewMachine()
+            if answer is not None
+            else await review_machine(
+                ctx,
+                pr,
+                profile,
+                event.id,
+                ctx.requested_by,
+                timed_out=wake.kind == EventKind.JOB_TIMEOUT,
+            )
         )
         if machine.wait is not None:
             return machine.wait
         workdir = await ctx.workspace.prepare(
             pr.repo, pr.number, pr.head_sha, info.default_branch
         )
-        answer = None
         try:
-            testing = machine.testing(ctx, reproduce=False) if machine.token else None
-            if testing:
-                earlier = await earlier_work(ctx, pr)
-                testing = f"{testing}\n\n{earlier}" if earlier else testing
-            incremental = without_generated(
-                await ctx.workspace.diff(workdir, previous_sha, pr.head_sha)
-                if previous_sha
-                else ""
-            )
-            # With the changes since the last review at hand, the whole diff is the
-            # agent's to read in the checkout when it needs more (its file list
-            # stays in the PR block): it was 60,000 characters a follow-up.
-            full = (
-                None
-                if incremental.strip()
-                else without_generated(
-                    await ctx.workspace.diff(
-                        workdir, f"origin/{info.default_branch}", pr.head_sha
+            if answer is None:
+                answer = await ctx.ask(
+                    AgentTask(
+                        kind=TaskKind.FOLLOWUP,
+                        prompt=await self._prompt(
+                            ctx,
+                            pr,
+                            profile,
+                            info.default_branch,
+                            workdir,
+                            machine,
+                            previous_sha,
+                            prior,
+                            spot=cls.state == ReviewState.APPROVED_NEW_COMMITS,
+                            turned_down=turned_down,
+                        ),
+                        workdir=workdir,
+                        skill_dirs=ctx.skill_dirs(),
+                        repo=pr.repo,
+                        messages=True,
+                        **session_task_fields(ctx, machine),
                     )
                 )
+                if not answer.ok:
+                    raise RuntimeError(f"follow-up agent failed: {answer.error}")
+                await close(ctx, machine)
+                await keep_report(ctx, pr.head_sha, answer)
+            await ctx.keep_work_session(answer, workdir)
+            result = await fill_form(
+                ctx,
+                answer,
+                FollowupResult,
+                form_prompt(
+                    FOLLOWUP_FORM.format(recommendations=recommendations_line(profile)),
+                    answer.text,
+                    [
+                        label_block(choices, limit),
+                        quality_block(profile, followup=True),
+                    ],
+                ),
+                workdir,
             )
-            spot = cls.state == ReviewState.APPROVED_NEW_COMMITS
-            prompt = "\n\n".join(
-                [
-                    interactive(profile, ctx.requested_by, testing)
-                    if ctx.requested_by
-                    else headless(profile, testing),
-                    review_skill_block(profile, ctx.service.skills_dir, workdir),
-                    work_lessons_block(await ctx.knowledge.agent_lessons(pr.repo)),
-                    (
-                        "This PR was approved earlier; new commits arrived since. Check only whether they introduce "
-                        "a regression or a new problem. Report earlier findings only if they apply."
-                        if spot
-                        else "This is a follow-up review. For every earlier finding, decide whether the new commits "
-                        "resolved it (`resolved`, with the fixing commit), partly addressed it (`partial`), or left it "
-                        "open (`open`). Then report new findings introduced since the last reviewed commit."
-                    ),
-                    untrusted(
-                        "earlier.findings",
-                        prior
-                        or "(no structured findings; read the earlier review comments)",
-                        30_000,
-                    ),
-                    writing_block(profile),
-                    quality_block(profile, followup=True),
-                    notes_block(
-                        await load_notes(ctx.store, ctx.requested_by), "reviews"
-                    )
-                    if ctx.requested_by
-                    else "",
-                    f"Last reviewed commit: {previous_sha or 'unknown'}. Head: {pr.head_sha}.",
-                    testing_block(
-                        machine,
-                        await reproduction_record(ctx.store, pr.repo, pr.number),
-                    ),
-                    untrusted(
-                        "diff.since_review", incremental or "(not available)", 80_000
-                    ),
-                    pr_block(pr, full, 60_000)
-                    + (
-                        "\n\nThe whole PR's diff against its base: `git diff "
-                        f"origin/{info.default_branch}...HEAD` in the checkout."
-                        if full is None
-                        else ""
-                    ),
-                    "`recommendation` must be one of: "
-                    + ", ".join(
-                        repr(v) for v in profile.review.recommendations.values()
-                    ),
-                    rejections_block(turned_down),
-                    label_block(choices, limit),
-                    schema_hint(FollowupResult.model_json_schema()),
-                ]
-            )
-            task = AgentTask(
-                kind=TaskKind.FOLLOWUP,
-                prompt=prompt,
-                workdir=workdir,
-                output_schema=FollowupResult.model_json_schema(),
-                skill_dirs=ctx.skill_dirs(),
-                repo=pr.repo,
-                messages=True,
-                **session_task_fields(ctx, machine),
-            )
-            answer = await ctx.ask(task, FollowupResult)
-            if not answer.ok or answer.structured is None:
-                raise RuntimeError(f"follow-up agent failed: {answer.error}")
-            result = FollowupResult.model_validate(answer.structured)
         finally:
             await ctx.workspace.release(workdir)
             # A run the job's next try (or the next start) picks up keeps its session.
             if not keeps_session(ctx, answer):
                 await close(ctx, machine)
+        await forget_report(ctx)
 
         result.labels = accepted_labels(result.labels, choices, limit)
         meaning = profile.review.meaning_of(result.recommendation)
@@ -339,6 +309,80 @@ class Followup(Playbook):
                 "labels": result.labels,
                 **machine.summary(pr.head_sha),
             },
+        )
+
+    async def _prompt(
+        self,
+        ctx: PlaybookContext,
+        pr: PrSnapshot,
+        profile: RepoProfile,
+        base_ref: str,
+        workdir: Path,
+        machine: ReviewMachine,
+        previous_sha: str | None,
+        prior: str,
+        *,
+        spot: bool,
+        turned_down: list[Rejection],
+    ) -> str:
+        """What the follow-up agent reads: the skill to use on the PR again, the
+        commit it was last reviewed at with the findings then, and only what the
+        skill cannot know."""
+        since = f"`{short_sha(previous_sha)}`" if previous_sha else "an earlier commit"
+        what = (
+            f"It was approved at {since}, and new commits came since: check only "
+            "whether they bring a regression or a new problem."
+            if spot
+            else f"It was reviewed at {since}, and new commits came since: say for "
+            "each earlier finding below whether they resolved it, partly addressed "
+            "it, or left it open, then review what changed for new problems."
+        )
+        if previous_sha:
+            what += f" `git diff {previous_sha}..HEAD` shows what changed."
+        if machine.token:
+            testing = machine.testing(ctx, reproduce=False)
+            earlier = await earlier_work(ctx, pr)
+            testing = f"{testing}\n\n{earlier}" if earlier else testing
+        else:
+            testing = NOTHING_RUNS.format(
+                note=machine.note or "No test machine is attached to this review."
+            )
+        lessons = await ctx.knowledge.review_lessons(pr.repo, profile)
+        return "\n\n".join(
+            part
+            for part in [
+                review_call(
+                    profile, ctx.service.skills_dir, workdir, pr, "review again"
+                ),
+                what,
+                checkout_line(pr.head_sha, base_ref),
+                review_rules(profile, ctx.requested_by),
+                testing,
+                testing_block(await reproduction_record(ctx.store, pr.repo, pr.number)),
+                "The earlier findings:\n"
+                + untrusted(
+                    "earlier.findings",
+                    prior
+                    or "(no structured findings; read the earlier review comments)",
+                    30_000,
+                ),
+                review_instructions_block(profile),
+                writing_block(profile, own_review_skill(profile, workdir) is not None),
+                f"The maintainers' lessons for reviews of this repository:\n{lessons}"
+                if lessons
+                else "",
+                notes_block(await load_notes(ctx.store, ctx.requested_by), "reviews")
+                if ctx.requested_by
+                else "",
+                work_lessons_block(
+                    await ctx.knowledge.agent_lessons(
+                        pr.repo, [machine.lab] if machine.lab else []
+                    )
+                ),
+                rejections_block(turned_down),
+                forge_note(pr),
+            ]
+            if part
         )
 
     async def _prior_findings(self, ctx: PlaybookContext, pr: PrSnapshot) -> str:

@@ -31,6 +31,7 @@ resolution of the conflicted files (``resolved``), which is what the merge commi
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -64,10 +65,19 @@ from ..playbooks.fix import (
 )
 from ..playbooks.merge_base import only_files
 from ..playbooks.person_notes import load_notes, notes_block, remember_said
-from ..playbooks.prompts import pr_block, review_skill_block, schema_hint, untrusted
+from ..playbooks.prompts import forge_note, schema_hint, untrusted
 from ..service import Service
 from .auth import User
-from .chat import keep_session, stopped_message, turn_route
+from .chat import (
+    RESUMED_TURN,
+    Resumed,
+    keep_session,
+    resumed_route,
+    stopped_message,
+    take_up_work,
+    turn_route,
+    work_session,
+)
 from .live_turns import LiveTurns, Stopped
 from .records import open_door, reading_line
 
@@ -213,7 +223,12 @@ async def _checkout(
         if same_commit(now.base_sha, base) and now.patch == patch:
             return Path(thread.workdir)
         await ws.release(thread.workdir)
-    path = await ws.prepare(repo, number, base, default_branch)
+    # The first checkout goes where the change was made, so its agent's session
+    # resumes with everything it read and did.
+    kept = await work_session(service, thread) if not thread.workdir else None
+    path = await ws.prepare(
+        repo, number, base, default_branch, at=Path(kept["workdir"]) if kept else None
+    )
     try:
         await ws.apply(path, patch)
     except Exception as e:
@@ -222,7 +237,7 @@ async def _checkout(
             409, f"the change no longer applies to {short_sha(base)}: {e}"
         ) from e
     thread.workdir = str(path)
-    thread.session = None
+    take_up_work(service, thread, kept, path)
     await service.store.save_thread(thread)
     return path
 
@@ -239,9 +254,12 @@ async def fix_turn(
     route: Route,
     door: Any = None,
     live: LiveTurns | None = None,
+    *,
+    resumed: Resumed | None = None,
 ) -> dict[str, Any]:
     """One turn of the conversation about a fix: ``user``'s message and the agent's
-    answer, which may change the files (design 5.5)."""
+    answer, which may change the files (design 5.5); ``resumed``, the turn a restart
+    cut off, whose message the conversation has already."""
     assert job.repo
     first = job.events[0] if job.events else {}
     asked = (first.get("payload") if isinstance(first, dict) else None) or {}
@@ -265,31 +283,25 @@ async def fix_turn(
         )
 
     text, removed = redact_secrets(said)
-    message = ChatMessage(
-        thread_id=thread.id, role="user", text=text, author=user.login
-    )
-    await service.store.add_message(message)
-    await remember_said(
-        service.store,
-        user.login,
-        text,
-        repo=job.repo,
-        number=job.number,
-        where="fix discussion",
-        kind=SignalKind.REVIEW_DISCUSSION,
-        action_kind=ActionKind.PR_FIX,
-        message_id=message.id,
-    )
+    if resumed is None:
+        message = ChatMessage(
+            thread_id=thread.id, role="user", text=text, author=user.login
+        )
+        await service.store.add_message(message)
+        await remember_said(
+            service.store,
+            user.login,
+            text,
+            repo=job.repo,
+            number=job.number,
+            where="fix discussion",
+            kind=SignalKind.REVIEW_DISCUSSION,
+            action_kind=ActionKind.PR_FIX,
+            message_id=message.id,
+        )
     history = await service.store.list_messages(thread.id)
     workdir = await _checkout(
         service, thread, job.repo, job.number, info.default_branch, base, patch
-    )
-    diff = (
-        await service.a.workspace.diff(
-            workdir, f"origin/{info.default_branch}", pr.head_sha
-        )
-        if pr is not None
-        else ""
     )
     request = "\n\n".join(
         part
@@ -349,8 +361,7 @@ async def fix_turn(
             + untrusted("fix.diff", patch, FIX_DIFF_LIMIT)
             if patch
             else "",
-            review_skill_block(profile, service.info.skills_dir, workdir),
-            pr_block(pr, diff, diff_limit=FIX_DIFF_LIMIT) if pr is not None else "",
+            forge_note(pr) if pr is not None else "",
             notes_block(await load_notes(service.store, user.login), "conversations"),
             reading_line(user.login) if door is not None else "",
             f"Answer the newest message, from {user.login}, above.",
@@ -368,6 +379,10 @@ async def fix_turn(
         )
     )
     turn, resume = await turn_route(service, user.login, thread, route)
+    turn, resume = resumed_route(service, turn, resumed, resume)
+    fresh = prompt  # all a fresh run needs, when the CLI cannot resume
+    if resumed is not None and resume:
+        prompt = f"{RESUMED_TURN}\n\n{prompt}"
     run = new_id("run")
     token, door_env = await open_door(door, user.login)
     task = AgentTask(
@@ -381,15 +396,20 @@ async def fix_turn(
         pr=job.number,
         job_id=run,
         requested_by=user.login,
-        agent_chosen=bool(thread.agent),
+        # The agent that made the change answers for it, before the person's own.
+        agent_chosen=bool(thread.agent)
+        or resumed is not None
+        or (payload is not None and turn.primary == payload.runtime),
         untrusted_input=untrusted_input,
         resume_session=resume,
+        fresh_prompt=fresh if resume else None,
         records_token=token,
         env=door_env,
         timeout_seconds=2400,
     )
     thread.live_run = run
     await service.store.save_thread(thread)
+    cut_off = False
     try:
         outcome = await (live or LiveTurns()).run(run, service.a.agents.run(task, turn))
         if isinstance(outcome, Stopped):
@@ -397,11 +417,16 @@ async def fix_turn(
                 mode="json"
             )
         result = outcome
+    except asyncio.CancelledError:
+        # The stopping service cut it off: it stays answering, for the next start.
+        cut_off = service.closing.is_set()
+        raise
     finally:
         if door is not None:
             door.revoke(token)
-        thread.live_run = None
-        await service.store.save_thread(thread)
+        if not cut_off:
+            thread.live_run = None
+            await service.store.save_thread(thread)
     if not result.ok:
         await service.store.add_message(
             ChatMessage(

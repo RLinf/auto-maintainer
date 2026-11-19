@@ -162,6 +162,27 @@ async def test_repair_resumes_the_session_when_supported() -> None:
     assert repair.id.endswith("-repair") and len(records) == 2
 
 
+async def test_a_session_the_cli_cannot_take_up_runs_afresh_on_the_same_agent() -> None:
+    """A conversation resumes the session its work ended in; when the CLI cannot
+    take it up, the same agent answers from the whole prompt before any other."""
+    a = ScriptedAgentRuntime("a", [_fail("other"), {"ok": True}])
+    b = ScriptedAgentRuntime("b", [{"ok": True}])
+    router, _ = _router(a, b)
+    task = _task(prompt="Go on.", resume_session="s-gone", fresh_prompt="Judge it.")
+    result = await router.run(task, Route(primary="a", fallback=["b"]), Verdict)
+    assert result.ok and result.runtime == "a" and not b.tasks
+    resumed, fresh = a.tasks
+    assert resumed.resume_session == "s-gone" and resumed.prompt == "Go on."
+    assert fresh.resume_session is None and fresh.prompt == "Judge it."
+    # Without a prompt to start afresh from, the route's next agent answers.
+    a2 = ScriptedAgentRuntime("a", [_fail("other")])
+    b2 = ScriptedAgentRuntime("b", [{"ok": True}])
+    router, _ = _router(a2, b2)
+    plain = _task(resume_session="s-gone")
+    result = await router.run(plain, Route(primary="a", fallback=["b"]), Verdict)
+    assert result.runtime == "b" and len(a2.tasks) == 1
+
+
 async def test_repair_starts_fresh_without_sessions() -> None:
     caps = Capabilities(schema_flag=False, sessions=False)
     a = ScriptedAgentRuntime(
@@ -378,7 +399,14 @@ async def test_a_signed_out_agent_still_runs_on_its_requesters_own_account() -> 
 
 
 class _People:
-    """maria runs ``b`` on her own account; nobody else runs any."""
+    """maria runs ``b`` on her own account; nobody else runs any. ``chosen``: the
+    default each person picked."""
+
+    def __init__(self) -> None:
+        self.chosen: dict[str, object] = {}
+
+    async def default(self, login: str) -> object:
+        return self.chosen.get(login.lower())
 
     async def get(self, login: str) -> dict[str, object]:
         from auto_maintainer.domain.agents import PersonalAgent
@@ -537,3 +565,38 @@ async def test_a_runtime_that_answered_is_not_probed_on_every_page() -> None:
     router.runtimes["codex"] = again
     await router.health()
     assert again.probes == 1, "new settings, a new runtime: probed at once"
+
+
+async def test_a_persons_default_picks_the_agent_and_its_account() -> None:
+    """A person chooses what their requests try first among the service's agents
+    and their own: the service's account of an agent they also run on their own,
+    or their own account; without a choice, their own agents go first."""
+    from auto_maintainer.domain.agents import PersonalDefault
+
+    a = _own("a", [])
+    b = _own("b", [])
+    router, _ = _router(a, b)
+    people = _People()
+    router.people = people  # type: ignore[assignment]
+    route = Route(primary="a", fallback=[])
+    a.default = b.default = {"ok": True}
+
+    people.chosen["maria"] = PersonalDefault(agent="b", own=False)
+    first = await router.run(_task(requested_by="maria"), route, Verdict)
+    assert first.runtime == "b" and b.tasks[-1].service_account, (
+        "the service's account of an agent she also runs on her own"
+    )
+    assert not await router._on_own_account(b, b.tasks[-1])
+
+    people.chosen["maria"] = PersonalDefault(agent="a", own=False)
+    again = await router.run(_task(requested_by="maria"), route, Verdict)
+    assert again.runtime == "a", "the service's agent, before her own"
+
+    people.chosen["maria"] = PersonalDefault(agent="b", own=True)
+    mine = await router.run(_task(requested_by="maria"), route, Verdict)
+    assert mine.runtime == "b" and not b.tasks[-1].service_account
+    assert await router._on_own_account(b, b.tasks[-1])
+
+    people.chosen.pop("maria")
+    plain = await router.run(_task(requested_by="maria"), route, Verdict)
+    assert plain.runtime == "b", "no choice: her own agents first, as before"

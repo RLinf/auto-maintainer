@@ -144,8 +144,9 @@ from ..profiles.skills import (
 from ..service import Service
 from .auth import User, current_user
 
-PERMISSION_TTL = timedelta(minutes=10)
-"""The oldest kept permission a view shows: past it, the view reads it again first."""
+PERMISSION_TTL = timedelta(minutes=30)
+"""The oldest kept permission a view shows (``service.VIEW_STALE_LIMIT``): past it,
+the view reads it again first."""
 PERMISSION_REFRESH = timedelta(minutes=7)
 """From this age a view still shows the kept permission at once, and it is read again
 in the background, so pages people keep open never wait for the forge."""
@@ -1182,6 +1183,18 @@ def proposal_requester(proposal: Proposal, record: ActionRecord | None) -> str |
     return record.action.provenance.requested_by if record else None
 
 
+def waits_on(proposal: Proposal, record: ActionRecord | None, login: str) -> bool:
+    """Whether ``proposal`` waits on ``login``, among the people who may decide it:
+    they asked for it (or it is drafted for them), or nobody in particular did (the
+    service's own work, for its maintainers), or it changes the service's code (for
+    its owner). The waiting count and Home's feed show only these; the Approvals page
+    lists every proposal its viewer may decide or see."""
+    if record is not None and record.action.kind == ActionKind.CODE_UPDATE:
+        return True
+    requester = proposal_requester(proposal, record)
+    return not requester or requester.lower() == login.lower()
+
+
 async def may_decide(
     service: Service,
     user: User,
@@ -1275,6 +1288,13 @@ async def may_answer(service: Service, user: User, question: AgentQuestion) -> b
     if question.asked_for and question.asked_for.lower() == user.login.lower():
         return True
     return await is_maintainer(service, user, question.repo)
+
+
+def addressed_to(question: AgentQuestion, login: str) -> bool:
+    """Whether ``question`` waits on ``login``: it is for them (``asked_for``) or for
+    nobody in particular. The waiting counts and Home's feed show only these; other
+    people's questions stay answerable on the Questions page by whoever ``may_answer``."""
+    return not question.asked_for or question.asked_for.lower() == login.lower()
 
 
 class DeployBody(BaseModel):
@@ -1442,7 +1462,8 @@ def build_router() -> APIRouter:
                 [
                     q
                     for q in await service.store.list_questions(QuestionState.PENDING)
-                    if await may_answer(service, user, q)
+                    if addressed_to(q, user.login)
+                    and await may_answer(service, user, q)
                 ]
             ),
         }
@@ -3854,6 +3875,7 @@ def build_router() -> APIRouter:
                     "action": record.model_dump(mode="json") if record else None,
                     "requester": proposal_requester(p, record),
                     "can_decide": can_decide,
+                    "waits_on_me": bool(can_decide) and waits_on(p, record, user.login),
                     "can_edit": can_edit,
                     "can_push": await _can_push(service, user, record)
                     if record is not None and record.action.kind == ActionKind.PR_FIX

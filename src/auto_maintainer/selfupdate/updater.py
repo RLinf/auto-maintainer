@@ -42,6 +42,11 @@ STATUS_FETCH_SECONDS = 60.0
 status whenever it loads or hears that an action ran, and a fetch from GitHub takes
 seconds. A deploy always fetches."""
 
+STATUS_STALE_SECONDS = 1800.0
+"""Up to this old, ``status`` answers from its last fetch at once and fetches again
+behind it, so the Service page waits on GitHub only before the first fetch or after
+a long pause."""
+
 RESTART_EXIT_CODE = 75
 """``am serve`` exits with this code to ask its supervisor for a restart."""
 
@@ -109,14 +114,21 @@ class GitServiceUpdater:
 
     async def _recent_fetch(self) -> None:
         """``upstream`` as fetched within ``STATUS_FETCH_SECONDS``; callers that ask
-        at once share one fetch."""
-        if (
-            self._fetched_at is not None
-            and time.monotonic() - self._fetched_at < STATUS_FETCH_SECONDS
-        ):
+        at once share one fetch. A fetch up to ``STATUS_STALE_SECONDS`` old is used
+        at once while the branch is fetched again in the background."""
+        age = (
+            time.monotonic() - self._fetched_at
+            if self._fetched_at is not None
+            else None
+        )
+        if age is not None and age < STATUS_FETCH_SECONDS:
             return
         if self._fetching is None or self._fetching.done():
             self._fetching = asyncio.ensure_future(self._fetch())
+            # Read: a fetch nobody waits for may fail; the next status tries again.
+            self._fetching.add_done_callback(lambda f: f.cancelled() or f.exception())
+        if age is not None and age < STATUS_STALE_SECONDS:
+            return
         await asyncio.shield(self._fetching)
 
     async def _fetch(self) -> None:

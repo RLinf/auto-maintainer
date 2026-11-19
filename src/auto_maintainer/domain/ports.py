@@ -39,6 +39,7 @@ from .agents import (
     Capabilities,
     InstalledAgent,
     PersonalAgent,
+    PersonalDefault,
     QuestionState,
     RuntimeHealth,
 )
@@ -404,12 +405,19 @@ class Workspace(Protocol):
     """Git worktrees of target repositories for agent runs (design 4.7)."""
 
     async def prepare(
-        self, repo: str, number: int | None, sha: str, default_branch: str
+        self,
+        repo: str,
+        number: int | None,
+        sha: str,
+        default_branch: str,
+        at: Path | None = None,
     ) -> Any:
         """Check out ``sha`` in a fresh worktree from the service's mirror and return its path.
 
         Agent instruction files and skills are replaced with their default-branch
-        versions, so a PR cannot change how it is reviewed.
+        versions, so a PR cannot change how it is reviewed. ``at``: the path to use,
+        when it is free (a checkout released earlier, whose agent session is taken up
+        there); otherwise a new one.
         """
         ...
 
@@ -663,6 +671,12 @@ class PersonalAgents(Protocol):
     def home(self, login: str) -> Path: ...
     async def get(self, login: str) -> dict[str, PersonalAgent]: ...
     async def put(self, login: str, setup: PersonalAgent) -> None: ...
+    async def default(self, login: str) -> PersonalDefault | None:
+        """The agent the person's requests try first, when they chose one."""
+        ...
+
+    async def put_default(self, login: str, choice: PersonalDefault | None) -> None: ...
+
     async def providers(self, login: str) -> dict[str, Provider]: ...
     async def put_provider(
         self, login: str, provider_id: str, provider: Provider | None
@@ -823,11 +837,13 @@ class Store(Protocol):
         since: datetime | None = None,
         limit: int = 500,
         payload: Sequence[str] | None = None,
+        job_ids: Sequence[str] | None = None,
     ) -> list[ActionRecord]:
         """Actions newest first. With ``payload``, each action's payload holds only
         those dotted paths (``result.quality``; none for ``[]``): for views that read
         a few fields of many records. Such a record is for reading only: never
-        execute or save one."""
+        execute or save one. With ``job_ids``, only the actions those jobs made
+        (``Provenance.job_id``)."""
         ...
 
     async def count_actions(
@@ -965,6 +981,10 @@ class Store(Protocol):
     # users, audit, service state
     async def save_user(self, user: UserRecord) -> None: ...
     async def get_user(self, login: str) -> UserRecord | None: ...
+    async def list_users(self) -> list[UserRecord]:
+        """Everyone the dashboard has served, with the permissions it read for them."""
+        ...
+
     async def add_audit(self, entry: AuditEntry) -> None: ...
     async def list_audit(
         self, repo: str | None = None, limit: int = 200

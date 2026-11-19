@@ -33,8 +33,14 @@ STAGE_GOALS = "rubric/stage_goals.yaml"
 LABEL_RULES = "knowledge/labels.yaml"
 FLAKES = "ci/flake_signatures.yaml"
 LESSONS = "knowledge/review_lessons.md"
+"""What the maintainers taught about reviewing the repository's PRs: every review,
+follow-up, revision, triage, and quality score reads it."""
+PRIORITY_LESSONS = "knowledge/priority_lessons.md"
+"""What the maintainers taught about scoring the priority of its PRs: only priority
+scoring reads it, so reviews do not carry it."""
 GLOBAL_FLAKES = "global/ci/flake_signatures.yaml"
 GLOBAL_LESSONS = "global/knowledge/review_lessons.md"
+GLOBAL_PRIORITY_LESSONS = "global/knowledge/priority_lessons.md"
 AGENT_LESSONS = "knowledge/agent_lessons.md"
 """What the service's agents learned from their own trouble doing work in one
 repository (``playbooks/retrospect.py``), as its maintainers approved it."""
@@ -112,9 +118,19 @@ class Knowledge:
         return found
 
     async def review_lessons(self, repo: str, profile: RepoProfile) -> str:
-        parts = [await self._memory.read_text(f"{repo_dir(repo)}/{LESSONS}") or ""]
+        return await self._lessons(repo, profile, LESSONS, GLOBAL_LESSONS)
+
+    async def priority_lessons(self, repo: str, profile: RepoProfile) -> str:
+        return await self._lessons(
+            repo, profile, PRIORITY_LESSONS, GLOBAL_PRIORITY_LESSONS
+        )
+
+    async def _lessons(
+        self, repo: str, profile: RepoProfile, path: str, global_path: str
+    ) -> str:
+        parts = [await self._memory.read_text(f"{repo_dir(repo)}/{path}") or ""]
         if profile.memory.use_global:
-            parts.append(await self._memory.read_text(GLOBAL_LESSONS) or "")
+            parts.append(await self._memory.read_text(global_path) or "")
         return "\n\n".join(p.strip() for p in parts if p.strip())
 
     async def agent_lessons(

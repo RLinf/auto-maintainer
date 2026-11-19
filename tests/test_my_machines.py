@@ -117,9 +117,10 @@ async def test_only_the_owners_work_runs_on_their_machine(demo) -> None:
     async with _as(app, "maria") as maria:
         await maria.post("/api/reviews", json={"prs": [{"repo": REPO, "number": 42}]})
         await h.settle()
-    [opened] = runner.reproduced
-    assert opened["payload"].lab == MINE, "her review tests on her own machine"
-    assert opened["payload"].requested_by == "maria"
+    opened = runner.reproduced
+    assert len(opened) == 2, "the review's session, and its reproduction's beside it"
+    assert {o["payload"].lab for o in opened} == {MINE}, "both on her own machine"
+    assert {o["payload"].requested_by for o in opened} == {"maria"}
 
 
 async def test_a_persons_machine_is_reached_with_their_key_alone(

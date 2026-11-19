@@ -5,7 +5,7 @@
 
 import { useMemo, type ReactNode } from "react";
 import { Link } from "react-router-dom";
-import { api, type Me, type ServiceView } from "../api";
+import { addressedTo, api, type Me, type ServiceView } from "../api";
 import { CaughtUp, ErrorBox, Status, Tier, timeOf, useAct } from "../components";
 import { useMemoryChanges, useProposals, usePrs, useQuestions, useRepos, useService } from "../data";
 import { useT } from "../i18n";
@@ -71,8 +71,8 @@ export default function HomePage({ me }: { me: Me }) {
 
   const items = useMemo<FeedItem[]>(() => {
     const out: FeedItem[] = [];
-    for (const q of (questions.data ?? []).filter((x) => inScope(x.repo))) out.push({ id: q.id, kind: "question", at: q.created_at, node: <QuestionCard question={q} compact />, mine: q.asked_for === me.login });
-    for (const p of (proposals.data ?? []).filter((x) => inScope(x.repo))) out.push({ id: p.id, kind: "proposal", at: p.created_at, node: <ProposalCard proposal={p} compact /> });
+    for (const q of (questions.data ?? []).filter((x) => inScope(x.repo) && addressedTo(x, me.login))) out.push({ id: q.id, kind: "question", at: q.created_at, node: <QuestionCard question={q} compact />, mine: q.asked_for === me.login });
+    for (const p of (proposals.data ?? []).filter((x) => inScope(x.repo) && (x.waits_on_me ?? x.can_decide !== false))) out.push({ id: p.id, kind: "proposal", at: p.created_at, node: <ProposalCard proposal={p} compact /> });
     for (const c of (memory.data ?? []).filter((x) => !scope || !x.repos.length || x.repos.includes(scope))) out.push({ id: c.id, kind: "memory", at: c.created_at, node: <ChangeCard change={c} compact /> });
     for (const u of updates) out.push(u);
     return out;

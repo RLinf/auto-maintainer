@@ -55,7 +55,7 @@ from ..domain.ports import (
     Workspace,
 )
 from ..domain.profile import RepoProfile, Route
-from ..domain.progress import agent_session_key
+from ..domain.progress import agent_session_key, work_session_key
 from ..domain.records import Job
 from ..domain.review import ReviewClassification, classify_review_state
 from ..domain.settings import LabMachine
@@ -373,6 +373,23 @@ class PlaybookContext:
                     update={"prompt": STARTED_OVER + "\n\n" + task.prompt}
                 )
         return await self.agents.run(task, route, output_model)
+
+    async def keep_work_session(self, answer: AgentResult, workdir: object) -> None:
+        """Keep the session ``answer``'s agent finished the job's work in, with the
+        checkout it worked in (``progress.work_session_key``), so the conversation
+        about the work goes on in that session (``web/review_talk.py``). Nothing for
+        a run without one."""
+        if not answer.ok or not answer.session or not answer.runtime:
+            return
+        await self.store.set_state(
+            work_session_key(self.job.id),
+            {
+                "runtime": answer.runtime,
+                "session": answer.session,
+                "account": answer.account,
+                "workdir": str(workdir),
+            },
+        )
 
     async def _cut_off(self, kind: TaskKind) -> dict[str, Any] | None:
         """The agent session of this job's run of ``kind`` that a restart cut off,

@@ -31,10 +31,11 @@ from auto_maintainer.domain.memory import profile_path
 from auto_maintainer.domain.permissions import Permission
 from auto_maintainer.domain.profile import RepoProfile
 from auto_maintainer.playbooks.onboard import NO_REVIEW_SKILL
-from auto_maintainer.playbooks.prompts import review_skill_block
+from auto_maintainer.playbooks.prompts import review_call, review_instructions_block
 from auto_maintainer.profiles.layers import parse_yaml
 from auto_maintainer.resources import data_dir
 from auto_maintainer.testing.demo import build_demo
+from auto_maintainer.testing.fakes import make_pr
 from auto_maintainer.testing.harness import Harness
 from auto_maintainer.web import api as web_api
 from auto_maintainer.web.app import create_app
@@ -59,22 +60,30 @@ def test_reviews_follow_the_skill_and_instructions_maintainers_chose(
 ) -> None:
     _skills(tmp_path, **{"code-review": "How we review.", "release": "Cut a release."})
     skills = data_dir("skills")
-    automatic = review_skill_block(_profile(), skills, tmp_path)
-    assert "review skill `code-review`" in automatic, "its own review skill first"
+    pr = make_pr(number=7)
+    automatic = review_call(_profile(), skills, tmp_path, pr, "review")
+    assert automatic == (
+        "Use the `code-review` skill (`.claude/skills/code-review/SKILL.md`) to "
+        "review PR #7 in acme/widget."
+    ), "its own review skill first, asked for as a person would"
 
-    built_in = review_skill_block(_profile(skill="service:pr-review"), skills, tmp_path)
-    assert str(skills / "pr-review" / "SKILL.md") in built_in
-    assert "code-review" not in built_in, "the skill they chose against is not offered"
-    assert ".claude/skills/release/SKILL.md" in built_in, "other skills stay usable"
-
-    chosen = review_skill_block(
-        _profile(skill="repo:.claude/skills/release/SKILL.md"), skills, tmp_path
+    built_in = review_call(
+        _profile(skill="service:pr-review"), skills, tmp_path, pr, "review"
     )
-    assert "`.claude/skills/release/SKILL.md` in the working directory" in chosen
-    assert "- `.claude/skills/release/SKILL.md`" not in chosen
+    assert str(skills / "pr-review" / "SKILL.md") in built_in
+    assert "code-review" not in built_in, "the skill they chose against is not used"
 
-    told = review_skill_block(
-        _profile(instructions="Every new option needs docs."), skills, tmp_path
+    chosen = review_call(
+        _profile(skill="repo:.claude/skills/release/SKILL.md"),
+        skills,
+        tmp_path,
+        pr,
+        "review",
+    )
+    assert "`release` skill (`.claude/skills/release/SKILL.md`)" in chosen
+
+    told = review_instructions_block(
+        _profile(instructions="Every new option needs docs.")
     )
     assert "Every new option needs docs." in told and "it wins" in told
 

@@ -44,38 +44,36 @@ from ..domain.actions import (
 from ..domain.agents import AgentTask, TaskKind
 from ..domain.events import Event, EventKind
 from ..domain.ids import short_sha
+from ..domain.profile import RepoProfile
 from ..domain.records import ActionRecord, ChatMessage
 from ..domain.review import Finding, FollowupResult, ReviewResult
 from ..domain.snapshot import PrSnapshot, PrState
 from .base import Playbook, PlaybookContext, PlaybookResult, may_succeed_later
 from .ci_doctor import OUTSIDE_LOGS, outside_logs
 from .prompts import (
-    pr_block,
-    review_skill_block,
+    forge_note,
+    language_line,
     schema_hint,
+    skills_note,
     untrusted,
     work_lessons_block,
 )
 
-FIX = """You are fixing a pull request for {reviewer}, a maintainer, inside an automated maintainer service. The working directory is a checkout of the PR's head commit.
-- Change the code to {task} and nothing else. Keep the PR author's approach; make the smallest change that does it.
-- Check what you changed with the repository's static linters when it has them. Never run its tests, builds, scripts, or the PR's code on this machine: a repository's code runs only on its test machines, so say which tests a run there should cover.
-- Do not commit, push, or post, and never ask whether to: the service shows your changes to {reviewer}, who decides whether to open a PR with them.
-- When {reviewer} also asks to change the PR's title or description, do not write them in any file: give the new ones in your final message, and the service proposes them with your changes. When that is all they ask for, change no file.
-- When something blocks a sound fix (the intended behavior is unclear, two fixes are equally plausible), ask {reviewer} with your tool for asking the user.
-- Write any text in {public_language}: plain and specific.
-- When you are done, end with a short message: what you changed{each}, what you left and why, the checks you ran, and what a test run should cover."""
+FIX = """Fix PR #{number} in {repo} for {reviewer}, a maintainer: {task}. The working directory is a checkout of its head `{head}`, with its base branch at `origin/{base}`.
+- Make the smallest change that does it, keeping the PR author's approach, and follow the repository's own skills{skills} and conventions for what you change.
+- Do not commit, push, or post: {reviewer} reads your diff and decides whether to open a PR with it. Run the repository's code only on its test machines, never here; its linters may run.
+- When {reviewer} also wants the PR's title or description changed, give the new ones in your final message instead of writing them in a file; when that is all they want, change no file.
+- Ask {reviewer}, with your tool for asking the user, only when something blocks a sound fix.
+- End with what you changed{each}, what you left and why, and what a test run should cover.{language}"""
 
 DESCRIBE = """Describe changes that an agent made to a pull request, for the PR that proposes them. Read the diff and what it was asked; do not change any file. Write in {public_language}: plain and specific.
 Only when what was asked includes changing the pull request's own title or description, give the new ones in `pr_title` and `pr_body` (the whole description, starting from the current one below); otherwise leave both out."""
 
-NEW_PR = """You are preparing a {kind} against `{base_ref}` of `{repo}` for {reviewer}, a maintainer, inside an automated maintainer service. The working directory is a checkout of `{base_ref}` at commit `{sha}`.
-- Change or add files in the working directory to do what {reviewer} asks below, and nothing else. Follow the repository's existing structure, conventions, and skills; make the smallest sound change that fulfills the request.
-- Check what you changed with the repository's static linters when it has them. Never run its tests, builds, scripts, or repository code on this machine: a repository's code runs only on its test machines, so say which tests a run there should cover.
-- Do not commit, push, or open a PR yourself, and never ask whether to: the service shows your diff to {reviewer}, who decides whether to open the {kind} as themselves.
-- When something blocks a sound change (the intended design or target location is unclear, or two choices are equally plausible), ask {reviewer} with your tool for asking the user.
-- Write any text in {public_language}: plain and specific.
-- When you are done, end with a short message: what you changed, what you left and why, the checks you ran, and what a test run should cover."""
+NEW_PR = """Prepare a {kind} against `{base_ref}` of `{repo}` for {reviewer}, a maintainer: do what they ask below. The working directory is a checkout of `{base_ref}` at `{sha}`.
+- Make the smallest sound change that does it, and follow the repository's own skills{skills}, structure, and conventions.
+- Do not commit, push, or open a PR: {reviewer} reads your diff and decides whether to open the {kind} as themselves. Run the repository's code only on its test machines, never here; its linters may run.
+- Ask {reviewer}, with your tool for asking the user, only when something blocks a sound change.
+- End with what you changed, what you left and why, and what a test run should cover.{language}"""
 
 DESCRIBE_NEW_PR = """Describe changes an agent made on `{base_ref}` of `{repo}`, for the {kind} that opens them. Read the diff and what it was asked; do not change any file. Write `title` (in the repository's commit style) and `summary` (what the PR does and why) in {public_language}: plain and specific. Leave `pr_title` and `pr_body` unset."""
 
@@ -279,9 +277,6 @@ class FixPlaybook(Playbook):
             pr.repo, pr.number, pr.head_sha, info.default_branch
         )
         try:
-            diff = await ctx.workspace.diff(
-                workdir, f"origin/{info.default_branch}", pr.head_sha
-            )
             listing = "\n".join(
                 f"- {f.id} [{f.severity}] {f.title} ({f.path}:{f.line}): {f.body}"
                 + (f"\n  Suggested: {f.suggestion}" if f.suggestion else "")
@@ -299,16 +294,21 @@ class FixPlaybook(Playbook):
             # agent's tools cannot reach (Read the Docs).
             outside = await outside_logs(ctx, pr, profile) if request or note else ""
             prompt = "\n\n".join(
-                [
+                part
+                for part in [
                     FIX.format(
+                        number=pr.number,
+                        repo=pr.repo,
                         reviewer=by,
-                        public_language=profile.languages.public,
+                        head=short_sha(pr.head_sha),
+                        base=info.default_branch,
+                        skills=skills_note(workdir),
+                        language=_language(profile),
                         task=f"do what {by} asks below"
                         if request
                         else "address the review findings below",
                         each="" if request else " for each finding",
                     ),
-                    review_skill_block(profile, ctx.service.skills_dir, workdir),
                     work_lessons_block(await ctx.knowledge.agent_lessons(pr.repo)),
                     asked,
                     f"What {by} added: " + untrusted("maintainer.note", note, 2000)
@@ -317,8 +317,9 @@ class FixPlaybook(Playbook):
                     OUTSIDE_LOGS + untrusted("ci.outside_logs", outside, 40_000)
                     if outside
                     else "",
-                    pr_block(pr, diff),
+                    forge_note(pr),
                 ]
+                if part
             )
             # The agent edits; the diff says what it did. Long edits often end
             # without a final answer in any fixed form, so a short second task
@@ -344,6 +345,7 @@ class FixPlaybook(Playbook):
                 )
                 return PlaybookResult(failed=f"fix agent failed: {answer.error}")
             account = answer.text.strip()
+            await ctx.keep_work_session(answer, workdir)
             changes = await ctx.workspace.changes(workdir)
             described = None
             if changes.files:
@@ -528,9 +530,10 @@ class FixPlaybook(Playbook):
                         repo=event.repo,
                         sha=short_sha(base_sha),
                         reviewer=by,
-                        public_language=profile.languages.public,
+                        skills=skills_note(workdir),
+                        language=_language(profile),
                     ),
-                    review_skill_block(profile, ctx.service.skills_dir, workdir),
+                    work_lessons_block(await ctx.knowledge.agent_lessons(event.repo)),
                     asked,
                     f"What {by} added: " + untrusted("maintainer.note", note, 2000)
                     if note
@@ -559,6 +562,7 @@ class FixPlaybook(Playbook):
                 )
                 return PlaybookResult(failed=f"fix agent failed: {answer.error}")
             account = answer.text.strip()
+            await ctx.keep_work_session(answer, workdir)
             changes = await ctx.workspace.changes(workdir)
             described = None
             if changes.files:
@@ -709,6 +713,12 @@ async def followup_findings(
             finding.model_copy(update={"body": f"{finding.body}\n{note}".strip()})
         )
     return [*still, *result.new_findings]
+
+
+def _language(profile: RepoProfile) -> str:
+    """The public language, after the prompt's last rule; empty for English."""
+    line = language_line(profile)
+    return f"\n- {line}" if line else ""
 
 
 def _what(edit: dict[str, str]) -> str:

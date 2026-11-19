@@ -65,6 +65,7 @@ from ..domain.ids import new_id
 from ..domain.labs import first_usable
 from ..domain.memory import SignalKind
 from ..domain.profile import RepoProfile, Route
+from ..domain.progress import agent_session_key
 from ..domain.records import ActionRecord, ChatMessage, ChatThread, Job, JobStatus
 from ..domain.secrets import redact_secrets
 from ..domain.snapshot import PrSnapshot
@@ -93,13 +94,18 @@ from .api import (
 )
 from .auth import User, current_user
 from .chat import (
+    RESUMED_TURN,
     ProposedAction,
+    Resumed,
     apply_thread_agent,
     check_agent,
     keep_session,
+    resumed_route,
     save_lesson,
     stopped_message,
+    take_up_work,
     turn_route,
+    work_session,
 )
 from .fix_talk import fix_draft, fix_turn, pending
 from .jobs import ACTIVE, _job, _payload
@@ -114,10 +120,6 @@ about that change (``web/fix_talk.py``), whether or not the job drafted one."""
 
 TALKS_ON = {"review", "followup", *CHANGE_TALKS}
 """Playbooks whose jobs have a conversation."""
-
-TALK_DIFF_LIMIT = 40_000
-"""The diff a turn carries; the agent reads the rest in its checkout. A turn's
-prompt stays far below what any agent CLI takes in one message."""
 
 _turns: dict[str, asyncio.Lock] = {}
 """One turn at a time per conversation, in this process."""
@@ -197,14 +199,18 @@ async def _checkout(
     info = await service.a.forge.get_repo(pr.repo)
     if thread.workdir and Path(thread.workdir).is_dir():
         return Path(thread.workdir), info.default_branch
+    # The first checkout goes where the review's was, so its agent's session
+    # resumes with everything it read.
+    kept = await work_session(service, thread) if not thread.workdir else None
     path = await service.a.workspace.prepare(
         pr.repo,
         pr.number,
         record.action.head_sha or pr.head_sha,
         info.default_branch,
+        at=Path(kept["workdir"]) if kept else None,
     )
     thread.workdir = str(path)
-    thread.session = None
+    take_up_work(service, thread, kept, path)
     await service.store.save_thread(thread)
     return path, info.default_branch
 
@@ -753,7 +759,10 @@ async def _turn(
     live: LiveTurns | None = None,
     *,
     agent: str | None = None,
+    resumed: Resumed | None = None,
 ) -> dict[str, Any]:
+    """One turn: ``said`` and the agent's answer; ``resumed``, the turn a restart cut
+    off, whose message the conversation has already."""
     assert job.repo and job.number is not None
     thread = await service.store.get_thread(thread_id_of(job)) or ChatThread(
         id=thread_id_of(job),
@@ -774,23 +783,30 @@ async def _turn(
         )
     kind = task_kind_of(payload)
     base_route = _route(service, profile, kind, payload.runtime)
-    default_agent = await service.runs_on_for(base_route, user.login, str(kind))
+    default_agent = (
+        payload.runtime
+        if payload.runtime and base_route.primary == payload.runtime
+        else await service.runs_on_for(base_route, user.login, str(kind))
+    )
     apply_thread_agent(service, thread, agent, default_agent=default_agent)
     text, removed = redact_secrets(said)
     await service.store.save_thread(thread)
-    said = ChatMessage(thread_id=thread.id, role="user", text=text, author=user.login)
-    await service.store.add_message(said)
-    await remember_said(
-        service.store,
-        user.login,
-        text,
-        repo=job.repo,
-        number=job.number,
-        where="review discussion",
-        kind=SignalKind.REVIEW_DISCUSSION,
-        action_kind=record.action.kind,
-        message_id=said.id,
-    )
+    if resumed is None:
+        message = ChatMessage(
+            thread_id=thread.id, role="user", text=text, author=user.login
+        )
+        await service.store.add_message(message)
+        await remember_said(
+            service.store,
+            user.login,
+            text,
+            repo=job.repo,
+            number=job.number,
+            where="review discussion",
+            kind=SignalKind.REVIEW_DISCUSSION,
+            action_kind=record.action.kind,
+            message_id=message.id,
+        )
     history = await service.store.list_messages(thread.id)
     head = record.action.head_sha or pr.head_sha
     workdir, default_branch = await _checkout(service, thread, record, pr)
@@ -835,9 +851,7 @@ async def _turn(
                 pr=pr,
                 head=head,
                 default_branch=default_branch,
-                diff=diff,
                 payload=payload,
-                diff_limit=TALK_DIFF_LIMIT,
                 reviewer=notes_block(
                     await load_notes(service.store, record.action.draft_for),
                     "reviews",
@@ -853,6 +867,10 @@ async def _turn(
         if part
     )
     route, resume = await turn_route(service, user.login, thread, base_route)
+    route, resume = resumed_route(service, route, resumed, resume)
+    fresh = prompt  # all a fresh run needs, when the CLI cannot resume
+    if resumed is not None and resume:
+        prompt = f"{RESUMED_TURN}\n\n{prompt}"
     run = new_id("run")
     token, door_env = await open_door(door, user.login)
     task = AgentTask(
@@ -866,14 +884,19 @@ async def _turn(
         pr=job.number,
         job_id=run,
         requested_by=user.login,
-        agent_chosen=bool(thread.agent),
+        # The agent that wrote the review answers for it, before the person's own.
+        agent_chosen=bool(thread.agent)
+        or resumed is not None
+        or route.primary == payload.runtime,
         untrusted_input=not await author_is_team(service.a.forge, profile, pr),
         resume_session=resume,
+        fresh_prompt=fresh if resume else None,
         records_token=token,
         env=door_env,
     )
     thread.live_run = run
     await service.store.save_thread(thread)
+    cut_off = False
     try:
         outcome = await (live or LiveTurns()).run(
             run, service.a.agents.run(task, route, model)
@@ -883,11 +906,16 @@ async def _turn(
                 mode="json"
             )
         result = outcome
+    except asyncio.CancelledError:
+        # The stopping service cut it off: it stays answering, for the next start.
+        cut_off = service.closing.is_set()
+        raise
     finally:
         if door is not None:
             door.revoke(token)
-        thread.live_run = None
-        await service.store.save_thread(thread)
+        if not cut_off:
+            thread.live_run = None
+            await service.store.save_thread(thread)
     if not result.ok or result.structured is None:
         await service.store.add_message(
             ChatMessage(
@@ -1033,3 +1061,120 @@ async def _revise_posted(
     )
     saved = await service.pipeline.submit(action, force_propose=True)
     return saved.action.id
+
+
+_resuming: set[asyncio.Task[Any]] = set()
+"""The turns taken up after a restart, running in the background."""
+
+
+async def resume_cut_off(service: Service, app: Any, thread: ChatThread) -> bool:
+    """Take up a conversation about a review or a change whose turn a restart cut
+    off (``Service.turn_resumers``): its agent answers the last message again, in
+    the session the turn had when one was kept, as the person who sent it; the
+    message is not added again. ``False`` for any other conversation."""
+    run = thread.live_run
+    if not run or not thread.job_id:
+        return False
+    job = await service.store.get_job(thread.job_id)
+    if job is None or job.playbook not in TALKS_ON or not job.repo:
+        return False
+    said = next(
+        (
+            m
+            for m in reversed(await service.store.list_messages(thread.id))
+            if m.role == "user"
+        ),
+        None,
+    )
+    if said is None or not said.author:
+        return False
+    kept: dict[str, Any] = {}
+    for kind in ("fix", "review", "followup"):
+        found = await service.store.get_state(agent_session_key(run, kind))
+        if isinstance(found, dict) and found.get("session"):
+            kept = found
+            break
+    resumed = Resumed(run=run, session=kept.get("session"), runtime=kept.get("runtime"))
+    task = asyncio.create_task(
+        _take_up(service, app, job, User(login=said.author), said.text, resumed),
+        name=f"take-up-{run}",
+    )
+    _resuming.add(task)
+    task.add_done_callback(_resuming.discard)
+    return True
+
+
+async def _take_up(
+    service: Service, app: Any, job: Job, user: User, text: str, resumed: Resumed
+) -> None:
+    """Run the cut-off turn again (``resume_cut_off``); when it cannot, the
+    conversation says so and takes the message again."""
+    assert job.repo
+    door = getattr(app.state, "records", None)
+    live = getattr(app.state, "live_turns", None)
+    lock = _turns.setdefault(thread_id_of(job), asyncio.Lock())
+    try:
+        async with lock:
+            profile = await service.profiles.active(job.repo)
+            pr = (
+                await service.a.forge.get_pr(job.repo, job.number)
+                if job.number is not None
+                else None
+            )
+            if profile is None or (job.number is not None and pr is None):
+                raise HTTPException(409, "the PR is not available now")
+            if job.playbook in CHANGE_TALKS:
+                record = await fix_draft(service, job)
+                thread = await service.store.get_thread(thread_id_of(job))
+                assert thread is not None
+                route = _route(
+                    service,
+                    profile,
+                    TaskKind.FIX,
+                    record.action.payload.get("runtime") if record else None,
+                )
+                await fix_turn(
+                    service,
+                    user,
+                    job,
+                    thread,
+                    record,
+                    profile,
+                    pr,
+                    text,
+                    route,
+                    door,
+                    live,
+                    resumed=resumed,
+                )
+                return
+            draft = await _draft(service, job)
+            if draft is None or pr is None:
+                raise HTTPException(409, "the review has no draft to talk about")
+            await _turn(
+                service,
+                user,
+                job,
+                draft,
+                profile,
+                pr,
+                text,
+                door,
+                live,
+                resumed=resumed,
+            )
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        detail = e.detail if isinstance(e, HTTPException) else str(e)
+        log.warning("could not take up %s: %s", resumed.run, detail)
+        await service.store.add_message(
+            ChatMessage(
+                thread_id=thread_id_of(job),
+                role="assistant",
+                text="The service restarted while the agent was answering, and "
+                f"taking the answer up again failed ({detail}). Send your message "
+                "again.",
+                run_id=resumed.run,
+            )
+        )
