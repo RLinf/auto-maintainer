@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Any
 
 from ...domain.agents import (
+    AgentChoices,
     AgentQuota,
     AgentTask,
     Capabilities,
@@ -60,6 +61,8 @@ _LEVELS = {
 class AntigravityRuntime(AcpRuntime):
     """Antigravity's ACP server, with the options ``sandbox`` and ``tool_policy``
     (``agent_options.ANTIGRAVITY``)."""
+
+    known_choices = AgentChoices(efforts=["low", "medium", "high"])
 
     max_prompt_bytes = 150_000
     """Antigravity 1.5 cuts a prompt past about 200 KB without saying so, losing its

@@ -33,7 +33,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from ...domain.agents import AgentTask
+from ...domain.agents import AgentChoices, AgentTask
 from ..acp import AcpRuntime
 from ..exec import RunFiles
 
@@ -42,6 +42,8 @@ _LEVELS = {"low": "low", "medium": "high", "high": "high", "xhigh": "max", "max"
 
 class DshRuntime(AcpRuntime):
     """DeepSeek Harness's ACP server."""
+
+    known_choices = AgentChoices(efforts=["low", "high", "max"])
 
     home_paths = (".dsh",)
     default_name = "dsh"

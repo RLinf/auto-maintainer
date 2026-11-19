@@ -4,16 +4,75 @@
 
 import { AgentOptionsForm, setCount } from "./agentOptions";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
-import { api, type AgentLogin, type MyAgent, type MyProvider, type SignInOption } from "./api";
+import { useEffect, useRef, useState } from "react";
+import { api, type AgentChoices, type AgentLogin, type MyAgent, type MyProvider, type SignInOption } from "./api";
 import { copyText } from "./clipboard";
 import { Empty, ErrorBox, Section, Status, useAct } from "./components";
 import { useT } from "./i18n";
 import { Icon } from "./icons";
+import { useAgentsData } from "./pages/Agents";
 import { Skeleton, useToast } from "./ui";
 import { agentName } from "./prActions";
 import { ApiForm, ApiSummary, KeyState, modelsFor, PROTOCOLS } from "./providerForm";
 import { AgentsUsageSection } from "./usage";
+
+/** Inline text input for a model name when the CLI does not list its models:
+ * saves on Enter or blur when changed, and Escape reverts. */
+export function ModelInput({
+  value,
+  placeholder,
+  ariaLabel,
+  title,
+  disabled,
+  onSave,
+}: {
+  value: string | null | undefined;
+  placeholder: string;
+  ariaLabel: string;
+  title?: string;
+  disabled: boolean;
+  onSave: (next: string | null) => void;
+}) {
+  const [draft, setDraft] = useState(value ?? "");
+  const skipBlur = useRef(false);
+  useEffect(() => setDraft(value ?? ""), [value]);
+  const commit = (raw: string) => {
+    const next = raw.trim() || null;
+    if (next !== (value || null)) onSave(next);
+  };
+  return (
+    <input
+      className="model-input"
+      value={draft}
+      disabled={disabled}
+      placeholder={placeholder}
+      aria-label={ariaLabel}
+      title={title}
+      autoComplete="off"
+      spellCheck={false}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={(e) => {
+        if (skipBlur.current) {
+          skipBlur.current = false;
+          return;
+        }
+        commit(e.currentTarget.value);
+      }}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          skipBlur.current = true;
+          commit(e.currentTarget.value);
+          e.currentTarget.blur();
+        } else if (e.key === "Escape") {
+          skipBlur.current = true;
+          setDraft(value ?? "");
+          e.currentTarget.blur();
+        }
+      }}
+    />
+  );
+}
 
 /** A sign-in in progress: the page to open, the code to enter there or a box for the
  * code the page shows, until the CLI says it is signed in. */
@@ -173,6 +232,8 @@ function useMine() {
 export function MyAgentsSection() {
   const t = useT();
   const q = useMine();
+  const health = useAgentsData();
+  const byName = new Map((health.data?.health ?? []).map((h) => [h.name, h]));
   return (
     <>
       <Section title={t("My agents")} hint={t("Run what you ask for on your own agent accounts instead of the service's. Nobody else's work uses them, and your keys never leave this host.")}>
@@ -185,7 +246,7 @@ export function MyAgentsSection() {
         ) : (
           <div className="list">
             {q.data.agents.map((a) => (
-              <MyAgentRow key={a.name} agent={a} apis={q.data.providers} />
+              <MyAgentRow key={a.name} agent={a} apis={q.data.providers} choices={byName.get(a.name)?.choices ?? a.choices} personal={q.data.personal} />
             ))}
           </div>
         )}
@@ -333,7 +394,17 @@ function MyApiRow({ p }: { p: MyProvider }) {
 
 type Setup = MyAgent["setup"];
 
-function MyAgentRow({ agent: a, apis }: { agent: MyAgent; apis: MyProvider[] }) {
+function MyAgentRow({
+  agent: a,
+  apis,
+  choices,
+  personal,
+}: {
+  agent: MyAgent;
+  apis: MyProvider[];
+  choices: AgentChoices | null | undefined;
+  personal: boolean;
+}) {
   const t = useT();
   const [login, setLogin] = useState<AgentLogin | null>(a.login);
   const keys = [["my-agents"], ["settings"]];
@@ -341,14 +412,48 @@ function MyAgentRow({ agent: a, apis }: { agent: MyAgent; apis: MyProvider[] }) 
   const signOut = useAct(() => api.post<MyAgent>(`/api/me/agents/${a.name}/sign-out`), keys);
   const s = a.setup;
   const usable = apis.filter((p) => modelsFor(p, a.adapter).length > 0 || p.id === s.provider);
-  const current = apis.find((p) => p.id === s.provider);
-  const models = current ? modelsFor(current, a.adapter) : [];
-  const spec = current?.models.find((m) => m.id === (s.model ?? models[0]?.id));
+  const current = s.use_own ? apis.find((p) => p.id === s.provider) : undefined;
+  const providerModels = current ? modelsFor(current, a.adapter) : [];
+  const serviceProviderModels = !s.use_own ? a.service_provider_models ?? null : null;
+  const cliModels = choices?.models ?? [];
+  const nameOf = (id: string | null | undefined) => (id ? cliModels.find((m) => m.id === id)?.name || id : null);
+  const cliModel = nameOf(choices?.default_model);
+  const canPickModel = a.adapter !== "generic";
+  const spec = current
+    ? current.models.find((m) => m.id === (s.model ?? providerModels[0]?.id))
+    : serviceProviderModels
+      ? serviceProviderModels.find((m) => m.id === (s.model ?? a.service_model ?? serviceProviderModels[0]?.id))
+      : undefined;
+  const efforts =
+    current || serviceProviderModels
+      ? spec?.reasoning.length
+        ? spec.reasoning
+        : spec?.tested_at
+          ? []
+          : (choices?.efforts ?? [])
+      : (choices?.efforts ?? []);
   const choice = !s.use_own ? "" : s.provider ? `api:${s.provider}` : "sign-in";
+  const disabled = !personal || save.isPending;
+  const defaultEffortLabel = current
+    ? `${t("Thinking")}: ${t("default")}`
+    : !s.use_own && a.service_effort
+      ? `${t("Thinking")}: ${a.service_effort} (${t("service default")})`
+      : choices?.default_effort
+        ? `${t("Thinking")}: ${choices.default_effort} (${t("default")})`
+        : `${t("Thinking")}: ${!s.use_own ? t("service default") : t("default")}`;
+  const defaultCliModelLabel = !s.use_own
+    ? a.service_model
+      ? `${nameOf(a.service_model)} (${t("service default")})`
+      : cliModel
+        ? `${cliModel} (${t("the CLI's default")})`
+        : t("service default")
+    : cliModel
+      ? `${cliModel} (${t("the CLI's default")})`
+      : t("the CLI's default");
   const choose = (value: string) =>
     save.mutate(
       value === ""
-        ? { use_own: false, provider: s.provider, model: s.model, effort: s.effort }
+        ? { use_own: false, provider: null, model: null, effort: null }
         : value === "sign-in"
           ? { use_own: true, provider: null, model: null, effort: null }
           : { use_own: true, provider: value.slice(4), model: null, effort: null },
@@ -375,7 +480,7 @@ function MyAgentRow({ agent: a, apis }: { agent: MyAgent; apis: MyProvider[] }) 
         <span className="right row model-controls" style={{ gap: 4 }}>
           <select
             value={choice}
-            disabled={!a.isolated || save.isPending}
+            disabled={!a.isolated || disabled}
             aria-label={`${a.name}: ${t("Your requests run on")}`}
             title={a.isolated ? t("What runs the work you ask for") : t("Agents run on the host here, where every run could read every person's sign-in, so personal accounts are off")}
             onChange={(e) => choose(e.target.value)}
@@ -392,24 +497,79 @@ function MyAgentRow({ agent: a, apis }: { agent: MyAgent; apis: MyProvider[] }) 
               </option>
             ))}
           </select>
-          {current && (
-            <select value={s.model ?? ""} disabled={save.isPending} aria-label={`${a.name}: ${t("Model")}`} onChange={(e) => save.mutate({ ...s, model: e.target.value || null, effort: null })}>
-              <option value="">{models[0] ? `${models[0].id} (${t("the first")})` : t("the first")}</option>
-              {models.map((m) => (
+          {current ? (
+            <select
+              value={s.model ?? ""}
+              disabled={disabled}
+              aria-label={`${a.name}: ${t("Model")}`}
+              onChange={(e) => save.mutate({ use_own: true, provider: s.provider, model: e.target.value || null, effort: null })}
+            >
+              <option value="">{providerModels[0] ? `${providerModels[0].id} (${t("the first")})` : t("the first")}</option>
+              {providerModels.map((m) => (
                 <option key={m.id} value={m.id}>
                   {m.id}
                 </option>
               ))}
+              {s.model && !providerModels.some((m) => m.id === s.model) && <option value={s.model}>{s.model}</option>}
             </select>
-          )}
-          {current && spec && spec.reasoning.length > 0 && (
-            <select value={s.effort ?? ""} disabled={save.isPending} aria-label={`${a.name}: ${t("Thinking")}`} onChange={(e) => save.mutate({ ...s, effort: e.target.value || null })}>
-              <option value="">{`${t("Thinking")}: ${t("default")}`}</option>
-              {spec.reasoning.map((e) => (
+          ) : serviceProviderModels ? (
+            <select
+              value={s.model ?? ""}
+              disabled={disabled}
+              aria-label={`${a.name}: ${t("Model")}`}
+              onChange={(e) => save.mutate({ use_own: false, provider: null, model: e.target.value || null, effort: null })}
+            >
+              <option value="">{a.service_model ? `${a.service_model} (${t("service default")})` : t("service default")}</option>
+              {serviceProviderModels.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.id}
+                </option>
+              ))}
+              {s.model && !serviceProviderModels.some((m) => m.id === s.model) && <option value={s.model}>{s.model}</option>}
+            </select>
+          ) : cliModels.length > 0 ? (
+            <select
+              value={s.model ?? ""}
+              disabled={disabled}
+              aria-label={`${a.name}: ${t("Model")}`}
+              onChange={(e) => save.mutate({ use_own: s.use_own, provider: null, model: e.target.value || null, effort: s.effort })}
+            >
+              <option value="">{defaultCliModelLabel}</option>
+              {cliModels.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.name || m.id}
+                </option>
+              ))}
+              {s.model && !cliModels.some((m) => m.id === s.model) && <option value={s.model}>{s.model}</option>}
+            </select>
+          ) : canPickModel ? (
+            <ModelInput
+              value={s.model}
+              disabled={disabled}
+              ariaLabel={`${a.name}: ${t("Model")}`}
+              placeholder={`${t("Model")}: ${defaultCliModelLabel}`}
+              title={t("Model name for this CLI; leave empty for the default. Press Enter to save.")}
+              onSave={(next) => save.mutate({ use_own: s.use_own, provider: null, model: next, effort: s.effort })}
+            />
+          ) : null}
+          {(efforts.length > 0 || s.effort) && (
+            <select
+              value={s.effort ?? ""}
+              disabled={disabled}
+              aria-label={`${a.name}: ${t("Thinking")}`}
+              onChange={(e) => save.mutate({ use_own: s.use_own, provider: s.use_own ? s.provider : null, model: s.model, effort: e.target.value || null })}
+            >
+              <option value="">{defaultEffortLabel}</option>
+              {efforts.map((e) => (
                 <option key={e} value={e}>
                   {t("Thinking")}: {e}
                 </option>
               ))}
+              {s.effort && !efforts.includes(s.effort) && (
+                <option value={s.effort}>
+                  {t("Thinking")}: {s.effort}
+                </option>
+              )}
             </select>
           )}
           {a.can_sign_in && !login && <StartSignIn url={`/api/me/agents/${a.name}/sign-in`} options={a.sign_in_options} signed={a.signed_in} onStarted={setLogin} />}

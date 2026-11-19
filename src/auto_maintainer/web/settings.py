@@ -97,6 +97,14 @@ def can_sign_in(runtime: Any) -> bool:
     return bool(can and can())
 
 
+def runtime_choices(runtime: Any) -> dict[str, Any] | None:
+    """The models and reasoning levels ``runtime`` last reported, or its adapter's
+    known list, without starting its CLI."""
+    cached = getattr(runtime, "cached_choices", None)
+    found = cached() if callable(cached) else None
+    return found.model_dump(mode="json") if found is not None else None
+
+
 async def settings_view(service: Service, user: User) -> dict[str, Any]:
     """Everything the Settings page shows, with each value's source."""
     text, legacy = await service.settings_text()
@@ -177,6 +185,7 @@ async def settings_view(service: Service, user: User) -> dict[str, Any]:
                     {"id": o, "label": label}
                     for o, label in getattr(service.runtime(name), "login_options", ())
                 ],
+                "choices": runtime_choices(service.runtime(name)),
             }
             for name, cfg in agents.items()
         ],
@@ -751,23 +760,26 @@ def build_router() -> APIRouter:
         text, legacy = await service.settings_text()
         if name not in effective_agents(service.service_config, legacy):
             raise HTTPException(404, f"there is no agent named {name!r}")
+        model = (body.model or "").strip() or None
+        effort = (body.effort or "").strip() or None
+        quick = (body.quick_model or "").strip() or None
         fields: dict[str, Any] = {
-            "model": body.model or None,
-            "effort": body.effort or None,
+            "model": model,
+            "effort": effort,
         }
         if "provider" in body.model_fields_set:
             fields["provider"] = body.provider or None
             if "quick_model" not in body.model_fields_set:
                 fields["quick_model"] = None  # another provider's model
         if "quick_model" in body.model_fields_set:
-            fields["quick_model"] = body.quick_model or None
+            fields["quick_model"] = quick
         what = ", ".join(
             f"{k} {v}"
             for k, v in (
                 ("provider", fields.get("provider", "")),
-                ("model", body.model),
-                ("effort", body.effort),
-                ("quick tasks", body.quick_model),
+                ("model", model),
+                ("effort", effort),
+                ("quick tasks", quick),
             )
             if v
         )

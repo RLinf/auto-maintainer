@@ -2930,6 +2930,8 @@ const zh: Record<string, string> = {
   "Where should I start?": "我应该从哪里开始？",
   "How do I review a PR here?": "在这里怎么评审一个 PR？",
   "What can I do on this dashboard?": "我能在这个控制台上做什么？",
+  "Model name for this CLI; leave empty for the default. Press Enter to save.": "传给此 CLI 的模型名；留空使用默认。按回车保存。",
+  "Model name for quick tasks; leave empty to use the same model. Press Enter to save.": "快速任务使用的模型名；留空则使用同一模型。按回车保存。",
 };
 
 const LangContext = createContext<{ lang: Lang; setLang: (l: Lang) => void }>({ lang: "zh", setLang: () => {} });

@@ -1078,6 +1078,8 @@ export interface SettingsAgent {
   providers_supported: string[];
   /** The account kinds its sign-in offers, when it must be told which (pi). */
   sign_in_options: SignInOption[];
+  /** Cached or known models and reasoning levels for this CLI, before a live probe finishes. */
+  choices?: AgentChoices | null;
 }
 
 export interface SignInOption {
@@ -1169,10 +1171,23 @@ export interface AgentLogin {
   started_at: string;
 }
 
+export interface ServiceProviderModel {
+  id: string;
+  reasoning: string[];
+  tested_at: string | null;
+}
+
 export interface MyAgent {
   name: string;
   /** Whether the service's own account of it can run: signed in, or on a model provider. */
   service_usable?: boolean;
+  /** Cached or known models and reasoning levels for this CLI. */
+  choices?: AgentChoices | null;
+  /** The model and reasoning level the service runs this agent on by default. */
+  service_model?: string | null;
+  service_effort?: string | null;
+  /** Models of the service provider this agent runs on, when it uses one. */
+  service_provider_models?: ServiceProviderModel[] | null;
   can_sign_in: boolean;
   sign_in_options: SignInOption[];
   signed_in: boolean | null;

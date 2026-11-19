@@ -419,9 +419,12 @@ class PersonalAgent(BaseModel):
     """The id of the person's own model API (a ``Provider`` of theirs) to run on
     instead of the CLI's sign-in."""
     model: str | None = None
-    """A model of that API; its first model when unset."""
+    """The model for this person's requests on this agent: a model of their API
+    (its first when unset), a model name for their CLI sign-in, or an override on
+    the service's account."""
     effort: str | None = None
-    """A reasoning level the model accepts; the task's own when unset."""
+    """The reasoning level for this person's requests on this agent; the task's own
+    when unset."""
     options: dict[str, Any] = Field(default_factory=dict)
     """The CLI's settings for this person's runs on their own account
     (``domain/agent_options.py``), over the service's; an option they leave out takes

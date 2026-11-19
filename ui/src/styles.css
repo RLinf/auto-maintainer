@@ -387,6 +387,7 @@ tr:hover .row-action, .row-action:focus-visible { opacity: 1; }
 .agent-row-body:empty { display: none; }
 .agent-menu { min-width: min(240px, calc(100vw - 24px)); padding: 4px; }
 .agent-row-body { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding-left: 26px; min-width: 0; }
+.model-input { width: 170px; max-width: 100%; }
 @media (max-width: 640px) { .agent-row-body { padding-left: 0; } }
 .list-row .main { flex: 1; min-width: 0; }
 .list-row .t { font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; color: var(--text); }
@@ -1131,7 +1132,7 @@ details.pv-section[open] > summary { margin-bottom: 6px; }
   .settings-row-value { flex: 1 1 100%; max-width: 100%; text-align: left; }
   .settings-row-actions { flex: 1 1 100%; flex-wrap: wrap; gap: 6px; }
   .model-controls { flex: 1 1 100%; width: 100%; margin-left: 0; }
-  .model-controls > select { flex: 1 1 100%; width: 100%; }
+  .model-controls > select, .model-controls > input { flex: 1 1 100%; width: 100%; }
   .install-status { align-items: flex-start; width: 100%; }
   .aliases-row { flex-wrap: wrap; row-gap: 4px; }
   .aliases-row > .main { flex: 1 1 calc(100% - 34px); }

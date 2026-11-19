@@ -1064,3 +1064,127 @@ async def test_the_owner_sets_each_hourly_write_cap(demo) -> None:
         ).status_code == 422
         await maria.put("/api/settings/write-caps", json={"per_repo": None})
     assert h.service.pipeline.write_caps == (500, 100), "the host's default again"
+
+
+async def test_settings_and_personal_agents_expose_choices_and_save_model_and_effort(
+    demo, tmp_path: Path
+) -> None:
+    """``/api/settings`` and ``/api/me/agents`` expose cached/known choices without
+    probing CLIs; a person saves model and effort for their own CLI sign-in or on
+    the service's account (validated against any service provider)."""
+    from auto_maintainer.agents.adapters.antigravity import AntigravityRuntime
+    from auto_maintainer.agents.adapters.claude_code import ClaudeCodeRuntime
+    from auto_maintainer.store.people import PeopleAgents
+
+    h, app = demo
+    cli = tmp_path / "cli"
+    cli.write_text("#!/bin/sh\n")
+    cli.chmod(0o755)
+    agy = AntigravityRuntime(binary=str(cli), model="gemini-4-neon", effort="medium")
+    claude = ClaudeCodeRuntime(
+        binary=str(cli),
+        model="m1",
+        provider=ProviderBinding(
+            id="gw",
+            name="Gateway",
+            protocol="anthropic",
+            base_url="https://gw.example",
+            models=("m1", "m2"),
+            api_key="sk",
+            specs=(ModelSpec(id="m1", reasoning=["high"]), ModelSpec(id="m2")),
+        ),
+    )
+    h.runner.runtimes = {"antigravity": agy, "claude-code": claude}
+    h.service.a.people = PeopleAgents(tmp_path / "people")
+
+    async with _client(app, "maria") as maria:
+        agents = {
+            a["name"]: a for a in (await maria.get("/api/settings")).json()["agents"]
+        }
+        assert agents["antigravity"]["choices"]["efforts"] == [
+            "low",
+            "medium",
+            "high",
+        ]
+        assert agents["claude-code"]["choices"]["models"]
+        saved = await maria.put(
+            "/api/settings/agents/antigravity/model",
+            json={
+                "model": " gemini-4-argon ",
+                "quick_model": " gemini-4-flash ",
+                "effort": "high",
+            },
+        )
+        assert saved.status_code == 200 and saved.json()["approved"] is True
+        cfg = h.service.service_config.agents["antigravity"]
+        assert (cfg["model"], cfg["quick_model"], cfg["effort"]) == (
+            "gemini-4-argon",
+            "gemini-4-flash",
+            "high",
+        )
+
+    async with _client(app, "walt") as walt:
+        mine_rows = {
+            a["name"]: a for a in (await walt.get("/api/me/agents")).json()["agents"]
+        }
+        assert mine_rows["antigravity"]["choices"]["efforts"] == [
+            "low",
+            "medium",
+            "high",
+        ]
+        assert (
+            mine_rows["antigravity"]["service_model"],
+            mine_rows["antigravity"]["service_effort"],
+        ) == ("gemini-4-neon", "medium")
+        assert mine_rows["claude-code"]["service_provider_models"] == [
+            {"id": "m1", "reasoning": ["high"], "tested_at": None},
+            {"id": "m2", "reasoning": [], "tested_at": None},
+        ]
+
+        # Service-account preference works even without container isolation.
+        svc = await walt.put(
+            "/api/me/agents/antigravity",
+            json={"use_own": False, "model": " gemini-4-argon ", "effort": "high"},
+        )
+        assert svc.status_code == 200, svc.text
+        assert svc.json()["setup"] == {
+            "agent": "antigravity",
+            "use_own": False,
+            "provider": None,
+            "model": "gemini-4-argon",
+            "effort": "high",
+            "options": {},
+        }
+
+        # Service-provider validation applies when running on the service's account.
+        bad_model = await walt.put(
+            "/api/me/agents/claude-code",
+            json={"use_own": False, "model": "unknown-model"},
+        )
+        assert bad_model.status_code == 422
+        bad_effort = await walt.put(
+            "/api/me/agents/claude-code",
+            json={"use_own": False, "model": "m1", "effort": "low"},
+        )
+        assert bad_effort.status_code == 422
+        good_svc = await walt.put(
+            "/api/me/agents/claude-code",
+            json={"use_own": False, "model": "m1", "effort": "high"},
+        )
+        assert good_svc.status_code == 200
+
+        # Personal CLI sign-in keeps model and effort without a personal provider.
+        agy.container_sandbox = _Box()  # type: ignore[attr-defined]
+        own_cli = await walt.put(
+            "/api/me/agents/antigravity",
+            json={"use_own": True, "model": "claude-opus-5-5", "effort": "medium"},
+        )
+        assert own_cli.status_code == 200, own_cli.text
+        assert own_cli.json()["setup"] == {
+            "agent": "antigravity",
+            "use_own": True,
+            "provider": None,
+            "model": "claude-opus-5-5",
+            "effort": "medium",
+            "options": {},
+        }
