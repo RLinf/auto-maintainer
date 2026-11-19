@@ -36,7 +36,7 @@ from ..domain.actions import (
 from ..domain.agents import AgentTask, TaskKind
 from ..domain.diffs import commentable
 from ..domain.events import Event, EventKind
-from ..domain.ids import short_sha
+from ..domain.ids import same_commit, short_sha
 from ..domain.ports import Store
 from ..domain.profile import RepoProfile
 from ..domain.records import JobStatus
@@ -86,8 +86,11 @@ from .prompts import (
 from .requests import (
     FOLLOWUP_STATES,
     ReviewRequest,
+    recorded_review,
+    replaced,
     review_key,
     review_request,
+    settle_delay,
     starts_review,
 )
 from .review_form import fill_form, forget_report, keep_report, saved_report
@@ -132,9 +135,19 @@ class ReviewPlaybook(Playbook):
             ctx.requested_by = request.by
             ctx.agent = request.agent
         manual = request is not None and request.manual
+        if not manual:
+            delay = settle_delay(event, ctx.job.created_at, ctx.clock.now())
+            if delay is not None:
+                return PlaybookResult(
+                    result={"waiting": "for more pushes to settle"}, retry_after=delay
+                )
         pr = await ctx.forge.get_pr(event.repo, event.number)
         if pr is None or pr.state != PrState.OPEN:
             return PlaybookResult(result={"skipped": "the PR is not open"})
+        if not manual and replaced(event, pr.head_sha):
+            return PlaybookResult(
+                result={"skipped": "a newer push replaced the commit"}
+            )
         if not manual and not in_scope(pr, profile):
             return PlaybookResult(result={"skipped": "out of scope"})
         if (
@@ -161,6 +174,16 @@ class ReviewPlaybook(Playbook):
             # One of the PR's owners or reviewers wants a review of their own, or
             # someone asked for a full review: whoever reviewed it before.
             state = ReviewState.NEW_REVIEW
+        elif not manual and state == ReviewState.NEW_REVIEW:
+            # A review the service only recorded (nobody posted it) counts too, so the
+            # next commit gets a follow-up rather than another full review.
+            recorded = await recorded_review(ctx.store, pr.repo, pr.number)
+            if recorded is not None:
+                state = (
+                    ReviewState.UP_TO_DATE
+                    if same_commit(recorded.action.head_sha, pr.head_sha)
+                    else ReviewState.FOLLOWUP_REVIEW
+                )
         if state in FOLLOWUP_STATES:
             return PlaybookResult(
                 result={
@@ -440,7 +463,7 @@ async def review_prompt(
     review, then only what the skill cannot know: who it works for, the test machine,
     and what the maintainers taught or turned down."""
     if machine.token:
-        testing = machine.testing(ctx, reproduce=True)
+        testing = machine.testing(ctx, reproduce=ctx.requested_by is not None)
         earlier = await earlier_work(ctx, pr)
         testing = f"{testing}\n\n{earlier}" if earlier else testing
     else:
@@ -483,10 +506,12 @@ def alongside(
     job_id: str,
 ) -> PlaybookResult:
     """The review's first wait for its session, which also starts the skill's
-    reproduction agent on the same machine: it runs while the review does, and its
-    record goes into this job's review (``reproduce.py``)."""
+    reproduction agent on the same machine when someone asked for the review: it runs
+    while the review does, and its record goes into this job's review
+    (``reproduce.py``)."""
     lab = str(wait.actions[0].payload.get("lab") or "") if wait.actions else ""
-    if not lab:
+    if not lab or request is None or not request.manual:
+        # A review nobody asked for runs no reproduction beside it.
         return wait
     start = Event(
         kind=EventKind.DASHBOARD_COMMAND,

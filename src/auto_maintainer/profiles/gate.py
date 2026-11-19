@@ -32,7 +32,7 @@ from pydantic import BaseModel
 from ..domain.memory import MemoryChange, Tier
 from ..domain.permissions import Permission
 from ..domain.ports import ForgeReader
-from ..domain.profile import RepoProfile
+from ..domain.profile import RepoProfile, Review
 
 
 class GateDecision(BaseModel):
@@ -193,6 +193,27 @@ class ConfigGate:
                 else f"{login} is an admin of {repo}, and nobody has taken ownership yet"
             ),
         )
+
+
+OWNER_APPROVAL = "service:owner"
+"""Where ``MemoryChange.approvals`` keeps the service owner's approval of a change
+that only the owner may make beside a repository's maintainers (``owner_needed``)."""
+
+
+def review_automation(review: Review) -> dict[str, object]:
+    """When a repository's reviews start on their own (``review.trigger``,
+    ``review.scan``): they run on the service's agents and test machines, so only the
+    service's owner changes it, beside a maintainer of the repository."""
+    return {"trigger": review.trigger, "scan": review.scan.model_dump(mode="json")}
+
+
+def owner_needed(current: RepoProfile | None, candidate: RepoProfile) -> bool:
+    """Whether a change from ``current`` to ``candidate`` needs the service's owner:
+    it changes when reviews start on their own, or (for a repository's first
+    profile) starts them at all."""
+    if current is None:
+        return candidate.review.trigger != "manual"
+    return review_automation(current.review) != review_automation(candidate.review)
 
 
 def memory_change_ready(

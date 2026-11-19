@@ -15,7 +15,7 @@ import { ProposalCard, ServiceMergeBaseButton } from "../proposal";
 import { Skeleton, useRememberedView, useTab } from "../ui";
 import { ACTIVE, useWork } from "../jobs";
 import { GuideHello } from "./Guide";
-import { AgentWork, GettingStarted, ReviewCard, useAutomations } from "./homeParts";
+import { AgentWork, GettingStarted, ReviewCard } from "./homeParts";
 import { ChangeCard } from "./Memory";
 import { QuestionCard } from "./Questions";
 
@@ -66,7 +66,6 @@ export default function HomePage({ me }: { me: Me }) {
   const repoQuery = scope ? `&repo=${encodeURIComponent(scope)}` : "";
   const sv = service.data;
   const updates = serviceUpdates(sv);
-  const automations = useAutomations(repoRows);
   const work = useWork(false);
 
   const items = useMemo<FeedItem[]>(() => {
@@ -160,9 +159,9 @@ export default function HomePage({ me }: { me: Me }) {
 
       <RepoTabs names={names} scope={scope} onPick={setScope} count={(repo) => allRows.filter((p) => p.repo === repo && NEEDS_REVIEW.has(p.review_state)).length} />
       <GuideHello />
-      <GettingStarted repos={repoRows} prs={rows} automations={automations} />
+      <GettingStarted repos={repoRows} prs={rows} />
       <AgentWork me={me} />
-      <ReviewCard rows={needs} all={rows} loading={prs.isLoading} me={me} automations={automations} searchParams={viewParams} />
+      <ReviewCard rows={needs} all={rows} loading={prs.isLoading} me={me} searchParams={viewParams} />
 
       <section id="decisions" className="stack" style={{ gap: 12, minWidth: 0 }}>
         <div className="row">

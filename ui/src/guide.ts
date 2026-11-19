@@ -461,8 +461,8 @@ export const TOPICS: Topic[] = [
     ],
     tips: [
       {
-        en: "Reviews can also run on their own: [[When reviews run]] on Home sets it, for maintainers.",
-        zh: "评审也可以自动进行：维护者可以在首页的 [[何时评审]] 中设置。",
+        en: "Reviews can also run on their own, on the service's agents and test machines: [[When reviews run]] on a repository's Settings tab shows when, and only the service's owner changes it.",
+        zh: "评审也可以自动进行，它们使用服务的智能体和测试机：仓库「设置」标签页中的 [[何时评审]] 显示何时评审，只有服务所有者可以修改。",
       },
     ],
   },
@@ -837,8 +837,8 @@ export const TOPICS: Topic[] = [
         zh: "[[写法]] 决定评审评论怎么写；[[质量评分]] 决定 PR 如何打分（仅内部可见）。",
       },
       {
-        en: "On Home, [[When reviews run]]: only when asked, every few hours, or on every update, and whether new commits get a follow-up.",
-        zh: "在首页的 [[何时评审]] 中设定：只在请求时、每隔几小时，或每次更新时评审，以及有新提交时是否跟进评审。",
+        en: "On the Settings tab, [[When reviews run]] shows whether reviews start only when asked, every few hours, or on every update, and whether new commits get a follow-up; the service's owner sets it.",
+        zh: "「设置」标签页中的 [[何时评审]] 显示评审是只在请求时、每隔几小时，还是每次更新时进行，以及有新提交时是否跟进评审；由服务所有者设置。",
       },
       {
         en: "Anything else: [[Describe a change]] and the agent drafts the edit for a maintainer to approve, or [[Edit YAML]] yourself.",

@@ -69,7 +69,16 @@ from .prompts import (
     work_lessons_block,
     writing_block,
 )
-from .requests import FOLLOWUP_STATES, review_key, review_request, starts_review
+from .requests import (
+    FOLLOWUP_STATES,
+    RECORDED,
+    recorded_review,
+    replaced,
+    review_key,
+    review_request,
+    settle_delay,
+    starts_review,
+)
 from .review import reproduction_record
 from .review_form import fill_form, forget_report, keep_report, saved_report
 from .review_session import (
@@ -103,9 +112,19 @@ class Followup(Playbook):
             ctx.requested_by = request.by
             ctx.agent = request.agent
         manual = request is not None and request.manual
+        if not manual:
+            delay = settle_delay(event, ctx.job.created_at, ctx.clock.now())
+            if delay is not None:
+                return PlaybookResult(
+                    result={"waiting": "for more pushes to settle"}, retry_after=delay
+                )
         pr = await ctx.forge.get_pr(event.repo, event.number)
         if pr is None or pr.state != PrState.OPEN:
             return PlaybookResult(result={"skipped": "the PR is not open"})
+        if not manual and replaced(event, pr.head_sha):
+            return PlaybookResult(
+                result={"skipped": "a newer push replaced the commit"}
+            )
         if not manual and not in_scope(pr, profile):
             return PlaybookResult(result={"skipped": "out of scope"})
         if (
@@ -141,11 +160,25 @@ class Followup(Playbook):
             profile.scope.include_drafts or manual,
             own_actions=ctx.own_reviews,
         )
-        if cls.state not in FOLLOWUP_STATES:
-            return PlaybookResult(
-                result={"skipped": f"state is {cls.state}", "handed_to": "review"}
-            )
         previous_sha = cls.reviewed_sha
+        state = cls.state
+        if not manual and state == ReviewState.NEW_REVIEW:
+            # A review the service only recorded (nobody posted it) is what this
+            # follows up, so a PR whose reviews nobody posts gets no new full review.
+            recorded = await recorded_review(ctx.store, pr.repo, pr.number)
+            if recorded is not None:
+                previous_sha = recorded.action.head_sha
+                state = (
+                    ReviewState.UP_TO_DATE
+                    if same_commit(previous_sha, pr.head_sha)
+                    else ReviewState.FOLLOWUP_REVIEW
+                )
+        if state == ReviewState.UP_TO_DATE:
+            return PlaybookResult(result={"skipped": "already reviewed at this head"})
+        if state not in FOLLOWUP_STATES:
+            return PlaybookResult(
+                result={"skipped": f"state is {state}", "handed_to": "review"}
+            )
         prior = await self._prior_findings(ctx, pr)
 
         info = await ctx.forge.get_repo(pr.repo)
@@ -404,6 +437,25 @@ class Followup(Playbook):
                 lines.append(
                     f"{f.get('id')} [{f.get('severity')}] {f.get('title')}: {f.get('body', '')[:400]}"
                 )
+        if not lines:
+            # Reviews the service only recorded, oldest first, when none was posted.
+            drafts = await ctx.store.list_actions(
+                repo=pr.repo,
+                number=pr.number,
+                kinds=[ActionKind.REVIEW_POST],
+                statuses=list(RECORDED),
+                limit=20,
+            )
+            for draft in reversed(drafts):
+                result = draft.action.payload.get("result") or {}
+                for f in result.get("findings", []) or []:
+                    lines.append(
+                        f"{f.get('id')} [{f.get('severity')}] {f.get('title')} ({f.get('path')}:{f.get('line')}): {f.get('body', '')[:400]}"
+                    )
+                for f in result.get("new_findings", []) or []:
+                    lines.append(
+                        f"{f.get('id')} [{f.get('severity')}] {f.get('title')}: {f.get('body', '')[:400]}"
+                    )
         if lines:
             return "\n".join(dict.fromkeys(lines))
         ids = {i.lower() for i in ctx.identities()}

@@ -688,6 +688,26 @@ async def test_the_skills_reproduction_agent_runs_alongside_the_review(demo) -> 
     assert "python check.py" in update.prompt, "the review is revised with its record"
 
 
+async def test_a_review_nobody_asked_for_runs_no_reproduction(demo) -> None:
+    """A scan's review keeps its own session on the machine but starts no
+    reproduction beside it, and its prompt says none runs."""
+    from auto_maintainer.domain.events import Event, EventKind
+
+    h, _ = demo
+    await h.emit(
+        Event(
+            kind=EventKind.DASHBOARD_COMMAND,
+            repo=REPO,
+            number=42,
+            payload={"command": "review", "source": "scan"},
+        )
+    )
+    [review] = _reviews(h)
+    assert "reproduction agent is not yours to start" not in review.prompt
+    assert not [t for t in h.runner.tasks if t.kind == "reproduce"]
+    assert not [j for j in await h.store.list_jobs() if j.playbook == "reproduce"]
+
+
 async def test_a_reproduction_the_pr_needs_not_leaves_the_review_as_it_is(
     demo,
 ) -> None:
@@ -1235,68 +1255,6 @@ async def test_a_reproduction_asked_for_edits_the_services_posted_review(
         updated is not None
         and updated.action.payload["body"] == edit.action.payload["body"]
     )
-
-
-async def test_a_reviews_own_reproduction_edits_the_review_posted_meanwhile(
-    demo,
-) -> None:
-    """When a scan review is approved as the service while its own reproduction still
-    runs, the reproduction's result goes straight into the posted review."""
-    import asyncio
-
-    from auto_maintainer.domain.events import Event, EventKind
-
-    h, app = demo
-    answer = h.runner.handlers["review"]
-    h.runner.on(
-        "review",
-        lambda t: (
-            answer(t)
-            if "That reproduction has ended" in t.prompt
-            else {**answer(t), "reproduction": "Check a batch of one loads."}
-        ),
-    )
-    in_repro = asyncio.Event()
-    finish_repro = asyncio.Event()
-
-    async def repro(task: Any) -> Any:
-        in_repro.set()
-        await finish_repro.wait()
-        return {"conclusion": "reproduced", "comment": "Batch of one loaded."}
-
-    h.runner.on("reproduce", repro)
-    pr = await h.forge.get_pr(REPO, 42)
-    assert pr is not None
-    # Its author is on the team: a session nobody asked for runs only team code.
-    pr = pr.model_copy(update={"author_association": "MEMBER"})
-    h.forge.put_pr(pr)
-    await h.service.bus.publish(
-        Event(
-            kind=EventKind.DASHBOARD_COMMAND,
-            repo=REPO,
-            number=42,
-            sha=pr.head_sha,
-            payload={"command": "review", "source": "scan"},
-            source="scan",
-        )
-    )
-    running = asyncio.create_task(h.settle())
-    await asyncio.wait_for(in_repro.wait(), 10)
-    async with _as(app, "maria") as maria:
-        [draft] = [
-            p
-            for p in (await maria.get("/api/proposals")).json()
-            if p["action"]["action"]["kind"] == "review.post"
-        ]
-        await maria.post(f"/api/proposals/{draft['id']}/approve", json={"as_me": False})
-        await h.service.actuator.drain()
-    finish_repro.set()
-    await running
-    await h.settle()
-    [edit] = await _review_edits(h)
-    assert edit.status == "executed" and edit.approver == "maria"
-    assert edit.post_as is None
-    assert h.forge.writes_of("update_review")
 
 
 async def test_a_reproduction_edits_a_review_as_its_author_only_when_they_asked(

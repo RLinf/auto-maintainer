@@ -33,6 +33,7 @@ from auto_maintainer.domain.snapshot import (
     Review,
     ReviewEventState,
 )
+from auto_maintainer.playbooks.requests import SETTLE_SECONDS
 from auto_maintainer.testing.fakes import make_pr
 from auto_maintainer.testing.harness import Harness
 
@@ -219,6 +220,11 @@ async def test_followup_after_new_commits(harness: Harness) -> None:
     )
     events = await harness.poll()
     assert EventKind.PR_SYNCHRONIZED in [e.kind for e in events]
+    assert len(harness.forge.writes_of("create_review")) == 1, (
+        "a push's review waits for more pushes"
+    )
+    harness.clock.advance(seconds=SETTLE_SECONDS + 1)
+    await harness.settle()
     reviews = harness.forge.writes_of("create_review")
     assert len(reviews) == 2
     assert "All earlier review comments are resolved" in reviews[1]["body"]

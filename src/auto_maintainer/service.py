@@ -123,7 +123,7 @@ from .playbooks.base import (
     ServiceInfo,
     author_is_team,
 )
-from .profiles.gate import ConfigGate, GateDecision
+from .profiles.gate import OWNER_APPROVAL, ConfigGate, GateDecision
 from .profiles.governance import GovernanceRecords
 from .profiles.knowledge import Knowledge
 from .profiles.layers import ProfileError, content_hash
@@ -440,6 +440,7 @@ class Service:
             workspace=adapters.workspace,
             updater=adapters.updater,
             deploy_checks=lambda: self.service_config.system.deploy_checks or "local",
+            is_owner=self._is_owner,
             request_restart=self.request_restart,
             writer_as=self.user_writer,
             publisher_as=self.user_publisher,
@@ -860,6 +861,9 @@ class Service:
     def settings_repo(self) -> str | None:
         """The service's repository, whose admin owns this deployment."""
         return self.settings.code_repo
+
+    async def _is_owner(self, login: str) -> bool:
+        return (await self.service_gate(login)).allowed
 
     async def service_gate(self, login: str) -> GateDecision:
         """Whether ``login``, a person signed in to the dashboard, acts as this
@@ -2103,6 +2107,13 @@ class Service:
             decisions.append(decision)
             if decision.allowed and login not in change.approvals.get(repo, []):
                 change.approvals.setdefault(repo, []).append(login)
+        if (
+            any(lock_path(r) in change.files for r in change.repos)
+            and login not in change.approvals.get(OWNER_APPROVAL, [])
+            and await self._is_owner(login)
+        ):
+            # A change to when reviews start on their own waits for the owner too.
+            change.approvals.setdefault(OWNER_APPROVAL, []).append(login)
         await self.store.save_memory_change(change)
         await self.store.add_audit(
             AuditEntry(

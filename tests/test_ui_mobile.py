@@ -276,7 +276,6 @@ def test_tsx_avoids_rigid_widths_and_inline_grids() -> None:
         "reproduce.tsx": "min(360px, calc(100vw - 24px))",
         "fixCi.tsx": "min(360px, calc(100vw - 24px))",
         "App.tsx": "min(300px, calc(100vw - 24px))",
-        "pages/homeParts.tsx": "min(360px, calc(100vw - 24px))",
         "pages/Settings.tsx": "min(380px, calc(100vw - 24px))",
     }
     for rel, expected in clamped_popovers.items():

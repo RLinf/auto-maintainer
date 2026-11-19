@@ -21,7 +21,8 @@ import logging
 from ..domain.events import Event, EventKind
 from ..domain.memory import MemoryChange, MemoryChangeState, Tier, lock_path
 from ..domain.records import AuditEntry
-from ..profiles.gate import memory_change_ready
+from ..profiles.gate import memory_change_ready, owner_needed
+from ..profiles.lock import parse_lock
 from ..profiles.service import finalize_lock_files
 from .context import ExecContext
 
@@ -37,6 +38,30 @@ async def try_merge_memory(x: ExecContext, change: MemoryChange) -> MemoryChange
     async with x.memory_lock:
         fresh = await x.store.get_memory_change(change.id)
         return await _try_merge(x, fresh or change)
+
+
+async def _owner_waits(x: ExecContext, change: MemoryChange) -> str | None:
+    """Why ``change`` waits for the service's owner, or ``None``: a change to when a
+    repository's reviews start on their own needs their approval beside its
+    maintainers' (``profiles.gate.owner_needed``), checked live."""
+    needs = []
+    for repo in change.repos:
+        lock = parse_lock(change.files.get(lock_path(repo)), "memory")
+        if lock is not None and owner_needed(
+            await x.profiles.active(repo), lock.to_profile()
+        ):
+            needs.append(repo)
+    if not needs:
+        return None
+    approvers = {login for logins in change.approvals.values() for login in logins}
+    if x.is_owner is not None:
+        for login in sorted(approvers):
+            if await x.is_owner(login):
+                return None
+    return (
+        f"changing when reviews of {', '.join(needs)} start on their own waits for "
+        "the service's owner"
+    )
 
 
 async def _try_merge(x: ExecContext, change: MemoryChange) -> MemoryChange:
@@ -70,6 +95,10 @@ async def _try_merge(x: ExecContext, change: MemoryChange) -> MemoryChange:
     ready, reason = memory_change_ready(change, auto, notice, x.clock.now())
     if not ready:
         log.info("memory change %s waits: %s", change.id, reason)
+        return change
+    waits = await _owner_waits(x, change)
+    if waits:
+        log.info("memory change %s waits: %s", change.id, waits)
         return change
 
     now = x.clock.now()

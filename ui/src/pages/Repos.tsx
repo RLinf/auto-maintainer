@@ -9,6 +9,7 @@ import { api, type Agreement, type GateDecision, type MemoryChange, type Profile
 import { useAgent } from "../agent";
 import { RepoMachinesSection, useRepoMachines } from "../machines";
 import { LessonsTab } from "../lessons";
+import { ReviewAutomationSection } from "../reviewAutomation";
 import { PeopleTab } from "../people";
 import { UsageTab } from "../usage";
 import { ProfileChanges, type Profile } from "../profileView";
@@ -409,6 +410,7 @@ export function RepoDetailPage() {
 
       {tab === "settings" && (
         <div className="stack" style={{ gap: 16 }}>
+          <ReviewAutomationSection repo={full} />
           <RepoMachinesSection repo={full} />
           <SettingsEditor repo={full} base={base} initial={p.memory_layer} canConfigure={p.can_configure} gateReason={p.gate.reason} />
         </div>

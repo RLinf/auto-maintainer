@@ -145,6 +145,10 @@ from ..profiles.skills import (
 from ..service import Service
 from .auth import User, current_user
 
+OWNER_ONLY_AUTOMATION = (
+    "only the service's owner changes when reviews start on their own: they run on "
+    "the service's agents and test machines"
+)
 PERMISSION_TTL = timedelta(minutes=30)
 """The oldest kept permission a view shows (``service.VIEW_STALE_LIMIT``): past it,
 the view reads it again first."""
@@ -1826,6 +1830,7 @@ def build_router() -> APIRouter:
         if profile is None:
             raise HTTPException(409, f"{repo} has no approved profile yet")
         gate = await shows_gate(service, user, repo, profile)
+        owner = await service.service_gate(user.login)
         review = profile.review
         return {
             "repo": repo,
@@ -1834,8 +1839,10 @@ def build_router() -> APIRouter:
             "every_hours": hours_of(review.scan.schedule),
             "max_prs": review.scan.max_prs,
             "followups": review.scan.followups,
-            "can_configure": gate.allowed,
-            "reason": gate.reason,
+            # Reviews that start on their own run on the service's agents and test
+            # machines: its owner sets when, beside the repository's maintainers.
+            "can_configure": gate.allowed and owner.allowed,
+            "reason": OWNER_ONLY_AUTOMATION if not owner.allowed else gate.reason,
         }
 
     @r.put("/repos/{repo:path}/review-automation")
@@ -1845,11 +1852,15 @@ def build_router() -> APIRouter:
         body: AutomationBody,
         user: User = Depends(current_user),
     ) -> dict[str, Any]:
-        """Change it through the repository's settings layer; a maintainer applies it
-        by making it, anyone else proposes it."""
+        """Change it through the repository's settings layer: only the service's owner
+        does, since such reviews run on the service's agents and test machines; when
+        they also maintain the repository it applies at once. The memory gate holds
+        any other change to it, from chat or the settings editor, for the owner."""
         service = service_of(request)
         repo = _repo(repo)
         await require_view(service, user, repo)
+        if not (await service.service_gate(user.login)).allowed:
+            raise HTTPException(403, OWNER_ONLY_AUTOMATION)
         current = await service.profiles.active(repo)
         layer = parse_yaml(
             await service.a.memory.read_text(profile_path(repo)) or "", "settings"

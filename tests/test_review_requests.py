@@ -347,16 +347,23 @@ def test_am_review_full_asks_for_a_full_review() -> None:
 # -- when reviews start on their own -------------------------------------------------------
 
 
-async def test_maintainers_set_when_reviews_start_on_their_own(demo) -> None:
+async def test_only_the_services_owner_sets_when_reviews_start_on_their_own(
+    demo,
+) -> None:
+    """Reviews that start on their own run on the service's agents and test machines:
+    only its owner changes when (maria here), and a change to it made any other way,
+    approved by a maintainer who is not the owner, waits for the owner."""
+    from auto_maintainer.domain.memory import MemoryChangeState
+    from auto_maintainer.profiles.gate import OWNER_APPROVAL
+
     h, app = demo
     body = {"trigger": "scan", "every_hours": 3, "max_prs": 4, "followups": False}
     async with _as(app, "walt") as walt:
         current = (await walt.get(f"/api/repos/{REPO}/review-automation")).json()
         assert current["trigger"] == "manual" and current["can_configure"] is False
-        proposed = (
-            await walt.put(f"/api/repos/{REPO}/review-automation", json=body)
-        ).json()
-        assert proposed["applied"] is False
+        assert "owner" in current["reason"]
+        refused = await walt.put(f"/api/repos/{REPO}/review-automation", json=body)
+        assert refused.status_code == 403
     async with _as(app, "maria") as maria:
         applied = (
             await maria.put(f"/api/repos/{REPO}/review-automation", json=body)
@@ -367,6 +374,24 @@ async def test_maintainers_set_when_reviews_start_on_their_own(demo) -> None:
     assert now["max_prs"] == 4 and now["followups"] is False
     profile = await h.service.profiles.active(REPO)
     assert profile is not None and profile.review.scan.schedule == "0 */3 * * *"
+
+    # Another maintainer, not the owner, turns on reviews of every update some
+    # other way (the settings editor, chat): it waits for the owner.
+    h.forge.set_permission(REPO, "olga", Permission.ADMIN)
+    layer = {"review": {"trigger": "events"}}
+    _, change = await h.service.profiles.propose_memory_layer(
+        REPO, layer, "olga", "review: every update"
+    )
+    await h.store.save_memory_change(change)
+    await h.service.submit_memory_change(change)
+    _, state = await h.service.approve_memory_change(change.id, "olga")
+    assert state == MemoryChangeState.OPEN, "a maintainer alone does not change it"
+    _, state = await h.service.approve_memory_change(change.id, "maria")
+    assert state == MemoryChangeState.MERGED
+    stored = await h.store.get_memory_change(change.id)
+    assert stored is not None and stored.approvals.get(OWNER_APPROVAL) == ["maria"]
+    profile = await h.service.profiles.active(REPO)
+    assert profile is not None and profile.review.trigger == "events"
 
 
 # -- fixing what a review found --------------------------------------------------------------

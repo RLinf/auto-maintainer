@@ -302,3 +302,72 @@ async def test_a_requested_follow_up_drafts_beside_one_a_scan_recorded(
         ] == ["followup"]
     finally:
         await h.close()
+
+
+async def test_pushes_settle_and_a_newer_push_stops_the_older_ones_jobs(
+    tmp_path: Path,
+) -> None:
+    """With reviews on every update, a push's review waits for more pushes, and a
+    newer push stops the jobs nobody asked for that still work on the older commit."""
+    from auto_maintainer.domain.records import JobStatus
+    from auto_maintainer.playbooks.requests import SETTLE_SECONDS
+
+    h = await Harness.create(
+        tmp_path, layer={"extends": ["dco"], "review": {"trigger": "events"}}
+    )
+    try:
+        _answers(h)
+        h.forge.put_pr(_pr(42, "a" * 40))
+        await h.poll()
+        assert len(_kinds(h, "review")) == 1, "a new PR is reviewed at once"
+        pr = await h.forge.get_pr(REPO, 42)
+        h.forge.put_pr(pr.model_copy(update={"head_sha": "b" * 40}))
+        await h.poll()
+        waiting = [
+            j
+            for j in await h.store.list_jobs([JobStatus.QUEUED], repo=REPO, number=42)
+            if j.playbook in ("review", "followup")
+        ]
+        assert waiting and len(_kinds(h, "review")) == 1, "the push's jobs wait"
+        h.forge.put_pr(pr.model_copy(update={"head_sha": "c" * 40}))
+        await h.poll()
+        for job in waiting:
+            stopped = await h.store.get_job(job.id)
+            assert stopped is not None and stopped.status == JobStatus.CANCELLED
+            assert "newer push" in (stopped.error or "")
+        h.clock.advance(seconds=SETTLE_SECONDS + 1)
+        await h.settle()
+        followups = _kinds(h, "followup")
+        assert len(followups) == 1 and len(_kinds(h, "review")) == 1, (
+            "one follow-up, of the newest commit"
+        )
+    finally:
+        await h.close()
+
+
+async def test_a_recorded_review_makes_the_next_push_a_follow_up(
+    tmp_path: Path,
+) -> None:
+    """A review nobody posted (recorded in shadow) still counts: the next commit
+    gets a follow-up of its findings, not another full review."""
+    from auto_maintainer.playbooks.requests import SETTLE_SECONDS
+
+    h = await Harness.create(
+        tmp_path, layer={"extends": ["dco"], "review": {"trigger": "events"}}
+    )
+    try:
+        _answers(h)
+        h.forge.put_pr(_pr(42, "a" * 40))
+        await h.poll()
+        assert len(_kinds(h, "review")) == 1
+        assert not h.forge.writes_of("create_review"), "recorded in shadow only"
+        pr = await h.forge.get_pr(REPO, 42)
+        h.forge.put_pr(pr.model_copy(update={"head_sha": "b" * 40}))
+        await h.poll()
+        h.clock.advance(seconds=SETTLE_SECONDS + 1)
+        await h.settle()
+        assert len(_kinds(h, "review")) == 1, "no second full review"
+        [followup] = _kinds(h, "followup")
+        assert "Missing case" in followup.prompt, "it follows up the recorded findings"
+    finally:
+        await h.close()

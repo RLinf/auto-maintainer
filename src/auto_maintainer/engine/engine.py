@@ -26,9 +26,11 @@ from ..actuator.pipeline import ActionPipeline
 from ..domain.actions import ActionStatus
 from ..domain.clock import Clock
 from ..domain.events import Event, EventKind
+from ..domain.ids import same_commit
 from ..domain.ports import EventSink, Store
 from ..domain.records import Job, JobStatus, WaitSpec
 from ..playbooks.base import Playbook, PlaybookContext, PlaybookResult
+from ..playbooks.requests import SUPERSEDED_ON_PUSH, automatic
 from ..profiles.service import ProfileService
 
 log = logging.getLogger(__name__)
@@ -94,6 +96,7 @@ class Engine:
             and event.sha
         ):
             await self.pipeline.supersede_stale(event.repo, event.number, event.sha)
+            await self._stop_outdated(event)
         if event.kind == EventKind.MEMORY_CHANGED:
             self.profiles.invalidate(event.repo)
         await self._wake_waiting(event)
@@ -117,6 +120,29 @@ class Engine:
             if event.kind in playbook.triggers:
                 created += await self._start(playbook, event)
         return created
+
+    async def _stop_outdated(self, push: Event) -> None:
+        """Stop the reviews, follow-ups, and reproductions nobody asked for that still
+        work on an older commit of the PR ``push`` updated: the newer commit gets
+        jobs of its own, and finishing the old ones only spends agents and test
+        machines on a commit nobody will read about. Ones a person asked for go on."""
+        assert push.sha
+        for job in await self.store.list_jobs(
+            [JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.WAITING],
+            repo=push.repo,
+            number=push.number,
+            playbooks=list(SUPERSEDED_ON_PUSH),
+        ):
+            if not job.events:
+                continue
+            first = Event.model_validate(job.events[0])
+            if (
+                not automatic(first)
+                or not first.sha
+                or same_commit(first.sha, push.sha)
+            ):
+                continue
+            await self.stop_job(job.id, f"a newer push ({push.sha[:7]})")
 
     async def _start(self, playbook: Playbook, event: Event) -> list[Job]:
         profile = None

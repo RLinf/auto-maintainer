@@ -111,6 +111,10 @@ class ExecContext:
     """Pushes self-improvement branches to the code repo."""
     updater: ServiceUpdater | None = None
     """Moves the service's own checkout to a new commit."""
+    is_owner: Callable[[str], Awaitable[bool]] | None = None
+    """Whether a login is the service's owner, live (``Service.service_gate``): the
+    memory gate merges a change to a repository's review automation only with their
+    approval."""
     deploy_checks: Callable[[], str] = lambda: "local"
     """How a deploy checks the commit first, as the service settings say now
     (``SystemSettings.deploy_checks``): ``ci``, ``local``, or ``none``."""
