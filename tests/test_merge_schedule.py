@@ -2001,6 +2001,9 @@ async def test_a_person_diagnoses_or_fixes_only_the_failures_they_chose(
         )
         assert out.status_code == 200, out.text
         await h.settle()
+        live = await maria.get(f"/api/jobs/{out.json()['event']}")
+        assert live.status_code == 200, "its live view opens by the request's id"
+        assert live.json()["playbook"] == "ci_doctor"
     seen = {o.check_name for o in await h.store.list_ci_observations(REPO)}
     assert seen == {"unit"}, "lint was not chosen"
     assert len(looked) == 1 and "E501" not in looked[0]

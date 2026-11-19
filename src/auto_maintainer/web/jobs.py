@@ -71,10 +71,12 @@ AGENT_PLAYBOOKS = {
     "quick_quality": "evaluate",
     "merge_base": "fix",
     "fix_ci": "fix",
+    "ci_doctor": "ci_diagnose",
+    "ci_rules": "onboard",
 }
-"""Playbooks whose work is an agent's, and the task kind of their main agent run. A
-playbook missing here has no live view: the dashboard cannot find its job by the
-request that started it."""
+"""Playbooks whose work is an agent's, and the task kind of their main agent run:
+the Agents' work list shows their jobs, and a live view opened by the request that
+started one finds it here first (``_job``)."""
 
 ASKED_FOR = {EventKind.DASHBOARD_COMMAND.value, EventKind.PRIORITY_RESCORE.value}
 """Kinds of the events that start scoring someone waits for: a maintainer's request,
@@ -346,16 +348,22 @@ async def _job(service: Service, user: User, job_id: str) -> Job:
     started it (what the dashboard knows right after asking for the work)."""
     job = await service.store.get_job(_REQUESTS.get(job_id, job_id))
     if job is None and job_id.startswith("evt_"):
-        job = next(
-            (
-                j
-                for j in await service.store.list_jobs(
-                    limit=500, playbooks=list(AGENT_PLAYBOOKS)
-                )
-                if j.events and j.events[0].get("id") == job_id
-            ),
-            None,
-        )
+        # Agents' work first; then any playbook's recent jobs, so a request whose
+        # playbook the list lacks still opens (it said "no such job yet" for a
+        # lessons summary and a CI diagnosis).
+        for playbooks in (list(AGENT_PLAYBOOKS), None):
+            job = next(
+                (
+                    j
+                    for j in await service.store.list_jobs(
+                        limit=500, playbooks=playbooks
+                    )
+                    if j.events and j.events[0].get("id") == job_id
+                ),
+                None,
+            )
+            if job is not None:
+                break
         if job is not None:
             _REQUESTS[job_id] = job.id
             while len(_REQUESTS) > REQUESTS_KEPT:
