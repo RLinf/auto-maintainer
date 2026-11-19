@@ -1,7 +1,8 @@
 // A repository's Lessons tab (design 5.11): its review, priority, and agent lessons,
 // each with who approved it; editing them (a maintainer's edit applies at once,
-// anyone else's waits for a maintainer); and having an agent summarize a file into a
-// draft that a maintainer reads here and applies or discards.
+// anyone else's waits for a maintainer); and talking with an agent about a file,
+// which summarizes and revises it into a draft that a maintainer reads here and
+// applies or discards.
 
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
@@ -10,7 +11,7 @@ import { ErrorBox, GrowingTextarea, RejectButton, Section, useAct } from "./comp
 import { useT } from "./i18n";
 import { Icon } from "./icons";
 import { Markdown } from "./markdown";
-import { openJob } from "./openJob";
+import { SharedTalk, type Seed } from "./talk";
 import { Skeleton, useToast } from "./ui";
 
 type Kind = "review" | "priority" | "agent";
@@ -81,8 +82,9 @@ function LessonsCard({ repo, file, canConfigure, hasProfile }: { repo: string; f
   const count = file.sections.reduce((n, s) => n + s.items.length, 0);
   const keys = [["lessons", repo], ["memory"]];
   const save = useAct((sections: Draft) => api.put<{ applied: boolean }>(`/api/repos/${repo}/lessons/${file.kind}`, { base: file.text, sections }), keys);
-  const summarize = useAct(() => api.post<{ event: string }>(`/api/repos/${repo}/lessons/${file.kind}/summarize`, {}), keys);
-  const summaryWaits = file.pending.some((p) => p.summary);
+  const [talk, setTalk] = useState<{ open: boolean; seed: Seed | null }>({ open: false, seed: null });
+  const summarizeText = t("Summarize these lessons: merge the ones that say the same thing, group related ones under topics, and tell me which you drop and why.");
+  const summarize = () => setTalk({ open: true, seed: { text: summarizeText, n: Date.now(), send: true } });
   const edit = () => setDraft(file.sections.length ? file.sections.map((s) => ({ title: s.title, items: s.items.map((i) => i.text) })) : [{ title: "", items: [""] }]);
   const submit = () =>
     draft &&
@@ -94,27 +96,18 @@ function LessonsCard({ repo, file, canConfigure, hasProfile }: { repo: string; f
       onError: (e) => toast({ title: t("Not saved"), body: String((e as Error).message), icon: "x" }),
     });
   return (
+    <>
     <Section
       title={`${t(file.heading)} · ${count}`}
       hint={t(READERS[file.kind])}
       aside={
         hasProfile && !draft ? (
           <div className="row" style={{ gap: 6 }}>
-            <button
-              className="sm ghost"
-              disabled={count < 2 || summaryWaits || summarize.isPending}
-              title={summaryWaits ? t("A summary waits for a maintainer below.") : count < 2 ? t("There is nothing to summarize yet.") : undefined}
-              onClick={() =>
-                summarize.mutate(undefined, {
-                  onSuccess: (out) => {
-                    openJob(out.event);
-                    toast({ title: t("Summarizing"), body: t("The agent's draft appears here for a maintainer to apply."), icon: "sparkles" });
-                  },
-                  onError: (e) => toast({ title: t("Not started"), body: String((e as Error).message), icon: "x" }),
-                })
-              }
-            >
+            <button className="sm ghost" disabled={count < 2} title={count < 2 ? t("There is nothing to summarize yet.") : undefined} onClick={summarize}>
               <Icon name="sparkles" size={13} /> {t("Summarize")}
+            </button>
+            <button className={`sm ghost ${talk.open ? "on" : ""}`} aria-expanded={talk.open} onClick={() => setTalk({ ...talk, open: !talk.open })}>
+              <Icon name="message" size={13} /> {t("Talk with the agent")}
             </button>
             <button className="sm ghost" onClick={edit}>
               <Icon name="pencil" size={13} /> {t("Edit")}
@@ -165,6 +158,30 @@ function LessonsCard({ repo, file, canConfigure, hasProfile }: { repo: string; f
         <ErrorBox error={save.error} />
       </div>
     </Section>
+    {talk.open && (
+      <SharedTalk
+        base={`/api/repos/${repo}/lessons/${file.kind}/talk`}
+        queryKey={["lessons", repo, file.kind, "talk"]}
+        invalidate={[["lessons", repo], ["memory"]]}
+        title={`${t("Talk with the agent")}: ${t(file.heading)}`}
+        hint={t("shared by this repository's reviewers")}
+        intro={t("Ask it to summarize these lessons, or to reword, merge, regroup, add, or drop some. Each revision it drafts waits above for a maintainer to apply.")}
+        placeholder={t("For example: keep the CI lessons apart; merge the two about review length; drop the one about install scripts.")}
+        enabled={hasProfile}
+        task="learn"
+        seed={talk.seed}
+        actions={(send, busy) => (
+          <>
+            <button className="sm" disabled={busy || count < 2 || !hasProfile} onClick={() => send(summarizeText)}>
+              <Icon name="sparkles" size={13} />
+              {t("Summarize")}
+            </button>
+            <span className="small muted">{t("Nothing changes until a maintainer applies the draft.")}</span>
+          </>
+        )}
+      />
+    )}
+    </>
   );
 }
 

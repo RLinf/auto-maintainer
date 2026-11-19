@@ -8,18 +8,15 @@
 // the record applies at once. The holders of a role that maintains are the
 // repository's maintainers in the service, and every member may use its dashboard.
 
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Fragment, useEffect, useRef, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { AgentPicker, agentName } from "./agentPicker";
-import { api, type ChatMessage, type JobStep } from "./api";
-import { ErrorBox, Section, GrowingTextarea, StopButton, useAct } from "./components";
-import { useQuestions } from "./data";
+import { api } from "./api";
+import { ErrorBox, Section, useAct } from "./components";
 import { useT } from "./i18n";
 import { Icon } from "./icons";
-import { Steps } from "./jobs";
 import { Markdown } from "./markdown";
-import { QuestionCard } from "./pages/Questions";
+import { Clamped, SharedTalk, type Seed } from "./talk";
 import { ChangeById } from "./settingsChange";
 import { DataTable, ListToolbar, useList, type Column } from "./list";
 import { Skeleton, Tabs, useTab, useToast } from "./ui";
@@ -918,39 +915,6 @@ function HistoryView({ gov, name, onOpen }: { gov: Governance; name: Named; onOp
   );
 }
 
-const MESSAGES_SHOWN = 2;
-const QUESTIONS_SHOWN = 3;
-const CLAMP_CHARS = 700;
-
-/** A long answer, cut to a few lines until the reader opens it. */
-function Clamped({ text }: { text: string }) {
-  const t = useT();
-  const [open, setOpen] = useState(false);
-  const long = text.length > CLAMP_CHARS || text.split("\n").length > 12;
-  return (
-    <>
-      <div className={long && !open ? "clamped" : undefined}>
-        <Markdown text={text} className="chat-md" />
-      </div>
-      {long && (
-        <button className="ghost sm" style={{ marginTop: 4 }} onClick={() => setOpen(!open)}>
-          {open ? t("Show less") : t("Show more")}
-        </button>
-      )}
-    </>
-  );
-}
-
-type TalkState = {
-  thread: string | null;
-  agent?: string | null;
-  runtime?: string | null;
-  live_run: string | null;
-  listening: boolean;
-  messages: ChatMessage[];
-};
-type TurnSteps = { run: string | null; live: boolean; steps: JobStep[] };
-
 /** The conversation with the agent that keeps the record, shared by the repository's reviewers. */
 function PeopleTalk({
   repo,
@@ -963,218 +927,36 @@ function PeopleTalk({
   questions: string[];
   established: boolean;
   hasProfile: boolean;
-  seed?: { text: string; n: number } | null;
+  seed?: Seed | null;
 }) {
   const t = useT();
-  const client = useQueryClient();
-  const box = useRef<HTMLTextAreaElement>(null);
-  const [text, setText] = useState("");
-  const [pendingText, setPendingText] = useState("");
-  const [pickedAgent, setPickedAgent] = useState<string | undefined>(undefined);
-  const [allMessages, setAllMessages] = useState(false);
-  const [allQuestions, setAllQuestions] = useState(false);
-  const log = useRef<HTMLDivElement>(null);
-  const base = `/api/repos/${repo}/governance/talk`;
-  // Asking about someone from the people list starts the message here.
-  useEffect(() => {
-    if (!seed) return;
-    setText(seed.text);
-    window.setTimeout(() => {
-      box.current?.focus();
-      box.current?.setSelectionRange(seed.text.length, seed.text.length);
-    }, 50);
-  }, [seed]);
-  const talk = useQuery({ queryKey: ["people", repo, "talk"], queryFn: () => api.get<TalkState>(base) });
-  const listening = !!talk.data?.listening;
-  const agent = pickedAgent ?? talk.data?.agent ?? talk.data?.runtime ?? "";
-  const send = useMutation({
-    mutationFn: ({ said, chosen }: { said: string; chosen: string | undefined }) =>
-      api.post<ChatMessage>(base, {
-        text: said,
-        ...(chosen !== undefined && !listening ? { agent: chosen } : {}),
-      }),
-    onSuccess: async () => {
-      await client.invalidateQueries({ queryKey: ["people", repo, "talk"] });
-      setPickedAgent(undefined);
-    },
-    onSettled: () => {
-      setPendingText("");
-      for (const queryKey of [["people"], ["memory"]]) void client.invalidateQueries({ queryKey });
-    },
-  });
-  const running = send.isPending || !!talk.data?.live_run;
-  // While a turn runs, others' messages and whether the agent takes one move too.
-  useEffect(() => {
-    if (!running) return;
-    const timer = window.setInterval(() => void client.invalidateQueries({ queryKey: ["people", repo, "talk"], exact: true }), 2000);
-    return () => window.clearInterval(timer);
-  }, [running, client, repo]);
-  const live = useQuery({
-    queryKey: ["people", repo, "talk", "live"],
-    queryFn: () => api.get<TurnSteps>(`${base}/steps`),
-    enabled: running,
-    refetchInterval: running ? 1500 : false,
-  });
-  const busy = running && !listening;
-  const pendingQuestions = useQuestions("pending");
-  const messages = talk.data?.messages ?? [];
-  const runs = new Set([...messages.map((m) => m.run_id), live.data?.run, talk.data?.live_run].filter((x): x is string => !!x));
-  const waiting = (pendingQuestions.data ?? []).filter((q) => q.job_id && runs.has(q.job_id));
-  const last = messages[messages.length - 1];
-  // The latest exchange shows; earlier messages open on request, in a box of their own.
-  const latest = messages.length - Math.max(0, messages.map((m) => m.role).lastIndexOf("user"));
-  const earlier = Math.max(0, messages.length - Math.max(MESSAGES_SHOWN, latest));
-  useEffect(() => {
-    if (allMessages && log.current) log.current.scrollTop = log.current.scrollHeight;
-  }, [allMessages, messages.length]);
-  const showPending = !!pendingText && !(last?.role === "user" && last.text === pendingText);
-
-  // While the agent answers, a new message interrupts it (or goes to it at work,
-  // when it takes messages).
-  const submit = (said: string) => {
-    const clean = said.trim();
-    if (!clean || !hasProfile) return;
-    if (!listening) setPendingText(clean);
-    setText("");
-    send.mutate({ said: clean, chosen: pickedAgent });
-  };
-  const answer = (q: string) => {
-    setText(`${q}\n→ `);
-    box.current?.focus();
-  };
-
   return (
-    <Section title={t("Talk with the agent")} hint={t("shared by this repository's reviewers")}>
-      <div className="stack review-talk" style={{ gap: 10 }}>
-        {!messages.length && !pendingText && (
-          <span className="small muted">
-            {established
-              ? t("Tell it what to change: a rule, a member, a change of role. Ask it to check who should change role. It drafts each change for a maintainer to apply.")
-              : t("Start by telling it where your process is written (a file in the repository or a web page), or describe the roles and how people move between them.")}
-          </span>
-        )}
-        {earlier > 0 && (
-          <button className="ghost sm" style={{ alignSelf: "flex-start" }} onClick={() => setAllMessages(!allMessages)}>
-            <Icon name={allMessages ? "chevronDown" : "chevronRight"} size={13} />
-            {allMessages ? t("Show only the latest") : `${t("Show earlier messages")} (${earlier})`}
+    <SharedTalk
+      base={`/api/repos/${repo}/governance/talk`}
+      queryKey={["people", repo, "talk"]}
+      invalidate={[["people"], ["memory"]]}
+      title={t("Talk with the agent")}
+      hint={t("shared by this repository's reviewers")}
+      intro={
+        established
+          ? t("Tell it what to change: a rule, a member, a change of role. Ask it to check who should change role. It drafts each change for a maintainer to apply.")
+          : t("Start by telling it where your process is written (a file in the repository or a web page), or describe the roles and how people move between them.")
+      }
+      placeholder={t("For example: our roles are in GOVERNANCE.md; reviewers become maintainers after six months and two maintainers' approval; add @alice as a reviewer of docs/.")}
+      enabled={hasProfile}
+      task="governance"
+      questions={questions}
+      seed={seed}
+      actions={(send, busy) => (
+        <>
+          <button className="sm" disabled={busy || !established || !hasProfile} title={!established ? t("Fill in the process first; the check follows its rules.") : undefined} onClick={() => send(t("Check who should change role under our process, from GitHub activity."))}>
+            <Icon name="refresh" size={13} />
+            {t("Check who should change role")}
           </button>
-        )}
-        <div ref={log} className={`stack talk-log ${allMessages ? "all" : ""}`} style={{ gap: 10 }}>
-        {(allMessages ? messages : messages.slice(earlier)).map((m) => (
-          <Fragment key={m.id}>
-            {m.role === "user" ? (
-              <div className="bubble user">
-                <span className="small" style={{ display: "block", opacity: 0.75 }}>
-                  {m.author}
-                  {m.while_running && ` · ${t("sent while it worked")}`}
-                </span>
-                {m.text}
-              </div>
-            ) : (
-              <div className="bubble assistant">
-                {m.runtime && (
-                  <span className="small muted" style={{ display: "block", marginBottom: 2 }}>
-                    {agentName(m.runtime)}
-                  </span>
-                )}
-                <Clamped text={m.text} />
-              </div>
-            )}
-            {m.role !== "user" && (m.changes ?? []).length > 0 && (
-              <span className="small" style={{ color: "var(--ok)" }}>
-                <Icon name="check" size={13} /> {t("Drafted a revision; it waits below for a maintainer")}
-              </span>
-            )}
-          </Fragment>
-        ))}
-        </div>
-        {showPending && <div className="bubble user">{pendingText}</div>}
-        {running &&
-          (live.data?.steps.length ? (
-            <div className="agent-live" aria-live="polite">
-              <Steps steps={live.data.steps} active />
-            </div>
-          ) : (
-            <div className="bubble assistant thinking" aria-live="polite">
-              <span className="typing" aria-label={t("The agent is working")}>
-                <span />
-                <span />
-                <span />
-              </span>
-            </div>
-          ))}
-        {waiting.length > 0 && (
-          <section className="stack" style={{ gap: 8 }}>
-            <span className="kind-chip warn">{t("The agent is waiting for an answer")}</span>
-            {waiting.map((q) => (
-              <QuestionCard key={q.id} question={q} compact />
-            ))}
-          </section>
-        )}
-        {questions.length > 0 && (
-          <div className="stack open-questions" style={{ gap: 6 }}>
-            <span className="kind-chip">{t("The agent asks")}</span>
-            {(allQuestions ? questions : questions.slice(0, QUESTIONS_SHOWN)).map((q) => (
-              <div key={q} className="row" style={{ gap: 8, alignItems: "flex-start" }}>
-                <span className="small" style={{ flex: 1, minWidth: 0 }}>
-                  {q}
-                </span>
-                <button className="sm" onClick={() => answer(q)}>
-                  {t("Answer")}
-                </button>
-              </div>
-            ))}
-            {questions.length > QUESTIONS_SHOWN && (
-              <button className="ghost sm" style={{ alignSelf: "flex-start" }} onClick={() => setAllQuestions(!allQuestions)}>
-                {allQuestions ? t("Show fewer questions") : `${t("Show all questions")} (${questions.length})`}
-              </button>
-            )}
-          </div>
-        )}
-        <form
-          className="composer"
-          onSubmit={(e) => {
-            e.preventDefault();
-            submit(text);
-          }}
-        >
-          <GrowingTextarea
-            ref={box}
-            value={text}
-            minRows={2}
-            placeholder={
-              listening
-                ? t("Tell the agent something while it works…")
-                : t("For example: our roles are in GOVERNANCE.md; reviewers become maintainers after six months and two maintainers' approval; add @alice as a reviewer of docs/.")
-            }
-            aria-label={t("Message")}
-            disabled={!hasProfile}
-            onChange={(e) => setText(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
-                e.preventDefault();
-                submit(text);
-              }
-            }}
-          />
-          {busy && <StopButton url={`${base}/stop`} />}
-          <button className="primary icon" disabled={!text.trim() || !hasProfile} aria-label={t("Send")} title={busy ? t("Stop the agent and send this instead") : undefined}>
-            <Icon name="send" size={15} />
-          </button>
-        </form>
-        <div className="row" style={{ gap: 8, flexWrap: "wrap", justifyContent: "space-between" }}>
-          <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
-            <button className="sm" disabled={busy || !established || !hasProfile} title={!established ? t("Fill in the process first; the check follows its rules.") : undefined} onClick={() => submit(t("Check who should change role under our process, from GitHub activity."))}>
-              <Icon name="refresh" size={13} />
-              {t("Check who should change role")}
-            </button>
-            <span className="small muted">{t("Nothing changes until a maintainer applies the draft.")}</span>
-          </div>
-          <AgentPicker compact purpose="answer" task="governance" value={agent} onChange={setPickedAgent} disabled={listening || !hasProfile} />
-        </div>
-        <ErrorBox error={send.error || talk.error} />
-      </div>
-    </Section>
+          <span className="small muted">{t("Nothing changes until a maintainer applies the draft.")}</span>
+        </>
+      )}
+    />
   );
 }
 

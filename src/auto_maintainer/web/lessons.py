@@ -13,8 +13,9 @@
 # limitations under the License.
 
 """A repository's Lessons tab (design 5.11): its review, priority, and agent lessons,
-each with the change that brought it in and who approved that; editing them; and
-having an agent summarize a file.
+each with the change that brought it in and who approved that, and editing them. The
+conversation about a file, where an agent summarizes and revises it, is
+``web/lessons_talk.py``.
 
 Everyone who may see the repository reads them. An edit, and a summary, is a T2
 memory change that never merges on its own: a maintainer's own edit is approved by
@@ -30,12 +31,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from ..domain.actions import ActionKind, MemoryChangePayload, make_action
-from ..domain.events import Event, EventKind
 from ..domain.lessons import LessonsFile, Section, key, parse, render
 from ..domain.memory import MemoryChange, MemoryChangeState, Tier
 from ..domain.records import AuditEntry
 from ..domain.secrets import redact_secrets
-from ..playbooks.lessons_summary import COMMAND, SUMMARY_TITLE, lessons_path
+from ..playbooks.lessons_summary import SUMMARY_TITLE, lessons_path
 from ..profiles.knowledge import LESSON_FILES
 from ..service import Service
 from .api import _repo, require_propose, require_view, service_of, shows_gate
@@ -51,10 +51,6 @@ class EditBody(BaseModel):
         description="The file's text the edit started from: a change since then "
         "refuses the edit, so nobody's lesson is lost unseen."
     )
-
-
-class SummarizeBody(BaseModel):
-    agent: str | None = None
 
 
 def _kind(kind: str) -> str:
@@ -238,38 +234,5 @@ def build_router() -> APIRouter:
             "applied": bool(stored and stored.state == MemoryChangeState.MERGED),
             "state": stored.state if stored else change.state,
         }
-
-    @r.post("/{repo:path}/lessons/{kind}/summarize")
-    async def summarize(
-        request: Request,
-        repo: str,
-        kind: str,
-        body: SummarizeBody,
-        user: User = Depends(current_user),
-    ) -> dict[str, Any]:
-        """Have an agent summarize one file into a draft a maintainer applies; the
-        job's live view opens by the returned ``event``."""
-        service = service_of(request)
-        repo, kind = _repo(repo), _kind(kind)
-        await require_propose(service, user, repo)
-        if await service.profiles.active(repo) is None:
-            raise HTTPException(409, f"{repo} has no approved profile yet")
-        heading = LESSON_FILES[kind][1]
-        text = await service.a.memory.read_text(lessons_path(repo, kind)) or ""
-        if len(parse(text, heading).items()) < 2:
-            raise HTTPException(422, "there is nothing to summarize yet")
-        event = Event(
-            kind=EventKind.DASHBOARD_COMMAND,
-            repo=repo,
-            payload={
-                "command": COMMAND,
-                "kind": kind,
-                "by": user.login,
-                "agent": body.agent,
-            },
-            source="dashboard",
-        )
-        await service.bus.publish(event)
-        return {"event": event.id}
 
     return r

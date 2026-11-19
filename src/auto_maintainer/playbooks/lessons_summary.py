@@ -12,39 +12,47 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Summarizing a repository's lessons (design 5.11): lessons are approved one at a
-time, so a file collects repeats and lessons a later one replaced. On a person's
-request (the Lessons tab, ``dashboard.command`` with ``command: lessons``), an agent
-rewrites one file as a tidy list: repeats merged, related lessons under topics, each
-standing on its own, nothing added. What it drops it lists with why.
-
-The result is a T2 memory change that never merges on its own: a maintainer of the
-repository reads it on the Lessons tab and applies or discards it. A newer summary of
-the same file replaces one that still waits.
+"""Tidying a repository's lessons with an agent (design 5.11): lessons are approved
+one at a time, so a file collects repeats and lessons a later one replaced. Reviewers
+talk about one file with an agent on the Lessons tab (``web/lessons_talk.py``): it
+summarizes the file (repeats merged, related lessons under topics, each standing on
+its own, nothing added, every dropped lesson listed with why) and revises it as they
+ask. What it writes is a T2 memory change that never merges on its own: a maintainer
+of the repository reads it on the tab and applies or discards it. A newer revision
+replaces the draft that waits.
 """
 
 from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
-from ..domain.actions import ActionKind, MemoryChangePayload, make_action
-from ..domain.agents import AgentTask, TaskKind
-from ..domain.events import Event, EventKind
 from ..domain.lessons import LessonsFile, Section, parse, render
-from ..domain.memory import MemoryChange, MemoryChangeState, Tier, repo_dir
+from ..domain.memory import MemoryChange, MemoryChangeState, repo_dir
+from ..domain.ports import Store
 from ..profiles.knowledge import LESSON_FILES
-from .base import Playbook, PlaybookContext, PlaybookResult
-from .prompts import schema_hint, untrusted
 
-COMMAND = "lessons"
 SUMMARY_TITLE = "lessons: summarize"
-"""How a summary's memory change is titled, so a newer one finds it to replace."""
+"""How the agent's drafts are titled, so the tab shows them as the agent's."""
 
 READERS = {
     "review": "every review, follow-up, triage, and quality score",
     "priority": "priority scoring",
     "agent": "the agents' work in it (reviews, reproductions, fixes, CI diagnoses)",
 }
+
+TALK = (
+    "You keep the {heading} of {repo}: rules its maintainers approved one at a time, "
+    "which {readers} there reads. Its reviewers talk with you here to tidy them: "
+    "summarize, reword, merge, regroup, add, or drop lessons. To summarize, rewrite "
+    "them as one tidy list: merge lessons that say the same thing, put related "
+    "lessons under short topics, and word each so it stands on its own. Keep every "
+    "rule that still holds, with its specifics (paths, labels, numbers), and add none "
+    "of your own unless a reviewer states one; drop a lesson only when another says "
+    "it, a later one replaces it, or a reviewer asks, and list each dropped lesson "
+    "with why. When your answer changes the lessons, return the whole list in "
+    "`groups`; when it does not, leave `groups` null. Nothing applies until a "
+    "maintainer applies your draft. {no_code} Write in {language}."
+)
 
 
 class LessonGroup(BaseModel):
@@ -61,141 +69,50 @@ class LessonGroup(BaseModel):
 
 class DroppedLesson(BaseModel):
     lesson: str = Field(description="The lesson as the file has it.")
-    why: str = Field(description="Which lesson says it, or replaces it.")
+    why: str = Field(description="Which lesson says it, or replaces it, or who asked.")
 
 
-class SummarizedLessons(BaseModel):
-    groups: list[LessonGroup]
-    dropped: list[DroppedLesson] = Field(default_factory=list)
-    summary: str = Field(
-        description="For the maintainers, in a few sentences: what was merged, "
-        "grouped, reworded, or dropped."
+class LessonsTurn(BaseModel):
+    """One answer in the conversation about a lessons file."""
+
+    reply: str = Field(description="The answer to the newest message.")
+    groups: list[LessonGroup] | None = Field(
+        default=None,
+        description="The whole revised list when this answer changes the lessons; "
+        "null when they stay as they are.",
     )
+    dropped: list[DroppedLesson] = Field(default_factory=list)
 
 
 def lessons_path(repo: str, kind: str) -> str:
     return f"{repo_dir(repo)}/{LESSON_FILES[kind][0]}"
 
 
-class SummarizeLessons(Playbook):
-    """Have an agent tidy one lessons file into a draft a maintainer applies."""
+async def base_lessons(
+    store: Store, memory_text: str, repo: str, kind: str
+) -> tuple[LessonsFile, MemoryChange | None]:
+    """What a revision builds on: the newest draft of the file that nobody approved
+    yet, else the file as applied (``memory_text``); with that draft."""
+    path, heading = lessons_path(repo, kind), LESSON_FILES[kind][1]
+    for change in sorted(
+        await store.list_memory_changes(MemoryChangeState.OPEN),
+        key=lambda c: c.created_at,
+        reverse=True,
+    ):
+        if change.files.get(path) is not None and not change.approvals:
+            return parse(change.files[path] or "", heading), change
+    return parse(memory_text, heading), None
 
-    name = "lessons"
-    triggers = (EventKind.DASHBOARD_COMMAND,)
-    pool = "agent"
 
-    def accepts(self, event: Event, profile: object) -> bool:
-        return (
-            event.payload.get("command") == COMMAND
-            and event.payload.get("kind") in LESSON_FILES
-            and bool(event.repo and event.payload.get("by"))
-        )
+def revised_lessons(current: LessonsFile, groups: list[LessonGroup]) -> LessonsFile:
+    return LessonsFile(
+        heading=current.heading,
+        sections=[
+            Section(title=g.title.strip(), items=[x for x in g.lessons if x.strip()])
+            for g in groups
+        ],
+    )
 
-    def key(self, event: Event) -> str:
-        return f"lessons:{event.repo}:{event.payload.get('kind')}:{event.id}"
 
-    async def run(self, ctx: PlaybookContext, event: Event) -> PlaybookResult:
-        profile = ctx.require_profile()
-        assert event.repo
-        repo, kind, by = (
-            event.repo,
-            str(event.payload["kind"]),
-            str(event.payload["by"]),
-        )
-        ctx.requested_by = by
-        ctx.agent = event.payload.get("agent") or None
-        path = lessons_path(repo, kind)
-        heading = LESSON_FILES[kind][1]
-        text = await ctx.memory.read_text(path) or ""
-        current = parse(text, heading)
-        if len(current.items()) < 2:
-            return PlaybookResult(result={"skipped": "fewer than two lessons"})
-        prompt = "\n\n".join(
-            [
-                f"These are the {heading.lower()} of {repo}: rules its maintainers "
-                f"approved one at a time, which {READERS[kind]} there reads. Rewrite "
-                "them as one tidy list: merge lessons that say the same thing, put "
-                "related lessons under short topics, and word each so it stands on "
-                "its own. Keep every rule that still holds, with its specifics "
-                "(paths, labels, numbers); add none of your own. Drop a lesson only "
-                "when another says it or a later one replaces it, and list each "
-                f"dropped lesson with why. Write in {profile.languages.internal}.",
-                untrusted("lessons", text, 40_000),
-                schema_hint(SummarizedLessons.model_json_schema()),
-            ]
-        )
-        answer = await ctx.ask(
-            AgentTask(
-                kind=TaskKind.LEARN,
-                prompt=prompt,
-                workdir=ctx.scratch(),
-                output_schema=SummarizedLessons.model_json_schema(),
-                repo=repo,
-                requested_by=by,
-                activity="lessons",
-            ),
-            SummarizedLessons,
-        )
-        if not answer.ok or answer.structured is None:
-            return PlaybookResult(failed=f"the agent did not summarize: {answer.error}")
-        result = SummarizedLessons.model_validate(answer.structured)
-        after = LessonsFile(
-            heading=current.heading,
-            sections=[
-                Section(
-                    title=g.title.strip(), items=[x for x in g.lessons if x.strip()]
-                )
-                for g in result.groups
-            ],
-        )
-        if not after.items():
-            return PlaybookResult(failed="the agent's summary kept no lesson")
-        rendered = render(after)
-        if rendered == render(current):
-            return PlaybookResult(result={"unchanged": True})
-        dropped = "\n".join(
-            f"- {d.lesson.strip()} ({d.why.strip()})" for d in result.dropped
-        )
-        waiting = [
-            c
-            for c in await ctx.store.list_memory_changes(MemoryChangeState.OPEN)
-            if c.title.startswith(SUMMARY_TITLE) and path in c.files and not c.approvals
-        ]
-        change = MemoryChange(
-            tier=Tier.T2,
-            title=f"{SUMMARY_TITLE} {heading.lower()} of {repo}",
-            description="\n\n".join(
-                part
-                for part in [
-                    result.summary.strip(),
-                    f"Dropped:\n{dropped}" if dropped else "",
-                    f"Asked for by {by} on the Lessons tab.",
-                ]
-                if part
-            ),
-            files={path: rendered},
-            repos=[repo],
-            requested_by=by,
-            from_own_signals=False,
-            created_at=ctx.clock.now(),
-        )
-        await ctx.store.save_memory_change(change)
-        return PlaybookResult(
-            actions=[
-                make_action(
-                    ActionKind.MEMORY_CHANGE,
-                    repo,
-                    MemoryChangePayload(
-                        change_id=change.id,
-                        replaces=waiting[-1].id if waiting else None,
-                    ),
-                    discriminator=change.id,
-                )
-            ],
-            result={
-                "change": change.id,
-                "before": len(current.items()),
-                "after": len(after.items()),
-                "dropped": len(result.dropped),
-            },
-        )
+def unchanged(current: LessonsFile, after: LessonsFile) -> bool:
+    return render(current) == render(after)

@@ -186,7 +186,12 @@ async def test_a_maintainers_edit_applies_and_anyone_elses_waits(demo) -> None:
     )
 
 
-async def test_an_agent_summarizes_into_a_draft_a_maintainer_applies(demo) -> None:
+async def test_reviewers_talk_the_lessons_into_a_draft_a_maintainer_applies(
+    demo,
+) -> None:
+    """Summarizing is a conversation: each turn that changes the lessons drafts a
+    revision on top of the waiting one, which it replaces; a turn may just answer;
+    nothing applies until a maintainer applies the draft."""
     h, app = demo
     await _learned(
         h,
@@ -195,32 +200,54 @@ async def test_an_agent_summarizes_into_a_draft_a_maintainer_applies(demo) -> No
         "lessons",
         "maria",
     )
-    h.runner.on(
-        "learn",
-        lambda t: {
-            "groups": [
-                {"title": "Writing", "lessons": ["Keep reviews short."]},
-                {"title": "CI", "lessons": ["Do not add the run-ci label."]},
-            ],
-            "dropped": [
-                {"lesson": "Reviews must be brief.", "why": "Same as the first."}
-            ],
-            "summary": "Merged two lessons about length.",
-        },
+    answers = iter(
+        [
+            {
+                "reply": "Merged the two about length.",
+                "groups": [
+                    {"title": "Writing", "lessons": ["Keep reviews short."]},
+                    {"title": "CI", "lessons": ["Do not add the run-ci label."]},
+                ],
+                "dropped": [
+                    {"lesson": "Reviews must be brief.", "why": "Same as the first."}
+                ],
+            },
+            {
+                "reply": "Put them under one topic.",
+                "groups": [
+                    {
+                        "title": "Reviews",
+                        "lessons": [
+                            "Keep reviews short.",
+                            "Do not add the run-ci label.",
+                        ],
+                    }
+                ],
+            },
+            {"reply": "The CI lesson comes from #1758.", "groups": None},
+        ]
     )
+    h.runner.on("learn", lambda t: next(answers))
+    url = f"/api/repos/{REPO}/lessons/review/talk"
     async with _as(app, "walt") as walt:
-        asked = await walt.post(f"/api/repos/{REPO}/lessons/review/summarize", json={})
-        assert asked.status_code == 200, asked.text
-        await h.settle()
-        live = await walt.get(f"/api/jobs/{asked.json()['event']}")
-        assert live.status_code == 200, "its live view opens by the request's id"
-        [task] = [t for t in h.runner.tasks if t.kind == "learn"]
-        assert task.requested_by == "walt" and "Reviews must be brief." in task.prompt
+        first = await walt.post(url, json={"text": "Summarize these lessons."})
+        assert first.status_code == 200, first.text
+        assert len(first.json()["changes"]) == 1
+        second = await walt.post(url, json={"text": "One topic is enough."})
+        assert len(second.json()["changes"]) == 1
+        third = await walt.post(url, json={"text": "Where is the CI one from?"})
+        assert third.json()["changes"] == [], "an answer alone drafts nothing"
+        tasks = [t for t in h.runner.tasks if t.kind == "learn"]
+        assert "as your last draft left them" in tasks[1].prompt
+        assert "Summarize these lessons." in tasks[1].prompt, "the conversation so far"
+        assert tasks[0].requested_by == "walt"
+        talk = (await walt.get(url)).json()
+        assert [m["role"] for m in talk["messages"]] == ["user", "assistant"] * 3
         page = (await walt.get(f"/api/repos/{REPO}/lessons")).json()
     [review] = [f for f in page["files"] if f["kind"] == "review"]
-    [draft] = review["pending"]
-    assert draft["summary"] and "Same as the first." in draft["description"]
-    assert [s["title"] for s in draft["sections"]] == ["Writing", "CI"]
+    assert len(review["pending"]) == 1, "the second replaced the first"
+    draft = review["pending"][0]
+    assert draft["summary"] and [s["title"] for s in draft["sections"]] == ["Reviews"]
     assert len(_lessons(page)) == 3, "nothing applies before a maintainer does"
     async with _as(app, "maria") as maria:
         applied = await maria.post(f"/api/memory/changes/{draft['id']}/approve")
@@ -230,3 +257,8 @@ async def test_an_agent_summarizes_into_a_draft_a_maintainer_applies(demo) -> No
         "Keep reviews short.",
         "Do not add the run-ci label.",
     ]
+    async with _as(app, "walt") as walt:
+        mine = (await walt.get("/api/chat/threads")).json()
+    assert not any("lessons" in str(t.get("id", "")) for t in mine), (
+        "kept out of personal chats"
+    )

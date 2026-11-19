@@ -32,7 +32,6 @@ from .governance import GovernancePlaybook
 from .housekeeping import Journal, LabTest, Stale
 from .hygiene import Hygiene
 from .learn import LearnFromRejection
-from .lessons_summary import SummarizeLessons
 from .merge import MergePlaybook
 from .merge_base import MergeBasePlaybook
 from .onboard import Onboard, ProfileDrift
@@ -62,7 +61,6 @@ def all_playbooks() -> list[Playbook]:
         EvaluatePlaybook(),
         Calibrate(),
         LearnFromRejection(),
-        SummarizeLessons(),
         Hygiene(),
         CiDoctor(),
         MergePlaybook(),
