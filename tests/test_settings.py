@@ -417,15 +417,17 @@ async def test_the_agent_drafts_a_change_the_maintainer_applies(demo) -> None:
         thread = (
             await maria.post("/api/chat/threads", json={"text": "use deepseek"})
         ).json()
-        message = (
+        sent = (
             await maria.post(
                 f"/api/chat/threads/{thread['id']}/messages",
                 json={"text": f"Run Claude Code on DeepSeek, my key is sk-{KEY}"},
             )
         ).json()
+        await app.state.live_turns.wait(sent["run"], timeout=5)
+        history = (await maria.get(f"/api/chat/threads/{thread['id']}/messages")).json()
+        message = history[-1]
         [change_id] = message["changes"]
         assert "removed what looked like a credential" in message["text"]
-        history = (await maria.get(f"/api/chat/threads/{thread['id']}/messages")).json()
         pending = (await maria.get("/api/settings")).json()["pending"]
         assert [c["id"] for c in pending] == [change_id]
         assert pending[0]["approvals"] == {}

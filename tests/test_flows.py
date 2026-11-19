@@ -952,12 +952,16 @@ async def test_the_chat_agent_scores_every_open_pr_again(
         await maria.get("/auth/dev?login=maria")
         maria.headers["x-am-csrf"] = maria.cookies.get("am_csrf") or ""
         thread = (await maria.post("/api/chat/threads", json={"text": "hi"})).json()
-        answer = (
+        sent = (
             await maria.post(
                 f"/api/chat/threads/{thread['id']}/messages",
                 json={"text": "Score them again"},
             )
         ).json()
+        await app.state.live_turns.wait(sent["run"], timeout=5)
+        answer = (await maria.get(f"/api/chat/threads/{thread['id']}/messages")).json()[
+            -1
+        ]
         await harness.settle()
     assert "2 PR(s) in acme/widget" in answer["text"]
     after = len([t for t in harness.runner.tasks if str(t.kind) == "evaluate"])
@@ -995,12 +999,16 @@ async def test_the_chat_agent_proposes_closing_a_pr_with_a_comment(
         await maria.get("/auth/dev?login=maria")
         maria.headers["x-am-csrf"] = maria.cookies.get("am_csrf") or ""
         thread = (await maria.post("/api/chat/threads", json={"text": "hi"})).json()
-        answer = (
+        sent = (
             await maria.post(
                 f"/api/chat/threads/{thread['id']}/messages",
                 json={"text": "close this PR with a comment saying it's a duplicate"},
             )
         ).json()
+        await app.state.live_turns.wait(sent["run"], timeout=5)
+        answer = (await maria.get(f"/api/chat/threads/{thread['id']}/messages")).json()[
+            -1
+        ]
         await harness.settle()
         [proposal_id] = answer["proposals"]
         assert harness.forge.writes_of("close") == [], "nothing runs before approval"
@@ -1386,12 +1394,16 @@ async def test_a_rerun_approved_from_chat_runs_past_the_rerun_budget(
         await maria.get("/auth/dev?login=maria")
         maria.headers["x-am-csrf"] = maria.cookies.get("am_csrf") or ""
         thread = (await maria.post("/api/chat/threads", json={"text": "hi"})).json()
-        answer = (
+        sent = (
             await maria.post(
                 f"/api/chat/threads/{thread['id']}/messages",
                 json={"text": "rerun the failed CI"},
             )
         ).json()
+        await app.state.live_turns.wait(sent["run"], timeout=5)
+        answer = (await maria.get(f"/api/chat/threads/{thread['id']}/messages")).json()[
+            -1
+        ]
         await harness.settle()
         [proposal_id] = answer["proposals"]
         out = await maria.post(f"/api/proposals/{proposal_id}/approve", json={})

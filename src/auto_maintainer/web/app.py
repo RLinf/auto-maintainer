@@ -130,7 +130,17 @@ def create_app(
     app.state.cookie_secure = cookie_secure
     app.state.records = RecordsDoor(app, data_dir / "sandbox" / "records.sock")
     """The agents' read-only door to this dashboard, started by the first conversation."""
-    app.state.live_turns = LiveTurns()
+    live_turns = LiveTurns()
+    app.state.live_turns = live_turns
+
+    class _LiveTurnsLifecycle:
+        async def start(self) -> None:
+            pass
+
+        async def stop(self) -> None:
+            await live_turns.stop_all()
+
+    service.a.background.append(_LiveTurnsLifecycle())
     # A restart takes up the conversations about a review or a change it cut off.
     service.turn_resumers.append(
         lambda thread: review_talk.resume_cut_off(service, app, thread)

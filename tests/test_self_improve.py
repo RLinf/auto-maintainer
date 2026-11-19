@@ -83,12 +83,14 @@ async def test_a_member_starts_their_own_request_and_it_becomes_a_pr(
     app = create_app(h.service, data_dir=tmp_path, allow_dev_login=True)
     async with _client(app, "walt") as walt:
         thread = (await walt.post("/api/chat/threads", json={"text": "ping"})).json()
-        out = (
+        sent = (
             await walt.post(
                 f"/api/chat/threads/{thread['id']}/messages",
                 json={"text": "Can you answer pings?"},
             )
         ).json()
+        await app.state.live_turns.wait(sent["run"], timeout=5)
+        out = (await walt.get(f"/api/chat/threads/{thread['id']}/messages")).json()[-1]
         [card] = out["requests"]
         await h.settle()
         assert h.service.a.publisher.published == [], "nothing starts before approval"  # type: ignore[union-attr]
@@ -157,7 +159,9 @@ async def test_only_the_owner_starts_a_request_its_asker_may_not(
     async with _client(app, "eve") as eve:
         thread = (await eve.post("/api/chat/threads", json={"text": "ping"})).json()
         base = f"/api/chat/threads/{thread['id']}"
-        out = (await eve.post(f"{base}/messages", json={"text": "Pings?"})).json()
+        sent = (await eve.post(f"{base}/messages", json={"text": "Pings?"})).json()
+        await app.state.live_turns.wait(sent["run"], timeout=5)
+        out = (await eve.get(f"{base}/messages")).json()[-1]
         [card] = out["requests"]
         denied = await eve.post(f"{base}/requests/{card['id']}/approve")
         assert denied.status_code == 403, denied.text
@@ -187,17 +191,23 @@ async def test_a_conversation_runs_one_code_change_at_a_time(
     async with _client(app, "maria") as maria:
         thread = (await maria.post("/api/chat/threads", json={"text": "ping"})).json()
         base = f"/api/chat/threads/{thread['id']}"
-        first = (
+        sent1 = (
             await maria.post(f"{base}/messages", json={"text": "Answer pings."})
         ).json()
-        waiting = (await maria.post(f"{base}/messages", json={"text": "Again."})).json()
+        await app.state.live_turns.wait(sent1["run"], timeout=5)
+        first = (await maria.get(f"{base}/messages")).json()[-1]
+        sent2 = (await maria.post(f"{base}/messages", json={"text": "Again."})).json()
+        await app.state.live_turns.wait(sent2["run"], timeout=5)
+        waiting = (await maria.get(f"{base}/messages")).json()[-1]
         assert waiting["requests"] == [] and "waiting for approval" in waiting["text"]
         approved = (
             await maria.post(f"{base}/requests/{first['requests'][0]['id']}/approve")
         ).json()
         job_id = approved["requests"][0]["job"]
         await h.service.bus.drain()
-        again = (await maria.post(f"{base}/messages", json={"text": "And?"})).json()
+        sent3 = (await maria.post(f"{base}/messages", json={"text": "And?"})).json()
+        await app.state.live_turns.wait(sent3["run"], timeout=5)
+        again = (await maria.get(f"{base}/messages")).json()[-1]
         job = await maria.get(f"/api/jobs/{job_id}")
         assert job.status_code == 200, job.text
     assert again["jobs"] == [job_id] and "did not ask for another" in again["text"]
@@ -382,7 +392,11 @@ async def test_the_agent_offers_to_add_a_repository_and_a_maintainer_approves(
     async with _client(app, "maria") as maria:
         thread = (await maria.post("/api/chat/threads", json={"text": "hi"})).json()
         base = f"/api/chat/threads/{thread['id']}"
-        out = (await maria.post(f"{base}/messages", json={"text": "Add gadget"})).json()
+        sent = (
+            await maria.post(f"{base}/messages", json={"text": "Add gadget"})
+        ).json()
+        await app.state.live_turns.wait(sent["run"], timeout=5)
+        out = (await maria.get(f"{base}/messages")).json()[-1]
         [card] = out["requests"]
         assert card["kind"] == "add_repo" and card["text"] == "acme/gadget"
         assert await h.store.get_repo("acme/gadget") is None, "nothing before approval"
@@ -402,10 +416,13 @@ async def test_a_conversation_outside_any_repository_reads_the_services_own_code
     app = create_app(h.service, data_dir=tmp_path, allow_dev_login=True)
     async with _client(app, "maria") as maria:
         thread = (await maria.post("/api/chat/threads", json={"text": "hi"})).json()
-        await maria.post(
-            f"/api/chat/threads/{thread['id']}/messages",
-            json={"text": "How do you pick the agent for a review?"},
-        )
+        sent = (
+            await maria.post(
+                f"/api/chat/threads/{thread['id']}/messages",
+                json={"text": "How do you pick the agent for a review?"},
+            )
+        ).json()
+        await app.state.live_turns.wait(sent["run"], timeout=5)
     [task] = [t for t in h.runner.tasks if str(t.kind) == "chat"]
     running = (await h.service.a.updater.status()).running_sha  # type: ignore[union-attr]
     assert (CODE, None, running) in h.service.a.workspace.prepared  # type: ignore[attr-defined]

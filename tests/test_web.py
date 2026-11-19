@@ -280,9 +280,9 @@ async def test_a_lesson_from_chat_stays_on_the_answer(demo) -> None:
     async with _client(app, "maria") as maria:
         thread = (await maria.post("/api/chat/threads", json={"text": "hi"})).json()
         base = f"/api/chat/threads/{thread['id']}"
-        answer = (
-            await maria.post(f"{base}/messages", json={"text": "Docs: P3"})
-        ).json()
+        sent = (await maria.post(f"{base}/messages", json={"text": "Docs: P3"})).json()
+        await app.state.live_turns.wait(sent["run"], timeout=5)
+        answer = (await maria.get(f"{base}/messages")).json()[-1]
         await h.service.actuator.drain()
         [change_id] = answer["changes"]
         change = (await maria.get(f"/api/memory/changes/{change_id}")).json()
@@ -320,9 +320,12 @@ async def test_a_priority_lesson_stays_out_of_reviews(demo) -> None:
     )
     async with _client(app, "maria") as maria:
         thread = (await maria.post("/api/chat/threads", json={"text": "hi"})).json()
-        await maria.post(
-            f"/api/chat/threads/{thread['id']}/messages", json={"text": "P0: few"}
-        )
+        sent = (
+            await maria.post(
+                f"/api/chat/threads/{thread['id']}/messages", json={"text": "P0: few"}
+            )
+        ).json()
+        await app.state.live_turns.wait(sent["run"], timeout=5)
         await h.service.actuator.drain()
     profile = await h.service.profiles.active("acme/widget")
     assert profile is not None
@@ -544,6 +547,7 @@ async def test_the_agent_knows_the_page_it_is_asked_from(demo) -> None:
             json={"text": "What blocks this PR?", "context": context},
         )
         assert reply.status_code == 200, reply.text
+        await app.state.live_turns.wait(reply.json()["run"], timeout=5)
         hidden = await walt.post(
             "/api/chat/threads",
             json={"text": "x", "context": {"page": "repo", "repo": "other/secret"}},
@@ -583,6 +587,7 @@ async def test_the_queue_and_settings_go_only_into_prompts_that_need_them(
                 json={"text": text, "context": context},
             )
             assert sent.status_code == 200, sent.text
+            await app.state.live_turns.wait(sent.json()["run"], timeout=5)
     plain, settings, queue = seen
     assert "Review queue (internal)" not in plain and "Service settings" not in plain
     assert "`am-read /api/settings`" in plain and "`am-read /api/prs`" in plain
@@ -640,11 +645,15 @@ async def test_the_agent_reads_the_dashboard_as_the_person_it_talks_with(demo) -
         thread = (
             await walt.post("/api/chat/threads", json={"text": "x", "context": context})
         ).json()
-        reply = await walt.post(
+        sent = await walt.post(
             f"/api/chat/threads/{thread['id']}/messages",
             json={"text": "Why did the review not post?", "context": context},
         )
-    assert reply.json()["text"] == "The leak guard refused it."
+        await app.state.live_turns.wait(sent.json()["run"], timeout=5)
+        reply = (await walt.get(f"/api/chat/threads/{thread['id']}/messages")).json()[
+            -1
+        ]
+    assert reply["text"] == "The leak guard refused it."
     task = tasks[-1]
     assert task.records_token and "am-read /api/<path>" in task.prompt
     assert task.env["AM_RECORDS_SOCKET"].endswith("records.sock")

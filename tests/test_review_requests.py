@@ -1071,7 +1071,11 @@ async def test_a_change_in_the_persons_own_words_needs_no_review(demo) -> None:
             json={"text": "Mention batches of one in the README of #42."},
         )
         assert sent.status_code == 200, sent.text
-        assert sent.json()["jobs"], "the change starts at once"
+        await app.state.live_turns.wait(sent.json()["run"], timeout=5)
+        answer = (await maria.get(f"/api/chat/threads/{thread['id']}/messages")).json()[
+            -1
+        ]
+        assert answer["jobs"], "the change starts at once"
         await h.settle()
         assert "Mention batches of one in the README." in asked[-1].prompt
         said = [
@@ -1494,7 +1498,11 @@ async def test_chat_change_opens_new_or_draft_pr_against_default_branch(
             json={"text": "Open a PR adding the write-doc skill."},
         )
         assert sent.status_code == 200, sent.text
-        assert sent.json()["jobs"], "the change starts at once without an open PR"
+        await app.state.live_turns.wait(sent.json()["run"], timeout=5)
+        answer = (await maria.get(f"/api/chat/threads/{thread['id']}/messages")).json()[
+            -1
+        ]
+        assert answer["jobs"], "the change starts at once without an open PR"
         await h.settle()
 
         [task] = asked
@@ -1618,10 +1626,11 @@ async def test_new_pr_change_that_touches_no_files_drafts_nothing(demo) -> None:
     async with _as(app, "maria") as maria:
         before = [p["id"] for p in (await maria.get("/api/proposals")).json()]
         thread = (await maria.post("/api/chat/threads", json={"text": "hi"})).json()
-        await maria.post(
+        sent = await maria.post(
             f"/api/chat/threads/{thread['id']}/messages",
             json={"text": "Open a draft PR if write-doc is missing."},
         )
+        await app.state.live_turns.wait(sent.json()["run"], timeout=5)
         await h.settle()
         after = (await maria.get("/api/proposals")).json()
         assert [p["id"] for p in after] == before

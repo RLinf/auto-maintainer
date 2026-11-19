@@ -103,6 +103,7 @@ async def _say(app: Any, login: str, *texts: str) -> None:
                 f"/api/chat/threads/{thread['id']}/messages", json={"text": text}
             )
             assert sent.status_code == 200, sent.text
+            await app.state.live_turns.wait(sent.json()["run"], timeout=5)
 
 
 async def test_everything_a_person_says_and_does_teaches_their_notes(demo) -> None:
@@ -252,7 +253,11 @@ async def test_the_chat_saves_a_preference_to_the_persons_notes(demo) -> None:
             f"/api/chat/threads/{thread['id']}/messages",
             json={"text": "Please never give me style nits."},
         )
-        assert "your preferences" in sent.json()["text"]
+        await app.state.live_turns.wait(sent.json()["run"], timeout=5)
+        reply = (await walt.get(f"/api/chat/threads/{thread['id']}/messages")).json()[
+            -1
+        ]
+        assert "your preferences" in reply["text"]
     notes = await load_notes(h.store, "walt")
     assert [(n.text, n.about, n.source) for n in notes.notes] == [
         ("Skip style nits for me.", "reviews", "person")
