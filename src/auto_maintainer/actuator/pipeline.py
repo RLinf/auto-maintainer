@@ -46,6 +46,7 @@ from ..domain.ports import EventSink, Store
 from ..domain.profile import RepoProfile
 from ..domain.records import ActionRecord, AuditEntry
 from ..policy.engine import (
+    ONE_PER_SHA,
     PAUSED_RULE,
     REPO_WRITE_CAP_RULE,
     WRITE_CAP_RULE,
@@ -191,27 +192,32 @@ class ActionPipeline:
 
     # -- decisions -------------------------------------------------------------------
 
+    async def _executed_on_sha(self, action: Action, post_as: str | None) -> int:
+        """How many actions of ``action``'s kind ran on its PR's head commit under
+        the account ``post_as`` names (the service's own when ``None``)."""
+        if action.number is None or not action.head_sha:
+            return 0
+        account = (post_as or self.service_login).lower()
+        records = await self.store.list_actions(
+            repo=action.repo,
+            number=action.number,
+            kinds=[action.kind],
+            statuses=[ActionStatus.EXECUTED, ActionStatus.INTENT],
+        )
+        return sum(
+            1
+            for r in records
+            if r.action.id != action.id
+            and same_commit(r.action.head_sha, action.head_sha)
+            and (r.post_as or self.service_login).lower() == account
+        )
+
     async def _facts(
         self, action: Action, approved_by: str | None, post_as: str | None = None
     ) -> PolicyFacts:
         now = self.clock.now()
         hour = now - timedelta(hours=1)
-        executed = 0
-        account = (post_as or self.service_login).lower()
-        if action.number is not None and action.head_sha:
-            records = await self.store.list_actions(
-                repo=action.repo,
-                number=action.number,
-                kinds=[action.kind],
-                statuses=[ActionStatus.EXECUTED, ActionStatus.INTENT],
-            )
-            executed = sum(
-                1
-                for r in records
-                if r.action.id != action.id
-                and same_commit(r.action.head_sha, action.head_sha)
-                and (r.post_as or self.service_login).lower() == account
-            )
+        executed = await self._executed_on_sha(action, post_as)
         count = self.store.count_actions
         statuses = [ActionStatus.EXECUTED, ActionStatus.INTENT, ActionStatus.QUEUED]
         return PolicyFacts(
@@ -301,8 +307,13 @@ class ActionPipeline:
                 decision = Decision(kind=DecisionKind.EXECUTE, rule="internal")
         else:
             # A draft for someone is theirs to post, as themselves or as the service:
-            # what it counts against is known when they approve it (``_redecide``).
+            # which account it counts against is known when they approve it
+            # (``_redecide``), so only a draft neither may post is refused here.
             facts = await self._facts(action, None, action.draft_for)
+            if action.draft_for and action.kind in ONE_PER_SHA:
+                facts.executed_on_sha = min(
+                    facts.executed_on_sha, await self._executed_on_sha(action, None)
+                )
             if force_propose:
                 # Someone asked for it; a standby host proposes it to them too.
                 facts.standby = False

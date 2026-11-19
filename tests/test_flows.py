@@ -1180,6 +1180,50 @@ async def test_a_post_the_policy_refuses_after_approval_stays_a_draft(
     assert any("already ran for this head" in w for w in back.warnings), back.warnings
 
 
+async def test_a_draft_another_account_may_post_is_kept(harness: Harness) -> None:
+    """One review of a commit per posting account: a reviewer who already posted one
+    of this commit as themselves still gets the new draft, to post as the service;
+    only a draft that neither account may post is refused when it is made."""
+    from auto_maintainer.domain.actions import (
+        Action,
+        ActionKind,
+        ActionStatus,
+        ReviewPostPayload,
+        make_action,
+    )
+    from auto_maintainer.domain.records import ActionRecord
+
+    await _auto(harness, review_post="propose")
+    harness.forge.put_pr(_pr())
+
+    def review(name: str, draft_for: str | None = "maria") -> Action:
+        return make_action(
+            ActionKind.REVIEW_POST,
+            "acme/widget",
+            ReviewPostPayload(body=f"Review {name}.", runtime=name),
+            number=42,
+            head_sha="a" * 40,
+            discriminator=name,
+            draft_for=draft_for,
+        )
+
+    await harness.store.add_action(
+        ActionRecord(
+            action=review("hers"), status=ActionStatus.EXECUTED, post_as="maria"
+        )
+    )
+    kept = await harness.service.pipeline.submit(review("again"))
+    assert kept.status == ActionStatus.PROPOSED, "she may post it as the service"
+
+    await harness.store.add_action(
+        ActionRecord(action=review("service's", None), status=ActionStatus.EXECUTED)
+    )
+    refused = await harness.service.pipeline.submit(review("third"))
+    assert refused.status == ActionStatus.DENIED
+    assert refused.decision is not None
+    assert refused.decision.rule == "limit.one_per_sha"
+
+
 async def test_a_comment_on_a_line_the_diff_does_not_show_goes_in_the_review(
     harness: Harness,
 ) -> None:
