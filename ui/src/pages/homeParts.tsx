@@ -539,8 +539,15 @@ export function AgentWork({ me }: { me: Me }) {
     done: batches.filter((b) => !b.active),
   };
   const size = (id: keyof typeof groups) => groups[id].length + scoringIn[id].length;
+  // The tab is chosen once, when the list first loads (what waits for the person,
+  // else what is at work), and stays until they pick another: a job ending must not
+  // move the section to Finished under them.
   const [tab, setTab] = useState<keyof typeof groups | null>(null);
-  const shown = tab ?? (size("needs") ? "needs" : size("running") || !size("done") ? "running" : "done");
+  const first = work.data ? (size("needs") ? "needs" : "running") : null;
+  useEffect(() => {
+    if (tab === null && first !== null) setTab(first);
+  }, [tab, first]);
+  const shown = tab ?? first ?? "running";
   const [all, setAll] = useState(false);
   const rows = groups[shown];
   const tabs: { id: keyof typeof groups; label: string }[] = [
