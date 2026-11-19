@@ -641,7 +641,9 @@ async def test_a_review_tests_its_pr_in_its_own_session(demo) -> None:
         await _review(h, maria, 42)  # alice is not on the team: on by default
     [opened] = _review_sessions(runner)
     assert set(opened["code"]) == {"base", "head"}
-    assert opened["payload"].wants_gpu and not opened["payload"].needs_gpu
+    assert not opened["payload"].wants_gpu and not opened["payload"].needs_gpu, (
+        "no GPU until a check needs one: its reproduction may need them all"
+    )
     records = await h.store.list_actions(repo=REPO, number=42, kinds=["lab.review"])
     assert {(r.status, r.approver) for r in records} == {("executed", None)}, (
         "nobody approved the review's session or its reproduction's"
@@ -678,6 +680,7 @@ async def test_the_skills_reproduction_agent_runs_alongside_the_review(demo) -> 
     [worker] = [t for t in h.runner.tasks if t.kind == "reproduce"]
     assert "You are the reproduction agent" in worker.prompt
     assert "The PR's review runs while you work" in worker.prompt
+    assert "When they are busy, wait for them" in worker.prompt
     assert len(runner.reproduced) == 2 and len(runner.closed) == 2
     [job] = [j for j in await h.store.list_jobs() if j.playbook == "reproduce"]
     assert job.result and job.result["revised"] == draft["action_id"]

@@ -92,8 +92,8 @@ def main(argv: list[str]) -> int:
         print(f"holds {len(held)} GPU(s): {', '.join(map(str, held)) or 'none'}")
         if len(held) < count:
             print(
-                f"lab: {count - len(held)} more were not idle; "
-                "try again later or with --wait MINUTES",
+                f"lab: {count - len(held)} more were not idle; ask again with "
+                "--wait MINUTES to wait for them (lab --info says the time left)",
                 file=sys.stderr,
             )
             return 1

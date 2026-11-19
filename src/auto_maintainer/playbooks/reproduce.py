@@ -100,6 +100,7 @@ SESSION_GRACE_SECONDS = 600
 SESSION = """You are the reproduction agent of the review of PR #{number} in {repo}, inside an automated maintainer service, working on test machine {lab}.
 - {skill}
 - {asked}
+- {gpus}
 - When you are done, return the JSON your task asks for: the conclusion (reproduced, not_reproduced, inconclusive, or not_needed), in `comment` the record your skill has the reproduction agent report, in {public_language}, and in `notes` anything only maintainers should read."""
 
 SKILL = (
@@ -109,6 +110,10 @@ SKILL = (
 )
 
 ASK = "When only {by} can settle something that changes what you run, ask them with your tool for asking the user."
+
+GPUS = "Take the GPUs the run needs with `lab --gpus N`. When they are busy, wait for them (`lab --gpus N --wait MINUTES`, again as often as it takes while the session has time; the review's agent beside you gives back what it borrows) rather than run on fewer or report the run as failed for want of them. Only what the machine does not have at all (more GPUs than it has, another node, a robot) is missing; for that, run what your skill says stands in for it on everything the machine has, and record it as an intervention."
+"""How the reproduction agent gets its GPUs: it waits for busy ones instead of
+giving up, and stands in only for hardware the machine lacks."""
 
 ALONGSIDE = "The PR's review runs while you work, and your record goes into it. Reproduce what the PR adds or claims, as your skill says; when the skill says the PR needs no reproduction, run nothing and conclude `not_needed`."
 """What the reproduction agent started with a review is asked (``review.alongside``)."""
@@ -535,6 +540,7 @@ class ReproducePlaybook(Playbook):
                         path=review_skill_path(profile, ctx.service.skills_dir, workdir)
                     ),
                     asked=asked,
+                    gpus=GPUS,
                     public_language=profile.languages.public,
                 ),
                 ASK.format(by=by) if by else "",
