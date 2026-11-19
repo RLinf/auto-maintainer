@@ -295,12 +295,16 @@ async def test_chat_starts_the_agent_on_the_record(demo) -> None:
     )
     async with _as(app, "maria") as maria:
         thread = (await maria.post("/api/chat/threads", json={"text": "hi"})).json()
-        answer = (
+        sent = (
             await maria.post(
                 f"/api/chat/threads/{thread['id']}/messages",
                 json={"text": "Set up our roles from GOVERNANCE.md"},
             )
         ).json()
+        await app.state.live_turns.wait(sent["run"], timeout=5)
+        answer = (await maria.get(f"/api/chat/threads/{thread['id']}/messages")).json()[
+            -1
+        ]
         assert len(answer["jobs"]) == 1
         await h.settle()
     [task] = [t for t in h.runner.tasks if t.kind == "governance"]

@@ -212,12 +212,16 @@ async def test_fallback_from_own_agent_stays_sticky_after_breaker_cools_down(
 
     async with _as(app, "maria") as maria:
         thread = (await maria.post("/api/chat/threads", json={"text": "hello"})).json()
-        first = (
+        sent = (
             await maria.post(
                 f"/api/chat/threads/{thread['id']}/messages",
                 json={"text": "hello"},
             )
         ).json()
+        await app.state.live_turns.wait(sent["run"], timeout=5)
+        first = (await maria.get(f"/api/chat/threads/{thread['id']}/messages")).json()[
+            -1
+        ]
         assert first["text"] == "antigravity turn 1"
         assert first["runtime"] == "antigravity"
         assert len(claude.calls) == 1 and len(agy.calls) == 1
@@ -226,12 +230,16 @@ async def test_fallback_from_own_agent_stays_sticky_after_breaker_cools_down(
         # Even after claude-code's circuit breaker cools down, the established
         # antigravity session remains sticky instead of bouncing back to claude-code.
         router.breakers.clear()
-        second = (
+        sent2 = (
             await maria.post(
                 f"/api/chat/threads/{thread['id']}/messages",
                 json={"text": "follow up"},
             )
         ).json()
+        await app.state.live_turns.wait(sent2["run"], timeout=5)
+        second = (await maria.get(f"/api/chat/threads/{thread['id']}/messages")).json()[
+            -1
+        ]
         assert second["text"] == "antigravity turn 2"
         assert second["runtime"] == "antigravity"
         assert len(claude.calls) == 1, "did not bounce back to failing own_agents CLI"
@@ -300,12 +308,16 @@ async def test_selecting_and_switching_agent_in_chat_conversations(demo) -> None
         ).json()
         assert thread["agent"] == "opencode"
 
-        first = (
+        sent1 = (
             await maria.post(
                 f"/api/chat/threads/{thread['id']}/messages",
                 json={"text": "First question", "agent": "opencode"},
             )
         ).json()
+        await app.state.live_turns.wait(sent1["run"], timeout=5)
+        first = (await maria.get(f"/api/chat/threads/{thread['id']}/messages")).json()[
+            -1
+        ]
         assert first["text"] == "opencode answer 1"
         assert first["runtime"] == "opencode"
         assert len(runtimes["claude-code"].calls) == 0
@@ -315,12 +327,16 @@ async def test_selecting_and_switching_agent_in_chat_conversations(demo) -> None
 
         # Omitting `agent` on the next turn keeps thread.agent="opencode" and resumes
         # its session.
-        second = (
+        sent2 = (
             await maria.post(
                 f"/api/chat/threads/{thread['id']}/messages",
                 json={"text": "Continue on opencode"},
             )
         ).json()
+        await app.state.live_turns.wait(sent2["run"], timeout=5)
+        second = (await maria.get(f"/api/chat/threads/{thread['id']}/messages")).json()[
+            -1
+        ]
         assert second["text"] == "opencode answer 2"
         assert second["runtime"] == "opencode"
         assert len(runtimes["opencode"].calls) == 2
@@ -330,12 +346,16 @@ async def test_selecting_and_switching_agent_in_chat_conversations(demo) -> None
         # (c) Switching `agent` mid-conversation clears the prior runtime's session,
         # runs the newly chosen runtime with prior messages in the prompt, and records
         # `runtime` on the assistant message.
-        switched = (
+        sent3 = (
             await maria.post(
                 f"/api/chat/threads/{thread['id']}/messages",
                 json={"text": "Now answer with codex", "agent": "codex"},
             )
         ).json()
+        await app.state.live_turns.wait(sent3["run"], timeout=5)
+        switched = (
+            await maria.get(f"/api/chat/threads/{thread['id']}/messages")
+        ).json()[-1]
         assert switched["text"] == "codex answer 1"
         assert switched["runtime"] == "codex"
         assert len(runtimes["codex"].calls) == 1
@@ -354,12 +374,16 @@ async def test_selecting_and_switching_agent_in_chat_conversations(demo) -> None
 
         # Clearing `agent=""` returns the thread to automatic routing, dropping codex's
         # session so the default/own agent takes over cleanly.
-        cleared = (
+        sent4 = (
             await maria.post(
                 f"/api/chat/threads/{thread['id']}/messages",
                 json={"text": "Return to default", "agent": ""},
             )
         ).json()
+        await app.state.live_turns.wait(sent4["run"], timeout=5)
+        cleared = (
+            await maria.get(f"/api/chat/threads/{thread['id']}/messages")
+        ).json()[-1]
         assert cleared["runtime"] == "claude-code"
         assert len(runtimes["claude-code"].calls) == 1
         assert runtimes["claude-code"].calls[0].agent_chosen is False

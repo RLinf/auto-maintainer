@@ -377,6 +377,11 @@ class ChatMessage(BaseModel):
     while_running: bool = False
     """A ``user`` message sent to the agent while it wrote the review; the review
     answers it."""
+    client_message_id: str | None = None
+    """Per-send idempotency key from the client for a ``user`` message, so replayed
+    requests do not insert duplicates or stop an active turn."""
+    error: bool = False
+    """Whether an ``assistant`` message records a failed turn rather than an answer."""
     id: str = Field(default_factory=lambda: new_id("msg"))
     created_at: datetime = Field(default_factory=utc_now)
 

@@ -980,7 +980,19 @@ export interface ChatMessage {
   runtime?: string | null;
   /** A message sent to the agent while it wrote the review. */
   while_running?: boolean;
+  /** Per-send idempotency key from the client for a user message. */
+  client_message_id?: string | null;
+  /** Whether an assistant message records a failed turn rather than an answer. */
+  error?: boolean;
   created_at: string;
+}
+
+export interface ChatSendResult {
+  message: ChatMessage;
+  reply?: ChatMessage | null;
+  run: string | null;
+  live: boolean;
+  deduplicated: boolean;
 }
 
 export interface ChatRequest {

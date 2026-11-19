@@ -17,7 +17,7 @@ import {
 } from "react";
 import { Link, matchPath, useLocation, useNavigate } from "react-router-dom";
 import { AgentPicker, agentName } from "./agentPicker";
-import { api, type ChatMessage, type ChatRequest, type ChatSteps, type ChatThread } from "./api";
+import { api, type ChatMessage, type ChatRequest, type ChatSendResult, type ChatSteps, type ChatThread } from "./api";
 import { ErrorBox, GrowingTextarea, StopButton } from "./components";
 import { useProposals } from "./data";
 import { FlatButton, ResizeEdge, usePanelLayout } from "./panelLayout";
@@ -306,6 +306,19 @@ function AgentPanel({
 /** The newest draft already applied, so a conversation that mounts again does not resend it. */
 let consumedDraft = 0;
 
+/** Per-send idempotency key; works on plain HTTP origins where ``crypto.randomUUID`` is absent. */
+function newClientMessageId(): string {
+  if (typeof crypto !== "undefined") {
+    if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
+    if (typeof crypto.getRandomValues === "function") {
+      const bytes = new Uint8Array(16);
+      crypto.getRandomValues(bytes);
+      return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+    }
+  }
+  return `c_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
+}
+
 export function Conversation({
   threadId,
   thread: threadProp = null,
@@ -348,7 +361,15 @@ export function Conversation({
   const ctx = { page: context.page, repo: context.repo, number: context.number };
 
   const send = useMutation({
-    mutationFn: async ({ message, chosen }: { message: string; chosen: string | undefined }) => {
+    mutationFn: async ({
+      message,
+      chosen,
+      clientMessageId,
+    }: {
+      message: string;
+      chosen: string | undefined;
+      clientMessageId: string;
+    }) => {
       const agentField = chosen !== undefined ? { agent: chosen } : {};
       let id = threadId;
       if (!id) {
@@ -356,14 +377,39 @@ export function Conversation({
         id = created.id;
         onThread(id);
       }
-      return api.post<ChatMessage>(`/api/chat/threads/${id}/messages`, { text: message, context: ctx, ...agentField });
+      const res = await api.post<ChatSendResult>(`/api/chat/threads/${id}/messages`, {
+        text: message,
+        context: ctx,
+        client_message_id: clientMessageId,
+        ...agentField,
+      });
+      return { id, res };
     },
-    onSuccess: async () => {
-      await client.invalidateQueries({ queryKey: ["chat"] });
+    onSuccess: ({ id, res }) => {
+      client.setQueryData<ChatMessage[]>(["chat", "messages", id], (prev) => {
+        if (!prev) return res.reply ? [res.message, res.reply] : [res.message];
+        let next = prev.some((m) => m.id === res.message.id) ? prev : [...prev, res.message];
+        if (res.reply && !next.some((m) => m.id === res.reply!.id)) next = [...next, res.reply];
+        return next;
+      });
+      if (res.live && res.run) {
+        client.setQueryData<ChatSteps>(["chat", "steps", id, "live"], (prev) =>
+          prev?.run === res.run ? prev : { run: res.run, live: true, steps: [] },
+        );
+      }
       setPickedAgent(undefined);
+      void client.invalidateQueries({ queryKey: ["chat", "messages", id] });
+      void client.invalidateQueries({ queryKey: ["chat", "steps", id, "live"] });
+      void client.invalidateQueries({ queryKey: ["chat", "threads"] });
+      if (!res.live) {
+        for (const key of ["proposals", "settings", "memory"]) void client.invalidateQueries({ queryKey: [key] });
+      }
     },
-    onSettled: () => {
-      for (const key of ["chat", "proposals", "settings", "memory"]) void client.invalidateQueries({ queryKey: [key] });
+    onError: () => {
+      if (threadId) {
+        void client.invalidateQueries({ queryKey: ["chat", "messages", threadId] });
+        void client.invalidateQueries({ queryKey: ["chat", "steps", threadId, "live"] });
+      }
     },
   });
   // A message sent while the agent answers interrupts it: the service stops that
@@ -372,7 +418,7 @@ export function Conversation({
     const m = message.trim();
     if (!m) return;
     setText("");
-    send.mutate({ message: m, chosen: pickedAgent });
+    send.mutate({ message: m, chosen: pickedAgent, clientMessageId: newClientMessageId() });
   };
 
   useEffect(() => {
@@ -401,8 +447,13 @@ export function Conversation({
   const running = send.isPending || (live.data ? live.data.live : !!liveRun);
   const wasRunning = useRef(running);
   useEffect(() => {
-    // The reply came while this view was not the one waiting for it.
-    if (wasRunning.current && !running) void client.invalidateQueries({ queryKey: ["chat", "messages", threadId] });
+    // The background turn finished (replied, failed, or was stopped): pick up the
+    // message and anything the answer created.
+    if (wasRunning.current && !running && threadId) {
+      for (const key of ["chat", "proposals", "settings", "memory"]) {
+        void client.invalidateQueries({ queryKey: [key] });
+      }
+    }
     wasRunning.current = running;
   }, [running, client, threadId]);
   const list = messages.data ?? [];
@@ -432,14 +483,18 @@ export function Conversation({
         )}
         {list.map((m) => (
           <Fragment key={m.id}>
-            <div className={`bubble ${m.role === "user" ? "user" : "assistant"}`}>
-              {m.role !== "user" && m.runtime && (
-                <span className="small muted" style={{ display: "block", marginBottom: 2 }}>
-                  {agentName(m.runtime)}
-                </span>
-              )}
-              {m.role === "user" ? m.text : <Rich text={m.text} />}
-            </div>
+            {m.error ? (
+              <ErrorBox error={m.text} />
+            ) : (
+              <div className={`bubble ${m.role === "user" ? "user" : "assistant"}`}>
+                {m.role !== "user" && m.runtime && (
+                  <span className="small muted" style={{ display: "block", marginBottom: 2 }}>
+                    {agentName(m.runtime)}
+                  </span>
+                )}
+                {m.role === "user" ? m.text : <Rich text={m.text} />}
+              </div>
+            )}
             {m.run_id && threadId && <RunSteps threadId={threadId} run={m.run_id} />}
             {(m.jobs ?? []).map((id) => (
               <JobById key={id} id={id} />
@@ -510,7 +565,16 @@ export function Conversation({
               }
             }}
           />
-          {running && threadId && <StopButton url={`/api/chat/threads/${threadId}/stop`} />}
+          {running && threadId && (
+            <StopButton
+              url={`/api/chat/threads/${threadId}/stop`}
+              onStopped={() => {
+                void client.invalidateQueries({ queryKey: ["chat", "steps", threadId, "live"] });
+                void client.invalidateQueries({ queryKey: ["chat", "messages", threadId] });
+                void client.invalidateQueries({ queryKey: ["chat", "threads"] });
+              }}
+            />
+          )}
           <button className="primary icon" disabled={!text.trim()} aria-label={t("Send")} title={running ? t("Stop the agent and send this instead") : undefined}>
             <Icon name="send" size={15} />
           </button>

@@ -400,6 +400,7 @@ class MessageBody(BaseModel):
     repo: str | None = None
     context: PageContext | None = None
     agent: str | None = None
+    client_message_id: str | None = Field(default=None, max_length=128)
 
 
 def build_router() -> APIRouter:
@@ -585,8 +586,6 @@ def build_router() -> APIRouter:
         thread = await service.store.get_thread(thread_id)
         if thread is None or thread.owner != user.login:
             raise HTTPException(404, "unknown thread")
-        if body.agent:
-            check_agent(service, body.agent)
         here = body.context.repo if body.context and body.context.repo else None
         if here and service.serves(here):
             await require_grant(service, user, here, Grant.DISCUSS, "talk with agents")
@@ -600,31 +599,144 @@ def build_router() -> APIRouter:
         if base_route is None:
             raise HTTPException(500, "no chat route is configured")
         live: LiveTurns = request.app.state.live_turns
-        if live.running(thread.live_run):
-            # A new message interrupts the turn still running: its agent stops, and
-            # this one starts from the conversation so far.
-            await live.stop(thread.live_run, user.login)
-            thread = await service.store.get_thread(thread_id) or thread
-        default_agent = await service.runs_on_for(
-            base_route, user.login, str(TaskKind.CHAT)
-        )
-        apply_thread_agent(service, thread, body.agent, default_agent=default_agent)
-        await service.store.save_thread(thread)
+        client_id = (body.client_message_id or "").strip() or None
+        async with live.lock(thread_id):
+            thread = await service.store.get_thread(thread_id)
+            if thread is None or thread.owner != user.login:
+                raise HTTPException(404, "unknown thread")
+            if client_id is not None:
+                history = await service.store.list_messages(thread_id)
+                found = _find_client_message(history, client_id)
+                if found is not None:
+                    existing, reply, is_latest = found
+                    is_live = (
+                        reply is None and is_latest and live.running(thread.live_run)
+                    )
+                    out: dict[str, Any] = {
+                        "message": existing.model_dump(mode="json"),
+                        "run": thread.live_run
+                        if is_live
+                        else (reply.run_id if reply else None),
+                        "live": is_live,
+                        "deduplicated": True,
+                    }
+                    if reply is not None:
+                        out["reply"] = reply.model_dump(mode="json")
+                    return out
+            if body.agent:
+                check_agent(service, body.agent)
+            if live.running(thread.live_run):
+                # A new message interrupts the turn still running: its agent stops, and
+                # this one starts from the conversation so far.
+                await live.stop(thread.live_run, user.login)
+                thread = await service.store.get_thread(thread_id) or thread
+            default_agent = await service.runs_on_for(
+                base_route, user.login, str(TaskKind.CHAT)
+            )
+            apply_thread_agent(service, thread, body.agent, default_agent=default_agent)
+            route, resume = await turn_route(service, user.login, thread, base_route)
+            text, removed = redact_secrets(body.text)
+            run = new_id("run")
+            said = ChatMessage(
+                thread_id=thread_id,
+                role="user",
+                text=text,
+                client_message_id=client_id,
+            )
+            await service.store.add_message(said)
+            await remember_said(
+                service.store,
+                user.login,
+                text,
+                repo=thread.repo,
+                number=thread.number,
+                where="chat",
+                message_id=said.id,
+            )
+            thread.live_run = run
+            await service.store.save_thread(thread)
+            door = request.app.state.records
+            live.start(
+                run,
+                _run_turn(
+                    service=service,
+                    live=live,
+                    door=door,
+                    thread=thread,
+                    user=user,
+                    context=body.context,
+                    route=route,
+                    resume=resume,
+                    run=run,
+                    removed=removed,
+                ),
+            )
+        return {
+            "message": said.model_dump(mode="json"),
+            "run": run,
+            "live": True,
+            "deduplicated": False,
+        }
+
+    return r
+
+
+def _find_client_message(
+    history: list[ChatMessage], client_id: str
+) -> tuple[ChatMessage, ChatMessage | None, bool] | None:
+    """Return ``(user_message, reply_if_finished, is_latest_user_message)`` when
+    ``client_id`` was already accepted in this thread, else ``None``."""
+    for idx, msg in enumerate(history):
+        if msg.role == "user" and msg.client_message_id == client_id:
+            reply: ChatMessage | None = None
+            is_latest = True
+            for later in history[idx + 1 :]:
+                if later.role == "user":
+                    is_latest = False
+                    break
+                if later.role == "assistant" and reply is None:
+                    reply = later
+            return msg, reply, is_latest
+    return None
+
+
+async def _clear_live_run(service: Service, thread: ChatThread, run: str) -> None:
+    if thread.live_run == run:
+        thread.live_run = None
+    await service.store.save_thread(thread)
+
+
+async def _finish_turn(
+    service: Service, thread: ChatThread, run: str, message: ChatMessage
+) -> None:
+    """Persist the finished message before clearing ``thread.live_run``, so any poll
+    that observes ``live=False`` sees the message in ``/messages``."""
+    await service.store.add_message(message)
+    await _clear_live_run(service, thread, run)
+
+
+async def _run_turn(
+    *,
+    service: Service,
+    live: LiveTurns,
+    door: Any,
+    thread: ChatThread,
+    user: User,
+    context: PageContext | None,
+    route: Route,
+    resume: str | None,
+    run: str,
+    removed: list[str],
+) -> None:
+    """Run one chat turn in the background, recording the answer, stop note, or error."""
+    thread_id = thread.id
+    repos: list[str] = []
+
+    async def execute() -> AgentResult:
+        nonlocal repos
         repos = await visible_repos(service, user)
-        text, removed = redact_secrets(body.text)
-        said = ChatMessage(thread_id=thread_id, role="user", text=text)
-        await service.store.add_message(said)
-        await remember_said(
-            service.store,
-            user.login,
-            text,
-            repo=thread.repo,
-            number=thread.number,
-            where="chat",
-            message_id=said.id,
-        )
         history = await service.store.list_messages(thread_id)
-        page = body.context.page if body.context else ""
+        page = context.page if context else ""
         recent = " ".join(m.text for m in history[-3:] if m.role == "user")
         queue_block = settings_block = ""
         left_out = []
@@ -646,6 +758,7 @@ def build_router() -> APIRouter:
             left_out.append("the service settings (`am-read /api/settings`)")
         memory_index = await service.knowledge.memory_index(thread.repo)
         workdir, where = await _workdir(service, thread)
+        effective_resume = resume if thread.session else None
         prompt = "\n\n".join(
             part
             for part in [
@@ -687,7 +800,7 @@ def build_router() -> APIRouter:
                 ),
                 f"Memory index:\n{memory_index or '(empty)'}",
                 queue_block,
-                await _page_block(service, user, body.context, repos),
+                await _page_block(service, user, context, repos),
                 settings_block,
                 "Not in this message, since the question does not seem to need them: "
                 + " and ".join(left_out)
@@ -696,49 +809,83 @@ def build_router() -> APIRouter:
                 else "",
                 untrusted(
                     "chat.history",
-                    "\n".join(f"{m.role}: {m.text}" for m in history[-20:]),
+                    "\n".join(
+                        f"{m.role}: {m.text}" for m in history[-20:] if not m.error
+                    ),
                     30_000,
                 ),
                 schema_hint(ChatAnswer.model_json_schema()),
             ]
             if part
         )
-        route, resume = await turn_route(service, user.login, thread, base_route)
-        run = new_id("run")
-        door = request.app.state.records
         token, door_env = await open_door(door, user.login)
-        task = AgentTask(
-            kind=TaskKind.CHAT,
-            prompt=prompt,
-            workdir=workdir,
-            output_schema=ChatAnswer.model_json_schema(),
-            resume_session=resume,
-            job_id=run,
-            requested_by=user.login,
-            agent_chosen=bool(thread.agent),
-            records_token=token,
-            env=door_env,
-        )
-        thread.live_run = run
-        await service.store.save_thread(thread)
         try:
-            outcome = await live.run(run, service.a.agents.run(task, route, ChatAnswer))
-            if isinstance(outcome, Stopped):
-                return (
-                    await stopped_message(service, thread, run, outcome)
-                ).model_dump(mode="json")
-            result = outcome
-            if not result.ok or result.structured is None:
-                if result.error_kind == "limit":
-                    raise HTTPException(429, str(result.error))
-                raise HTTPException(502, f"the chat agent failed: {result.error}")
-            answer = ChatAnswer.model_validate(result.structured)
+            task = AgentTask(
+                kind=TaskKind.CHAT,
+                prompt=prompt,
+                workdir=workdir,
+                output_schema=ChatAnswer.model_json_schema(),
+                resume_session=effective_resume,
+                job_id=run,
+                requested_by=user.login,
+                agent_chosen=bool(thread.agent),
+                records_token=token,
+                env=door_env,
+            )
+            return await service.a.agents.run(task, route, ChatAnswer)
         finally:
             door.revoke(token)
-            thread.live_run = None
-            await service.store.save_thread(thread)
-        keep_session(thread, result)
-        await service.store.save_thread(thread)
+
+    try:
+        outcome = await live.run(run, execute())
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        log.warning("chat turn %s in %s failed", run, thread_id, exc_info=True)
+        detail, _ = redact_secrets(f"the chat agent failed: {e}")
+        await _finish_turn(
+            service,
+            thread,
+            run,
+            ChatMessage(
+                thread_id=thread_id,
+                role="assistant",
+                text=detail,
+                run_id=run,
+                error=True,
+            ),
+        )
+        return
+
+    if isinstance(outcome, Stopped):
+        await stopped_message(service, thread, run, outcome)
+        await _clear_live_run(service, thread, run)
+        return
+
+    result = outcome
+    if not result.ok or result.structured is None:
+        raw = (
+            str(result.error)
+            if result.error_kind == "limit"
+            else f"the chat agent failed: {result.error}"
+        )
+        detail, _ = redact_secrets(raw)
+        await _finish_turn(
+            service,
+            thread,
+            run,
+            ChatMessage(
+                thread_id=thread_id,
+                role="assistant",
+                text=detail,
+                run_id=run,
+                error=True,
+            ),
+        )
+        return
+
+    try:
+        answer = ChatAnswer.model_validate(result.structured)
         created: list[str] = []
         changes: list[str] = []
         jobs: list[str] = []
@@ -835,10 +982,25 @@ def build_router() -> APIRouter:
             run_id=run,
             runtime=result.runtime,
         )
-        await service.store.add_message(message)
-        return message.model_dump(mode="json")
+    except Exception as e:
+        log.warning("chat turn %s in %s failed", run, thread_id, exc_info=True)
+        detail, _ = redact_secrets(f"the chat agent failed: {e}")
+        await _finish_turn(
+            service,
+            thread,
+            run,
+            ChatMessage(
+                thread_id=thread_id,
+                role="assistant",
+                text=detail,
+                run_id=run,
+                error=True,
+            ),
+        )
+        return
 
-    return r
+    keep_session(thread, result)
+    await _finish_turn(service, thread, run, message)
 
 
 async def _workdir(service: Any, thread: ChatThread) -> tuple[Path, str]:
