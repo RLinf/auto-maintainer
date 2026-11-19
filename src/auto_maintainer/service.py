@@ -267,7 +267,7 @@ class ServiceSettings:
         default_factory=lambda: {"io": 8, "agent": 3, "lab": 1, "quality": 2}
     )
     dev_mode: bool = False
-    write_caps: tuple[int, int] = (120, 40)
+    write_caps: tuple[int, int] = (300, 100)
     code_repo: str | None = None
     poll_seconds: int = 120
     default_agent: str | None = None

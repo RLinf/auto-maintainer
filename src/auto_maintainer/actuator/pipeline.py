@@ -45,7 +45,13 @@ from ..domain.memory import Signal, SignalKind
 from ..domain.ports import EventSink, Store
 from ..domain.profile import RepoProfile
 from ..domain.records import ActionRecord, AuditEntry
-from ..policy.engine import PAUSED_RULE, WRITE_CAP_RULE, PolicyFacts, decide
+from ..policy.engine import (
+    PAUSED_RULE,
+    REPO_WRITE_CAP_RULE,
+    WRITE_CAP_RULE,
+    PolicyFacts,
+    decide,
+)
 from ..policy.leak_guard import TIER_BLIND, check_text
 from ..profiles.knowledge import Knowledge
 from ..profiles.service import ProfileService
@@ -116,7 +122,7 @@ class ActionPipeline:
         bus: EventSink,
         clock: Clock,
         dev_mode: bool = False,
-        write_caps: tuple[int, int] = (120, 40),
+        write_caps: tuple[int, int] = (300, 100),
         sandbox_repo: str | None = None,
         service_login: str = "",
         standby: bool = False,
@@ -402,8 +408,13 @@ class ActionPipeline:
         elif decision.kind == DecisionKind.EXECUTE:
             self.actuator.enqueue(action.id, action.repo, kind=action.kind)
         elif decision.kind == DecisionKind.DENY and decision.rule == WRITE_CAP_RULE:
+            await self.set_paused(True, "service", reason=decision.reason)
+        elif (
+            decision.kind == DecisionKind.DENY and decision.rule == REPO_WRITE_CAP_RULE
+        ):
+            # Only the repository that reached its cap pauses; the others go on.
             await self.set_paused(
-                True, "service", reason="the hourly public write cap was reached"
+                True, "service", repo=action.repo, reason=decision.reason
             )
         return record
 

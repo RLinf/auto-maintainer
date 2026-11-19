@@ -16,6 +16,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from auto_maintainer.domain.actions import (
@@ -132,11 +134,18 @@ def test_hard_limits() -> None:
     )
     capped = PolicyFacts(public_writes_last_hour=500)
     assert decide(_action(), profile, capped).rule == "limit.write_cap"
+    repo_capped = PolicyFacts(repo_public_writes_last_hour=100)
+    assert decide(_action(), profile, repo_capped).rule == "limit.repo_write_cap"
     internal = Action(kind=ActionKind.NOTIFY, repo=REPO)
     assert (
         decide(internal, _profile(notify={"level": "auto"}), capped).kind
         == DecisionKind.EXECUTE
     )
+    lab = _action(ActionKind.LAB_REVIEW)
+    assert (
+        decide(lab, _profile(**{"lab.review": {"level": "auto"}}), capped).kind
+        == DecisionKind.EXECUTE
+    ), "a test machine's session writes nothing to the forge: the cap is not its"
 
 
 def test_pause_and_dev_mode() -> None:
@@ -235,3 +244,34 @@ def test_tier_names_are_refused_only_where_the_writer_knew_the_tier() -> None:
     assert not check_text("score: 78 overall", profile, set(), [], tiers=False).ok
     assert ActionKind.REVIEW_POST in TIER_BLIND
     assert ActionKind.COMMENT_UPSERT not in TIER_BLIND
+
+
+async def test_only_writes_to_the_forge_count_toward_the_hourly_cap(
+    tmp_path: Path,
+) -> None:
+    """Reviews' sessions on test machines are not public writes: on 2026-11-19, 36
+    of them and four real writes reached RLinf's cap of 40, which paused the
+    service."""
+    from datetime import UTC, datetime, timedelta
+
+    from auto_maintainer.domain.actions import ActionStatus
+    from auto_maintainer.domain.records import ActionRecord
+    from auto_maintainer.store.sqlite import SqliteStore
+
+    store = await SqliteStore.open(tmp_path / "am.db")
+    try:
+        for i, kind in enumerate(
+            [ActionKind.LAB_REVIEW] * 3 + [ActionKind.LABEL_APPLY, ActionKind.NOTIFY]
+        ):
+            action = Action(kind=kind, repo=REPO, number=i, head_sha="a" * 40)
+            await store.add_action(
+                ActionRecord(action=action, status=ActionStatus.EXECUTED)
+            )
+        since = datetime.now(UTC) - timedelta(hours=1)
+        assert await store.count_actions([ActionStatus.EXECUTED], since) == 1
+        assert (
+            await store.count_actions([ActionStatus.EXECUTED], since, public_only=False)
+            == 5
+        )
+    finally:
+        await store.close()

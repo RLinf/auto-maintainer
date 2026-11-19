@@ -46,8 +46,8 @@ class PolicyFacts(BaseModel):
     """Executions of the same kind at this head SHA by the same posting account."""
     public_writes_last_hour: int = 0
     repo_public_writes_last_hour: int = 0
-    max_public_writes_per_hour: int = 120
-    max_repo_public_writes_per_hour: int = 40
+    max_public_writes_per_hour: int = 300
+    max_repo_public_writes_per_hour: int = 100
 
 
 ONE_PER_SHA = {ActionKind.REVIEW_POST}
@@ -56,6 +56,9 @@ edit in place): the service's own account posts at most one review of a commit, 
 each person posting as themselves at most one of their own."""
 
 WRITE_CAP_RULE = "limit.write_cap"
+"""The service's hourly cap on writes to forges was reached: the service pauses."""
+REPO_WRITE_CAP_RULE = "limit.repo_write_cap"
+"""One repository's hourly cap was reached: that repository pauses, the rest go on."""
 PAUSED_RULE = "paused"
 """The rule of a public action held while the service or its repository is paused."""
 
@@ -103,14 +106,25 @@ def decide(action: Action, profile: RepoProfile, facts: PolicyFacts) -> Decision
             rule="limit.one_per_sha",
             reason=f"{kind} already ran for this head SHA",
         )
-    if public and (
+    # The cap is on writes to the forge; a test machine's session writes nothing
+    # there and neither counts toward it nor waits for it.
+    if kind.writes_forge and (
         facts.public_writes_last_hour >= facts.max_public_writes_per_hour
-        or facts.repo_public_writes_last_hour >= facts.max_repo_public_writes_per_hour
     ):
         return Decision(
             kind=DecisionKind.DENY,
             rule=WRITE_CAP_RULE,
-            reason="the hourly public write cap was reached",
+            reason=f"the hourly cap of {facts.max_public_writes_per_hour} public "
+            "writes across all repositories was reached",
+        )
+    if kind.writes_forge and (
+        facts.repo_public_writes_last_hour >= facts.max_repo_public_writes_per_hour
+    ):
+        return Decision(
+            kind=DecisionKind.DENY,
+            rule=REPO_WRITE_CAP_RULE,
+            reason=f"the hourly cap of {facts.max_repo_public_writes_per_hour} public "
+            f"writes on {action.repo} was reached",
         )
 
     rule = profile.rule(kind)

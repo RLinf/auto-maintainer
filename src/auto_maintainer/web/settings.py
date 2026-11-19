@@ -353,6 +353,13 @@ def _with_token_limits(text: str, limits: TokenLimits) -> str:
     return yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
 
 
+class WriteCapsBody(BaseModel):
+    total: int | None = Field(default=None, ge=0, le=2000)
+    """Public writes across all repositories per hour; ``None`` keeps the host's."""
+    per_repo: int | None = Field(default=None, ge=0, le=500)
+    """Public writes on one repository per hour; ``None`` keeps the host's."""
+
+
 class DeployChecksBody(BaseModel):
     mode: DeployChecks | None = None
     """``None`` keeps the default, testing on this host."""
@@ -804,6 +811,42 @@ def build_router() -> APIRouter:
             DocumentBody(
                 yaml=_with_token_limits(text, body.limits),
                 title="settings: token limits per person",
+            ),
+            user,
+        )
+
+    @r.put("/write-caps")
+    async def set_write_caps(
+        request: Request, body: WriteCapsBody, user: User = Depends(current_user)
+    ) -> dict[str, Any]:
+        """The hourly caps on public writes (comments, labels, reviews, pushes; not
+        test machine sessions): across all repositories, reaching it pauses the
+        service; on one repository, that repository. A cap the request leaves out
+        stays as it is; ``null`` returns it to the host's. Applies at once."""
+        service = service_of(request)
+        text, _ = await service.settings_text()
+        data = _settings_data(text)
+        system = dict(data.get("system") or {})
+        sent = body.model_fields_set  # a cap the request leaves out stays as it is
+        for field, key, value in (
+            ("total", "max_public_writes_per_hour", body.total),
+            ("per_repo", "max_repo_public_writes_per_hour", body.per_repo),
+        ):
+            if field not in sent:
+                continue
+            if value is None:
+                system.pop(key, None)
+            else:
+                system[key] = value
+        if system:
+            data["system"] = system
+        else:
+            data.pop("system", None)
+        return await save(
+            request,
+            DocumentBody(
+                yaml=yaml.safe_dump(data, sort_keys=False, allow_unicode=True),
+                title="settings: hourly caps on public writes",
             ),
             user,
         )

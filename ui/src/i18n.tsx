@@ -642,6 +642,8 @@ const zh: Record<string, string> = {
   "No open PRs.": "没有打开的 PR。",
   "No proposals wait for you.": "没有等你批准的提议。",
   "Waiting on me": "等我处理",
+  "Comments, labels, reviews, and pushes across all repositories; reaching it pauses the service": "所有仓库合计的评论、标签、评审和推送；达到后暂停整个服务",
+  "Reaching it pauses only that repository; sessions on test machines do not count": "达到后只暂停该仓库；测试机上的会话不计入",
   "Wait for GitHub CI": "等待 GitHub CI",
   "Test here first (default)": "先在本机测试（默认）",
   "Deploy without testing": "不测试直接部署",

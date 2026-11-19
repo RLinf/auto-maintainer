@@ -1532,6 +1532,58 @@ function AgentSlotsRow({ v, custom }: { v: SettingsView; custom: boolean }) {
   );
 }
 
+/** One of the hourly caps on public writes; the owner changes it here and it applies
+ * at once. */
+function WriteCapRow({ v, which, icon, title, sub, custom }: { v: SettingsView; which: "total" | "per_repo"; icon: IconName; title: string; sub: string; custom: boolean }) {
+  const t = useT();
+  const toast = useToast();
+  const [draft, setDraft] = useState<string | null>(null);
+  const total = v.system.max_public_writes_per_hour;
+  const perRepo = v.system.max_repo_public_writes_per_hour;
+  const current = which === "total" ? total : perRepo;
+  const set = useAct((n: number) => api.put<{ approved: boolean }>("/api/settings/write-caps", { [which]: n }), [["settings"], ["memory"]]);
+  const value = draft ?? String(current);
+  const n = Number(value);
+  const max = which === "total" ? 2000 : 500;
+  const valid = Number.isInteger(n) && n >= 0 && n <= max;
+  return (
+    <Row
+      icon={icon}
+      title={
+        <span className="row" style={{ gap: 6 }}>
+          {title} <FromSettings on={custom} />
+        </span>
+      }
+      sub={sub}
+      value={
+        v.access.allowed ? (
+          <span className="row" style={{ gap: 6, justifyContent: "flex-end" }}>
+            <input type="number" min={0} max={max} value={value} aria-label={title} style={{ width: 72 }} onChange={(e) => setDraft(e.target.value)} />
+            {draft !== null && Number(draft) !== current && (
+              <button
+                className="primary sm"
+                disabled={!valid || set.isPending}
+                onClick={() =>
+                  set.mutate(n, {
+                    onSuccess: (r) => {
+                      setDraft(null);
+                      toast({ title: r.approved ? t("Saved") : t("Change proposed"), icon: r.approved ? "check" : "inbox" });
+                    },
+                  })
+                }
+              >
+                {t("Save")}
+              </button>
+            )}
+          </span>
+        ) : (
+          <strong>{current}</strong>
+        )
+      }
+    />
+  );
+}
+
 function SystemTab({ v, ask }: { v: SettingsView; ask: (p: string, send?: boolean) => void }) {
   const t = useT();
   const custom = new Set(v.system.from_settings);
@@ -1550,24 +1602,21 @@ function SystemTab({ v, ask }: { v: SettingsView; ask: (p: string, send?: boolea
             sub={t("How often the service looks for new PRs, comments, and CI results")}
             value={<strong>{v.system.poll_seconds >= 60 ? `${Math.round(v.system.poll_seconds / 60)} min` : `${v.system.poll_seconds} s`}</strong>}
           />
-          <Row
+          <WriteCapRow
+            v={v}
+            which="total"
             icon="shield"
-            title={
-              <span className="row" style={{ gap: 6 }}>
-                {t("Public writes per hour")} <FromSettings on={custom.has("max_public_writes_per_hour")} />
-              </span>
-            }
-            sub={t("Comments, labels, and reviews across all repositories; a safety cap")}
-            value={<strong>{v.system.max_public_writes_per_hour}</strong>}
+            title={t("Public writes per hour")}
+            sub={t("Comments, labels, reviews, and pushes across all repositories; reaching it pauses the service")}
+            custom={custom.has("max_public_writes_per_hour")}
           />
-          <Row
+          <WriteCapRow
+            v={v}
+            which="per_repo"
             icon="repo"
-            title={
-              <span className="row" style={{ gap: 6 }}>
-                {t("Public writes per repository per hour")} <FromSettings on={custom.has("max_repo_public_writes_per_hour")} />
-              </span>
-            }
-            value={<strong>{v.system.max_repo_public_writes_per_hour}</strong>}
+            title={t("Public writes per repository per hour")}
+            sub={t("Reaching it pauses only that repository; sessions on test machines do not count")}
+            custom={custom.has("max_repo_public_writes_per_hour")}
           />
           <AgentSlotsRow v={v} custom={custom.has("agent_slots")} />
           <Row

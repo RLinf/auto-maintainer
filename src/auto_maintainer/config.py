@@ -230,7 +230,7 @@ class HostConfig(_Cfg):
     """Jobs each pool runs at once. ``quality`` runs the quick quality scores of the
     PRs nobody reviewed yet, in the background, apart from the reviews in ``agent``."""
     poll_seconds: int = 120
-    write_caps: tuple[int, int] = (120, 40)
+    write_caps: tuple[int, int] = (300, 100)
     sandbox_repo: str | None = None
     """The only repository a development instance (``am serve --dev``) serves. Its
     actions follow its profile; every other repository is refused. Without it, dev

@@ -602,3 +602,48 @@ async def test_evaluations_list_by_score_as_a_number(tmp_path: Path) -> None:
         assert listed == [3, 2, 1], "65.5 ranks above 9.5, and 100 above both"
     finally:
         await store.close()
+
+
+async def test_a_repositorys_cap_pauses_that_repository_alone(
+    harness: Harness,
+) -> None:
+    """Reaching one repository's hourly cap on public writes pauses that repository;
+    the service, and every other repository, go on. The service's cap across all
+    repositories pauses the service."""
+    from auto_maintainer.domain.memory import profile_path
+    from auto_maintainer.domain.records import RepoRecord
+    from auto_maintainer.profiles.layers import dump_yaml
+
+    harness.forge.put_pr(make_pr())
+    harness.memory.files[profile_path(REPO)] = dump_yaml(
+        {"schema": 1, "policy": {"label.apply": {"level": "auto"}}}
+    )
+    await harness.approve_directly(REPO, "maria")
+    await harness.store.save_repo(RepoRecord(repo="acme/other", active=True))
+    pipeline = harness.service.pipeline
+    pipeline.write_caps = (100, 1)
+
+    def label(name: str) -> object:
+        return make_action(
+            ActionKind.LABEL_APPLY,
+            REPO,
+            LabelPayload(labels=[name]),
+            number=42,
+            head_sha="a" * 40,
+            discriminator=name,
+        )
+
+    await pipeline.submit(label("bug"))
+    await harness.settle()
+    await pipeline.submit(label("docs"))
+    await harness.settle()
+    assert len(harness.forge.writes_of("add_labels")) == 1
+    assert await pipeline.paused(REPO)
+    assert not await pipeline.paused(None), "the service goes on"
+    assert not await pipeline.paused("acme/other"), "and so do other repositories"
+
+    await pipeline.set_paused(False, "maria", repo=REPO)
+    pipeline.write_caps = (1, 100)
+    await pipeline.submit(label("perf"))
+    await harness.settle()
+    assert await pipeline.paused(None), "the cap across all repositories pauses all"

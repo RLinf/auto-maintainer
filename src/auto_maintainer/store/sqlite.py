@@ -689,9 +689,10 @@ class SqliteStore:
         if repo:
             stmt = stmt.where(m.actions.c.repo == repo)
         if public_only:
+            # Writes to a forge only: a test machine's session writes nothing there.
             stmt = stmt.where(
                 m.actions.c.kind.notin_(
-                    [k.value for k in ActionKind if not k.touches_repository]
+                    [k.value for k in ActionKind if not k.writes_forge]
                 )
             )
         row = await self._one(stmt)

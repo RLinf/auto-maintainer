@@ -1043,3 +1043,24 @@ async def test_an_agents_cli_settings_are_set_through_the_gate(
     assert "sandbox" not in (h.service.runtime("claude-code").options or {}), (
         "a person's settings never reach the service's runtime"
     )
+
+
+async def test_the_owner_sets_each_hourly_write_cap(demo) -> None:
+    """Each cap is set on its own; the other stays as it is, and ``null`` returns a
+    cap to the host's."""
+    h, app = demo
+    async with _client(app, "maria") as maria:
+        out = await maria.put("/api/settings/write-caps", json={"per_repo": 150})
+        assert out.json()["approved"] is True
+        await maria.put("/api/settings/write-caps", json={"total": 500})
+        system = (await maria.get("/api/settings")).json()["system"]
+        assert (
+            system["max_public_writes_per_hour"],
+            system["max_repo_public_writes_per_hour"],
+        ) == (500, 150)
+        assert h.service.pipeline.write_caps == (500, 150), "applied at once"
+        assert (
+            await maria.put("/api/settings/write-caps", json={"per_repo": 501})
+        ).status_code == 422
+        await maria.put("/api/settings/write-caps", json={"per_repo": None})
+    assert h.service.pipeline.write_caps == (500, 100), "the host's default again"
