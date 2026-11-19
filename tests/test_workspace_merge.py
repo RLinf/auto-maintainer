@@ -284,3 +284,40 @@ async def test_a_change_applied_to_a_new_checkout_gives_the_same_diff(
     with pytest.raises(RuntimeError):
         await ws.apply(again, made.patch)  # already applied: it does not apply twice
     await ws.release(again)
+
+
+async def test_a_checkout_works_from_the_mirror_when_the_forge_is_out_of_reach(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fetching from the forge is tried again; when it stays out of reach, a commit
+    the mirror already has is checked out from it, and one it lacks fails."""
+    import auto_maintainer.workspace.git as workspace_git
+    from auto_maintainer.subproc import ProcError
+
+    monkeypatch.setattr(workspace_git, "FETCH_PAUSES", (0, 0))
+    forge = tmp_path / "forge"
+    upstream = forge / "acme" / "widget.git"
+    git(tmp_path, "init", "-q", "--bare", "-b", "main", str(upstream))
+    work = tmp_path / "work"
+    git(tmp_path, "clone", "-q", str(upstream), str(work))
+    head = _commit(work, "one\n", "seed")
+    git(work, "push", "-q", "origin", "HEAD:main", "HEAD:refs/pull/7/head")
+    ws = GitWorkspace(tmp_path / "data", forge_url=f"file://{forge}")
+    await ws.release(await ws.prepare("acme/widget", 7, head, "main"))
+
+    fetches = 0
+    real = ws._git
+
+    async def counting(repo: str, *args: str, **kwargs: object) -> str:
+        nonlocal fetches
+        fetches += args[0] == "fetch"
+        return await real(repo, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(ws, "_git", counting)
+    upstream.rename(tmp_path / "gone.git")
+    path = await ws.prepare("acme/widget", 7, head, "main")
+    assert (path / "loader.py").read_text() == "one\n"
+    assert fetches == 3, "tried three times before using the mirror's copy"
+    await ws.release(path)
+    with pytest.raises(ProcError):
+        await ws.prepare("acme/widget", 7, "f" * 40, "main")

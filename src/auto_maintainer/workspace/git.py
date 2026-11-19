@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import logging
 import os
 import shutil
 import tempfile
@@ -31,7 +32,13 @@ from typing import Any
 
 from ..domain.forges import fs_parts, slug
 from ..domain.ports import CommandResult, ConflictSides, MergeAttempt, WorkChanges
-from ..subproc import run
+from ..subproc import ProcError, run
+
+log = logging.getLogger(__name__)
+
+FETCH_PAUSES = (3, 10)
+"""How long to wait before fetching from the forge again after a failure: the network
+to it drops now and then (a name lookup, a TLS handshake), and comes back."""
 
 TokenFn = Callable[[str], Awaitable[str | None]]
 
@@ -240,6 +247,24 @@ class GitWorkspace:
             )
         ).stdout
 
+    async def _fetch(self, repo: str, mirror: Path, *refs: str) -> None:
+        """Fetch ``refs`` from the forge into ``mirror``, again after a pause when it
+        fails (``FETCH_PAUSES``)."""
+        for pause in (*FETCH_PAUSES, None):
+            try:
+                await self._git(repo, "fetch", "-q", "origin", *refs, cwd=mirror)
+                return
+            except ProcError:
+                if pause is None:
+                    raise
+                await asyncio.sleep(pause)
+
+    @staticmethod
+    async def _has(mirror: Path, sha: str) -> bool:
+        return (
+            await run(["git", "cat-file", "-e", f"{sha}^{{commit}}"], cwd=mirror)
+        ).ok
+
     def mirror(self, repo: str) -> Path:
         return self.root / "mirrors" / f"{slug(repo)}.git"
 
@@ -284,10 +309,18 @@ class GitWorkspace:
             ]
             if number is not None:
                 refspecs.append(f"+refs/pull/{number}/head:refs/pull/{number}/head")
-            await self._git(repo, "fetch", "-q", "origin", *refspecs, cwd=mirror)
-            have = await run(["git", "cat-file", "-e", f"{sha}^{{commit}}"], cwd=mirror)
-            if not have.ok:
-                await self._git(repo, "fetch", "-q", "origin", sha, cwd=mirror)
+            try:
+                await self._fetch(repo, mirror, *refspecs)
+            except ProcError:
+                # The forge stays out of reach: the mirror's copy does when it has
+                # the commit (its default branch may be a little behind).
+                if not await self._has(mirror, sha):
+                    raise
+                log.warning(
+                    "fetching %s failed; using the mirror's copy of %s", repo, sha[:12]
+                )
+            if not await self._has(mirror, sha):
+                await self._fetch(repo, mirror, sha)
             what = f"pr-{number}" if number is not None else default_branch
             path = self.repo_dir(repo) / f"{what}-{sha[:12]}-{uuid.uuid4().hex[:6]}"
             # Only a free path among the repository's checkouts, where a released
