@@ -64,6 +64,11 @@ export interface RouteOptionInput {
   runs_on?: string | null;
 }
 
+export interface PersonalDefaultInput {
+  agent: string;
+  own: boolean;
+}
+
 /** Resolve the usable agents, the default agent for ``task``, and the normalized selection. */
 export function resolveAgentChoices<T extends AgentOptionInput>(
   value: string,
@@ -71,17 +76,37 @@ export function resolveAgentChoices<T extends AgentOptionInput>(
   settingsLoaded: boolean,
   allAgents: T[],
   routing: RouteOptionInput[],
-): { agents: T[]; primary: string | undefined; current: string; others: T[] } {
+  myDefault?: PersonalDefaultInput | null,
+): { agents: T[]; primary: string | undefined; primaryOnService: boolean; current: string; others: T[] } {
   const agents = allAgents.filter((a) => a.enabled && a.installed !== false && (a.usable !== false || !!a.mine));
   const route = routing.find((r) => r.task === task);
-  // What the person asks for tries their own agents first (verification keeps its route).
-  const own = task === "verify" ? undefined : agents.find((a) => a.mine);
-  const primary = own?.name ?? route?.runs_on ?? route?.primary;
+  const routePrimary = route?.runs_on ?? route?.primary;
+  // Matches AgentRouter.firsts / Service.runs_on_for: verification keeps its route;
+  // otherwise the person's default (when ready, and usable if on the service's account
+  // or theirs if on their own account), else their own agents, else the route.
+  let primary = routePrimary;
+  let primaryOnService = false;
+  if (task !== "verify") {
+    const chosen = myDefault
+      ? allAgents.find((a) => a.name === myDefault.agent && a.enabled && a.installed !== false)
+      : undefined;
+    if (chosen && !myDefault!.own) {
+      if (chosen.usable !== false) {
+        primary = chosen.name;
+        primaryOnService = true;
+      }
+    } else if (chosen && myDefault!.own && chosen.mine) {
+      primary = chosen.name;
+    } else {
+      const own = agents.find((a) => a.mine);
+      primary = own?.name ?? routePrimary;
+    }
+  }
   // A remembered agent that was disabled since, or matches the default, falls back to "".
   const valid = !value || agents.some((a) => a.name === value) || !settingsLoaded;
   const current = !valid || (primary && value === primary) ? "" : value;
   const others = agents.filter((a) => a.name !== primary);
-  return { agents, primary, current, others };
+  return { agents, primary, primaryOnService, current, others };
 }
 
 export interface RunCiDisplay {

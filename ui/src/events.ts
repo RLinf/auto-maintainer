@@ -12,7 +12,7 @@ const INVALIDATES: Record<string, string[][]> = {
   "proposal.decided": [["proposals"], ["pr"], ["repos"]],
   "action.executed": [["pr"], ["prs"], ["proposals"], ["audit"], ["service"], ["settings"], ["memory"]],
   "action.failed": [["pr"], ["proposals"], ["audit"], ["service"]],
-  "memory.changed": [["memory"], ["profile"], ["repos"], ["settings"]],
+  "memory.changed": [["memory"], ["profile"], ["repos"], ["settings"], ["my-agents"]],
   "pr.opened": [["prs"], ["repos"], ["merge-schedule"]],
   "pr.synchronized": [["prs"], ["pr"], ["merge-schedule"]],
   "pr.updated": [["prs"], ["pr"], ["merge-schedule"]],
@@ -28,7 +28,7 @@ const INVALIDATES: Record<string, string[][]> = {
   "priority.overridden": [["prs"], ["pr"]],
   "repo.added": [["repos"]],
   "code.changed": [["service"]],
-  "service.changed": [["agents"], ["agents-usage"], ["service-sign-ins"], ["my-agents"]],
+  "service.changed": [["agents"], ["agents-usage"], ["service-sign-ins"], ["my-agents"], ["settings"]],
   "question.asked": [["questions"], ["me"]],
   "question.answered": [["questions"], ["me"], ["audit"], ["job"], ["work"]],
   // An agent's steps: only the views of that one job follow at once (``refreshJob``);

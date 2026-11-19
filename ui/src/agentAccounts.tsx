@@ -34,6 +34,7 @@ export function SignInFlow({ login, onEnd }: { login: AgentLogin; onEnd: () => v
     if (ended) {
       void client.invalidateQueries({ queryKey: ["my-agents"] });
       void client.invalidateQueries({ queryKey: ["service-sign-ins"] });
+      void client.invalidateQueries({ queryKey: ["settings"] });
     }
   }, [ended, client]);
   return (
@@ -200,7 +201,7 @@ export function MyAgentsSection() {
 export function MyDefaultChoice() {
   const t = useT();
   const q = useMine();
-  const set = useAct((body: { agent: string | null; own: boolean }) => api.put("/api/me/agents-default", body), [["my-agents"]]);
+  const set = useAct((body: { agent: string | null; own: boolean }) => api.put("/api/me/agents-default", body), [["my-agents"], ["settings"]]);
   if (!q.data) return q.error ? <ErrorBox error={q.error} /> : <Skeleton rows={1} />;
   const data = q.data;
   const mine = data.agents.filter((a) => a.setup.use_own);
@@ -285,7 +286,7 @@ function MyApiRow({ p }: { p: MyProvider }) {
   const t = useT();
   const [editing, setEditing] = useState(false);
   const [confirm, setConfirm] = useState(false);
-  const remove = useAct(() => api.del(`/api/me/providers/${p.id}`), [["my-agents"]]);
+  const remove = useAct(() => api.del(`/api/me/providers/${p.id}`), [["my-agents"], ["settings"]]);
   if (editing) {
     return (
       <div className="list-row" style={{ display: "block", padding: "12px 0" }}>
@@ -334,7 +335,7 @@ type Setup = MyAgent["setup"];
 function MyAgentRow({ agent: a, apis }: { agent: MyAgent; apis: MyProvider[] }) {
   const t = useT();
   const [login, setLogin] = useState<AgentLogin | null>(a.login);
-  const keys = [["my-agents"]];
+  const keys = [["my-agents"], ["settings"]];
   const save = useAct((body: Omit<Setup, "agent">) => api.put<MyAgent>(`/api/me/agents/${a.name}`, body), keys);
   const signOut = useAct(() => api.post<MyAgent>(`/api/me/agents/${a.name}/sign-out`), keys);
   const s = a.setup;

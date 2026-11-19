@@ -1,6 +1,6 @@
-// Which agent does a review: by default the reviewer's own agent (one they run on their
-// own model API or sign-in), else the one its route runs on (the first usable agent in
-// its order), or one the reviewer picks among the agents usable here.
+// Which agent does a task: by default the person's personal default, else their own
+// agent (one they run on their own model API or sign-in), else the one its route runs
+// on (the first usable agent in its order), or one they pick among the agents usable here.
 
 import { useState } from "react";
 import type { ReviewStart } from "./api";
@@ -37,18 +37,22 @@ export function useAgentChoice(task: string): [string, (v: string) => void] {
 export function useAgentOptions(value: string, task = "review") {
   const t = useT();
   const settings = useSettings();
-  const { agents, primary, current, others } = resolveAgentChoices(
+  const { agents, primary, primaryOnService, current, others } = resolveAgentChoices(
     value,
     task,
     !!settings.data,
     settings.data?.agents ?? [],
     settings.data?.routing ?? [],
+    settings.data?.my_default,
   );
   const label = (name: string) => {
     const mine = agents.find((a) => a.name === name)?.mine;
     return mine ? `${agentName(name)} · ${mine === "api" ? t("my API") : t("my own sign-in")}` : agentName(name);
   };
-  return { agents, primary, current, others, label };
+  const defaultLabel = primary
+    ? `${primaryOnService ? agentName(primary) : label(primary)} (${t("default")})`
+    : t("Default agent");
+  return { agents, primary, primaryOnService, current, others, label, defaultLabel };
 }
 
 export function AgentPicker({
@@ -67,7 +71,7 @@ export function AgentPicker({
   purpose?: "do" | "answer";
 }) {
   const t = useT();
-  const { primary, current, others, label } = useAgentOptions(value, task);
+  const { current, others, label, defaultLabel } = useAgentOptions(value, task);
   const title = purpose === "answer" ? t("Which agent answers") : t("Which agent does it");
   return (
     <label className="row" style={{ gap: 6, flexWrap: "nowrap", minWidth: 0 }} title={title}>
@@ -83,7 +87,7 @@ export function AgentPicker({
         aria-label={title}
         style={{ height: compact ? 28 : 34, minWidth: 0 }}
       >
-        <option value="">{primary ? `${label(primary)} (${t("default")})` : t("Default agent")}</option>
+        <option value="">{defaultLabel}</option>
         {others.map((a) => (
           <option key={a.name} value={a.name}>
             {label(a.name)}

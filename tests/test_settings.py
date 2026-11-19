@@ -913,6 +913,26 @@ async def test_a_persons_work_is_shown_on_their_own_agent_before_it_runs(demo) -
     ), "a verification keeps its route's agent"
     assert await h.service.runs_on_for(route, None, "fix") == h.service.runs_on(route)
 
+    # When the router reports firsts (personal default), a signed-out service default
+    # falls back to the route while a usable service default or an own-account default wins.
+    usable = {"antigravity": True, "codex": False, "claude-code": False}
+
+    async def firsts(login: str) -> tuple[list[str], set[str]]:
+        if login == "maria":
+            return ["antigravity"], {"antigravity"}
+        if login == "walt":
+            return ["codex"], {"codex"}
+        if login == "ada":
+            return ["claude-code"], set()
+        return [], set()
+
+    h.runner.firsts = firsts  # type: ignore[attr-defined]
+    h.runner.usable = lambda name: usable.get(name, True)  # type: ignore[attr-defined]
+    chat_route = Route(primary="antigravity")
+    assert await h.service.runs_on_for(chat_route, "maria", "chat") == "antigravity"
+    assert await h.service.runs_on_for(chat_route, "walt", "chat") == "antigravity"
+    assert await h.service.runs_on_for(chat_route, "ada", "chat") == "claude-code"
+
 
 async def test_a_person_chooses_their_default_among_the_services_agents_and_their_own(
     demo, tmp_path: Path
@@ -927,6 +947,7 @@ async def test_a_person_chooses_their_default_among_the_services_agents_and_thei
     h.service.a.people = PeopleAgents(tmp_path / "people")
     async with _client(app, "walt") as walt:
         assert (await walt.get("/api/me/agents")).json()["default"] is None
+        assert (await walt.get("/api/settings")).json()["my_default"] is None
         refused = await walt.put(
             "/api/me/agents-default", json={"agent": "claude-code", "own": True}
         )
@@ -935,15 +956,19 @@ async def test_a_person_chooses_their_default_among_the_services_agents_and_thei
             "/api/me/agents-default", json={"agent": "claude-code", "own": False}
         )
         assert service.status_code == 200
-        assert (await walt.get("/api/me/agents")).json()["default"] == {
-            "agent": "claude-code",
-            "own": False,
-        }
+        expected = {"agent": "claude-code", "own": False}
+        assert (await walt.get("/api/me/agents")).json()["default"] == expected
+        assert (await walt.get("/api/settings")).json()["my_default"] == expected
+        async with _client(app, "maria") as maria:
+            assert (await maria.get("/api/settings")).json()["my_default"] is None, (
+                "settings_view exposes each person's own default"
+            )
         unknown = await walt.put("/api/me/agents-default", json={"agent": "nope"})
         assert unknown.status_code in (404, 409, 422)
         cleared = await walt.put("/api/me/agents-default", json={"agent": None})
         assert cleared.status_code == 200
         assert (await walt.get("/api/me/agents")).json()["default"] is None
+        assert (await walt.get("/api/settings")).json()["my_default"] is None
     async with _client(app, "maria") as maria:
         assert (await maria.get("/api/me/agents")).json()["default"] is None, (
             "each person's own"

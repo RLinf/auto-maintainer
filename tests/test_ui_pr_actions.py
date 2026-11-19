@@ -80,13 +80,85 @@ const routes = [
   {{ task: "verify", primary: "claude-code", runs_on: "antigravity" }},
 ];
 
-// A user's own agent leads on interactive tasks; choosing it explicitly collapses to "".
+// A user's own agent leads on interactive tasks when no personal default is set;
+// choosing it explicitly collapses to "".
 const reviewDefault = resolveAgentChoices("codex", "review", true, agents, routes);
 assert.equal(reviewDefault.primary, "codex");
+assert.equal(reviewDefault.primaryOnService, false);
 assert.equal(reviewDefault.current, "");
 assert.deepEqual(
   reviewDefault.others.map((a) => a.name),
   ["claude-code", "antigravity"],
+);
+
+// A personal default on the service's account wins over a configured personal agent.
+const serviceDefault = resolveAgentChoices("antigravity", "review", true, agents, routes, {{
+  agent: "antigravity",
+  own: false,
+}});
+assert.equal(serviceDefault.primary, "antigravity");
+assert.equal(serviceDefault.primaryOnService, true);
+assert.equal(serviceDefault.current, "");
+assert.deepEqual(
+  serviceDefault.others.map((a) => a.name),
+  ["claude-code", "codex"],
+);
+assert.equal(
+  resolveAgentChoices("codex", "review", true, agents, routes, {{
+    agent: "antigravity",
+    own: false,
+  }}).current,
+  "codex",
+);
+
+// Choosing the service's account of an agent the user also runs on their own marks primaryOnService.
+const sameAgentService = resolveAgentChoices(
+  "",
+  "review",
+  true,
+  [
+    {{ name: "claude-code", enabled: true, installed: true, usable: true, mine: "api" }},
+    {{ name: "antigravity", enabled: true, installed: true, usable: true, mine: null }},
+  ],
+  routes,
+  {{ agent: "claude-code", own: false }},
+);
+assert.equal(sameAgentService.primary, "claude-code");
+assert.equal(sameAgentService.primaryOnService, true);
+
+// A personal default on the user's own account stays primary even when the service account is signed out.
+const ownDefault = resolveAgentChoices("", "review", true, agents, routes, {{
+  agent: "codex",
+  own: true,
+}});
+assert.equal(ownDefault.primary, "codex");
+assert.equal(ownDefault.primaryOnService, false);
+
+// A personal default on a signed-out service agent falls back to the route, not personal agents.
+const signedOutServiceDefault = resolveAgentChoices(
+  "",
+  "review",
+  true,
+  [
+    {{ name: "claude-code", enabled: true, installed: true, usable: true, mine: null }},
+    {{ name: "codex", enabled: true, installed: true, usable: false, mine: "sign-in" }},
+    {{ name: "antigravity", enabled: true, installed: true, usable: false, mine: null }},
+  ],
+  routes,
+  {{ agent: "antigravity", own: false }},
+);
+assert.equal(signedOutServiceDefault.primary, "claude-code");
+assert.equal(signedOutServiceDefault.primaryOnService, false);
+
+// A personal default pointing at a disabled agent, or own: true without a personal account,
+// falls back to the user's own agents (matching AgentRouter.firsts).
+assert.equal(
+  resolveAgentChoices("", "review", true, agents, routes, {{ agent: "gemini", own: false }}).primary,
+  "codex",
+);
+assert.equal(
+  resolveAgentChoices("", "review", true, agents, routes, {{ agent: "antigravity", own: true }}).primary,
+  "codex",
 );
 
 // Non-default usable agent stays selected; disabled remembered agent resets once loaded.
@@ -95,9 +167,13 @@ assert.equal(explicit.current, "antigravity");
 assert.equal(resolveAgentChoices("gemini", "review", true, agents, routes).current, "");
 assert.equal(resolveAgentChoices("gemini", "review", false, [], routes).current, "gemini");
 
-// Verification keeps its configured route instead of switching to the user's own agent.
-const verify = resolveAgentChoices("", "verify", true, agents, routes);
+// Verification keeps its configured route instead of switching to the user's own agent or personal default.
+const verify = resolveAgentChoices("", "verify", true, agents, routes, {{
+  agent: "claude-code",
+  own: false,
+}});
 assert.equal(verify.primary, "antigravity");
+assert.equal(verify.primaryOnService, false);
 
 // Contextual CI hides "none", turns "passed" into a pill, and gates "approval" on canPush.
 assert.deepEqual(describeRunCi("none", true), {{ inline: "none", actionable: false, disabled: true }});

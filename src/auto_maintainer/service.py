@@ -1823,13 +1823,18 @@ class Service:
         (``AgentRouter.firsts``), except for a verification, else ``runs_on``."""
         if login and kind not in KEEPS_OWN_PRIMARY:
             firsts = getattr(self.a.agents, "firsts", None)
-            first = (
-                (await firsts(login))[0]
-                if callable(firsts)
-                else await self.own_agents(login)
-            )
-            if first:
-                return first[0]
+            if callable(firsts):
+                first, on_service = await firsts(login)
+                usable = next(
+                    (n for n in first if n not in on_service or self.agent_usable(n)),
+                    None,
+                )
+                if usable:
+                    return usable
+            else:
+                first = await self.own_agents(login)
+                if first:
+                    return first[0]
         return self.runs_on(route)
 
     def runs_on(self, route: Route | None) -> str | None:
