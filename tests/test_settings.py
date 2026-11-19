@@ -912,3 +912,39 @@ async def test_a_persons_work_is_shown_on_their_own_agent_before_it_runs(demo) -
         h.service.runs_on(route)
     ), "a verification keeps its route's agent"
     assert await h.service.runs_on_for(route, None, "fix") == h.service.runs_on(route)
+
+
+async def test_a_person_chooses_their_default_among_the_services_agents_and_their_own(
+    demo, tmp_path: Path
+) -> None:
+    from auto_maintainer.agents.adapters.claude_code import ClaudeCodeRuntime
+    from auto_maintainer.store.people import PeopleAgents
+
+    h, app = demo
+    runtime = ClaudeCodeRuntime(binary=str(tmp_path / "claude"))
+    runtime.container_sandbox = _Box()  # type: ignore[attr-defined]
+    h.runner.runtimes = {"claude-code": runtime}
+    h.service.a.people = PeopleAgents(tmp_path / "people")
+    async with _client(app, "walt") as walt:
+        assert (await walt.get("/api/me/agents")).json()["default"] is None
+        refused = await walt.put(
+            "/api/me/agents-default", json={"agent": "claude-code", "own": True}
+        )
+        assert refused.status_code == 409 and "own account" in refused.json()["detail"]
+        service = await walt.put(
+            "/api/me/agents-default", json={"agent": "claude-code", "own": False}
+        )
+        assert service.status_code == 200
+        assert (await walt.get("/api/me/agents")).json()["default"] == {
+            "agent": "claude-code",
+            "own": False,
+        }
+        unknown = await walt.put("/api/me/agents-default", json={"agent": "nope"})
+        assert unknown.status_code in (404, 409, 422)
+        cleared = await walt.put("/api/me/agents-default", json={"agent": None})
+        assert cleared.status_code == 200
+        assert (await walt.get("/api/me/agents")).json()["default"] is None
+    async with _client(app, "maria") as maria:
+        assert (await maria.get("/api/me/agents")).json()["default"] is None, (
+            "each person's own"
+        )

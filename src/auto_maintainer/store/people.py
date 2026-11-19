@@ -49,7 +49,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from ..domain.agents import PersonalAgent
+from ..domain.agents import PersonalAgent, PersonalDefault
 from ..domain.labs import personal_name
 from ..domain.settings import PROVIDER_ID, LabMachine, Provider
 from ..subproc import run
@@ -108,6 +108,21 @@ class PeopleAgents:
                 mode="json", exclude={"agent"}, exclude_none=True
             )
             _write(path, data)
+
+    async def default(self, login: str) -> PersonalDefault | None:
+        data = self._read(self.folder(login) / "default.json")
+        try:
+            return PersonalDefault.model_validate(data) if data else None
+        except ValidationError:
+            return None
+
+    async def put_default(self, login: str, choice: PersonalDefault | None) -> None:
+        path = self.folder(login) / "default.json"
+        async with self._lock:
+            if choice is None:
+                path.unlink(missing_ok=True)
+            else:
+                _write(path, choice.model_dump(mode="json"))
 
     async def providers(self, login: str) -> dict[str, Provider]:
         folder = self.folder(login)

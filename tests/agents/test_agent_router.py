@@ -399,7 +399,14 @@ async def test_a_signed_out_agent_still_runs_on_its_requesters_own_account() -> 
 
 
 class _People:
-    """maria runs ``b`` on her own account; nobody else runs any."""
+    """maria runs ``b`` on her own account; nobody else runs any. ``chosen``: the
+    default each person picked."""
+
+    def __init__(self) -> None:
+        self.chosen: dict[str, object] = {}
+
+    async def default(self, login: str) -> object:
+        return self.chosen.get(login.lower())
 
     async def get(self, login: str) -> dict[str, object]:
         from auto_maintainer.domain.agents import PersonalAgent
@@ -558,3 +565,38 @@ async def test_a_runtime_that_answered_is_not_probed_on_every_page() -> None:
     router.runtimes["codex"] = again
     await router.health()
     assert again.probes == 1, "new settings, a new runtime: probed at once"
+
+
+async def test_a_persons_default_picks_the_agent_and_its_account() -> None:
+    """A person chooses what their requests try first among the service's agents
+    and their own: the service's account of an agent they also run on their own,
+    or their own account; without a choice, their own agents go first."""
+    from auto_maintainer.domain.agents import PersonalDefault
+
+    a = _own("a", [])
+    b = _own("b", [])
+    router, _ = _router(a, b)
+    people = _People()
+    router.people = people  # type: ignore[assignment]
+    route = Route(primary="a", fallback=[])
+    a.default = b.default = {"ok": True}
+
+    people.chosen["maria"] = PersonalDefault(agent="b", own=False)
+    first = await router.run(_task(requested_by="maria"), route, Verdict)
+    assert first.runtime == "b" and b.tasks[-1].service_account, (
+        "the service's account of an agent she also runs on her own"
+    )
+    assert not await router._on_own_account(b, b.tasks[-1])
+
+    people.chosen["maria"] = PersonalDefault(agent="a", own=False)
+    again = await router.run(_task(requested_by="maria"), route, Verdict)
+    assert again.runtime == "a", "the service's agent, before her own"
+
+    people.chosen["maria"] = PersonalDefault(agent="b", own=True)
+    mine = await router.run(_task(requested_by="maria"), route, Verdict)
+    assert mine.runtime == "b" and not b.tasks[-1].service_account
+    assert await router._on_own_account(b, b.tasks[-1])
+
+    people.chosen.pop("maria")
+    plain = await router.run(_task(requested_by="maria"), route, Verdict)
+    assert plain.runtime == "b", "no choice: her own agents first, as before"

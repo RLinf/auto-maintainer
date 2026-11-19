@@ -146,6 +146,10 @@ class AgentTask(BaseModel):
     """Folders the agent may read but never change, such as the service's own code
     beside a conversation's checkout; a container mounts them read-only."""
     resume_session: str | None = None
+    service_account: bool = False
+    """Run on the service's account even where the requester turned their own on for
+    this agent: their default names the service's (``PersonalDefault``). The router
+    sets it per attempt."""
     fresh_prompt: str | None = None
     """For a task that resumes ``resume_session``: what the same agent runs afresh
     when its CLI cannot take that session up (another checkout or account, a session
@@ -392,6 +396,15 @@ class AgentLogin(BaseModel):
     """The CLI waits for the code the sign-in page shows, pasted back."""
     message: str = ""
     started_at: datetime
+
+
+class PersonalDefault(BaseModel):
+    """The agent the work a person asks for tries first when they pick none, on their
+    own account (``own``) or on the service's: chosen among both, it replaces "every
+    agent I run on my own accounts first"."""
+
+    agent: str
+    own: bool = False
 
 
 class PersonalAgent(BaseModel):

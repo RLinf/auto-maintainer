@@ -37,7 +37,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from ..domain.access import Grant
-from ..domain.agents import AgentLogin, PersonalAgent
+from ..domain.agents import AgentLogin, PersonalAgent, PersonalDefault
 from ..domain.ports import PersonalAgents
 from ..domain.settings import PROVIDER_PROTOCOLS, REASONING_LEVELS, protocol_for
 from ..service import Service
@@ -53,6 +53,13 @@ class SetupBody(BaseModel):
     """One of the user's own model APIs; none, the CLI's own sign-in."""
     model: str | None = Field(default=None, max_length=200)
     effort: str | None = None
+
+
+class DefaultBody(BaseModel):
+    agent: str | None = None
+    """``None`` clears the choice."""
+    own: bool = False
+    """On the user's own account of ``agent``, rather than the service's."""
 
 
 class CodeBody(BaseModel):
@@ -155,11 +162,40 @@ def build_router() -> APIRouter:
             for n in getattr(service.a.agents, "runtimes", None) or {}
             if service.agent_ready(n)
         )
+        people = service.a.people
+        chosen = await people.default(user.login) if people is not None else None
         return {
-            "personal": service.a.people is not None,
+            "personal": people is not None,
             "agents": [await _agent_row(service, user, n) for n in names],
             "providers": await _providers(service, user),
+            "default": chosen.model_dump(mode="json") if chosen else None,
+            "service_default": service.runs_on(service.info.routing.get("review")),
         }
+
+    @r.put("/me/agents-default")
+    async def set_my_default(
+        request: Request, body: DefaultBody, user: User = Depends(current_user)
+    ) -> dict[str, Any]:
+        """Choose the agent the work the user asks for tries first when they pick
+        none: one of the service's, or one they run on their own account; or none,
+        for their own agents first and then the service's default."""
+        service = service_of(request)
+        people = _people(service)
+        if body.agent is None:
+            await people.put_default(user.login, None)
+            return {"default": None}
+        _ready(service, body.agent)
+        if body.own:
+            setup = (await people.get(user.login)).get(body.agent)
+            if setup is None or not setup.use_own:
+                raise HTTPException(
+                    409,
+                    f"your requests do not run {body.agent} on your own account yet: "
+                    "choose your sign-in or model API for it first",
+                )
+        choice = PersonalDefault(agent=body.agent, own=body.own)
+        await people.put_default(user.login, choice)
+        return {"default": choice.model_dump(mode="json")}
 
     @r.put("/me/agents/{name}")
     async def set_my_agent(

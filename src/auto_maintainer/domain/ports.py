@@ -39,6 +39,7 @@ from .agents import (
     Capabilities,
     InstalledAgent,
     PersonalAgent,
+    PersonalDefault,
     QuestionState,
     RuntimeHealth,
 )
@@ -670,6 +671,12 @@ class PersonalAgents(Protocol):
     def home(self, login: str) -> Path: ...
     async def get(self, login: str) -> dict[str, PersonalAgent]: ...
     async def put(self, login: str, setup: PersonalAgent) -> None: ...
+    async def default(self, login: str) -> PersonalDefault | None:
+        """The agent the person's requests try first, when they chose one."""
+        ...
+
+    async def put_default(self, login: str, choice: PersonalDefault | None) -> None: ...
+
     async def providers(self, login: str) -> dict[str, Provider]: ...
     async def put_provider(
         self, login: str, provider_id: str, provider: Provider | None

@@ -1819,12 +1819,17 @@ class Service:
         self, route: Route | None, login: str | None, kind: str
     ) -> str | None:
         """The agent a task of ``kind`` that ``login`` asked for runs on now, when
-        nobody picked one: their own agent first (``AgentRouter.own_agents``), except
-        for a verification, else ``runs_on``."""
+        nobody picked one: their default, or else their own agent first
+        (``AgentRouter.firsts``), except for a verification, else ``runs_on``."""
         if login and kind not in KEEPS_OWN_PRIMARY:
-            own = await self.own_agents(login)
-            if own:
-                return own[0]
+            firsts = getattr(self.a.agents, "firsts", None)
+            first = (
+                (await firsts(login))[0]
+                if callable(firsts)
+                else await self.own_agents(login)
+            )
+            if first:
+                return first[0]
         return self.runs_on(route)
 
     def runs_on(self, route: Route | None) -> str | None:
