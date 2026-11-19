@@ -231,6 +231,10 @@ class Followup(Playbook):
         hints = ActionHints(
             author_is_team=team, recommendation=meaning, changed_paths=pr.paths
         )
+        # A follow-up someone asked for drafts for them under a key of its own, as a
+        # requested review does: under the commit's key alone it was taken for the
+        # follow-up a scan recorded at that commit, and dropped with its draft.
+        asked = f"req:{event.id}" if request is not None and request.manual else ""
         actions = [
             make_action(
                 ActionKind.REVIEW_POST,
@@ -249,6 +253,7 @@ class Followup(Playbook):
                 ),
                 number=pr.number,
                 head_sha=pr.head_sha,
+                discriminator=asked,
                 rationale=f"follow-up since {short_sha(previous_sha)}",
                 hints=hints,
                 draft_for=request.by if request else None,
@@ -282,7 +287,7 @@ class Followup(Playbook):
                     LabelPayload(remove_roles=["changes_requested"]),
                     number=pr.number,
                     head_sha=pr.head_sha,
-                    discriminator="followup",
+                    discriminator=f"{asked}:followup" if asked else "followup",
                     hints=hints,
                     draft_for=request.by if request else None,
                 )
@@ -295,7 +300,9 @@ class Followup(Playbook):
                     LabelPayload(labels=result.labels),
                     number=pr.number,
                     head_sha=pr.head_sha,
-                    discriminator="followup:labels",
+                    discriminator=f"{asked}:followup:labels"
+                    if asked
+                    else "followup:labels",
                     rationale=f"labels the follow-up suggests: {', '.join(result.labels)}",
                     hints=hints,
                     draft_for=request.by if request else None,

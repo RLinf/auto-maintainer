@@ -255,3 +255,50 @@ async def test_a_poll_keeps_fresher_details_without_announcing_a_change(
         assert stored.commits[0].committed_at == when
     finally:
         await h.close()
+
+
+async def test_a_requested_follow_up_drafts_beside_one_a_scan_recorded(
+    tmp_path: Path,
+) -> None:
+    """A follow-up someone asks for at a commit a scan already followed up (and
+    recorded in shadow) still drafts for them: on 2026-11-19 #1807's requested
+    follow-up shared the scan's key, its draft was dropped as a duplicate, and its
+    conversation never opened."""
+    from auto_maintainer.domain.actions import ReviewPostPayload, make_action
+    from auto_maintainer.domain.records import ActionRecord
+
+    h = await Harness.create(tmp_path, layer={"extends": ["dco"]})
+    try:
+        _answers(h)
+        h.forge.put_pr(_pr(42, "a" * 40))
+        await h.emit(_request(42))
+        [first] = await h.store.list_proposals(ProposalState.PENDING)
+        await h.service.pipeline.approve(first.id, "maria")
+        await h.settle()
+        pr = await h.forge.get_pr(REPO, 42)
+        h.forge.put_pr(pr.model_copy(update={"head_sha": "b" * 40}))
+        await h.store.add_action(
+            ActionRecord(
+                action=make_action(
+                    ActionKind.REVIEW_POST,
+                    REPO,
+                    ReviewPostPayload(body="### Follow-up", kind="followup"),
+                    number=42,
+                    head_sha="b" * 40,
+                ),
+                status=ActionStatus.SHADOWED,
+            )
+        )
+        await h.emit(_request(42))
+        drafts = [
+            await h.store.get_action(p.action_id)
+            for p in await h.store.list_proposals(ProposalState.PENDING)
+            if p.requested_by == "maria"
+        ]
+        assert [
+            r.action.payload.get("kind")
+            for r in drafts
+            if r is not None and r.action.kind == ActionKind.REVIEW_POST
+        ] == ["followup"]
+    finally:
+        await h.close()
