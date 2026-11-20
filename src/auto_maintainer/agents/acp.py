@@ -85,12 +85,18 @@ WAKEUP_SETTLE_SECONDS = 30.0
 """Seconds of silence after a background subagent wakes an ACP session before
 treating the follow-up message as complete."""
 
+WAKEUP_TIMEOUT_SECONDS = 300.0
+"""Seconds an ACP session waits in ``awaiting_wakeup`` without any wakeup message
+before asking the agent to continue instead of hanging until the task deadline."""
+
 _BACKGROUND_TOOL_CUES = (
     "invoke_subagent",
-    "subagent",
     "run_workflow",
     "swarm",
-    "schedule",
+)
+_BACKGROUND_TITLE_RE = re.compile(
+    r"^(?:run\s+)?(" + "|".join(_BACKGROUND_TOOL_CUES) + r")(?=$|[\s:(])",
+    re.IGNORECASE,
 )
 _WAIT_RE = re.compile(
     r"\b("
@@ -107,8 +113,8 @@ _WAIT_RE = re.compile(
     re.IGNORECASE,
 )
 _BG_CUE_RE = re.compile(
-    r"\b(subagent|sub-agent|background|reproduc\w*|workflow|swarm|timer|cron|"
-    r"conversation://|reply|report\s+back|finaliz\w*|completes?|finish(?:es)?)\b",
+    r"\b(subagent|sub-agent|background|reproduc\w*|workflow|swarm|"
+    r"conversation://|reply|report\s+back|finaliz\w*)\b",
     re.IGNORECASE,
 )
 
@@ -138,6 +144,12 @@ CONTINUE = (
 )
 """Some agents (Antigravity) end their turn when a request is refused, waiting for a
 person to say what to do instead; nobody will, so the conversation says it."""
+
+WAKEUP_CONTINUE = (
+    "No background wakeup arrived after you ended your turn. Check any subagent or "
+    "workflow you started, or continue without it, and finish with the result your "
+    "task asks for."
+)
 
 
 class AcpRuntime(ExecRuntime):
@@ -387,11 +399,13 @@ class AcpConversation(Conversation):
         files: RunFiles | None = None,
         *,
         wakeup_settle: float = WAKEUP_SETTLE_SECONDS,
+        wakeup_timeout: float = WAKEUP_TIMEOUT_SECONDS,
     ) -> None:
         self.runtime = runtime
         self.task = task
         self.files = files
         self.wakeup_settle = wakeup_settle
+        self.wakeup_timeout = wakeup_timeout
         self.asking: list[dict[str, Any]] = []
         """Questions the agent asked with its own tool during the current turn."""
         self.asks = 0
@@ -500,6 +514,7 @@ class AcpConversation(Conversation):
         if self.awaiting_wakeup:
             self.awaiting_wakeup = False
             self.wakeup_spoke = False
+            self.background_launched = 0
             return self._told_turn().send
         if self.cancelling or "session/prompt" not in self.pending.values():
             # Before the first turn the message goes with the task; between turns
@@ -517,19 +532,36 @@ class AcpConversation(Conversation):
         ]
 
     def idle_timeout(self) -> float | None:
-        if self.awaiting_wakeup and self.wakeup_spoke and not self.active_tools:
-            return self.wakeup_settle
-        return None
+        if not self.awaiting_wakeup or self.active_tools:
+            return None
+        return self.wakeup_settle if self.wakeup_spoke else self.wakeup_timeout
 
     def on_idle(self) -> Step:
-        if not (self.awaiting_wakeup and self.wakeup_spoke and not self.active_tools):
+        if not self.awaiting_wakeup or self.active_tools:
             return Step()
         self._flush()
-        if _waiting_on_background(self.last_message):
+        if not self.wakeup_spoke:
+            self.awaiting_wakeup = False
+            self.background_launched = 0
+            if self.continuations < MAX_CONTINUATIONS:
+                self.continuations += 1
+                return Step(
+                    events=[
+                        AgentEvent(
+                            type=AgentEventType.MESSAGE,
+                            text="[no background wakeup arrived; asking the agent to continue]",
+                        )
+                    ],
+                    send=[self._prompt(WAKEUP_CONTINUE)],
+                )
+            return Step(events=[partial(text=self.last_message)], done=True)
+        if self.background_launched > 0 and _waiting_on_background(self.last_message):
+            self.background_launched -= 1
             self.wakeup_spoke = False
             return Step()
         self.awaiting_wakeup = False
         self.wakeup_spoke = False
+        self.background_launched = 0
         return Step(events=[partial(text=self.last_message)], done=True)
 
     def on_eof(self) -> Step:
@@ -538,6 +570,7 @@ class AcpConversation(Conversation):
         self._flush()
         self.awaiting_wakeup = False
         self.wakeup_spoke = False
+        self.background_launched = 0
         return (
             Step(events=[partial(text=self.last_message)])
             if self.last_message
@@ -695,11 +728,13 @@ class AcpConversation(Conversation):
             if (
                 stop == "end_turn"
                 and self.background_launched > 0
+                and self.continuations < MAX_CONTINUATIONS
                 and _waiting_on_background(self.last_message)
             ):
                 # Some ACP agents (Antigravity) return end_turn when yielding to a
                 # background subagent, then stream the wakeup reply asynchronously
                 # via session/update notifications with no new session/prompt response.
+                self.background_launched -= 1
                 self.awaiting_wakeup = True
                 self.wakeup_spoke = False
                 self.active_tools.clear()
@@ -755,6 +790,7 @@ class AcpConversation(Conversation):
         self.refused = []
         self.spoke = False
         self.asking = []
+        self.background_launched = 0
         return self._request(
             "session/prompt",
             {"sessionId": self.session_id, "prompt": [{"type": "text", "text": text}]},
@@ -903,8 +939,25 @@ def _line(obj: dict[str, Any]) -> str:
 def _is_background_tool(update: dict[str, Any]) -> bool:
     """Whether ``tool_call`` launches a background subagent or workflow that can
     wake the session asynchronously after ``end_turn``."""
-    label = f"{update.get('name') or ''} {update.get('title') or ''}".lower()
-    return any(cue in label for cue in _BACKGROUND_TOOL_CUES)
+    kind = str(update.get("kind") or "").strip().lower()
+    if kind not in ("", "other"):
+        return False
+    raw_name = str(update.get("name") or "").strip().lower()
+    if raw_name:
+        tool = re.split(r"[:/.]|__", raw_name)[-1]
+        if tool not in _BACKGROUND_TOOL_CUES:
+            return False
+    else:
+        title = str(update.get("title") or "").strip()
+        match = _BACKGROUND_TITLE_RE.match(title)
+        if match is None:
+            return False
+        tool = match.group(1).lower()
+    if tool == "swarm":
+        args = update.get("args") or update.get("rawInput")
+        if isinstance(args, dict) and args.get("action") not in (None, "add"):
+            return False
+    return True
 
 
 def _waiting_on_background(text: str) -> bool:

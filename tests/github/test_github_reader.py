@@ -786,3 +786,45 @@ async def test_an_admin_merges_past_branch_protection_that_spares_admins(
     ).respond(404)
     info = await GitHubReader(client).get_repo("acme/widget")
     assert info.service_bypasses_rules is True
+
+
+@pytest.mark.parametrize(
+    ("protection_status", "bypass", "expected"),
+    [
+        (404, "never", False),
+        (404, "always", True),
+        (403, "never", None),
+    ],
+)
+async def test_ruleset_only_protected_branch_distinguishes_404_from_403_protection(
+    client, router, protection_status, bypass, expected
+):
+    """GitHub sets ``protected: true`` on ``/branches/{branch}`` when a ruleset
+    protects the branch even with no classic branch protection (``/protection``
+    returns 404 ``Branch not protected``); only 403 means classic protection is
+    unreadable."""
+    router.get("/repos/acme/widget").respond(
+        200, json={"default_branch": "main", "permissions": {"admin": True}}
+    )
+    router.get("/repos/acme/widget/branches/main").respond(
+        200, json={"commit": {"sha": "s"}, "protected": True}
+    )
+    router.get("/repos/acme/widget/branches/main/protection").respond(
+        protection_status,
+        json={"message": "Branch not protected"}
+        if protection_status == 404
+        else {"message": "Must have admin rights to Repository."},
+    )
+    router.get("/repos/acme/widget/rules/branches/main").respond(
+        200,
+        json=[{"type": "pull_request", "ruleset_id": 7, "parameters": {}}],
+    )
+    router.get("/repos/acme/widget/rulesets/7").respond(
+        200, json={"id": 7, "current_user_can_bypass": bypass}
+    )
+    router.get("/repos/acme/widget/labels").respond(200, json=[])
+    router.get(
+        "/repos/acme/widget/actions/permissions/fork-pr-contributor-approval"
+    ).respond(404)
+    info = await GitHubReader(client).get_repo("acme/widget")
+    assert info.service_bypasses_rules is expected
