@@ -76,7 +76,7 @@ from ...domain.snapshot import (
     StarPoint,
     ThreadComment,
 )
-from .client import GitHubClient, GitHubError, GraphQLError
+from .client import GitHubClient, GitHubError, GraphQLError, RateLimited
 
 PR_BATCH = 10
 LIGHT_PAGE = 50
@@ -574,12 +574,18 @@ class GitHubReader:
                 strict, approvals, owners_review = False, 0, False
                 last_push, stale, threads = False, False, False
         protection = None
+        protection_unreadable = False
         if branch_data.get("protected"):
-            protection = await self._client.get(
-                f"/repos/{repo}/branches/{quote(branch, safe='')}/protection",
-                repo=repo,
-                allow=(403, 404),
-            )
+            try:
+                protection = await self._client.get(
+                    f"/repos/{repo}/branches/{quote(branch, safe='')}/protection",
+                    repo=repo,
+                    allow_404=True,
+                )
+            except GitHubError as err:
+                if isinstance(err, RateLimited) or err.status != 403:
+                    raise
+                protection_unreadable = True
         if protection:
             checks = protection.get("required_status_checks") or {}
             required = (required or set()) | set(checks.get("contexts") or [])
@@ -631,7 +637,14 @@ class GitHubReader:
                     rule_methods = (
                         methods if rule_methods is None else rule_methods & methods
                     )
-        bypasses = await self._bypasses(repo, data, branch_data, protection, rules)
+        bypasses = await self._bypasses(
+            repo,
+            data,
+            branch_data,
+            protection,
+            rules,
+            protection_unreadable=protection_unreadable,
+        )
         approval = await self._client.get(
             f"/repos/{repo}/actions/permissions/fork-pr-contributor-approval",
             repo=repo,
@@ -668,16 +681,18 @@ class GitHubReader:
         branch_data: dict[str, Any],
         protection: dict[str, Any] | None,
         rules: Any,
+        *,
+        protection_unreadable: bool = False,
     ) -> bool | None:
         """``RepoInfo.service_bypasses_rules``: whether this account may merge past
         the default branch's branch protection or any ruleset on it."""
         found: list[bool | None] = []
         if branch_data.get("protected"):
-            if protection is None:
+            if protection_unreadable:
                 # Unreadable: only an admin reads it, but a non-admin may still be
                 # one it lets past its review rule.
                 found.append(None)
-            else:
+            elif protection is not None:
                 admin = bool((data.get("permissions") or {}).get("admin"))
                 enforced = bool((protection.get("enforce_admins") or {}).get("enabled"))
                 allowed = (protection.get("required_pull_request_reviews") or {}).get(

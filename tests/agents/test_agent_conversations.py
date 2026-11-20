@@ -1220,3 +1220,170 @@ for line in sys.stdin:
     assert "Confirmed 10 bugs and GPU reproduction." in result.text
     assert result.usage.input_tokens == 100
     assert any("waiting for background subagent" in e.text for e in events)
+
+
+async def test_acp_shell_tool_mentioning_schedule_does_not_await_wakeup(
+    tmp_path: Path, talking_cli
+) -> None:
+    """A shell or file ``tool_call`` whose title mentions ``schedule`` or ``subagent``
+    is not a background subagent launch, and ending a turn while waiting on a shell
+    command finishes the turn instead of hanging in ``awaiting_wakeup``."""
+    from auto_maintainer.agents.acp import _is_background_tool, _waiting_on_background
+
+    assert _is_background_tool({"title": "Run invoke_subagent", "kind": "other"})
+    assert _is_background_tool({"name": "run_workflow", "kind": "other"})
+    assert _is_background_tool(
+        {"name": "swarm", "args": {"action": "add"}, "kind": "other"}
+    )
+    assert not _is_background_tool(
+        {"name": "swarm", "args": {"action": "status"}, "kind": "other"}
+    )
+    assert not _is_background_tool(
+        {
+            "title": "Run uv run pytest -q tests/test_merge_schedule.py",
+            "kind": "execute",
+        }
+    )
+    assert not _is_background_tool(
+        {"title": "tests/test_merge_schedule.py", "kind": "other"}
+    )
+    assert not _is_background_tool(
+        {"name": "read_file", "title": "Read tests/test_subagent.py", "kind": "read"}
+    )
+    assert not _waiting_on_background(
+        "I am waiting for the formatting, lint, and test command to finish."
+    )
+
+    cli = talking_cli(
+        [
+            {
+                "wait": '"initialize"',
+                "emit": [{"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": 1}}],
+            },
+            {
+                "wait": '"session/new"',
+                "emit": [{"jsonrpc": "2.0", "id": 2, "result": {"sessionId": "s1"}}],
+            },
+            {
+                "wait": '"session/set_mode"',
+                "emit": [{"jsonrpc": "2.0", "id": 3, "result": {}}],
+            },
+            {
+                "wait": '"session/prompt"',
+                "emit": [
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "session/update",
+                        "params": {
+                            "sessionId": "s1",
+                            "update": {
+                                "sessionUpdate": "tool_call",
+                                "toolCallId": "tc1",
+                                "title": "Run uv run pytest -q tests/test_merge_schedule.py",
+                                "kind": "execute",
+                            },
+                        },
+                    },
+                    _chunk(
+                        "I am waiting for the formatting, lint, and test command to finish."
+                    ),
+                    {"jsonrpc": "2.0", "id": 4, "result": {"stopReason": "end_turn"}},
+                ],
+            },
+        ]
+    )
+    rt = AntigravityRuntime(binary=str(cli.path), runs_dir=tmp_path / "runs")
+    events, result = await _run(rt, _task(tmp_path, timeout_seconds=2))
+    assert result.ok, result.error
+    assert "waiting for the formatting" in result.text
+    assert not any("waiting for background subagent" in e.text for e in events)
+
+
+async def test_acp_awaiting_wakeup_times_out_and_prompts_when_no_wakeup_arrives(
+    tmp_path: Path, talking_cli
+) -> None:
+    """When ``awaiting_wakeup`` is entered with ``wakeup_spoke=False`` and the ACP
+    server never pushes an async wakeup notification, ``idle_timeout`` bounds the
+    wait and ``on_idle`` prompts the agent to continue instead of hanging until the
+    full task timeout."""
+    from auto_maintainer.agents.acp import MAX_CONTINUATIONS, AcpConversation
+    from auto_maintainer.agents.exec import RunFiles
+
+    cli = talking_cli(
+        [
+            {
+                "wait": '"initialize"',
+                "emit": [{"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": 1}}],
+            },
+            {
+                "wait": '"session/new"',
+                "emit": [{"jsonrpc": "2.0", "id": 2, "result": {"sessionId": "s1"}}],
+            },
+            {
+                "wait": '"session/set_mode"',
+                "emit": [{"jsonrpc": "2.0", "id": 3, "result": {}}],
+            },
+            {
+                "wait": '"session/prompt"',
+                "emit": [
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "session/update",
+                        "params": {
+                            "sessionId": "s1",
+                            "update": {
+                                "sessionUpdate": "tool_call",
+                                "toolCallId": "tc1",
+                                "title": "Run invoke_subagent",
+                                "kind": "other",
+                            },
+                        },
+                    },
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "session/update",
+                        "params": {
+                            "sessionId": "s1",
+                            "update": {
+                                "sessionUpdate": "tool_call_update",
+                                "toolCallId": "tc1",
+                                "status": "completed",
+                            },
+                        },
+                    },
+                    _chunk("Waiting for the research subagent to reply."),
+                    {"jsonrpc": "2.0", "id": 4, "result": {"stopReason": "end_turn"}},
+                ],
+            },
+            {
+                "wait": "No background wakeup arrived",
+                "emit": [
+                    _chunk('{"ok": true}'),
+                    {"jsonrpc": "2.0", "id": 5, "result": {"stopReason": "end_turn"}},
+                ],
+            },
+        ]
+    )
+
+    class _ShortWakeupAntigravity(AntigravityRuntime):
+        def conversation(self, task: AgentTask, files: RunFiles):
+            return AcpConversation(
+                self, task, files, wakeup_settle=0.1, wakeup_timeout=0.15
+            )
+
+    rt = _ShortWakeupAntigravity(binary=str(cli.path), runs_dir=tmp_path / "runs")
+    events, result = await _run(
+        rt, _task(tmp_path, output_schema=SCHEMA, timeout_seconds=5)
+    )
+    assert result.ok and result.structured == {"ok": True}, result.error
+    assert any("no background wakeup arrived" in e.text for e in events)
+
+    # Once continuations are exhausted, on_idle ends the session rather than looping.
+    conv = AcpConversation(rt, _task(tmp_path), wakeup_settle=0.1, wakeup_timeout=0.15)
+    conv.awaiting_wakeup = True
+    conv.wakeup_spoke = False
+    conv.continuations = MAX_CONTINUATIONS
+    conv.last_message = "partial report"
+    assert conv.idle_timeout() == 0.15
+    step = conv.on_idle()
+    assert step.done is True and not conv.awaiting_wakeup
