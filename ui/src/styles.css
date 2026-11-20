@@ -354,6 +354,11 @@ tr:hover .row-action, .row-action:focus-visible { opacity: 1; }
 .chart-col-fill > span { flex-basis: 0; min-height: 1px; background: var(--c); }
 .chart-col-fill > span:last-child { border-radius: 3px 3px 0 0; }
 .chart-col:hover .chart-col-fill, .chart-col:focus-visible .chart-col-fill { filter: brightness(1.12); }
+.pr-curve { position: relative; width: 100%; }
+.pr-curve-svg { display: block; width: 100%; height: auto; max-height: 220px; overflow: visible; }
+.pr-curve-grid { stroke: var(--border); stroke-width: 1; }
+.pr-curve-cross { stroke: var(--border-strong); stroke-width: 1; stroke-dasharray: 3 3; pointer-events: none; }
+.pr-curve-axis { fill: var(--text-3); font-size: 11px; font-family: var(--mono); }
 .usage-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; }
 .usage-stat { display: grid; gap: 2px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-2); }
 .usage-stat strong { font-size: 20px; font-weight: 600; }

@@ -670,6 +670,68 @@ def test_commit_statuses_count_as_checks():
     assert [c.id for c in again.checks] == [c.id for c in pr.checks], "stable ids"
 
 
+def test_light_fingerprint_tracks_individual_status_contexts():
+    """When one Read the Docs context finishes (switching from build page to preview)
+    while a sibling context stays PENDING, the combined status.state is unchanged;
+    per-context states still change the light fingerprint so the snapshot refreshes."""
+    from auto_maintainer.forges.github.reader import _light_fingerprint
+
+    base = {
+        "updatedAt": "2026-11-20T00:00:00Z",
+        "headRefOid": "a" * 40,
+        "reviewDecision": None,
+        "reviewThreads": {"totalCount": 0, "nodes": []},
+        "commits": {
+            "nodes": [
+                {
+                    "commit": {
+                        "status": {
+                            "state": "PENDING",
+                            "contexts": [
+                                {
+                                    "context": "docs/readthedocs.org:en",
+                                    "state": "PENDING",
+                                },
+                                {
+                                    "context": "docs/readthedocs.org:cn",
+                                    "state": "PENDING",
+                                },
+                            ],
+                        },
+                        "checkSuites": {"totalCount": 0, "nodes": []},
+                    }
+                }
+            ]
+        },
+    }
+    finished_en = {
+        **base,
+        "commits": {
+            "nodes": [
+                {
+                    "commit": {
+                        "status": {
+                            "state": "PENDING",
+                            "contexts": [
+                                {
+                                    "context": "docs/readthedocs.org:en",
+                                    "state": "SUCCESS",
+                                },
+                                {
+                                    "context": "docs/readthedocs.org:cn",
+                                    "state": "PENDING",
+                                },
+                            ],
+                        },
+                        "checkSuites": {"totalCount": 0, "nodes": []},
+                    }
+                }
+            ]
+        },
+    }
+    assert _light_fingerprint(base) != _light_fingerprint(finished_en)
+
+
 @pytest.mark.parametrize(
     ("bypass", "expected"),
     [("never", False), ("always", True), ("pull_requests_only", True), (None, None)],

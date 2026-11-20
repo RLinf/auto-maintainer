@@ -201,6 +201,8 @@ interface MergeView {
   ci_now: CiNow[];
   enabled: boolean;
   can_arrange: boolean;
+  can_configure: boolean;
+  github_permission?: string;
   signed_in: boolean;
   mode: "serial" | "parallel";
   parallel: number;
@@ -348,6 +350,7 @@ export default function MergePage() {
       ) : (
         <div className="stack" style={{ gap: 18 }}>
           <ScopeBanner v={v} />
+          <GithubPermBanner v={v} />
           <Controls v={v} />
           <ScheduleSection v={v} />
           {v.ci_now.length > 0 && <CiNowSection v={v} />}
@@ -388,6 +391,33 @@ function useSaveSettings(repo: string) {
     });
 }
 
+const PERM_RANK: Record<string, number> = {
+  none: 0,
+  read: 1,
+  triage: 2,
+  write: 3,
+  maintain: 4,
+  admin: 5,
+};
+
+function GithubPermBanner({ v }: { v: MergeView }) {
+  const t = useT();
+  const who = v.merging.arming_who;
+  const perm = v.github_permission;
+  if (!v.can_arrange || !perm || !who || who === "codeowners") return null;
+  if ((PERM_RANK[perm] ?? 0) >= (PERM_RANK[who] ?? 0)) return null;
+  return (
+    <div className="card row small" style={{ gap: 8, borderColor: "var(--warn)", color: "var(--warn)" }}>
+      <Icon name="alert" size={14} />
+      <span>
+        {t("You have merge-schedule permission on the service, but your GitHub permission on")} <span className="mono">{v.repo}</span>{" "}
+        {t("is")} <strong className="mono">{perm}</strong> — {t("scheduling merges here requires GitHub")}{" "}
+        <strong className="mono">{who}</strong> {t("access")}.
+      </span>
+    </div>
+  );
+}
+
 function TurnOn({ v }: { v: MergeView }) {
   const t = useT();
   const save = useSaveSettings(v.repo);
@@ -400,7 +430,7 @@ function TurnOn({ v }: { v: MergeView }) {
         <div>
           <button className="primary" onClick={() => save({ enabled: true })}>
             <Icon name="merge" size={14} />
-            {v.can_arrange ? t("Turn on merge scheduling") : t("Propose turning it on")}
+            {v.can_configure ? t("Turn on merge scheduling") : t("Propose turning it on")}
           </button>
         </div>
       </div>
@@ -426,7 +456,7 @@ function Controls({ v }: { v: MergeView }) {
               className="merge-number"
               value={parallel}
               inputMode="numeric"
-              disabled={!v.can_arrange}
+              disabled={!v.can_configure}
               aria-label={t("How many run their CI at once")}
               onChange={(e) => setParallel(e.target.value.replace(/\D/g, ""))}
               onBlur={() => {
@@ -440,7 +470,7 @@ function Controls({ v }: { v: MergeView }) {
         )}
       </div>
       <label className="merge-control merge-auto">
-        <input type="checkbox" checked={v.auto} disabled={!v.can_arrange} onChange={(e) => save({ auto: e.target.checked })} />
+        <input type="checkbox" checked={v.auto} disabled={!v.can_configure} onChange={(e) => save({ auto: e.target.checked })} />
         <span className="stack" style={{ gap: 2 }}>
           <strong className="small">{t("Schedule ready PRs automatically")}</strong>
           <span className="small muted">
@@ -1033,12 +1063,12 @@ function RulesCard({ v }: { v: MergeView }) {
             </button>
           </span>
         )}
-        {v.can_arrange && <DescribeBox v={v} />}
+        {v.can_configure && <DescribeBox v={v} />}
         <div className="stack" style={{ gap: 6 }}>
           <div className="row" style={{ gap: 8 }}>
             <strong className="small">{t("Schedulable when")}</strong>
             {!r.ready_set && <span className="small muted">({t("every condition of the merge rules")})</span>}
-            {v.can_arrange && !editing && (
+            {v.can_configure && !editing && (
               <button className="sm ghost right" onClick={() => setEditing(true)}>
                 {t("Edit")}
               </button>
@@ -1080,7 +1110,7 @@ function RulesCard({ v }: { v: MergeView }) {
         <div className="stack" style={{ gap: 6 }}>
           <div className="row" style={{ gap: 8 }}>
             <strong className="small">{t("Merges after its CI when")}</strong>
-            {v.can_arrange && !editingLabels && (
+            {v.can_configure && !editingLabels && (
               <button className="sm ghost right" onClick={() => setEditingLabels(true)}>
                 {t("Edit")}
               </button>
@@ -1171,7 +1201,7 @@ function CiStartCard({ v }: { v: MergeView }) {
       title={t("How CI starts")}
       hint={t("What the scheduler acts on")}
       aside={
-        v.can_arrange &&
+        v.can_configure &&
         !editing && (
           <div className="row" style={{ gap: 6 }}>
             <button
@@ -1500,7 +1530,7 @@ function DraftRules({ v, draft }: { v: MergeView; draft: Draft }) {
             {t("Left out, as the repository does not have them")}: {draft.dropped.join("; ")}
           </span>
         )}
-        {v.can_arrange && (
+        {v.can_configure && (
           <div className="row" style={{ gap: 8 }}>
             <button className="sm ghost" disabled={discard.isPending} onClick={() => discard.mutate(undefined)}>
               {t("Discard")}
@@ -1589,7 +1619,7 @@ function MergingCard({ v }: { v: MergeView }) {
       title={t("How it merges")}
       hint={t("How a scheduled PR merges once its CI passed")}
       aside={
-        v.can_arrange &&
+        v.can_configure &&
         !editing && (
           <button className="sm ghost" onClick={() => (reset(), setEditing(true))}>
             {t("Edit")}
@@ -1766,7 +1796,7 @@ function MergingCard({ v }: { v: MergeView }) {
             {t("A cancelled job counts as a failure")}: <strong>{yes(m.cancelled_is_failure)}</strong>
           </li>
           <li className="small">
-            {t("Who may schedule")}: <strong>{t(WHO[m.arming_who] ?? m.arming_who)}</strong> <span className="muted">({t("among the repository's maintainers")})</span>
+            {t("Who may schedule")}: <strong>{t(WHO[m.arming_who] ?? m.arming_who)}</strong> <span className="muted">({t("among people with merge-schedule permission")})</span>
           </li>
           <li className="small">
             {t("Merge freezes")}:{" "}
@@ -1802,7 +1832,7 @@ function LintFixCard({ v }: { v: MergeView }) {
       title={t("Lint failures")}
       hint={t("Whether the schedule fixes what linters, formatters, and type checkers report")}
       aside={
-        v.can_arrange &&
+        v.can_configure &&
         !editing && (
           <button
             className="sm ghost"
@@ -1890,7 +1920,7 @@ function ConflictsCard({ v }: { v: MergeView }) {
       title={t("Conflicts with the base")}
       hint={t("Which conflicts the schedule resolves by itself on a PR's turn")}
       aside={
-        v.can_arrange &&
+        v.can_configure &&
         !editing && (
           <button className="sm ghost" onClick={start}>
             {t("Edit")}
@@ -2017,7 +2047,7 @@ function FlakyCard({ v }: { v: MergeView }) {
       title={t("Flaky tests and reruns")}
       hint={t("How a failed job of a scheduled PR, or one someone asks about, is judged and run again")}
       aside={
-        v.can_arrange &&
+        v.can_configure &&
         !editing && (
           <button className="sm ghost" onClick={() => setEditing(true)}>
             {t("Edit")}
@@ -2082,7 +2112,7 @@ function FlakyCard({ v }: { v: MergeView }) {
         <div className="row" style={{ gap: 8 }}>
           <strong className="small">{t("Flake patterns")}</strong>
           <span className="small muted">({f.patterns.length})</span>
-          {v.can_arrange && !adding && (
+          {v.can_configure && !adding && (
             <button className="sm ghost right" onClick={() => setAdding(true)}>
               <Icon name="plus" size={13} />
               {t("Add")}
@@ -2181,7 +2211,7 @@ function FlakyCard({ v }: { v: MergeView }) {
                   </code>
                   {p.description && <span className="small muted">{p.description}</span>}
                 </div>
-                {v.can_arrange && p.own && (
+                {v.can_configure && p.own && (
                   <button className="sm ghost" disabled={patterns.isPending} onClick={() => patterns.mutate(own.filter((x) => x.id !== p.id), { onSuccess: done })}>
                     {t("Remove")}
                   </button>

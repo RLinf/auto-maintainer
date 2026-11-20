@@ -43,7 +43,7 @@ import { CodeOwnersCard } from "../codeOwners";
 import { ReviewProgressPanel } from "../progress";
 import { ACTIVE, PrWork, usePrWork } from "../jobs";
 import { openJob } from "../openJob";
-import { activePrActionPanel, describeRunCi, docsCheckUrl, prMenuItems, type PrActionPanel } from "../prActions";
+import { activePrActionPanel, describeRunCi, docsCheckLink, prMenuItems, type PrActionPanel } from "../prActions";
 import { MenuItem, Popover, Skeleton, Tabs, useTab, useToast } from "../ui";
 import { TranslateReview } from "../translate";
 import { forgeOf } from "../forges";
@@ -116,8 +116,8 @@ export default function PrPage({ me }: { me: Me }) {
       : lang === "zh"
         ? `在 ${forgeName} 打开`
         : `Open on ${forgeName}`;
-  // The PR's compiled docs: the docs build's check, when one reported a link.
-  const docsHref = docsCheckUrl(pr.checks);
+  // The PR's compiled docs (preferring a built preview over a build status/log page).
+  const docsLink = docsCheckLink(pr.checks, lang);
   const mutationError = review.error || arm.error || disarm.error;
   // Reviewed before: the button follows up on what changed; its menu also offers a
   // full review of the whole PR again.
@@ -296,10 +296,32 @@ export default function PrPage({ me }: { me: Me }) {
               <Icon name="external" size={14} />
               <span className="hide-narrow">{openOnForge}</span>
             </a>
-            {docsHref && (
-              <a className="button" href={docsHref} target="_blank" rel="noreferrer" title={t("Open the docs built for this PR")}>
+            {docsLink && (
+              <a
+                className={`button${docsLink.kind === "build" && docsLink.state === "failed" ? " ghost" : ""}`}
+                href={docsLink.url}
+                target="_blank"
+                rel="noreferrer"
+                title={
+                  docsLink.kind === "preview"
+                    ? t("Open the docs built for this PR")
+                    : docsLink.state === "running"
+                      ? t("Docs are still building — open the build page")
+                      : docsLink.state === "failed"
+                        ? t("Docs build failed — open the build log")
+                        : t("Open the docs build page")
+                }
+              >
                 <Icon name="book" size={14} />
-                <span>{t("Docs")}</span>
+                <span>
+                  {docsLink.kind === "preview"
+                    ? t("Docs")
+                    : docsLink.state === "running"
+                      ? t("Docs (building)")
+                      : docsLink.state === "failed"
+                        ? t("Docs build failed")
+                        : t("Docs build")}
+                </span>
               </a>
             )}
             <PrActionsButton

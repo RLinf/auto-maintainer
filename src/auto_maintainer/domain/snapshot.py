@@ -351,6 +351,17 @@ class MergedPrSummary(_Model):
     review_count: int = 0
 
 
+class PrTimelineEntry(_Model):
+    """Timestamps of one pull request's lifecycle, for repository activity charts."""
+
+    number: int
+    state: PrState = PrState.OPEN
+    created_at: datetime | None = None
+    merged_at: datetime | None = None
+    closed_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
 class RunnerInfo(_Model):
     name: str
     status: str

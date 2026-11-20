@@ -190,9 +190,13 @@ export function PeopleTab({ repo }: { repo: string }) {
           repo={repo}
           member={open}
           gov={gov}
+          roles={roles}
           name={name}
           permission={d.permissions[open.login.toLowerCase()]}
           checks={viewingDraft ? [] : d.checks.filter((c) => c.login?.toLowerCase() === open.login.toLowerCase())}
+          canConfigure={d.can_configure}
+          hasProfile={d.has_profile}
+          onDraft={!!draft}
           onClose={() => setPerson(null)}
           onAsk={() => ask(`@${open.login}: `)}
         />
@@ -582,27 +586,66 @@ function PersonPanel({
   repo,
   member,
   gov,
+  roles,
   name,
   permission,
   checks,
+  canConfigure,
+  hasProfile,
+  onDraft,
   onClose,
   onAsk,
 }: {
   repo: string;
   member: Member;
   gov: Governance;
+  roles: Role[];
   name: Named;
   permission: string | undefined;
   checks: PeopleResponse["checks"];
+  canConfigure: boolean;
+  hasProfile: boolean;
+  onDraft: boolean;
   onClose: () => void;
   onAsk: () => void;
 }) {
   const t = useT();
+  const toast = useToast();
+  const [roleId, setRoleId] = useState(member.role);
+  const [areasText, setAreasText] = useState((member.areas ?? []).join(", "));
+  const [reason, setReason] = useState("");
+  const [confirmRemove, setConfirmRemove] = useState(false);
+  useEffect(() => {
+    setRoleId(member.role);
+    setAreasText((member.areas ?? []).join(", "));
+    setReason("");
+    setConfirmRemove(false);
+  }, [member.login, member.role, (member.areas ?? []).join(",")]);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
+  const update = useAct(
+    (body: { role: string; areas: string[]; reason: string }) =>
+      api.patch<{ applied: boolean; on_draft: boolean }>(`/api/repos/${repo}/governance/members/${encodeURIComponent(member.login)}`, body),
+    [["people", repo], ["memory"], ["access"]],
+  );
+  const remove = useAct(
+    (why: string) =>
+      api.del<{ applied: boolean; on_draft: boolean }>(
+        `/api/repos/${repo}/governance/members/${encodeURIComponent(member.login)}${why ? `?reason=${encodeURIComponent(why)}` : ""}`,
+      ),
+    [["people", repo], ["memory"], ["access"]],
+  );
+  const selectedRole = roles.find((r) => r.id === roleId);
+  const parsedAreas = areasText
+    .split(",")
+    .map((a) => a.trim())
+    .filter(Boolean);
+  const roleDirty =
+    roleId !== member.role ||
+    (selectedRole?.scoped ? parsedAreas.join(",") !== (member.areas ?? []).join(",") : (member.areas ?? []).length > 0);
   const role = (gov.roles ?? []).find((r) => r.id === member.role);
   const history = (gov.history ?? []).filter((c) => c.login.toLowerCase() === member.login.toLowerCase()).reverse();
   return (
@@ -629,6 +672,100 @@ function PersonPanel({
         </button>
       </div>
       <div className="agent-body stack" style={{ gap: 14 }}>
+        {hasProfile && roles.length > 0 && (
+          <div className="stack" style={{ gap: 6 }}>
+            <span className="kind-chip">{t("Change role")}</span>
+            <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+              <select value={roleId} onChange={(e) => setRoleId(e.target.value)} aria-label={t("Role")}>
+                {roles.map((r) => (
+                  <option key={r.id} value={r.id}>
+                    {r.name}
+                    {r.maintains ? ` · ${t("maintains")}` : ""}
+                  </option>
+                ))}
+              </select>
+              {selectedRole?.scoped && (
+                <input
+                  style={{ flex: "1 1 180px" }}
+                  value={areasText}
+                  placeholder={t("Areas, comma-separated paths")}
+                  aria-label={t("Areas")}
+                  onChange={(e) => setAreasText(e.target.value)}
+                />
+              )}
+            </div>
+            <input
+              value={reason}
+              placeholder={t("Reason for history (optional)")}
+              aria-label={t("Reason")}
+              onChange={(e) => setReason(e.target.value)}
+            />
+            <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+              <button
+                className="sm primary"
+                disabled={!roleDirty || update.isPending}
+                onClick={() =>
+                  update.mutate(
+                    { role: roleId, areas: selectedRole?.scoped ? parsedAreas : [], reason },
+                    {
+                      onSuccess: (out) => {
+                        setReason("");
+                        toast({
+                          title: out.applied ? t("Role updated") : t("Waiting for a maintainer"),
+                          body: out.applied
+                            ? undefined
+                            : out.on_draft
+                              ? t("Added to the draft that waits for a maintainer to apply it.")
+                              : t("A maintainer applies it on this tab or the Memory page."),
+                          icon: out.applied ? "check" : "inbox",
+                        });
+                      },
+                      onError: (e) => toast({ title: t("Not saved"), body: String((e as Error).message), icon: "x" }),
+                    },
+                  )
+                }
+              >
+                {canConfigure && !onDraft ? t("Save role") : t("Propose role change")}
+              </button>
+              {!confirmRemove ? (
+                <button className="sm ghost right" disabled={remove.isPending} onClick={() => setConfirmRemove(true)}>
+                  {t("Remove")}
+                </button>
+              ) : (
+                <span className="row right" style={{ gap: 6 }}>
+                  <button className="sm ghost" onClick={() => setConfirmRemove(false)}>
+                    {t("Cancel")}
+                  </button>
+                  <button
+                    className="sm bad"
+                    disabled={remove.isPending}
+                    onClick={() =>
+                      remove.mutate(reason, {
+                        onSuccess: (out) => {
+                          toast({
+                            title: out.applied ? t("Removed from record") : t("Waiting for a maintainer"),
+                            icon: out.applied ? "check" : "inbox",
+                          });
+                          onClose();
+                        },
+                        onError: (e) => toast({ title: t("Not removed"), body: String((e as Error).message), icon: "x" }),
+                      })
+                    }
+                  >
+                    {canConfigure && !onDraft ? t("Confirm remove") : t("Propose removal")}
+                  </button>
+                </span>
+              )}
+            </div>
+            <span className="small muted">
+              {onDraft
+                ? t("Changes build on the waiting draft.")
+                : canConfigure
+                  ? t("You are a maintainer: saved at once and recorded in history.")
+                  : t("A maintainer of the repository approves role changes.")}
+            </span>
+          </div>
+        )}
         {member.score != null && (
           <div className="row" style={{ gap: 8, alignItems: "baseline" }}>
             <span className="score-big">{formatScore(member.score)}</span>
@@ -716,8 +853,8 @@ function PersonPanel({
       </div>
       <div className="agent-foot">
         <div className="row">
-          <span className="small muted">{t("Changes go through the agent and a maintainer's approval.")}</span>
-          <button className="primary right" onClick={onAsk}>
+          <span className="small muted">{t("Or ask the agent to audit eligibility and draft changes.")}</span>
+          <button className="ghost right" onClick={onAsk}>
             <Icon name="message" size={14} />
             {t("Ask the agent about")} @{member.login}
           </button>

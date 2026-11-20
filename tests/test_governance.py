@@ -537,3 +537,78 @@ async def test_a_maintainer_adds_people_at_once_and_a_reviewer_proposes_them(
         ("walt", "reviewer", "walt"),
     }, "every addition is recorded"
     assert not page["pending"]
+
+
+async def test_a_maintainer_changes_and_removes_members_directly_and_a_reviewer_proposes(
+    demo,
+) -> None:
+    h, app = demo
+    base = f"/api/repos/{REPO}/governance/members"
+    async with _as(app, "maria") as maria:
+        added = await maria.post(
+            base,
+            json={
+                "people": [
+                    {"login": "maria", "role": "owner"},
+                    {"login": "bob", "role": "reviewer"},
+                    {"login": "walt", "role": "reviewer"},
+                ]
+            },
+        )
+        assert added.status_code == 200 and added.json()["applied"] is True
+
+        # Maintainer promotes bob directly: applied at once and recorded in history.
+        promoted = await maria.patch(
+            f"{base}/bob",
+            json={"role": "maintainer", "reason": "promoted after Q4 reviews"},
+        )
+        assert promoted.status_code == 200, promoted.text
+        assert promoted.json()["applied"] is True
+        assert promoted.json()["role"] == "maintainer"
+        assert "bob" in await h.service.governance.maintainers_of(REPO)
+
+        page = (await maria.get(f"/api/repos/{REPO}/governance")).json()
+        bob_entry = next(
+            m for m in page["governance"]["members"] if m["login"] == "bob"
+        )
+        assert bob_entry["role"] == "maintainer"
+        assert any(
+            c.get("login") == "bob"
+            and c.get("from_role") == "reviewer"
+            and c.get("to_role") == "maintainer"
+            and c.get("by") == "maria"
+            and c.get("reason") == "promoted after Q4 reviews"
+            for c in page["governance"]["history"]
+        )
+
+    # A non-maintainer's direct role change becomes a pending draft for maintainers.
+    async with _as(app, "walt") as walt:
+        proposed = await walt.patch(
+            f"{base}/walt", json={"role": "maintainer", "reason": "nominating myself"}
+        )
+        assert proposed.status_code == 200 and proposed.json()["applied"] is False
+        assert "walt" not in await h.service.governance.maintainers_of(REPO)
+
+    # Maintainer rejects walt's draft, then removes bob directly.
+    async with _as(app, "maria") as maria:
+        pending = (await maria.get(f"/api/repos/{REPO}/governance")).json()["pending"]
+        assert len(pending) == 1
+        rejected = await maria.post(
+            f"/api/memory/changes/{pending[0]['id']}/reject",
+            json={"reason": "not ready yet"},
+        )
+        assert rejected.status_code == 200, rejected.text
+
+        removed = await maria.delete(f"{base}/bob?reason=stepped+down")
+        assert removed.status_code == 200, removed.text
+        assert removed.json()["applied"] is True
+        assert "bob" not in await h.service.governance.maintainers_of(REPO)
+        page = (await maria.get(f"/api/repos/{REPO}/governance")).json()
+        assert all(m["login"] != "bob" for m in page["governance"]["members"])
+        assert any(
+            c.get("login") == "bob"
+            and c.get("from_role") == "maintainer"
+            and c.get("to_role") is None
+            and c.get("reason") == "stepped down"
+            for c in page["governance"]["history"]
+        )

@@ -100,6 +100,7 @@ from ..domain.merge_schedule import (
     state_key,
 )
 from ..domain.permissions import Permission
+from ..domain.pr_activity import build_pr_activity
 from ..domain.profile import Conditions, RepoProfile, Review
 from ..domain.records import (
     ActionRecord,
@@ -119,7 +120,13 @@ from ..domain.review_progress import checks_key, load_checks, review_progress
 from ..domain.run_ci import ci_view, latest_checks, plan_run_ci
 from ..domain.scoring import Evaluation, priority_key, recompute
 from ..domain.secrets import redact_secrets
-from ..domain.snapshot import Mergeable, PrSnapshot, PrState, ReviewEventState
+from ..domain.snapshot import (
+    Mergeable,
+    PrSnapshot,
+    PrState,
+    PrTimelineEntry,
+    ReviewEventState,
+)
 from ..playbooks.base import author_is_team
 from ..playbooks.ci_doctor import failing_checks
 from ..playbooks.evaluate import haystack, rubric_of
@@ -1117,16 +1124,18 @@ CONNECTION_FIELDS = frozenset(
 
 async def sees_internals(service: Service, user: User) -> bool:
     """Whether ``user`` sees how the service is reached and run: the raw settings
-    file, the test machines' connections, the model APIs' addresses. Its owner and
-    operators, and the maintainers of its repositories do (kept for views like
-    ``shows_owner`` and ``shows_maintainer``); other members see what they need to
-    use it, such as each machine's name, description, and what it is for."""
+    file, the test machines' connections, the model APIs' addresses. Its owner,
+    service admins, operators, and anyone holding ``Grant.SEE_INTERNALS`` in a
+    repository do; other members see what they need to use it, such as each
+    machine's name, description, and what it is for."""
     if user.login.lower() in {o.lower() for o in service.settings.operators}:
         return True
     if (await shows_owner(service, user.login)).allowed:
         return True
+    if service.access.is_admin(user.login):
+        return True
     for repo in await visible_repos(service, user):
-        if await shows_maintainer(service, user, repo):
+        if (await access_of(service, user, repo)).can(Grant.SEE_INTERNALS):
             return True
     return False
 
@@ -1322,9 +1331,10 @@ async def may_decide(
     *,
     maintainer: bool | None = None,
 ) -> bool:
-    """Whether ``user`` approves, edits, or rejects ``proposal`` (design 2.3): its
-    repository's maintainers decide every proposal, and a reviewer decides the ones
-    they asked for; changes to ``code_repo`` need the service's owner."""
+    """Whether ``user`` approves, edits, or rejects ``proposal`` (design 2.7):
+    anyone holding ``Grant.DECIDE_OTHERS`` in its repository decides every proposal,
+    and a reviewer decides the ones they asked for; changes to ``code_repo`` need
+    the service's owner."""
     if record is not None and record.action.kind == ActionKind.CODE_UPDATE:
         allowed, _ = await code_maintainer(service, user)
         return allowed
@@ -1332,7 +1342,9 @@ async def may_decide(
     if requester and requester.lower() == user.login.lower():
         return True
     if maintainer is None:
-        maintainer = await is_maintainer(service, user, proposal.repo)
+        maintainer = (await access_of(service, user, proposal.repo)).can(
+            Grant.DECIDE_OTHERS
+        )
     return maintainer
 
 
@@ -1398,15 +1410,15 @@ async def require_decide(service: Service, user: User, proposal: Proposal) -> No
 
 async def may_answer(service: Service, user: User, question: AgentQuestion) -> bool:
     """Who answers an agent's question: the person who asked for its work, if they
-    may see the repository, or one of its maintainers; operators answer for work
-    outside a repository."""
+    may see the repository, or anyone holding ``Grant.DECIDE_OTHERS`` there;
+    operators answer for work outside a repository."""
     if question.repo is None:
         return user.login in service.settings.operators
     if not await may_view(service, user, question.repo):
         return False
     if question.asked_for and question.asked_for.lower() == user.login.lower():
         return True
-    return await is_maintainer(service, user, question.repo)
+    return (await access_of(service, user, question.repo)).can(Grant.DECIDE_OTHERS)
 
 
 def addressed_to(question: AgentQuestion, login: str) -> bool:
@@ -1679,6 +1691,54 @@ def build_router() -> APIRouter:
             "can_configure": can.allowed,
             "gate": can.model_dump(mode="json"),
         }
+
+    @r.get("/repos/{repo:path}/pr-activity")
+    async def repo_pr_activity(
+        request: Request,
+        repo: str,
+        days: int = Query(default=30, ge=7, le=90),
+        user: User = Depends(current_user),
+    ) -> dict[str, Any]:
+        """Daily PR opened, merged, and open-backlog counts for ``repo`` over the
+        last ``days`` UTC days (cached 10 minutes per repository)."""
+        service = service_of(request)
+        repo = _repo(repo)
+        await require_view(service, user, repo)
+        now = service.clock.now()
+        since = now - timedelta(days=90)
+
+        async def read_timeline() -> list[PrTimelineEntry]:
+            try:
+                return await service.a.forge.list_pr_timeline(repo, since)
+            except Exception:
+                return []
+
+        forge_entries = await service.view_cached(
+            ("pr_activity", repo), read_timeline, seconds=600
+        )
+        snaps = await service.store.list_snapshots(repo)
+        local_entries = [
+            PrTimelineEntry(
+                number=p.number,
+                state=p.state,
+                created_at=p.created_at,
+                merged_at=p.updated_at if p.state == PrState.MERGED else None,
+                closed_at=p.updated_at if p.state == PrState.CLOSED else None,
+                updated_at=p.updated_at,
+            )
+            for p in snaps
+        ]
+        # Forge entries win over local snapshots (they carry exact mergedAt/closedAt).
+        combined = [*local_entries, *forge_entries]
+        open_now = (
+            sum(1 for p in snaps if p.state == PrState.OPEN)
+            if snaps
+            else sum(1 for e in forge_entries if e.state == PrState.OPEN)
+        )
+        series = build_pr_activity(
+            repo, combined, now=now, days=days, current_open=open_now
+        )
+        return series.model_dump(mode="json")
 
     @r.post("/repos/{repo:path}/profile/approve")
     async def approve_profile(
@@ -2492,7 +2552,7 @@ def build_router() -> APIRouter:
                 for r in progress.reviewers
             ],
             "can_resolve": holds(assignees, user.login, "owner")
-            or await shows_maintainer(service, user, repo),
+            or (await access_of(service, user, repo)).can(Grant.PR_ASSIGN),
             "signed_in": await service.can_post_as(user.login),
             "comment_checks": profile.review.comments.check if profile else None,
             "required_approvals": info.required_approvals if on_default else None,
@@ -2556,7 +2616,7 @@ def build_router() -> APIRouter:
         opener = thread.comments[0].author if thread.comments else ""
         if not (
             opener.lower() == user.login.lower()
-            or await is_maintainer(service, user, repo)
+            or (await access_of(service, user, repo)).can(Grant.PR_ASSIGN)
             or holds(
                 await service.store.list_assignees(repo, pr.number),
                 user.login,
@@ -3277,7 +3337,7 @@ def build_router() -> APIRouter:
         pr = await service.store.get_snapshot(repo, number)
         if pr is None:
             raise HTTPException(404, f"{repo}#{number} is not known yet")
-        if not await is_maintainer(service, user, repo) and not (
+        if not (await access_of(service, user, repo)).can(Grant.PR_ASSIGN) and not (
             body.role == "reviewer"
             and holds(
                 await service.store.list_assignees(repo, number), user.login, "owner"
@@ -3380,7 +3440,7 @@ def build_router() -> APIRouter:
         await require_view(service, user, repo)
         if (
             login.lower() != user.login.lower()
-            and not await is_maintainer(service, user, repo)
+            and not (await access_of(service, user, repo)).can(Grant.PR_ASSIGN)
             and not (
                 role == "reviewer"
                 and holds(
@@ -3608,7 +3668,7 @@ def build_router() -> APIRouter:
                 seen.add(a.login.lower())
                 people.append({"login": a.login, "role": None, "areas": []})
         return {
-            "can_assign": await shows_maintainer(service, user, repo),
+            "can_assign": (await access_of(service, user, repo)).can(Grant.PR_ASSIGN),
             "people": people,
         }
 
@@ -3627,12 +3687,17 @@ def build_router() -> APIRouter:
         if profile is None or pr is None or not profile.merge.enabled:
             raise HTTPException(409, "merge scheduling is off for this repository")
         # Scheduling approves the steps the schedule takes, the merge among them.
-        if not await is_maintainer(service, user, repo):
-            raise HTTPException(403, f"only {repo}'s maintainers schedule merges")
+        await require_grant(
+            service, user, repo, Grant.MERGE_SCHEDULE, "schedule merges"
+        )
         perm = await service.a.forge.get_permission(repo, user.login)
         who = profile.merge.arming.who
         if who != "codeowners" and not perm.at_least(Permission(who)):
-            raise HTTPException(403, f"scheduling a merge needs {who}")
+            raise HTTPException(
+                403,
+                f"scheduling a merge in {repo} needs GitHub {who} access "
+                f"(you currently have {perm})",
+            )
         now = service.clock.now()
         arm_ = MergeArm(
             repo=repo,
@@ -3665,8 +3730,9 @@ def build_router() -> APIRouter:
         service = service_of(request)
         repo = _repo(repo)
         await require_view(service, user, repo)
-        if not await is_maintainer(service, user, repo):
-            raise HTTPException(403, f"only {repo}'s maintainers unschedule merges")
+        await require_grant(
+            service, user, repo, Grant.MERGE_SCHEDULE, "unschedule merges"
+        )
         arm_ = await service.store.get_arm(repo, number)
         await service.store.delete_arm(repo, number)
         if arm_ is not None:
@@ -3979,7 +4045,9 @@ def build_router() -> APIRouter:
                 can_decide = can_edit = code_allowed
             else:
                 if p.repo not in maintains:
-                    maintains[p.repo] = await shows_maintainer(service, user, p.repo)
+                    maintains[p.repo] = (await access_of(service, user, p.repo)).can(
+                        Grant.DECIDE_OTHERS
+                    )
                 can_decide = await may_decide(
                     service, user, p, record, maintainer=maintains[p.repo]
                 )

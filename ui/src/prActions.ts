@@ -7,15 +7,36 @@ export interface CheckLink {
   name: string;
   workflow?: string | null;
   details_url?: string | null;
+  status?: string | null;
+  conclusion?: string | null;
+}
+
+export interface DocsLink {
+  url: string;
+  /** ``preview`` is the built docs site; ``build`` is a build status/log page. */
+  kind: "preview" | "build";
+  state: "ready" | "running" | "failed" | "other";
+  name: string;
 }
 
 /** A docs build's check: Read the Docs' PR preview and the like, by name or by the
  * host its details link points at. */
 const DOCS_CHECK = /readthedocs|build[-_ ]?preview/i;
-const DOCS_HOST = /(^|\.)readthedocs\.(io|org)$/i;
+const DOCS_HOST = /(^|\.)readthedocs\.(io|org|build)$/i;
+const RTD_BUILD_PAGE = /^https?:\/\/(?:app\.)?readthedocs\.(?:org|io)\/projects\/[^/]+\/builds\//i;
+const CI_RUN_PAGE = /^https?:\/\/[^/]+\/[^/]+\/[^/]+\/(?:actions\/runs\/|-\/(?:jobs|pipelines)\/)/i;
+const ZH_DOC = /(?:^|\/|[-_:])(?:zh(?:[-_]cn)?|cn)(?:$|\/|[-_:])/i;
+const FAILED_CONCLUSIONS = new Set(["failure", "timed_out", "cancelled", "startup_failure"]);
 
 export function isDocsCheck(check: CheckLink): boolean {
   return DOCS_CHECK.test(`${check.name} ${check.workflow ?? ""}`);
+}
+
+/** Whether ``url`` points to a docs build log / CI run page rather than the rendered
+ * docs site itself (for example Read the Docs while building or after a failure). */
+export function isDocsBuildPage(url: string | null | undefined): boolean {
+  if (!url) return false;
+  return RTD_BUILD_PAGE.test(url) || CI_RUN_PAGE.test(url);
 }
 
 function hostOf(url: string | null | undefined): string {
@@ -27,13 +48,44 @@ function hostOf(url: string | null | undefined): string {
   }
 }
 
-/** The docs build's link among a PR's checks: the first docs check that reported a
- * details link, by its name, workflow, or the host that link is on. */
-export function docsCheckUrl(checks: CheckLink[]): string | null {
-  const found = checks.find(
+function pickForLang(items: CheckLink[], lang?: string): CheckLink {
+  if (items.length <= 1 || !lang) return items[0];
+  const isZh = (c: CheckLink) => ZH_DOC.test(`${c.name} ${c.details_url ?? ""}`);
+  if (lang === "zh") return items.find(isZh) ?? items[0];
+  return items.find((c) => !isZh(c)) ?? items[0];
+}
+
+/** The best docs link among a PR's checks: prefers a rendered docs preview URL over a
+ * build status/log page (such as an in-progress or failed Read the Docs build). */
+export function docsCheckLink(checks: CheckLink[], lang?: string): DocsLink | null {
+  const matched = checks.filter(
     (c) => !!c.details_url && (isDocsCheck(c) || DOCS_HOST.test(hostOf(c.details_url))),
   );
-  return found?.details_url ?? null;
+  if (!matched.length) return null;
+  const previews = matched.filter(
+    (c) =>
+      !isDocsBuildPage(c.details_url) &&
+      !FAILED_CONCLUSIONS.has((c.conclusion ?? "").toLowerCase()),
+  );
+  if (previews.length) {
+    const pick = pickForLang(previews, lang);
+    return { url: pick.details_url!, kind: "preview", state: "ready", name: pick.name };
+  }
+  const running = matched.filter((c) => c.status === "in_progress" || c.status === "queued");
+  const pick = pickForLang(running.length ? running : matched, lang);
+  const concl = (pick.conclusion ?? "").toLowerCase();
+  const state =
+    pick.status === "in_progress" || pick.status === "queued"
+      ? "running"
+      : FAILED_CONCLUSIONS.has(concl)
+        ? "failed"
+        : "other";
+  return { url: pick.details_url!, kind: "build", state, name: pick.name };
+}
+
+/** The docs link's URL among a PR's checks, preferring the built docs preview. */
+export function docsCheckUrl(checks: CheckLink[], lang?: string): string | null {
+  return docsCheckLink(checks, lang)?.url ?? null;
 }
 
 const NAMES: Record<string, string> = {

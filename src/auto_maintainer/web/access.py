@@ -28,10 +28,12 @@ from pydantic import BaseModel, Field
 from ..domain.access import (
     ABOUT,
     ACCESS_PATH,
+    ADMIN_ONLY,
     DEFAULTS,
     GATED,
     GROUPS,
     ROLE_NAMES,
+    Grant,
     PeopleRole,
     Role,
     default_role,
@@ -55,15 +57,20 @@ def dump_yaml(data: dict[str, Any]) -> str:
     return yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
 
 
-def _effective(effective: Any) -> dict[str, Any]:
-    return {
+def _effective(effective: Any, *, arming_who: str | None = None) -> dict[str, Any]:
+    out: dict[str, Any] = {
         "repo": effective.repo,
         "role": effective.role,
         "role_from": effective.role_from,
+        "github_permission": str(effective.github_permission),
+        "maintains": effective.maintains,
         "grants": {str(g): why for g, why in effective.grants.items()},
         "withheld": {str(g): why for g, why in effective.withheld.items()},
         "limits": effective.limits.model_dump(),
     }
+    if arming_who is not None:
+        out["arming_who"] = arming_who
+    return out
 
 
 def _catalog() -> dict[str, Any]:
@@ -73,7 +80,12 @@ def _catalog() -> dict[str, Any]:
             {
                 "name": name,
                 "grants": [
-                    {"id": str(g), "about": ABOUT[g], "gated": g in GATED}
+                    {
+                        "id": str(g),
+                        "about": ABOUT[g],
+                        "gated": g in GATED,
+                        "admin_only": g in ADMIN_ONLY,
+                    }
                     for g in grants
                 ],
             }
@@ -112,7 +124,13 @@ def build_router() -> APIRouter:
         for record in await service.store.list_repos():
             effective = await access_of(service, user, record.repo)
             if effective.role is not None:
-                repos.append(_effective(effective))
+                profile = await service.profiles.active(record.repo)
+                arming_who = (
+                    profile.merge.arming.who
+                    if profile is not None and profile.merge.enabled
+                    else None
+                )
+                repos.append(_effective(effective, arming_who=arming_who))
         owner = (await shows_owner(service, user.login)).allowed
         return {
             "login": user.login,
@@ -153,7 +171,15 @@ def build_router() -> APIRouter:
                             "mapped": mapping.get(role.id),
                         }
                     )
-            repos.append({"repo": record.repo, "people_roles": roles})
+            profile = await service.profiles.active(record.repo)
+            repos.append(
+                {
+                    "repo": record.repo,
+                    "people_roles": roles,
+                    "arming_who": profile.merge.arming.who if profile else "write",
+                    "merge_enabled": bool(profile and profile.merge.enabled),
+                }
+            )
         return {
             "path": ACCESS_PATH,
             "text": await service.a.memory.read_text(ACCESS_PATH) or "",
@@ -207,7 +233,15 @@ def build_router() -> APIRouter:
                     "admin": service.access.is_admin(login),
                     "set": person.model_dump(mode="json") if person else None,
                     "repos": {
-                        e.repo: {"role": e.role, "role_from": e.role_from} for e in here
+                        e.repo: {
+                            "role": e.role,
+                            "role_from": e.role_from,
+                            "github_permission": str(e.github_permission),
+                            "maintains": e.maintains,
+                            "can_schedule": e.can(Grant.MERGE_SCHEDULE),
+                            "can_configure": e.can(Grant.REPO_CONFIGURE),
+                        }
+                        for e in here
                     },
                 }
             )

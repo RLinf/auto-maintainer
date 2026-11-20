@@ -64,6 +64,7 @@ from ...domain.snapshot import (
     PrFile,
     PrSnapshot,
     PrState,
+    PrTimelineEntry,
     RepoInfo,
     Review,
     ReviewEventState,
@@ -149,7 +150,7 @@ query($owner: String!, $name: String!, $cursor: String) {
       nodes {
         number updatedAt headRefOid reviewDecision
         reviewThreads(last: 100) { totalCount nodes { isResolved } }
-        commits(last: 1) { nodes { commit { status { state } checkSuites(first: 20) { totalCount nodes { updatedAt status } } } } }
+        commits(last: 1) { nodes { commit { status { state contexts { context state } } checkSuites(first: 20) { totalCount nodes { updatedAt status } } } } }
       }
     }
   }
@@ -166,6 +167,19 @@ query($owner: String!, $name: String!, $count: Int!) {
         labels(first: 20) { nodes { name } }
         reviews { totalCount }
         commits(last: 20) { nodes { commit { message } } }
+      }
+    }
+  }
+}
+"""
+
+_PR_TIMELINE_QUERY = """
+query($owner: String!, $name: String!, $cursor: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(first: 100, after: $cursor, orderBy: {field: UPDATED_AT, direction: DESC}) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        number state createdAt mergedAt closedAt updatedAt
       }
     }
   }
@@ -429,6 +443,15 @@ def _light_fingerprint(node: dict[str, Any]) -> str:
     # the PR's update time as it was: they count here on their own.
     threads = node.get("reviewThreads") or {}
     resolved = sum(1 for t in _nodes(threads) if t.get("isResolved"))
+    # A commit status (Read the Docs) changes neither the time nor a suite, and an
+    # individual context can finish (switching targetUrl from build page to built
+    # docs) while the combined status state stays PENDING or FAILURE.
+    status = ((head[0]["commit"].get("status") or {}) if head else {}) or {}
+    ctx_stamps = sorted(
+        f"{c.get('context')}:{c.get('state')}"
+        for c in (status.get("contexts") or [])
+        if isinstance(c, dict)
+    )
     return "|".join(
         [
             node.get("updatedAt") or "",
@@ -437,11 +460,8 @@ def _light_fingerprint(node: dict[str, Any]) -> str:
             *stamps,
             str(node.get("reviewDecision") or ""),
             f"{resolved}/{threads.get('totalCount', 0)}",
-            # A commit status (Read the Docs) changes neither the time nor a suite.
-            str(
-                ((head[0]["commit"].get("status") or {}) if head else {}).get("state")
-                or ""
-            ),
+            str(status.get("state") or ""),
+            *ctx_stamps,
         ]
     )
 
@@ -864,6 +884,50 @@ class GitHubReader:
             key=lambda p: p.merged_at or datetime.min.replace(tzinfo=UTC),
             reverse=True,
         )
+
+    async def list_pr_timeline(
+        self, repo: str, since: datetime
+    ) -> list[PrTimelineEntry]:
+        """Lightweight PR lifecycle timestamps updated on or after ``since``."""
+        owner, name = _split(repo)
+        cutoff = since.astimezone(UTC) if since.tzinfo else since.replace(tzinfo=UTC)
+        cursor: str | None = None
+        entries: list[PrTimelineEntry] = []
+        for _ in range(10):
+            data = await self._client.graphql(
+                _PR_TIMELINE_QUERY,
+                {"owner": owner, "name": name, "cursor": cursor},
+                repo=repo,
+            )
+            block = (data.get("repository") or {}).get("pullRequests") or {}
+            nodes = _nodes(block)
+            if not nodes:
+                break
+            reached_cutoff = False
+            for n in nodes:
+                updated = _dt(n.get("updatedAt"))
+                if updated is not None and updated < cutoff:
+                    reached_cutoff = True
+                    break
+                entries.append(
+                    PrTimelineEntry(
+                        number=int(n["number"]),
+                        state=PrState(n.get("state") or "OPEN"),
+                        created_at=_dt(n.get("createdAt")),
+                        merged_at=_dt(n.get("mergedAt")),
+                        closed_at=_dt(n.get("closedAt")),
+                        updated_at=updated,
+                    )
+                )
+            page = block.get("pageInfo") or {}
+            if (
+                reached_cutoff
+                or not page.get("hasNextPage")
+                or not page.get("endCursor")
+            ):
+                break
+            cursor = page["endCursor"]
+        return entries
 
     # ------------------------------------------------------------------ contents
 

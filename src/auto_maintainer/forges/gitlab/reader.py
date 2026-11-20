@@ -48,6 +48,7 @@ from ...domain.snapshot import (
     PrFile,
     PrSnapshot,
     PrState,
+    PrTimelineEntry,
     RepoInfo,
     Review,
     ReviewEventState,
@@ -517,6 +518,41 @@ class GitLabReader:
             )
             for m in mrs or []
         ]
+
+    async def list_pr_timeline(
+        self, repo: str, since: datetime
+    ) -> list[PrTimelineEntry]:
+        mrs = await self._client.get(
+            f"/projects/{project_id(repo)}/merge_requests",
+            params={
+                "state": "all",
+                "updated_after": since.isoformat(),
+                "order_by": "updated_at",
+                "sort": "desc",
+                "per_page": 100,
+            },
+        )
+        out: list[PrTimelineEntry] = []
+        for m in mrs or []:
+            raw_state = str(m.get("state") or "").lower()
+            state = (
+                PrState.MERGED
+                if raw_state == "merged"
+                else PrState.CLOSED
+                if raw_state == "closed"
+                else PrState.OPEN
+            )
+            out.append(
+                PrTimelineEntry(
+                    number=int(m["iid"]),
+                    state=state,
+                    created_at=_time(m.get("created_at")),
+                    merged_at=_time(m.get("merged_at")),
+                    closed_at=_time(m.get("closed_at")),
+                    updated_at=_time(m.get("updated_at")),
+                )
+            )
+        return out
 
     async def get_file(
         self, repo: str, path: str, ref: str | None = None

@@ -71,6 +71,7 @@ from .snapshot import (
     IssueSnapshot,
     MergedPrSummary,
     PrSnapshot,
+    PrTimelineEntry,
     RepoInfo,
     RunnerInfo,
 )
@@ -100,6 +101,10 @@ class ForgeReader(Protocol):
     async def list_merged_prs(
         self, repo: str, limit: int = 50
     ) -> list[MergedPrSummary]: ...
+
+    async def list_pr_timeline(
+        self, repo: str, since: datetime
+    ) -> list[PrTimelineEntry]: ...
 
     async def get_file(
         self, repo: str, path: str, ref: str | None = None

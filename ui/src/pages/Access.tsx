@@ -7,6 +7,7 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import { api } from "../api";
 import { Person } from "../avatar";
 import { Empty, ErrorBox, PageHead, Section, useAct } from "../components";
@@ -42,7 +43,7 @@ interface AccessConfig {
 }
 
 interface Catalog {
-  groups: { name: string; grants: { id: string; about: string; gated: boolean }[] }[];
+  groups: { name: string; grants: { id: string; about: string; gated: boolean; admin_only?: boolean }[] }[];
   roles: { id: RoleId; name: string; grants: string[] }[];
 }
 
@@ -50,6 +51,9 @@ interface Effective {
   repo: string;
   role: RoleId | null;
   role_from: string;
+  github_permission?: string;
+  maintains?: boolean;
+  arming_who?: string | null;
   grants: Record<string, string>;
   withheld: Record<string, string>;
   limits: Limits;
@@ -79,9 +83,18 @@ interface AccessView extends Catalog {
   config: AccessConfig;
   admins: string[];
   owner: boolean;
-  repos: { repo: string; people_roles: PeopleRoleRow[] }[];
+  repos: { repo: string; people_roles: PeopleRoleRow[]; arming_who?: string; merge_enabled?: boolean }[];
   agents: string[];
   machines: string[];
+}
+
+interface PersonRepoAccess {
+  role: RoleId | null;
+  role_from: string;
+  github_permission?: string;
+  maintains?: boolean;
+  can_schedule?: boolean;
+  can_configure?: boolean;
 }
 
 interface PersonRow {
@@ -89,7 +102,22 @@ interface PersonRow {
   signed_in: boolean;
   admin: boolean;
   set: PersonAccess | null;
-  repos: Record<string, { role: RoleId | null; role_from: string }>;
+  repos: Record<string, PersonRepoAccess>;
+}
+
+const PERM_RANK: Record<string, number> = {
+  none: 0,
+  read: 1,
+  triage: 2,
+  write: 3,
+  maintain: 4,
+  admin: 5,
+};
+
+function permMeets(actual: string | undefined, required: string | null | undefined): boolean {
+  if (!required || required === "codeowners") return true;
+  if (!actual) return true;
+  return (PERM_RANK[actual] ?? 0) >= (PERM_RANK[required] ?? 0);
 }
 
 const ROLE_CLASS: Record<RoleId, string> = {
@@ -119,6 +147,7 @@ function useWhy(): (text: string) => string {
       [/^they own the service$/, () => "服务所有者"],
       [/^they are a service admin$/, () => "服务管理员"],
       [/^they operate the service$/, () => "服务操作员"],
+      [/^only (.+)'s maintainers \(People record\)$/, (m) => `仅限 ${m[1]} 成员档案中的维护者`],
       [/^only (.+)'s maintainers$/, (m) => `仅限 ${m[1]} 的维护者`],
       [/^only the owner and the service admins$/, () => "仅限所有者和服务管理员"],
     ];
@@ -227,6 +256,11 @@ function YourPermissions({ mine }: { mine: Mine }) {
               <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
                 <strong>{e.repo}</strong>
                 <RolePill catalog={mine} role={e.role} />
+                {e.github_permission && e.github_permission !== "none" && (
+                  <span className="pill tag" title={t("Permission on GitHub")}>
+                    GitHub: {e.github_permission}
+                  </span>
+                )}
                 <span className="small muted">{why(e.role_from)}</span>
                 <span className="small muted">
                   {held}/{total} {t("permissions")}
@@ -238,6 +272,13 @@ function YourPermissions({ mine }: { mine: Mine }) {
                   </button>
                 )}
               </div>
+              {e.grants["merge.schedule"] && e.arming_who && !permMeets(e.github_permission, e.arming_who) && (
+                <div className="small" style={{ color: "var(--warn)" }}>
+                  <Icon name="alert" size={12} />{" "}
+                  {t("You can schedule merges on the service, but your GitHub permission is")} <span className="mono">{e.github_permission}</span>{" "}
+                  ({e.repo} {t("requires GitHub")} <span className="mono">{e.arming_who}</span> {t("to arm merges and update PR branches")}).
+                </div>
+              )}
               {shown && <GrantList catalog={mine} grants={e.grants} withheld={e.withheld} />}
               <LimitLine limits={e.limits} />
             </div>
@@ -258,9 +299,11 @@ function GrantList({ catalog, grants, withheld }: { catalog: Catalog; grants: Re
           <span className="small muted">{t(g.name)}</span>
           {g.grants.map((grant) => {
             const held = grants[grant.id];
+            const blockedBy = withheld[grant.id];
             return (
-              <span key={grant.id} className="small" style={{ opacity: held ? 1 : 0.5 }} title={held ? `${t("from")} ${why(held)}` : why(withheld[grant.id] ?? "") || t(grant.about)}>
+              <span key={grant.id} className="small" style={{ opacity: held ? 1 : 0.6 }} title={held ? `${t("from")} ${why(held)}` : why(blockedBy ?? "") || t(grant.about)}>
                 <Icon name={held ? "check" : "x"} size={11} /> {t(grant.about)}
+                {!held && blockedBy && <span className="muted"> ({why(blockedBy)})</span>}
               </span>
             );
           })}
@@ -355,11 +398,11 @@ function PeopleSection({ v, rows, loading, error, draft, setDraft }: DraftProps 
     // Opened from anywhere in a long list: bring it into view.
     if (open) editor.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
   }, [open]);
-  const repos = v.repos.map((r) => r.repo);
+  const repos = v.repos;
   const list = useList<PersonRow>({
     rows,
     key: (p) => p.login,
-    search: (p) => `${p.login} ${Object.values(p.repos).map((r) => r.role ?? "").join(" ")}`,
+    search: (p) => `${p.login} ${Object.values(p.repos).map((r) => `${r.role ?? ""} ${r.github_permission ?? ""}`).join(" ")}`,
     facets: [
       { id: "role", label: t("Role"), values: (p) => Object.values(p.repos).map((r) => roleName(v, r.role) || t("no role")) },
       { id: "signed", label: t("Signed in"), values: (p) => (p.signed_in ? t("signed in") : t("not signed in")) },
@@ -383,10 +426,33 @@ function PeopleSection({ v, rows, loading, error, draft, setDraft }: DraftProps 
         </span>
       ),
     },
-    ...repos.map((repo) => ({
+    ...repos.map(({ repo, arming_who, merge_enabled }) => ({
       id: `repo-${repo}`,
       header: repo,
-      cell: (p: PersonRow) => <RolePill catalog={v} role={p.repos[repo]?.role ?? null} title={why(p.repos[repo]?.role_from ?? "")} />,
+      cell: (p: PersonRow) => {
+        const info = p.repos[repo];
+        const perm = info?.github_permission;
+        const mergeWarn = !!(merge_enabled && info?.can_schedule && arming_who && !permMeets(perm, arming_who));
+        return (
+          <span className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+            <RolePill catalog={v} role={info?.role ?? null} title={why(info?.role_from ?? "")} />
+            {perm && perm !== "none" && (
+              <span className="small muted mono" title={t("Permission on GitHub")}>
+                gh:{perm}
+              </span>
+            )}
+            {mergeWarn && (
+              <span
+                className="small"
+                style={{ color: "var(--warn)" }}
+                title={`${t("GitHub permission is")} ${perm}; ${repo} ${t("requires GitHub")} ${arming_who} ${t("to arm merges and update PR branches")}`}
+              >
+                <Icon name="alert" size={12} />
+              </span>
+            )}
+          </span>
+        );
+      },
     })),
     { id: "signed", header: t("Signed in"), cell: (p) => (p.signed_in ? <Icon name="check" size={13} /> : <span className="muted">—</span>), width: 90 },
   ];
@@ -474,27 +540,58 @@ function PersonEditor({ v, login, row, draft, setDraft, onClose }: DraftProps & 
         {t("Role everywhere")}
         <RoleSelect v={v} value={person.role} inherit={t("From GitHub and the People record")} onChange={(role) => set({ role })} />
       </label>
-      {v.repos.map(({ repo }) => (
-        <label key={repo} className="row small" style={{ gap: 8, flexWrap: "wrap" }}>
-          {t("Role in")} <span className="mono">{repo}</span>
-          <RoleSelect
-            v={v}
-            value={person.repos?.[repo]}
-            inherit={t("As above")}
-            onChange={(role) => {
-              const repos = { ...(person.repos ?? {}) };
-              if (role) repos[repo] = role;
-              else delete repos[repo];
-              set({ repos });
-            }}
-          />
-          {row?.repos[repo] && (
-            <span className="muted">
-              {t("now")}: {t(roleName(v, row.repos[repo].role)) || t("no role")} ({why(row.repos[repo].role_from)})
-            </span>
-          )}
-        </label>
-      ))}
+      {v.repos.map(({ repo, arming_who, merge_enabled }) => {
+        const info = row?.repos[repo];
+        const chosenRole = person.repos?.[repo] ?? person.role ?? info?.role ?? null;
+        const roleDefaults = chosenRole ? v.roles.find((r) => r.id === chosenRole)?.grants ?? [] : [];
+        const roleOverride = chosenRole ? draft.roles[chosenRole]?.grants?.["merge.schedule"] : undefined;
+        const willSchedule =
+          chosenRole !== "blocked" &&
+          chosenRole !== null &&
+          (grants["merge.schedule"] ?? roleOverride ?? roleDefaults.includes("merge.schedule"));
+        const perm = info?.github_permission;
+        const mergeWarn = !!(merge_enabled && willSchedule && arming_who && perm && !permMeets(perm, arming_who));
+        return (
+          <div key={repo} className="stack" style={{ gap: 4 }}>
+            <label className="row small" style={{ gap: 8, flexWrap: "wrap" }}>
+              {t("Role in")} <span className="mono">{repo}</span>
+              <RoleSelect
+                v={v}
+                value={person.repos?.[repo]}
+                inherit={t("As above")}
+                onChange={(role) => {
+                  const repos = { ...(person.repos ?? {}) };
+                  if (role) repos[repo] = role;
+                  else delete repos[repo];
+                  set({ repos });
+                }}
+              />
+              {info && (
+                <span className="muted">
+                  {t("now")}: {t(roleName(v, info.role)) || t("no role")} ({why(info.role_from)})
+                  {perm && perm !== "none" && ` · GitHub: ${perm}`}
+                  {" · "}
+                  {info.maintains ? (
+                    t("configures repo (People record)")
+                  ) : (
+                    <>
+                      {t("does not configure repo")}{" "}
+                      <Link to={`/repos/${repo}?tab=people`}>{t("Edit in People")}</Link>
+                    </>
+                  )}
+                </span>
+              )}
+            </label>
+            {mergeWarn && (
+              <span className="small" style={{ color: "var(--warn)" }}>
+                <Icon name="alert" size={12} />{" "}
+                {t("GitHub permission is")} <span className="mono">{perm}</span>; <span className="mono">{repo}</span>{" "}
+                {t("requires GitHub")} <span className="mono">{arming_who}</span> {t("to arm merges and update PR branches")}.
+              </span>
+            )}
+          </div>
+        );
+      })}
       <span className="small muted">{t("Permissions for this person, over their role's")}</span>
       <div className="access-groups">
         {v.groups.map((g) => (
@@ -502,19 +599,30 @@ function PersonEditor({ v, login, row, draft, setDraft, onClose }: DraftProps & 
             <span className="small muted">{t(g.name)}</span>
             {g.grants.map((grant) => (
               <span key={grant.id} className="access-grant small">
-                <GrantSwitch
-                  state={grants[grant.id]}
-                  label={t(grant.about)}
-                  onChange={(s) => {
-                    const next = { ...grants };
-                    if (s === undefined) delete next[grant.id];
-                    else next[grant.id] = s;
-                    set({ grants: next });
-                  }}
-                />
+                {grant.gated ? (
+                  <span className="pill tag" title={t("Managed in each repository's People record")}>
+                    {t("People record")}
+                  </span>
+                ) : grant.admin_only ? (
+                  <span className="pill tag" title={t("Managed in Service admins below")}>
+                    {t("Service admins")}
+                  </span>
+                ) : (
+                  <GrantSwitch
+                    state={grants[grant.id]}
+                    label={t(grant.about)}
+                    onChange={(s) => {
+                      const next = { ...grants };
+                      if (s === undefined) delete next[grant.id];
+                      else next[grant.id] = s;
+                      set({ grants: next });
+                    }}
+                  />
+                )}
                 <span>
                   {t(grant.about)}
-                  {grant.gated && <span className="muted"> ({t("only the repository's maintainers")})</span>}
+                  {grant.gated && <span className="muted"> ({t("managed in each repository's People tab")})</span>}
+                  {grant.admin_only && <span className="muted"> ({t("managed in Service admins below")})</span>}
                 </span>
               </span>
             ))}
@@ -615,12 +723,25 @@ function RolesSection({ v, draft, setDraft }: DraftProps) {
                 <tr key={grant.id}>
                   <td className="small">
                     {t(grant.about)}
-                    {grant.gated && <span className="muted"> ({t("only the repository's maintainers")})</span>}
+                    {grant.gated && <span className="muted"> ({t("managed in each repository's People tab")})</span>}
+                    {grant.admin_only && <span className="muted"> ({t("managed in Service admins below")})</span>}
                   </td>
                   {roles.map((r) => {
                     const base = r.grants.includes(grant.id);
                     const set = draft.roles[r.id]?.grants?.[grant.id];
                     const on = set ?? base;
+                    if (grant.gated || grant.admin_only) {
+                      return (
+                        <td key={r.id} className="access-cell">
+                          <span
+                            className="small muted"
+                            title={grant.gated ? t("Managed in each repository's People record") : t("Managed in Service admins below")}
+                          >
+                            {grant.gated && r.id === "maintainer" ? t("People") : "—"}
+                          </span>
+                        </td>
+                      );
+                    }
                     return (
                       <td key={r.id} className="access-cell">
                         <button

@@ -11,6 +11,7 @@ import { RepoMachinesSection, useRepoMachines } from "../machines";
 import { LessonsTab } from "../lessons";
 import { ReviewAutomationSection } from "../reviewAutomation";
 import { PeopleTab } from "../people";
+import { PrActivitySection } from "../prActivity";
 import { UsageTab } from "../usage";
 import { ProfileChanges, type Profile } from "../profileView";
 import { kindLabel } from "../proposal";
@@ -315,6 +316,9 @@ export function RepoDetailPage() {
 
       {tab === "overview" && (
         <div className="grid2">
+          <div style={{ gridColumn: "1 / -1" }}>
+            <PrActivitySection repo={full} />
+          </div>
           <Section title={t("Approved profile")}>
             {p.lock ? (
               <div className="stack small">

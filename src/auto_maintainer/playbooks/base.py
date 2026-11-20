@@ -30,6 +30,7 @@ from typing import Any, ClassVar, Protocol
 
 from pydantic import BaseModel, Field
 
+from ..domain.access import Effective
 from ..domain.actions import Action
 from ..domain.agents import AgentResult, AgentTask, QuestionState, TaskKind
 from ..domain.clock import Clock
@@ -263,6 +264,10 @@ class PlaybookContext:
     """Reproduction sessions on test machines (design 5.10)."""
     governance: GovernanceRecords | None = None
     """The repository's governance record and its skeleton (design 2.6)."""
+    access_for: Callable[[str, str, Permission | None], Awaitable[Effective]] | None = (
+        None
+    )
+    """Effective service role and grants for a person in a repository (design 2.7)."""
     stopping: Callable[[], bool] = lambda: False
     """Whether the service is stopping: a job it cancels then runs again on the next
     start, so it keeps what it holds for that run (``keeps_session``)."""

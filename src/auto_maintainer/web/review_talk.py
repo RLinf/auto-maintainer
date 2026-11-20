@@ -86,10 +86,8 @@ from ..playbooks.review_revise import (
 from ..service import Service
 from .api import (
     access_of,
-    is_maintainer,
     require_grant,
     service_of,
-    shows_maintainer,
     takes_part,
 )
 from .auth import User, current_user
@@ -251,8 +249,9 @@ async def talk_access(
     )
     if "owner" in roles:
         return "talk"
-    maintains = is_maintainer if live else shows_maintainer
-    if await maintains(service, user, job.repo):
+    if (await access_of(service, user, job.repo, recheck=live)).can(
+        Grant.DECIDE_OTHERS
+    ):
         return "talk"
     return "fork" if roles else "read"
 
@@ -531,10 +530,12 @@ def build_router() -> APIRouter:
         job = await talk_job(service, user, job_id)
         assert job.repo
         asker = str(_payload(job).get("by") or "")
-        if asker.lower() != user.login.lower() and not await is_maintainer(
-            service, user, job.repo
-        ):
-            raise HTTPException(403, "only the asker and the maintainers stop it")
+        if asker.lower() != user.login.lower() and not (
+            await access_of(service, user, job.repo)
+        ).can(Grant.DECIDE_OTHERS):
+            raise HTTPException(
+                403, "only the asker and people who may decide others' work stop it"
+            )
         thread = await service.store.get_thread(thread_id_of(job))
         live = request.app.state.live_turns
         return {

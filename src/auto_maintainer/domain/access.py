@@ -20,9 +20,10 @@ everywhere (``config/access.yaml``, which the service's owner and its service ad
 change); maintaining it (``ConfigGate``: its People record's maintainers, else its
 GitHub admins); their role in its People record, through the repository's mapping;
 and their access on GitHub. Their permissions are their role's defaults, as the file
-changes them for the role and for the person. Nothing here gets around the
-configuration gate: what changes a repository's configuration, or schedules its
-merges, stays with its maintainers whatever a role says (``GATED``).
+changes them for the role and for the person. Operational permissions (including
+scheduling merges, assigning PRs, and deciding others' proposals) follow this file;
+changing a repository's configuration (profile, locks, and People record) stays with
+its maintainers through ``ConfigGate`` whatever a role says (``GATED``).
 
 Pure rules: ``resolve`` takes the facts the caller read (``Facts``) and the file.
 """
@@ -86,8 +87,11 @@ class Grant(StrEnum):
     FIX = "fix"
     SCORE = "score"
     PRIORITY = "priority.override"
+    PR_ASSIGN = "pr.assign"
+    DECIDE_OTHERS = "proposals.decide"
     MERGE_SCHEDULE = "merge.schedule"
     PROPOSE = "changes.propose"
+    REPO_CONFIGURE = "repo.configure"
     IMPROVE = "service.improve"
     OWN_AGENTS = "own.agents"
     OWN_MODELS = "own.models"
@@ -112,8 +116,11 @@ ABOUT: dict[Grant, str] = {
     Grant.FIX: "Have an agent fix a PR's code or its CI.",
     Grant.SCORE: "Have PRs scored again: priority and quality.",
     Grant.PRIORITY: "Override a PR's priority.",
-    Grant.MERGE_SCHEDULE: "Schedule merges; only the repository's maintainers, whatever this file says.",
+    Grant.PR_ASSIGN: "Assign and remove PR owners and reviewers, and resolve any review thread.",
+    Grant.DECIDE_OTHERS: "Decide others' proposals, answer others' agent questions, and join or stop others' review conversations.",
+    Grant.MERGE_SCHEDULE: "Schedule, order, retry, and unschedule merges.",
     Grant.PROPOSE: "Propose changes to the repository's settings, which its maintainers decide.",
+    Grant.REPO_CONFIGURE: "Apply changes to the repository's profile, settings, and People record.",
     Grant.IMPROVE: "Ask for a change to the service's own code, as a self-improvement PR.",
     Grant.OWN_AGENTS: "Sign their own agent accounts in, for their own tasks.",
     Grant.OWN_MODELS: "Add their own model APIs, for their own tasks.",
@@ -122,9 +129,13 @@ ABOUT: dict[Grant, str] = {
 }
 """What each grant lets a person do, as the People & permissions page says it."""
 
-GATED = frozenset({Grant.MERGE_SCHEDULE})
-"""Grants only the repository's maintainers hold, whatever the file says: what they
-approve goes through ``ConfigGate`` (design 2.3)."""
+GATED = frozenset({Grant.REPO_CONFIGURE})
+"""Grants only the repository's maintainers hold (via ``ConfigGate``, design 2.3),
+whatever ``config/access.yaml`` says."""
+
+ADMIN_ONLY = frozenset({Grant.MANAGE_ACCESS})
+"""Grants only the service's owner and its service admins hold, managed via the
+service admins list rather than per-role or per-person switches."""
 
 GROUPS: list[tuple[str, list[Grant]]] = [
     (
@@ -156,9 +167,14 @@ GROUPS: list[tuple[str, list[Grant]]] = [
             Grant.FIX,
             Grant.SCORE,
             Grant.PRIORITY,
+            Grant.PR_ASSIGN,
+            Grant.DECIDE_OTHERS,
         ],
     ),
-    ("Merges and changes", [Grant.MERGE_SCHEDULE, Grant.PROPOSE, Grant.IMPROVE]),
+    (
+        "Merges and changes",
+        [Grant.MERGE_SCHEDULE, Grant.PROPOSE, Grant.REPO_CONFIGURE, Grant.IMPROVE],
+    ),
     ("Their own resources", [Grant.OWN_AGENTS, Grant.OWN_MODELS, Grant.OWN_MACHINES]),
     ("Administration", [Grant.MANAGE_ACCESS]),
 ]
@@ -345,6 +361,10 @@ class Effective(_Model):
     withheld: dict[Grant, str] = Field(default_factory=dict)
     """Permissions the file gives them that a rule withholds, with why."""
     limits: Limits = Field(default_factory=Limits)
+    github_permission: Permission = Permission.NONE
+    """Their live permission on the forge."""
+    maintains: bool = False
+    """Whether ``ConfigGate`` allows them to configure the repository."""
     admin: bool = False
     owner: bool = False
 
@@ -410,6 +430,8 @@ def resolve(config: AccessConfig, facts: Facts) -> Effective:
         repo=facts.repo,
         role=role,
         role_from=role_from,
+        github_permission=facts.permission,
+        maintains=facts.maintains,
         admin=admin,
         owner=facts.owner,
     )
@@ -443,12 +465,15 @@ def resolve(config: AccessConfig, facts: Facts) -> Effective:
                 granted.pop(grant, None)
         limits = person.limits.over(limits)
     for grant in GATED:
-        if grant in granted and not facts.maintains:
-            out.withheld[grant] = f"only {facts.repo}'s maintainers"
+        if facts.maintains:
+            granted[grant] = f"they maintain {facts.repo}"
+        elif grant in granted:
+            out.withheld[grant] = f"only {facts.repo}'s maintainers (People record)"
             del granted[grant]
-    if Grant.MANAGE_ACCESS in granted and not (admin or facts.owner):
-        out.withheld[Grant.MANAGE_ACCESS] = "only the owner and the service admins"
-        del granted[Grant.MANAGE_ACCESS]
+    for grant in ADMIN_ONLY:
+        if grant in granted and not (admin or facts.owner):
+            out.withheld[grant] = "only the owner and the service admins"
+            del granted[grant]
     out.grants = granted
     out.limits = limits
     return out

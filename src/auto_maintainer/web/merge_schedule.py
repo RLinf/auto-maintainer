@@ -34,6 +34,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from ..domain.access import Grant
 from ..domain.actions import ActionKind
 from ..domain.events import Event, EventKind
 from ..domain.ids import same_commit
@@ -85,8 +86,11 @@ from ..profiles.layers import ProfileError, parse_yaml
 from ..service import Service
 from .api import (
     _repo,
+    access_of,
     is_maintainer,
+    permission,
     permissions_of,
+    require_grant,
     require_propose,
     require_view,
     service_of,
@@ -658,9 +662,15 @@ def _merging(profile: RepoProfile, info: RepoInfo) -> dict[str, Any]:
     }
 
 
-async def _maintainer(service: Service, user: User, repo: str) -> None:
+async def _require_schedule(service: Service, user: User, repo: str) -> None:
+    await require_grant(service, user, repo, Grant.MERGE_SCHEDULE, "arrange merges")
+
+
+async def _config_maintainer(service: Service, user: User, repo: str) -> None:
     if not await is_maintainer(service, user, repo):
-        raise HTTPException(403, f"only {repo}'s maintainers arrange its merges")
+        raise HTTPException(
+            403, f"only {repo}'s maintainers change its merge and CI rules"
+        )
 
 
 def build_router() -> APIRouter:
@@ -863,9 +873,12 @@ def build_router() -> APIRouter:
             }
 
         shared = await request.app.state.recent.shared(("merge-view", repo), compute)
+        effective = await access_of(service, user, repo)
         return {
             **shared,
-            "can_arrange": await shows_maintainer(service, user, repo),
+            "can_arrange": effective.can(Grant.MERGE_SCHEDULE),
+            "can_configure": await shows_maintainer(service, user, repo),
+            "github_permission": str(await permission(service, user, repo)),
             "signed_in": await service.can_post_as(user.login),
             "scope_request": await _scope_view(service, user),
         }
@@ -877,17 +890,25 @@ def build_router() -> APIRouter:
         body: ScheduleBody,
         user: User = Depends(current_user),
     ) -> dict[str, Any]:
-        """Schedule a PR as the maintainer who pressed it: that arms its merge at its
+        """Schedule a PR as the person who pressed it: that arms its merge at its
         head and approves the steps the schedule takes for it. One that does not meet
         the repository's target yet is scheduled only with ``force`` (by hand): its
         CI runs on its turn, and it merges once the merge rules hold."""
         service = service_of(request)
         repo = _repo(repo)
         await require_view(service, user, repo)
-        await _maintainer(service, user, repo)
+        await _require_schedule(service, user, repo)
         profile = await service.profiles.active(repo)
         if profile is None or not profile.merge.enabled:
             raise HTTPException(409, "merge scheduling is off for this repository")
+        perm = await service.a.forge.get_permission(repo, user.login)
+        who = profile.merge.arming.who
+        if who != "codeowners" and not perm.at_least(Permission(who)):
+            raise HTTPException(
+                403,
+                f"scheduling a merge in {repo} needs GitHub {who} access "
+                f"(you currently have {perm})",
+            )
         if await service.store.get_arm(repo, body.number) is not None:
             raise HTTPException(409, f"#{body.number} is already scheduled")
         pr = await service.a.actuator_reader.get_pr(repo, body.number)
@@ -903,7 +924,6 @@ def build_router() -> APIRouter:
                 f"#{body.number} is not ready: "
                 + "; ".join(_item(i.name, i.detail) for i in back),
             )
-        perm = await service.a.forge.get_permission(repo, user.login)
         now = service.clock.now()
         arm = MergeArm(
             repo=repo,
@@ -940,7 +960,7 @@ def build_router() -> APIRouter:
         service = service_of(request)
         repo = _repo(repo)
         await require_view(service, user, repo)
-        await _maintainer(service, user, repo)
+        await _require_schedule(service, user, repo)
         arms = ordered(await service.store.list_arms(repo))
         by_number = {a.number: a for a in arms}
         wanted = [n for n in dict.fromkeys(body.numbers) if n in by_number]
@@ -967,7 +987,7 @@ def build_router() -> APIRouter:
         service = service_of(request)
         repo = _repo(repo)
         await require_view(service, user, repo)
-        await _maintainer(service, user, repo)
+        await _require_schedule(service, user, repo)
         arm = await service.store.get_arm(repo, number)
         if arm is None:
             raise HTTPException(404, f"#{number} is not scheduled")
@@ -1015,7 +1035,7 @@ def build_router() -> APIRouter:
         service = service_of(request)
         repo = _repo(repo)
         await require_view(service, user, repo)
-        await _maintainer(service, user, repo)
+        await _require_schedule(service, user, repo)
         if (
             await service.store.get_arm(repo, number) is not None
             and (await _state(service, repo, number)).phase in ACTIVE
@@ -1082,7 +1102,7 @@ def build_router() -> APIRouter:
         service = service_of(request)
         repo = _repo(repo)
         await require_view(service, user, repo)
-        await _maintainer(service, user, repo)
+        await _require_schedule(service, user, repo)
         if await service.store.get_arm(repo, number) is None:
             raise HTTPException(404, f"#{number} is not scheduled")
         return await _send_back(
@@ -1106,7 +1126,7 @@ def build_router() -> APIRouter:
         service = service_of(request)
         repo = _repo(repo)
         await require_view(service, user, repo)
-        await _maintainer(service, user, repo)
+        await _require_schedule(service, user, repo)
         if await service.store.get_arm(repo, number) is None:
             raise HTTPException(404, f"#{number} is not scheduled")
         pr = await service.store.get_snapshot(repo, number)
@@ -1150,7 +1170,7 @@ def build_router() -> APIRouter:
         service = service_of(request)
         repo = _repo(repo)
         await require_view(service, user, repo)
-        await _maintainer(service, user, repo)
+        await _require_schedule(service, user, repo)
         key = SUGGESTIONS.format(repo=repo)
         kept = [
             k for k in await service.store.get_state(key) or [] if k.get("id") != sid
@@ -1463,7 +1483,7 @@ def build_router() -> APIRouter:
         service = service_of(request)
         repo = _repo(repo)
         await require_view(service, user, repo)
-        await _maintainer(service, user, repo)
+        await _config_maintainer(service, user, repo)
         event = Event(
             kind=EventKind.DASHBOARD_COMMAND,
             repo=repo,
@@ -1512,7 +1532,7 @@ def build_router() -> APIRouter:
         service = service_of(request)
         repo = _repo(repo)
         await require_view(service, user, repo)
-        await _maintainer(service, user, repo)
+        await _config_maintainer(service, user, repo)
         await service.store.set_state(DRAFT_KEY.format(repo=repo), None)
         return {"draft": None}
 
@@ -1615,7 +1635,7 @@ def build_router() -> APIRouter:
         service = service_of(request)
         repo = _repo(repo)
         await require_view(service, user, repo)
-        await _maintainer(service, user, repo)
+        await _config_maintainer(service, user, repo)
         event = Event(
             kind=EventKind.DASHBOARD_COMMAND,
             repo=repo,

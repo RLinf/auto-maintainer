@@ -28,15 +28,16 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from ..domain.actions import ActionKind, MemoryChangePayload, make_action
 from ..domain.events import Event, EventKind
 from ..domain.forges import parse_person
-from ..domain.governance import Member, role_changes, suggested_role
-from ..domain.memory import MemoryChangeState
+from ..domain.governance import Governance, Member, role_changes, suggested_role
+from ..domain.memory import MemoryChange, MemoryChangeState
 from ..domain.permissions import Permission
+from ..domain.profile import RepoProfile
 from ..domain.records import AuditEntry
 from ..domain.secrets import redact_secrets
 from ..playbooks.governance import base_record, revised
@@ -65,6 +66,13 @@ class NewMember(BaseModel):
 
 class AddBody(BaseModel):
     people: list[NewMember] = Field(min_length=1, max_length=200)
+
+
+class UpdateMemberBody(BaseModel):
+    role: str = Field(min_length=1, max_length=100)
+    areas: list[str] | None = Field(default=None, max_length=50)
+    note: str | None = Field(default=None, max_length=500)
+    reason: str = Field(default="", max_length=500)
 
 
 class AskBody(BaseModel):
@@ -203,6 +211,64 @@ def build_router() -> APIRouter:
             "has_profile": profile is not None,
         }
 
+    async def _submit_record(
+        service: Service,
+        user: User,
+        repo: str,
+        profile: RepoProfile,
+        after: Governance,
+        replaced: MemoryChange | None,
+        *,
+        title: str,
+        description: str,
+        audit_summary: str,
+        audit_data: dict[str, Any],
+    ) -> tuple[MemoryChange, bool]:
+        """Stage a governance record change as a T2 memory change; a maintainer's
+        direct change to the applied record applies at once, otherwise it waits for
+        a maintainer (``ConfigGate``)."""
+        change = service.governance.draft(
+            repo,
+            after,
+            title=title,
+            description=description
+            + (
+                " Builds on the draft that waited, which it replaces."
+                if replaced
+                else ""
+            ),
+            requested_by=user.login,
+        )
+        change.author = user.login
+        await service.store.save_memory_change(change)
+        await service.store.add_audit(
+            AuditEntry(
+                kind="config",
+                actor=user.login,
+                summary=audit_summary,
+                data={"change": change.id, **audit_data},
+            )
+        )
+        await service.pipeline.submit(
+            make_action(
+                ActionKind.MEMORY_CHANGE,
+                repo,
+                MemoryChangePayload(
+                    change_id=change.id, replaces=replaced.id if replaced else None
+                ),
+                discriminator=change.id,
+            )
+        )
+        await service.actuator.drain()
+        state = None
+        if replaced is None:
+            decision = await service.gate.check(repo, user.login, profile, person=True)
+            if decision.allowed:
+                _, state = await service.approve_memory_change(change.id, user.login)
+        stored = await service.store.get_memory_change(change.id)
+        applied = (stored.state if stored else state) == MemoryChangeState.MERGED
+        return change, applied
+
     @r.post("/{repo:path}/governance/members")
     async def add(
         request: Request, repo: str, body: AddBody, user: User = Depends(current_user)
@@ -243,8 +309,8 @@ def build_router() -> APIRouter:
                 raise HTTPException(
                     422,
                     f"@{login} is listed already, as "
-                    f"{held.name if held else listed[login.lower()].role}; ask the "
-                    "agent to change their role",
+                    f"{held.name if held else listed[login.lower()].role}; "
+                    "open their entry to change their role",
                 )
             areas = [a.strip() for a in person.areas if a.strip()]
             members.append(
@@ -270,51 +336,178 @@ def build_router() -> APIRouter:
         names = ", ".join(f"@{x}" for x in added[:5]) + (
             f" and {len(added) - 5} more" if len(added) > 5 else ""
         )
-        change = service.governance.draft(
+        change, applied = await _submit_record(
+            service,
+            user,
             repo,
+            profile,
             after,
+            replaced,
             title=f"people: add {names} to {repo}",
             description=f"Added on the People tab by {user.login}: "
             + "; ".join(f"@{m.login} as {m.role}" for m in members if m.login in added)
-            + "."
-            + (
-                " Builds on the draft that waited, which it replaces."
-                if replaced
-                else ""
-            ),
-            requested_by=user.login,
+            + ".",
+            audit_summary=f"people: added {len(added)} to {repo}",
+            audit_data={"added": added},
         )
-        change.author = user.login
-        await service.store.save_memory_change(change)
-        await service.store.add_audit(
-            AuditEntry(
-                kind="config",
-                actor=user.login,
-                summary=f"people: added {len(added)} to {repo}",
-                data={"change": change.id, "added": added},
-            )
-        )
-        await service.pipeline.submit(
-            make_action(
-                ActionKind.MEMORY_CHANGE,
-                repo,
-                MemoryChangePayload(
-                    change_id=change.id, replaces=replaced.id if replaced else None
-                ),
-                discriminator=change.id,
-            )
-        )
-        await service.actuator.drain()
-        state = None
-        if replaced is None:
-            decision = await service.gate.check(repo, user.login, profile, person=True)
-            if decision.allowed:
-                _, state = await service.approve_memory_change(change.id, user.login)
-        stored = await service.store.get_memory_change(change.id)
         return {
             "change": change.id,
             "added": added,
-            "applied": (stored.state if stored else state) == MemoryChangeState.MERGED,
+            "applied": applied,
+            "on_draft": replaced is not None,
+        }
+
+    @r.patch("/{repo:path}/governance/members/{login}")
+    async def update_member(
+        request: Request,
+        repo: str,
+        login: str,
+        body: UpdateMemberBody,
+        user: User = Depends(current_user),
+    ) -> dict[str, Any]:
+        """Change a listed member's role, areas, or note directly on the People tab.
+        A maintainer's change to the applied record applies at once and records the
+        change in history; anyone else's waits for a maintainer (``ConfigGate``)."""
+        service = service_of(request)
+        repo = _repo(repo)
+        await require_view(service, user, repo)
+        profile = await service.profiles.active(repo)
+        if profile is None:
+            raise HTTPException(409, f"{repo} has no approved profile yet")
+        loaded, base, replaced = await base_record(
+            service.governance,
+            repo,
+            await service.store.list_memory_changes(MemoryChangeState.OPEN),
+        )
+        if loaded.error and replaced is None:
+            raise HTTPException(
+                409, f"the stored record does not read ({loaded.error}); fix it first"
+            )
+        role = base.role(body.role)
+        if role is None:
+            raise HTTPException(422, f"the record has no role {body.role!r}")
+        key = login.strip().lstrip("@").lower()
+        idx = next(
+            (i for i, m in enumerate(base.members) if m.login.lower() == key), None
+        )
+        if idx is None:
+            raise HTTPException(404, f"@{login} is not listed in {repo}'s record")
+        old = base.members[idx]
+        today = service.clock.now().date()
+        areas = (
+            [a.strip() for a in body.areas if a.strip()]
+            if body.areas is not None
+            else list(old.areas)
+        )
+        note = (
+            redact_secrets(body.note.strip())[0] if body.note is not None else old.note
+        )
+        updated = old.model_copy(
+            update={
+                "role": role.id,
+                "areas": areas if role.scoped else [],
+                "since": today if role.id != old.role else old.since,
+                "note": note,
+            }
+        )
+        members = list(base.members)
+        members[idx] = updated
+        reason = redact_secrets(body.reason.strip())[0] or "updated on the People tab"
+        after = revised(
+            base,
+            base.model_copy(update={"members": members}),
+            repo=repo,
+            questions=[],
+            by=user.login,
+            on=today,
+            reason=reason,
+        )
+        change, applied = await _submit_record(
+            service,
+            user,
+            repo,
+            profile,
+            after,
+            replaced,
+            title=f"people: @{old.login} → {role.name} in {repo}"
+            if role.id != old.role
+            else f"people: update @{old.login} in {repo}",
+            description=f"Updated on the People tab by {user.login}: "
+            f"@{old.login} {old.role} → {role.id}"
+            + (f" ({reason})" if body.reason.strip() else "")
+            + ".",
+            audit_summary=f"people: updated @{old.login} ({old.role} -> {role.id}) in {repo}",
+            audit_data={"login": old.login, "from": old.role, "to": role.id},
+        )
+        return {
+            "change": change.id,
+            "login": old.login,
+            "role": role.id,
+            "applied": applied,
+            "on_draft": replaced is not None,
+        }
+
+    @r.delete("/{repo:path}/governance/members/{login}")
+    async def remove_member(
+        request: Request,
+        repo: str,
+        login: str,
+        reason: str = Query(default="", max_length=500),
+        user: User = Depends(current_user),
+    ) -> dict[str, Any]:
+        """Remove a member from the People record. A maintainer's removal from the
+        applied record applies at once and records it in history; anyone else's
+        waits for a maintainer (``ConfigGate``)."""
+        service = service_of(request)
+        repo = _repo(repo)
+        await require_view(service, user, repo)
+        profile = await service.profiles.active(repo)
+        if profile is None:
+            raise HTTPException(409, f"{repo} has no approved profile yet")
+        loaded, base, replaced = await base_record(
+            service.governance,
+            repo,
+            await service.store.list_memory_changes(MemoryChangeState.OPEN),
+        )
+        if loaded.error and replaced is None:
+            raise HTTPException(
+                409, f"the stored record does not read ({loaded.error}); fix it first"
+            )
+        key = login.strip().lstrip("@").lower()
+        old = next((m for m in base.members if m.login.lower() == key), None)
+        if old is None:
+            raise HTTPException(404, f"@{login} is not listed in {repo}'s record")
+        today = service.clock.now().date()
+        members = [m for m in base.members if m.login.lower() != key]
+        why = redact_secrets(reason.strip())[0] or "removed on the People tab"
+        after = revised(
+            base,
+            base.model_copy(update={"members": members}),
+            repo=repo,
+            questions=[],
+            by=user.login,
+            on=today,
+            reason=why,
+        )
+        change, applied = await _submit_record(
+            service,
+            user,
+            repo,
+            profile,
+            after,
+            replaced,
+            title=f"people: remove @{old.login} from {repo}",
+            description=f"Removed on the People tab by {user.login}: "
+            f"@{old.login} (was {old.role})"
+            + (f" ({why})" if reason.strip() else "")
+            + ".",
+            audit_summary=f"people: removed @{old.login} from {repo}",
+            audit_data={"login": old.login, "from": old.role},
+        )
+        return {
+            "change": change.id,
+            "login": old.login,
+            "applied": applied,
             "on_draft": replaced is not None,
         }
 

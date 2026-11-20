@@ -49,6 +49,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from ..domain.access import Grant
 from ..domain.actions import (
     Action,
     ActionHints,
@@ -2225,14 +2226,17 @@ async def maintains(
     permission: Permission,
 ) -> bool:
     """Whether ``login`` may schedule merges, or have them scheduled as them: they
-    maintain ``repo`` (its People record's maintainers, else ``access.configure``,
-    as the configuration gate reads it) and may arm merges (``merge.arming.who``).
-    Scheduling approves the steps the schedule takes, a merge among them."""
+    hold ``Grant.MERGE_SCHEDULE`` in ``repo`` (design 2.7) and their forge
+    permission satisfies ``merge.arming.who``. Scheduling approves the steps the
+    schedule takes, a merge among them."""
     arming = profile.merge.arming.who
     if not permission.at_least(
         Permission.WRITE if arming == "codeowners" else Permission(arming)
     ):
         return False
+    if ctx.access_for is not None:
+        effective = await ctx.access_for(login, repo, permission)
+        return effective.can(Grant.MERGE_SCHEDULE)
     named = await ctx.governance.maintainers_of(repo) if ctx.governance else set()
     if named:
         return login.lower() in {m.lower() for m in named}

@@ -68,6 +68,7 @@ from ..domain.snapshot import (
     MergedPrSummary,
     PrSnapshot,
     PrState,
+    PrTimelineEntry,
     RepoInfo,
     Review,
     ReviewEventState,
@@ -167,6 +168,34 @@ class FakeForge:
         self, repo: str, limit: int = 50
     ) -> list[MergedPrSummary]:
         return self.merged[:limit]
+
+    async def list_pr_timeline(
+        self, repo: str, since: datetime
+    ) -> list[PrTimelineEntry]:
+        out: list[PrTimelineEntry] = [
+            PrTimelineEntry(
+                number=p.number,
+                state=p.state,
+                created_at=p.created_at,
+                merged_at=p.updated_at if p.state == PrState.MERGED else None,
+                closed_at=p.updated_at if p.state == PrState.CLOSED else None,
+                updated_at=p.updated_at,
+            )
+            for (r, _), p in sorted(self.prs.items())
+            if r == repo
+        ]
+        seen = {e.number for e in out}
+        for m in self.merged:
+            if m.number not in seen:
+                out.append(
+                    PrTimelineEntry(
+                        number=m.number,
+                        state=PrState.MERGED,
+                        merged_at=m.merged_at,
+                        updated_at=m.merged_at,
+                    )
+                )
+        return out
 
     async def get_file(
         self, repo: str, path: str, ref: str | None = None

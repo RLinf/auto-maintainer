@@ -570,6 +570,7 @@ class Service:
             profiles=self.profiles,
             store=self.a.store,
             governance=self.governance,
+            access_for=self.access_for,
             lab_sessions=LabSessions(self.a.lab_runner),
             workspace=self.a.workspace,
             sandbox=self.a.sandbox,

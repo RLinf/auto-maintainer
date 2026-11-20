@@ -87,6 +87,8 @@ async def test_people_read_their_roles_and_the_owner_names_service_admins(
                     "repo": DEMO_REPO,
                     "role": "blocked",
                     "role_from": "set for them",
+                    "github_permission": "write",
+                    "maintains": False,
                     "grants": {},
                     "withheld": {},
                     "limits": {
@@ -96,6 +98,7 @@ async def test_people_read_their_roles_and_the_owner_names_service_admins(
                         "agents": None,
                         "machines": None,
                     },
+                    "arming_who": "write",
                 }
             ]
         assert await h.service.admits("bob") is False, "no sign-in either"
@@ -268,5 +271,87 @@ async def test_the_page_lists_people_and_saves_what_it_edits(tmp_path: Path) -> 
                 "/api/access", json={"config": {"people": {"x": {"role": "king"}}}}
             )
             assert bad.status_code == 422
+    finally:
+        await h.close()
+
+
+async def test_access_grants_control_merge_scheduling_while_config_gate_stays_strict(
+    tmp_path: Path,
+) -> None:
+    """Option B (design 2.7): operational grants in config/access.yaml (merge.schedule,
+    pr.assign, proposals.decide) actually take effect without bypassing ConfigGate, and
+    GitHub permission prerequisites (merge.arming.who) are checked with a clear error."""
+    from auto_maintainer.profiles.governance import governance_path
+
+    h = await build_demo(tmp_path)
+    try:
+        h.memory.files[governance_path(DEMO_REPO)] = (
+            "schema: 1\nestablished: true\n"
+            "roles:\n"
+            "  - {id: maintainer, name: Maintainer, level: 3, maintains: true}\n"
+            "  - {id: contributor, name: Contributor, level: 1}\n"
+            "members:\n"
+            "  - {login: maria, role: maintainer}\n"
+            "  - {login: walt, role: contributor}\n"
+            "  - {login: pan, role: contributor}\n"
+        )
+        h.forge.set_permission(DEMO_REPO, "walt", Permission.WRITE)
+        h.forge.set_permission(DEMO_REPO, "pan", Permission.READ)
+        app = create_app(h.service, data_dir=tmp_path, allow_dev_login=True)
+        async with _as(app, "maria") as maria:
+            saved = await maria.put(
+                "/api/access",
+                json={
+                    "text": (
+                        "people:\n"
+                        f"  walt: {{repos: {{{DEMO_REPO}: maintainer}}}}\n"
+                        f"  pan: {{repos: {{{DEMO_REPO}: maintainer}}}}\n"
+                    )
+                },
+            )
+            assert saved.status_code == 200 and saved.json()["applied"], saved.text
+            rows = {
+                r["login"]: r for r in (await maria.get("/api/access/people")).json()
+            }
+            assert rows["pan"]["repos"][DEMO_REPO]["github_permission"] == "read"
+            assert rows["pan"]["repos"][DEMO_REPO]["can_schedule"] is True
+            assert rows["pan"]["repos"][DEMO_REPO]["can_configure"] is False
+
+        async with _as(app, "walt") as walt:
+            view = (await walt.get(f"/api/merge-schedule/{DEMO_REPO}/view")).json()
+            assert view["can_arrange"] is True
+            assert view["can_configure"] is False
+            assert view["github_permission"] == "write"
+            # Operational actions succeed: force-schedule and assign PR reviewer.
+            sched = await walt.post(
+                f"/api/merge-schedule/{DEMO_REPO}/schedule",
+                json={"number": 42, "force": True},
+            )
+            assert sched.status_code == 200, sched.text
+            assign = await walt.post(
+                f"/api/prs/{DEMO_REPO}/42/assignees",
+                json={"logins": ["bob"], "role": "reviewer", "request_review": False},
+            )
+            assert assign.status_code == 200, assign.text
+            # Repo configuration still goes through ConfigGate (cannot bypass).
+            settings = await walt.put(
+                f"/api/merge-schedule/{DEMO_REPO}/settings", json={"auto": True}
+            )
+            assert settings.status_code == 200 and settings.json()["applied"] is False
+            describe = await walt.post(
+                f"/api/merge-schedule/{DEMO_REPO}/describe",
+                json={"text": "merge everything"},
+            )
+            assert describe.status_code == 403
+
+        async with _as(app, "pan") as pan:
+            # pan holds merge.schedule on the service, but only GitHub read vs write.
+            refused = await pan.post(
+                f"/api/merge-schedule/{DEMO_REPO}/schedule",
+                json={"number": 43, "force": True},
+            )
+            assert refused.status_code == 403
+            assert "GitHub write access" in refused.text
+            assert "currently have read" in refused.text
     finally:
         await h.close()

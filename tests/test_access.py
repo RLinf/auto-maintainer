@@ -112,14 +112,30 @@ def test_a_guest_uses_none_of_the_services_agents_or_machines_unless_enabled() -
 
 
 def test_no_file_gets_around_the_configuration_gate() -> None:
-    config = _config("people: {ana: {role: maintainer, grants: {manage.access: true}}}")
+    config = _config(
+        "people: {ana: {role: maintainer, grants: {manage.access: true, repo.configure: true}}}"
+    )
     ana = resolve(config, _facts(permission=Permission.WRITE))
     assert ana.role == Role.MAINTAINER
-    assert not ana.can(Grant.MERGE_SCHEDULE), "merges stay with who passes the gate"
-    assert Grant.MERGE_SCHEDULE in ana.withheld
+    assert ana.can(Grant.MERGE_SCHEDULE), "operational grants obey config/access.yaml"
+    assert ana.can(Grant.PR_ASSIGN)
+    assert ana.can(Grant.DECIDE_OTHERS)
+    assert not ana.can(Grant.REPO_CONFIGURE), (
+        "repo configuration stays with who passes ConfigGate"
+    )
+    assert Grant.REPO_CONFIGURE in ana.withheld
     assert not ana.can(Grant.MANAGE_ACCESS), "only the owner and service admins"
     maintainer = resolve(_config(), _facts(permission=Permission.ADMIN, maintains=True))
+    assert maintainer.can(Grant.REPO_CONFIGURE)
     assert maintainer.can(Grant.MERGE_SCHEDULE)
+    # Even if access.yaml lowers a ConfigGate maintainer's service role, REPO_CONFIGURE
+    # still honestly reflects ConfigGate.
+    lowered = resolve(
+        _config("people: {ana: {role: reviewer}}"),
+        _facts(permission=Permission.ADMIN, maintains=True),
+    )
+    assert lowered.role == Role.REVIEWER
+    assert lowered.can(Grant.REPO_CONFIGURE) and not lowered.can(Grant.MERGE_SCHEDULE)
 
 
 def test_the_owner_and_service_admins_manage_access_where_they_have_a_role() -> None:

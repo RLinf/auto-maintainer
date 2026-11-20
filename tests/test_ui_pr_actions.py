@@ -57,8 +57,10 @@ import {{
   activePrActionPanel,
   agentName,
   describeRunCi,
+  docsCheckLink,
   docsCheckUrl,
   fixableFindings,
+  isDocsBuildPage,
   prMenuItems,
   resolveAgentChoices,
 }} from {module_url!r};
@@ -228,9 +230,56 @@ const docs = [
 assert.equal(docsCheckUrl(docs), "https://readthedocs.org/projects/widget/builds/7");
 assert.equal(docsCheckUrl([{{ name: "build-preview", details_url: "https://docs.test/pr/42" }}]), "https://docs.test/pr/42");
 assert.equal(docsCheckUrl([{{ name: "preview", details_url: "https://widget.readthedocs.io/en/pr-42/" }}]), "https://widget.readthedocs.io/en/pr-42/");
+assert.equal(docsCheckUrl([{{ name: "preview", details_url: "https://widget--42.org.readthedocs.build/en/42/" }}]), "https://widget--42.org.readthedocs.build/en/42/");
 assert.equal(docsCheckUrl([{{ name: "docs", details_url: null }}]), null);
 assert.equal(docsCheckUrl([{{ name: "unit", details_url: "https://ci.test/runs/1" }}]), null);
 assert.equal(docsCheckUrl([]), null);
+
+// Built docs previews always beat in-progress/failed build pages, even if the build page comes first.
+assert.equal(isDocsBuildPage("https://app.readthedocs.org/projects/widget/builds/123/"), true);
+assert.equal(isDocsBuildPage("https://widget--42.org.readthedocs.build/en/42/"), false);
+const mixed = [
+  {{ name: "docs/readthedocs.org:widget-cn", status: "in_progress", conclusion: null, details_url: "https://app.readthedocs.org/projects/widget-cn/builds/99/" }},
+  {{ name: "docs/readthedocs.org:widget", status: "completed", conclusion: "success", details_url: "https://widget--42.org.readthedocs.build/en/42/" }},
+];
+assert.deepEqual(docsCheckLink(mixed, "zh"), {{
+  url: "https://widget--42.org.readthedocs.build/en/42/",
+  kind: "preview",
+  state: "ready",
+  name: "docs/readthedocs.org:widget",
+}});
+
+// When both EN and ZH previews are built, follow the dashboard language.
+const both = [
+  {{ name: "docs/readthedocs.org:widget", status: "completed", conclusion: "success", details_url: "https://widget--42.org.readthedocs.build/en/42/" }},
+  {{ name: "docs/readthedocs.org:widget-cn", status: "completed", conclusion: "success", details_url: "https://widget--42.org.readthedocs.build/zh-cn/42/" }},
+];
+assert.equal(docsCheckUrl(both, "en"), "https://widget--42.org.readthedocs.build/en/42/");
+assert.equal(docsCheckUrl(both, "zh"), "https://widget--42.org.readthedocs.build/zh-cn/42/");
+
+// When only build pages exist, label them honestly as running or failed builds.
+assert.deepEqual(
+  docsCheckLink([
+    {{ name: "docs/readthedocs.org:widget", status: "completed", conclusion: "failure", details_url: "https://app.readthedocs.org/projects/widget/builds/10/" }},
+  ]),
+  {{
+    url: "https://app.readthedocs.org/projects/widget/builds/10/",
+    kind: "build",
+    state: "failed",
+    name: "docs/readthedocs.org:widget",
+  }},
+);
+assert.deepEqual(
+  docsCheckLink([
+    {{ name: "docs/readthedocs.org:widget", status: "in_progress", conclusion: null, details_url: "https://app.readthedocs.org/projects/widget/builds/11/" }},
+  ]),
+  {{
+    url: "https://app.readthedocs.org/projects/widget/builds/11/",
+    kind: "build",
+    state: "running",
+    name: "docs/readthedocs.org:widget",
+  }},
+);
 """
     proc = subprocess.run([*argv, "-e", script], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr or proc.stdout
