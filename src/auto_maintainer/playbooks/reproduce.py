@@ -93,7 +93,7 @@ from .review_revise import (
     revision_blocks,
     task_kind_of,
 )
-from .review_session import earlier_work, give_record, held_gpus, machine_facts
+from .review_session import earlier_work, held_gpus, machine_facts
 
 WAIT_SECONDS = 7 * 24 * 3600
 
@@ -104,6 +104,7 @@ SESSION = """You are the reproduction agent of the review of PR #{number} in {re
 - {skill}
 - {asked}
 - {gpus}
+- {persistence}
 - When you are done, return the JSON your task asks for: the conclusion (reproduced, not_reproduced, inconclusive, or not_needed), in `comment` the record your skill has the reproduction agent report, in {public_language}, and in `notes` anything only maintainers should read."""
 
 SKILL = (
@@ -114,9 +115,11 @@ SKILL = (
 
 ASK = "When only {by} can settle something that changes what you run, ask them with your tool for asking the user."
 
-GPUS = "Take the GPUs the run needs with `lab --gpus N`. When they are busy, wait for them (`lab --gpus N --wait MINUTES`, again as often as it takes while the session has time; the review's agent beside you gives back what it borrows) rather than run on fewer or report the run as failed for want of them. Only what the machine does not have at all (more GPUs than it has, another node, a robot) is missing; for that, run what your skill says stands in for it on everything the machine has, and record it as an intervention."
+GPUS = "Take the GPUs the run needs with `lab --gpus N`. When they are busy, do CPU setup first (venv, downloads) and wait for them (`lab --gpus N --wait MINUTES`, repeating as often as needed — waiting keeps the session alive automatically) rather than run on fewer or report the run as failed for want of them. Only what the machine does not have at all (more GPUs than it has, another node, a robot) is missing; for that, run what your skill says stands in for it on everything the machine has, and record it as an intervention."
 """How the reproduction agent gets its GPUs: it waits for busy ones instead of
 giving up, and stands in only for hardware the machine lacks."""
+
+PERSISTENCE = "Do not quit over temporary or solvable blockers: if a venv or package is missing, build/install it in `$AM_LAB_KEEP` (or the machine's venv directory using its configured mirrors); if a checkpoint or dataset download is large or slow, download into `$AM_LAB_KEEP` so partial files resume, use `HF_ENDPOINT` / configured mirrors, retry transient network errors, and avoid short timeouts (active downloads extend the session automatically)."
 
 ALONGSIDE = "The PR's review runs while you work, and your record goes into it. Reproduce what the PR adds or claims, as your skill says; when the skill says the PR needs no reproduction, run nothing and conclude `not_needed`."
 """What the reproduction agent started with a review is asked (``review.alongside``)."""
@@ -128,11 +131,14 @@ to be written."""
 REPORT_STATE = "reproduce_report:{job}"
 """A finished reproduction's record while it waits for its review's draft."""
 
-UPDATE = """You wrote the {what} of PR #{number} in {repo} given below, and it said a reproduction on a test machine would follow. That reproduction has ended; its record is below. Revise the {what} with it:
-- Fill in where the skill asks how the PR was reproduced, what came out, and whether the documentation could be followed: the steps run and how, the functional and the metric result, the first failure and every step the docs left out; or, when no run happened, why and what a run would need.
-- Change a finding or the recommendation only where the run settles it: it confirmed or disproved a claim, or the documented steps failed.
-- Keep everything else word for word, including edits the reviewers made to the draft by hand.
-- Return the whole revised {what} in `{field}`, and say in `reply`, in a sentence or two, what you changed.
+UPDATE = """You are revising the {what} of PR #{number} in {repo} given below. That reproduction has ended; its record is below.
+
+You have the repository checkout here to inspect any file or line the reproduction touched. Decide freely how the {what} as a whole should be updated — do not limit your edits to the reproduction section or do a mechanical text replacement:
+- Integrate the reproduction results into where the skill asks how the PR was reproduced, what came out, and whether the documentation could be followed (steps run and settings/adaptations, functional and metric results, first failure, every intervention, or why no run happened).
+- If the reproduction uncovered problems (bugs, crashes, missing config or documentation steps, broken scripts, performance regressions, or usability gaps), incorporate them into the whole {what}: add them as findings (with inline file/line comments where applicable) and reflect them in the summary, sections, and overall recommendation.
+- If the reproduction confirmed, refined, or disproved existing findings, update, strengthen, or remove those findings and adjust severities and the recommendation as appropriate.
+- Keep the {what} coherent as a single unified review (preserving manual edits reviewers made to the draft unless the reproduction directly supersedes them).
+- Return the complete revised {what} in `{field}`, and say in `reply`, in a sentence or two, what you changed.
 - The {what} is public, in {public_language}: machine names, scores, and other internal details never go in it."""
 
 
@@ -385,15 +391,28 @@ class ReproducePlaybook(Playbook):
             "commands": [{k: v for k, v in c.items() if k != "tail"} for c in commands],
         }
         if report.conclusion == "not_needed":
-            await give_record(
-                ctx.store,
-                str(request.payload.get("alongside") or ""),
-                request.id,
-                {"conclusion": "not_needed", "comment": report.comment},
-            )
-            return PlaybookResult(
-                result={**summary, "skipped": "the PR needs no reproduction"}
-            )
+            summary_skipped = {**summary, "skipped": "the PR needs no reproduction"}
+            if request.payload.get("alongside"):
+                record_text = untrusted(
+                    "reproduction",
+                    "The reproduction agent judged that the PR needs no reproduction "
+                    f"and ran nothing: {report.comment}",
+                    10_000,
+                )
+                return await self._report(
+                    ctx,
+                    request,
+                    pr,
+                    by,
+                    {
+                        "summary": summary_skipped,
+                        "record_text": record_text,
+                        "comment": report.comment,
+                        "runtime": runtime,
+                        "head_sha": record.action.head_sha,
+                    },
+                )
+            return PlaybookResult(result=summary_skipped)
         machine = ctx.service.machines.get(lab)
         record_text = untrusted(
             "reproduction",
@@ -438,25 +457,6 @@ class ReproducePlaybook(Playbook):
         else, for a person's request, in a comment drafted for them."""
         summary = dict(kept.get("summary") or {})
         alongside = str(request.payload.get("alongside") or "")
-        if alongside and await give_record(
-            ctx.store,
-            alongside,
-            request.id,
-            {
-                "record_text": kept.get("record_text"),
-                "comment": kept.get("comment"),
-                "conclusion": summary.get("conclusion"),
-            },
-        ):
-            # The review that started it waits for this record and finishes with it.
-            await ctx.store.set_state(REPORT_STATE.format(job=ctx.job.id), None)
-            return PlaybookResult(
-                result={
-                    **summary,
-                    "for_review": alongside,
-                    "comment": kept.get("comment"),
-                }
-            )
         if pr is not None:
             if alongside:
                 target = await self._review_of_job(ctx, pr, alongside)
@@ -477,7 +477,13 @@ class ReproducePlaybook(Playbook):
             if target is not None and target[1] is not None:
                 revised = await self._revise(ctx, target[0], target[1], pr, record_text)
                 if revised is not None:
-                    done = PlaybookResult(result={**summary, "revised": revised})
+                    done = PlaybookResult(
+                        result={
+                            **summary,
+                            "revised": revised,
+                            **({"for_review": alongside} if alongside else {}),
+                        }
+                    )
             elif target is not None:
                 update = await self._update_posted(
                     ctx, target[0], pr, record_text, by, request
@@ -485,7 +491,11 @@ class ReproducePlaybook(Playbook):
                 if update is not None:
                     done = PlaybookResult(
                         actions=[update],
-                        result={**summary, "updates": target[0].action.id},
+                        result={
+                            **summary,
+                            "updates": target[0].action.id,
+                            **({"for_review": alongside} if alongside else {}),
+                        },
                     )
             # Kept until here, so a try that fails while adding it keeps the record.
             await ctx.store.set_state(REPORT_STATE.format(job=ctx.job.id), None)
@@ -577,6 +587,7 @@ class ReproducePlaybook(Playbook):
                     ),
                     asked=asked,
                     gpus=GPUS,
+                    persistence=PERSISTENCE,
                     public_language=profile.languages.public,
                 ),
                 ASK.format(by=by) if by else "",
@@ -638,15 +649,27 @@ class ReproducePlaybook(Playbook):
         reason: str | None,
         **extra: object,
     ) -> PlaybookResult:
-        """End without a run: the review that started it is told why, and the job's
-        result says so."""
-        await give_record(
-            ctx.store,
-            str(request.payload.get("alongside") or ""),
-            request.id,
-            {"not_run": why},
-        )
-        return PlaybookResult(result={"skipped": reason or why, **extra})
+        """End without a run: when started alongside a review, update that review
+        with why no run happened; otherwise just record it on the job."""
+        summary: dict[str, Any] = {"skipped": reason or why, **extra}
+        if request.payload.get("alongside") and pr is not None:
+            record_text = untrusted(
+                "reproduction", f"The reproduction did not run: {why}.", 10_000
+            )
+            return await self._report(
+                ctx,
+                request,
+                pr,
+                request.payload.get("by"),
+                {
+                    "summary": summary,
+                    "record_text": record_text,
+                    "comment": f"The reproduction did not run: {why}.",
+                    "runtime": None,
+                    "head_sha": pr.head_sha,
+                },
+            )
+        return PlaybookResult(result=summary)
 
     async def _review_of(
         self, ctx: PlaybookContext, request: Event, pr: PrSnapshot

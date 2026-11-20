@@ -311,6 +311,10 @@ async def test_review_prompt_is_clean_with_and_without_test_machine(
         assert "Test machine gpu-01 is yours while you work" in lab_review.prompt
         assert "real git worktree" in lab_review.prompt
         assert "You do not reproduce it yourself" not in lab_review.prompt
+        assert (
+            "Do not quit a reproduction over temporary or solvable blockers"
+            in lab_review.prompt
+        )
         assert "earlier.work" not in lab_review.prompt
         assert (lab_review.min_timeout_seconds or 0) >= 7200
         actions = await h.store.list_actions(
@@ -319,3 +323,65 @@ async def test_review_prompt_is_clean_with_and_without_test_machine(
         assert len(actions) >= 2
     finally:
         await h.close()
+
+
+async def test_grow_gpus_waits_for_busy_gpus_without_expiring_session(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Waiting for busy GPUs in ``grow_gpus`` keeps the session alive past its initial
+    idle limit and slides the deadline once GPUs free up."""
+    from auto_maintainer.domain.ports import GpuStatus
+
+    monkeypatch.setattr("auto_maintainer.labs.executor.GPU_POLL_SECONDS", 0.01)
+    clock = FixedClock()
+    store = await SqliteStore.open(tmp_path / "am.db")
+    polls = 0
+    freed = asyncio.Event()
+
+    class _BusyThenFreeHost(FakeLabHost):
+        async def gpu_status(self):
+            nonlocal polls
+            polls += 1
+            if not freed.is_set():
+                return [
+                    GpuStatus(
+                        index=0, memory_used_mib=40_000, utilization_pct=90, processes=1
+                    ),
+                    GpuStatus(
+                        index=1, memory_used_mib=40_000, utilization_pct=90, processes=1
+                    ),
+                ]
+            return [
+                GpuStatus(index=0, memory_used_mib=0, utilization_pct=0, processes=0),
+                GpuStatus(index=1, memory_used_mib=0, utilization_pct=0, processes=0),
+            ]
+
+    labs = LabExecutor({}, {}, store, clock)
+    labs.configure({"gpu-01": LabMachine(workdir="/tmp/lab", timeout_seconds=1800)})
+    labs.hosts["gpu-01"] = _BusyThenFreeHost("gpu-01")
+    try:
+        opened = await labs.open_session(
+            LabReproducePayload(lab="gpu-01", summary="wait for busy GPUs"),
+            "acme/widget",
+            11,
+            {"head": ""},
+            "act_waitgpu1",
+            binding=LabBinding(use=True),
+        )
+        sid = opened["session"]
+        tok = labs.session_token(sid)
+        assert tok is not None
+        assert opened["gpus"] == []
+
+        wait_task = asyncio.create_task(labs.grow_gpus(tok, 2, wait_seconds=7200))
+        while polls < 2:
+            await asyncio.sleep(0.01)
+        clock.advance(seconds=2400)
+        assert await labs.expire_sessions() == 0, "waiting for GPUs is not expired"
+        freed.set()
+        res = await wait_task
+        assert res["gpus"] == [0, 1]
+        info = labs.session_info(tok)
+        assert info is not None and info["seconds_left"] == 1800
+    finally:
+        await store.close()

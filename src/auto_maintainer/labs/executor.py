@@ -758,22 +758,28 @@ class LabExecutor:
         if count == 0:
             session.gpus = []
         else:
-            until = min(
-                self.clock.now() + timedelta(seconds=max(0, wait_seconds)),
-                session.deadline,
-            )
+            now = self.clock.now()
+            cap = session.hard_deadline or session.deadline
+            until = min(now + timedelta(seconds=max(0, wait_seconds)), cap)
             waited = False
-            while True:
-                idle = await self.idle_gpus(session.lab)
-                if len(idle) >= count or self.clock.now() >= until:
-                    session.gpus = idle
-                    break
-                if not waited:
-                    waited = True
-                    await session.tell(
-                        phase=f"Waiting for {count} idle GPUs ({len(idle)} idle now)"
-                    )
-                await asyncio.sleep(GPU_POLL_SECONDS)
+            session.active_commands += 1
+            try:
+                while not session.closed:
+                    cur = self.clock.now()
+                    session.slide(cur)
+                    idle = await self.idle_gpus(session.lab)
+                    if len(idle) >= count or cur >= until:
+                        session.gpus = idle
+                        break
+                    if not waited:
+                        waited = True
+                        await session.tell(
+                            phase=f"Waiting for {count} idle GPUs ({len(idle)} idle now)"
+                        )
+                    await asyncio.sleep(GPU_POLL_SECONDS)
+            finally:
+                session.active_commands = max(0, session.active_commands - 1)
+                session.slide(self.clock.now())
         session.env["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, session.gpus))
         await self._save(session)
         await session.tell(

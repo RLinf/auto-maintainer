@@ -667,12 +667,12 @@ def _starts_reproduction(h: Any) -> list[dict[str, Any]]:
     return told
 
 
-def _finishing(h: Any) -> list[Any]:
-    """The review agents' last turns, with their reproduction's record."""
+def _revisions(h: Any) -> list[Any]:
+    """Revision turns triggered after a reproduction finishes."""
     return [
         t
         for t in h.runner.tasks
-        if t.kind == "review" and "The reproduction you started has ended" in t.prompt
+        if t.kind == "review" and "That reproduction has ended" in t.prompt
     ]
 
 
@@ -709,12 +709,14 @@ async def test_a_review_tests_its_pr_in_its_own_session(demo) -> None:
     assert job.result["commands"][0]["command"] == "python check.py"
 
 
-async def test_the_reviewer_starts_the_reproduction_and_finishes_with_it(demo) -> None:
+async def test_the_reviewer_starts_the_reproduction_and_revises_draft_later(
+    demo,
+) -> None:
     """The review's agent judges that the PR needs a reproduction and starts the
-    skill's reproduction agent from its session: a fresh agent follows its brief on
-    the same machine, under the rule the review's own session runs by. The review
-    waits for it, then resumes the same agent with the run's record, so the draft
-    reports the run in one piece and nothing revises it afterwards."""
+    skill's reproduction agent from its session: the review finishes immediately and
+    creates its draft without waiting, and once the reproduction finishes later, an
+    agent revises the whole review draft freely with its results and any newly found
+    problems."""
     h, app = demo
     runner = h.service.a.lab_runner
     told = _starts_reproduction(h)
@@ -732,15 +734,16 @@ async def test_the_reviewer_starts_the_reproduction_and_finishes_with_it(demo) -
     [worker] = [t for t in h.runner.tasks if t.kind == "reproduce"]
     assert "You are the reproduction agent" in worker.prompt
     assert BRIEF in worker.prompt, "it follows the reviewer's brief"
-    [first] = _reviews(h)
-    [last] = _finishing(h)
-    assert "python check.py" in last.prompt, "the review finishes with its record"
-    assert last.lab_session == first.lab_session, "its session stayed open meanwhile"
+    [_first] = _reviews(h)
+    [rev] = _revisions(h)
+    assert "python check.py" in rev.prompt, "the revision gets the run's record"
+    assert "do not limit your edits to the reproduction section" in rev.prompt
+    assert "Keep everything else word for word" not in rev.prompt
     [review] = [j for j in await h.store.list_jobs() if j.playbook == "review"]
     [job] = [j for j in await h.store.list_jobs() if j.playbook == "reproduce"]
     assert job.result and job.result["for_review"] == review.id
+    assert job.result.get("revised"), "reproduction revised the review draft"
     assert review.status == JobStatus.DONE
-    assert not [t for t in h.runner.tasks if "That reproduction has ended" in t.prompt]
     assert len(runner.reproduced) == 2 and len(runner.closed) == 2
     again = await h.service.start_review_reproduction(
         {"job": review.id, "lab": "gpu-01"}, BRIEF
@@ -769,8 +772,8 @@ async def test_a_review_nobody_asked_for_tests_and_reproduces_team_work(demo) ->
     [job] = [j for j in await h.store.list_jobs() if j.playbook == "reproduce"]
     assert job.events[0]["payload"]["by"] is None, "nobody asked for it"
     assert [t for t in h.runner.tasks if t.kind == "reproduce"]
-    [last] = _finishing(h)
-    assert "python check.py" in last.prompt
+    [rev] = _revisions(h)
+    assert "python check.py" in rev.prompt
 
 
 async def test_outside_code_runs_only_for_someone_who_may_run_it(demo) -> None:
@@ -804,15 +807,13 @@ async def test_a_reproduction_the_pr_needs_not_is_said_in_the_review(demo) -> No
         await _review(h, maria, 42)
     [job] = [j for j in await h.store.list_jobs() if j.playbook == "reproduce"]
     assert job.result and "needs no reproduction" in job.result["skipped"]
-    [last] = _finishing(h)
-    assert (
-        "needs no reproduction" in last.prompt and "Nothing user-facing" in last.prompt
-    )
+    [rev] = _revisions(h)
+    assert "needs no reproduction" in rev.prompt and "Nothing user-facing" in rev.prompt
 
 
 async def test_a_reproduction_that_does_not_run_is_said_in_the_review(demo) -> None:
     """When the machine cannot take the reproduction, the review still finishes, and
-    its agent learns why no run happened."""
+    the revision turn updates the draft with why no run happened."""
     h, app = demo
     runner = h.service.a.lab_runner
     answer = h.runner.handlers["review"]
@@ -829,8 +830,8 @@ async def test_a_reproduction_that_does_not_run_is_said_in_the_review(demo) -> N
     async with _as(app, "maria") as maria:
         await _review(h, maria, 42)
     assert not [t for t in h.runner.tasks if t.kind == "reproduce"]
-    [last] = _finishing(h)
-    assert "did not run" in last.prompt and "every GPU is busy" in last.prompt
+    [rev] = _revisions(h)
+    assert "did not run" in rev.prompt and "every GPU is busy" in rev.prompt
 
 
 async def test_a_reproduction_that_ends_first_waits_for_its_review(demo) -> None:
@@ -1504,9 +1505,10 @@ async def test_a_choice_that_fails_falls_back_to_the_first_machine(demo) -> None
     assert h.service.a.lab_runner.reproduced[0]["payload"].lab == "gpu-01"
 
 
-async def test_a_follow_up_starts_the_reproduction_and_finishes_with_it(demo) -> None:
+async def test_a_follow_up_starts_the_reproduction_and_revises_later(demo) -> None:
     """A follow-up of new commits works as a review does: its agent may start the
-    skill's reproduction, and it finishes with the run's record."""
+    skill's reproduction without blocking, and once the reproduction finishes it
+    revises the follow-up draft."""
     h, app = demo
     answer = h.runner.handlers["followup"]
     told: list[dict[str, Any]] = []
@@ -1537,10 +1539,10 @@ async def test_a_follow_up_starts_the_reproduction_and_finishes_with_it(demo) ->
         for j in await h.store.list_jobs()
         if j.playbook == "followup" and j.id == job.result["for_review"]
     ]
-    [last] = [
+    [rev] = [
         t
         for t in h.runner.tasks
-        if t.kind == "followup" and "The reproduction you started has ended" in t.prompt
+        if t.kind == "followup" and "That reproduction has ended" in t.prompt
     ]
-    assert "python check.py" in last.prompt
+    assert "python check.py" in rev.prompt
     assert follow.status == JobStatus.DONE

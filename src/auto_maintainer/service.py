@@ -1029,8 +1029,8 @@ class Service:
         kept = await self.a.store.get_state(key)
         if isinstance(kept, dict) and kept.get("event"):
             return {
-                "note": "A reproduction already runs for this review; its record comes "
-                "to you when your review is written."
+                "note": "A reproduction already runs for this review; once it finishes, "
+                "it will automatically update your review."
             }
         if not brief.strip():
             return {"error": "the brief is empty"}
@@ -1054,9 +1054,9 @@ class Service:
         await self.bus.publish(event)
         return {
             "started": True,
-            "note": f"The reproduction agent starts on {lab} and runs while you review. "
-            "When your review is written, you get its record to complete it; until "
-            "then, say that the run is underway.",
+            "note": f"The reproduction agent starts on {lab} in the background. Finish "
+            "your review now (saying the reproduction is underway); once it finishes, "
+            "an agent will revise your review as a whole with its results.",
         }
 
     async def lab_refusal(self, action: Action, pr: PrSnapshot, lab: str) -> str | None:

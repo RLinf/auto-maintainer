@@ -96,10 +96,6 @@ from .review_form import fill_form, forget_report, keep_report, saved_report
 from .review_session import (
     ReviewMachine,
     close,
-    finish_prompt,
-    reproduction_outcome,
-    reproduction_running,
-    reproduction_taken,
     review_machine,
     session_task_fields,
     testing_block,
@@ -215,18 +211,11 @@ class ReviewPlaybook(Playbook):
             c for c in label_choices(info.labels, profile, pr) if c not in declined
         ]
         limit = profile.review.max_suggested_labels
-        # A report this job's agent wrote already needs only its form filled in, or,
-        # when the agent started a reproduction, that run's record first.
+        # A report this job's agent wrote already needs only its form filled in.
         answer = await saved_report(ctx, pr.head_sha)
-        finishing: str | None = None
-        if answer is not None:
-            outcome = await reproduction_outcome(ctx, pr)
-            if isinstance(outcome, PlaybookResult):
-                return outcome
-            finishing = outcome
         machine = (
             ReviewMachine()
-            if answer is not None and finishing is None
+            if answer is not None
             else await review_machine(
                 ctx,
                 pr,
@@ -238,7 +227,6 @@ class ReviewPlaybook(Playbook):
         )
         if machine.wait is not None:
             return machine.wait
-        held = False
         workdir = await ctx.workspace.prepare(
             pr.repo, pr.number, pr.head_sha, info.default_branch
         )
@@ -272,31 +260,6 @@ class ReviewPlaybook(Playbook):
                 if not answer.ok:
                     raise RuntimeError(f"review agent failed: {answer.error}")
                 await keep_report(ctx, pr.head_sha, answer)
-                if await reproduction_running(ctx):
-                    # Its reproduction runs: the review waits for it, its session
-                    # open for what the run calls for.
-                    outcome = await reproduction_outcome(ctx, pr)
-                    if isinstance(outcome, PlaybookResult):
-                        held = True
-                        return outcome
-                    finishing = outcome
-            if finishing is not None:
-                answer = await ctx.ask(
-                    AgentTask(
-                        kind=TaskKind.REVIEW,
-                        prompt=finish_prompt(finishing, machine),
-                        workdir=workdir,
-                        skill_dirs=ctx.skill_dirs(),
-                        repo=pr.repo,
-                        messages=True,
-                        **session_task_fields(ctx, machine),
-                    ),
-                    after=answer,
-                )
-                if not answer.ok:
-                    raise RuntimeError(f"review agent failed: {answer.error}")
-                await keep_report(ctx, pr.head_sha, answer)
-                await reproduction_taken(ctx)
             await close(ctx, machine)
             await ctx.keep_work_session(answer, workdir)
             lessons = await ctx.knowledge.review_lessons(pr.repo, profile)
@@ -326,9 +289,8 @@ class ReviewPlaybook(Playbook):
                 result = await self._verify(ctx, result, pr_block(pr, diff), workdir)
         finally:
             await ctx.workspace.release(workdir)
-            # A run the job's next try (or the next start) picks up keeps its session,
-            # and so does a review waiting for its reproduction.
-            if not held and not keeps_session(ctx, answer):
+            # A run the job's next try (or the next start) picks up keeps its session.
+            if not keeps_session(ctx, answer):
                 await close(ctx, machine)
         await forget_report(ctx)
 
