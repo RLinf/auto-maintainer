@@ -44,6 +44,9 @@ class PolicyFacts(BaseModel):
     changed_paths: list[str] = Field(default_factory=list)
     executed_on_sha: int = 0
     """Executions of the same kind at this head SHA by the same posting account."""
+    posting_as_person: bool = False
+    """True when a person requested/approved posting this action under their own GitHub
+    account (not the service's); ``ONE_PER_SHA`` still caps the service account."""
     public_writes_last_hour: int = 0
     repo_public_writes_last_hour: int = 0
     max_public_writes_per_hour: int = 300
@@ -51,9 +54,9 @@ class PolicyFacts(BaseModel):
 
 
 ONE_PER_SHA = {ActionKind.REVIEW_POST}
-"""Kinds limited to one execution per PR, head SHA, and posting account (later changes
-edit in place): the service's own account posts at most one review of a commit, and
-each person posting as themselves at most one of their own."""
+"""Kinds limited to one execution per PR and head SHA by the service's own account
+(later automated changes edit in place); a person who explicitly requests and approves
+posting a review as themselves is not blocked by this limit."""
 
 WRITE_CAP_RULE = "limit.write_cap"
 """The service's hourly cap on writes to forges was reached: the service pauses."""
@@ -100,7 +103,11 @@ def decide(action: Action, profile: RepoProfile, facts: PolicyFacts) -> Decision
             rule="dev_mode.sandbox",
             reason="a development instance acts only on its sandbox repository",
         )
-    if kind in ONE_PER_SHA and facts.executed_on_sha >= 1:
+    if (
+        kind in ONE_PER_SHA
+        and facts.executed_on_sha >= 1
+        and not facts.posting_as_person
+    ):
         return Decision(
             kind=DecisionKind.DENY,
             rule="limit.one_per_sha",

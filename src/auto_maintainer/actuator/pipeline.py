@@ -46,7 +46,6 @@ from ..domain.ports import EventSink, Store
 from ..domain.profile import RepoProfile
 from ..domain.records import ActionRecord, AuditEntry
 from ..policy.engine import (
-    ONE_PER_SHA,
     PAUSED_RULE,
     REPO_WRITE_CAP_RULE,
     WRITE_CAP_RULE,
@@ -230,6 +229,7 @@ class ActionPipeline:
             recommendation=action.hints.recommendation,
             changed_paths=action.hints.changed_paths,
             executed_on_sha=executed,
+            posting_as_person=bool(post_as),
             public_writes_last_hour=await count(statuses, hour),
             repo_public_writes_last_hour=await count(statuses, hour, repo=action.repo),
             max_public_writes_per_hour=self.write_caps[0],
@@ -306,14 +306,10 @@ class ActionPipeline:
             else:
                 decision = Decision(kind=DecisionKind.EXECUTE, rule="internal")
         else:
-            # A draft for someone is theirs to post, as themselves or as the service:
-            # which account it counts against is known when they approve it
-            # (``_redecide``), so only a draft neither may post is refused here.
+            # A draft for someone is theirs to post as themselves (never blocked by
+            # ONE_PER_SHA on submission) or as the service (checked on approval in
+            # ``_redecide``).
             facts = await self._facts(action, None, action.draft_for)
-            if action.draft_for and action.kind in ONE_PER_SHA:
-                facts.executed_on_sha = min(
-                    facts.executed_on_sha, await self._executed_on_sha(action, None)
-                )
             if force_propose:
                 # Someone asked for it; a standby host proposes it to them too.
                 facts.standby = False

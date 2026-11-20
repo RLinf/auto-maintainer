@@ -1180,10 +1180,12 @@ async def test_a_post_the_policy_refuses_after_approval_stays_a_draft(
     assert any("already ran for this head" in w for w in back.warnings), back.warnings
 
 
-async def test_a_draft_another_account_may_post_is_kept(harness: Harness) -> None:
-    """One review of a commit per posting account: a reviewer who already posted one
-    of this commit as themselves still gets the new draft, to post as the service;
-    only a draft that neither account may post is refused when it is made."""
+async def test_a_draft_for_someone_is_kept_even_when_both_accounts_already_posted(
+    harness: Harness,
+) -> None:
+    """``ONE_PER_SHA`` caps the service's own account at one review per head SHA;
+    a person who explicitly requests a review draft still gets it on an
+    already-reviewed commit and can approve posting it as themselves."""
     from auto_maintainer.domain.actions import (
         Action,
         ActionKind,
@@ -1212,16 +1214,24 @@ async def test_a_draft_another_account_may_post_is_kept(harness: Harness) -> Non
             action=review("hers"), status=ActionStatus.EXECUTED, post_as="maria"
         )
     )
-    kept = await harness.service.pipeline.submit(review("again"))
-    assert kept.status == ActionStatus.PROPOSED, "she may post it as the service"
-
     await harness.store.add_action(
         ActionRecord(action=review("service's", None), status=ActionStatus.EXECUTED)
     )
-    refused = await harness.service.pipeline.submit(review("third"))
+
+    # Automated / unrequested review by the service is still blocked by ONE_PER_SHA.
+    refused = await harness.service.pipeline.submit(review("auto-again", None))
     assert refused.status == ActionStatus.DENIED
     assert refused.decision is not None
     assert refused.decision.rule == "limit.one_per_sha"
+
+    # A person's requested draft is kept and can be approved as themselves.
+    kept = await harness.service.pipeline.submit(review("third", "maria"))
+    assert kept.status == ActionStatus.PROPOSED
+    prop = await harness.store.proposal_for_action(kept.action.id)
+    assert prop is not None
+    await harness.service.pipeline.approve(prop.id, "maria", post_as="maria")
+    after = await harness.store.get_action(kept.action.id)
+    assert after is not None and after.status == ActionStatus.QUEUED
 
 
 async def test_a_comment_on_a_line_the_diff_does_not_show_goes_in_the_review(
