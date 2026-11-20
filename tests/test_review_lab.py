@@ -266,7 +266,11 @@ async def test_review_prompt_is_clean_with_and_without_test_machine(
             lambda t: {"summary": "Clean.", "findings": [], "recommendation": "Ready"},
         )
 
-        # Case 1: No test machine configured -> clean fallback + full-scope framing.
+        # Case 1: No test machine configured -> clean fallback + full-scope framing,
+        # and review_lessons apply during the form turn rather than the audit turn.
+        h.memory.files["repos/acme/widget/knowledge/review_lessons.md"] = (
+            "# Review lessons\n- Keep review comments concise.\n"
+        )
         await h.emit(
             Event(
                 kind=EventKind.DASHBOARD_COMMAND,
@@ -276,9 +280,12 @@ async def test_review_prompt_is_clean_with_and_without_test_machine(
             )
         )
         [review_task] = [t for t in h.runner.tasks if str(t.kind) == "review"]
+        [form_task] = [t for t in h.runner.tasks if str(t.kind) == "form"]
         assert "No test machine is set up for this repository" in review_task.prompt
         assert "This is a full review of the entire PR diff" in review_task.prompt
         assert "earlier.work" not in review_task.prompt
+        assert "Keep review comments concise." not in review_task.prompt
+        assert "Keep review comments concise." in form_task.prompt
 
         # Case 2: Test machine configured -> clean lab prompt, no "You do not reproduce
         # it yourself" override, no earlier.work dump, generous min_timeout_seconds.

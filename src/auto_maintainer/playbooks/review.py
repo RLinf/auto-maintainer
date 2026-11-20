@@ -299,6 +299,7 @@ class ReviewPlaybook(Playbook):
                 await reproduction_taken(ctx)
             await close(ctx, machine)
             await ctx.keep_work_session(answer, workdir)
+            lessons = await ctx.knowledge.review_lessons(pr.repo, profile)
             form = await fill_form(
                 ctx,
                 answer,
@@ -309,7 +310,13 @@ class ReviewPlaybook(Playbook):
                         recommendations=recommendations_line(profile),
                     ),
                     answer.text,
-                    [label_block(choices, limit), quality_block(profile)],
+                    [
+                        label_block(choices, limit),
+                        quality_block(profile),
+                        f"The maintainers' lessons for writing reviews of this repository:\n{lessons}"
+                        if lessons
+                        else "",
+                    ],
                 ),
                 workdir,
             )
@@ -504,7 +511,6 @@ async def review_prompt(
         testing = NOTHING_RUNS.format(
             note=machine.note or "No test machine is attached to this review."
         )
-    lessons = await ctx.knowledge.review_lessons(pr.repo, profile)
     full_scope = (
         f"This is a full review of the entire PR diff (`origin/{base_ref}...HEAD`), "
         "not only the latest commit. Even when earlier review comments exist on the PR, "
@@ -522,9 +528,6 @@ async def review_prompt(
             testing_block(await reproduction_record(ctx.store, pr.repo, pr.number)),
             review_instructions_block(profile),
             writing_block(profile, own_review_skill(profile, workdir) is not None),
-            f"The maintainers' lessons for reviews of this repository:\n{lessons}"
-            if lessons
-            else "",
             notes_block(await load_notes(ctx.store, ctx.requested_by), "reviews")
             if ctx.requested_by
             else "",

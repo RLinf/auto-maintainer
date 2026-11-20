@@ -273,6 +273,7 @@ class Followup(Playbook):
                 await reproduction_taken(ctx)
             await close(ctx, machine)
             await ctx.keep_work_session(answer, workdir)
+            lessons = await ctx.knowledge.review_lessons(pr.repo, profile)
             result = await fill_form(
                 ctx,
                 answer,
@@ -283,6 +284,9 @@ class Followup(Playbook):
                     [
                         label_block(choices, limit),
                         quality_block(profile, followup=True),
+                        f"The maintainers' lessons for writing reviews of this repository:\n{lessons}"
+                        if lessons
+                        else "",
                     ],
                 ),
                 workdir,
@@ -425,7 +429,6 @@ class Followup(Playbook):
             testing = NOTHING_RUNS.format(
                 note=machine.note or "No test machine is attached to this review."
             )
-        lessons = await ctx.knowledge.review_lessons(pr.repo, profile)
         return "\n\n".join(
             part
             for part in [
@@ -446,9 +449,6 @@ class Followup(Playbook):
                 ),
                 review_instructions_block(profile),
                 writing_block(profile, own_review_skill(profile, workdir) is not None),
-                f"The maintainers' lessons for reviews of this repository:\n{lessons}"
-                if lessons
-                else "",
                 notes_block(await load_notes(ctx.store, ctx.requested_by), "reviews")
                 if ctx.requested_by
                 else "",
