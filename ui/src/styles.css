@@ -1225,6 +1225,19 @@ details.pv-section[open] > summary { margin-bottom: 6px; }
 .merge-details { padding: 12px 18px; }
 .merge-details summary { cursor: pointer; list-style: revert; }
 .merge-details[open] summary { margin-bottom: 6px; }
+.merge-search { min-width: 240px; max-width: 340px; width: 100%; padding: 5px 10px; font-size: 13px; border-radius: var(--r-sm); border: 1px solid var(--border); background: var(--surface); color: var(--text); }
+.merge-filters { gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+.merge-blockers { gap: 6px; flex-wrap: wrap; margin-top: 2px; }
+.pill.merge-blocker { background: var(--warn-bg); color: var(--warn); white-space: normal; line-height: 1.35; padding: 2px 9px; font-size: 12px; }
+.pill.merge-blocker.is-muted, .pill.merge-draft-pill { background: var(--surface-2); color: var(--text-2); }
+.merge-check-toggle { background: none; border: none; padding: 0; cursor: pointer; font: inherit; text-decoration: underline dotted; }
+.merge-check-toggle:hover { color: var(--text); }
+.merge-checklist { list-style: none; margin: 6px 0 0; padding: 8px 10px; border-radius: var(--r-sm); background: var(--surface-2); display: flex; flex-direction: column; gap: 4px; }
+.merge-checklist li { display: flex; align-items: baseline; gap: 6px; }
+.merge-checklist li.is-ok svg { color: var(--ok); flex-shrink: 0; }
+.merge-checklist li.is-fail svg { color: var(--warn); flex-shrink: 0; }
+.merge-checklist li.is-fail { color: var(--text); font-weight: 500; }
+.merge-checklist li.is-ok { color: var(--muted); }
 .clamp1 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
 @media (max-width: 640px) {
   .merge-row { flex-wrap: wrap; }

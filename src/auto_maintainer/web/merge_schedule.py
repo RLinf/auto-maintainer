@@ -38,10 +38,12 @@ from ..domain.actions import ActionKind
 from ..domain.events import Event, EventKind
 from ..domain.ids import same_commit
 from ..domain.memory import profile_path
-from ..domain.merge_gate import GateResult, MergeArm, evaluate_merge_gate
+from ..domain.merge_gate import GateItem, GateResult, MergeArm, evaluate_merge_gate
 from ..domain.merge_schedule import (
     ACTIVE,
     ScheduleState,
+    candidate_items,
+    condition_of,
     fix_key,
     holding_back,
     next_position,
@@ -207,16 +209,23 @@ async def gate_of(
         known.update(await permissions_of(service, pr.repo, missing))
     perms = {r.author: known[r.author.lower()] for r in pr.reviews}
     hygiene = await service.store.get_state(hygiene_key(pr.repo, pr.number)) or {}
-    blocking = {
-        r["id"]: r["passed"]
-        for r in hygiene.get("results", [])
-        if r.get("blocking")
-        and not r.get("skipped")
-        and same_commit(hygiene.get("sha"), pr.head_sha)
-    }
+    blocking: dict[str, bool] = {}
+    blocking_details: dict[str, str] = {}
+    for r in hygiene.get("results", []):
+        if (
+            r.get("blocking")
+            and not r.get("skipped")
+            and same_commit(hygiene.get("sha"), pr.head_sha)
+        ):
+            cid = str(r["id"])
+            passed = bool(r["passed"])
+            blocking[cid] = passed
+            if not passed and r.get("message"):
+                blocking_details[cid] = str(r["message"])
     for s in profile.checks:
         if s.blocking and s.enabled and s.id not in blocking:
             blocking[s.id] = False
+            blocking_details[s.id] = "not checked yet at this commit"
     return evaluate_merge_gate(
         pr,
         profile,
@@ -227,6 +236,7 @@ async def gate_of(
         blocking,
         await service.pipeline.paused(pr.repo),
         service.clock.now(),
+        blocking_details=blocking_details,
     )
 
 
@@ -726,24 +736,45 @@ def build_router() -> APIRouter:
             unarmed = [
                 pr
                 for pr in sorted(snaps.values(), key=lambda p: p.number)
-                if pr.number not in armed
-                and pr.state == PrState.OPEN
-                and (not pr.is_draft or profile.scope.include_drafts)
+                if pr.number not in armed and pr.state == PrState.OPEN
             ]
             # Every reviewer's permission in one parallel read: once their cache time
             # runs out, reading them PR by PR held the page for tens of seconds.
             known = await permissions_of(
                 service, repo, [r.author for pr in unarmed for r in pr.reviews]
             )
+            conds = ready_conditions(profile)
             for pr in unarmed:
                 gate = await gate_of(service, profile, info, pr, None, known)
-                back = holding_back(gate, ready_conditions(profile))
+                items = list(candidate_items(gate, conds))
+                if (
+                    pr.is_draft
+                    and not profile.scope.include_drafts
+                    and not any(i.name == "not_draft" for i in items)
+                ):
+                    items.append(
+                        GateItem(name="not_draft", ok=False, detail="draft PR")
+                    )
+                back = [i for i in items if not i.ok]
                 row = _row(pr, profile)
                 if not back:
                     candidates.append(row)
                 else:
-                    row["reasons"] = [_item(i.name, i.detail) for i in back[:3]]
+                    row["draft"] = bool(pr.is_draft)
+                    row["reasons"] = [_item(i.name, i.detail) for i in back]
+                    row["checks"] = [
+                        {
+                            "condition": condition_of(i) or i.name,
+                            "name": i.name,
+                            "ok": i.ok,
+                            "detail": i.detail,
+                        }
+                        for i in items
+                    ]
                     not_ready.append(row)
+            not_ready.sort(
+                key=lambda r: (bool(r.get("draft")), len(r["reasons"]), -r["number"])
+            )
             draft = await service.store.get_state(DRAFT_KEY.format(repo=repo))
             own_patterns = await _own_pattern_ids(service, repo)
             start = profile.ci.start

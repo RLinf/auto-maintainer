@@ -65,8 +65,17 @@ interface Scheduled extends Row {
   forced: boolean;
 }
 
+interface GateCheck {
+  condition: string;
+  name: string;
+  ok: boolean;
+  detail: string;
+}
+
 interface NotReady extends Row {
+  draft?: boolean;
   reasons: string[];
+  checks?: GateCheck[];
 }
 
 interface CiStart {
@@ -793,42 +802,169 @@ function Candidates({ v }: { v: MergeView }) {
   );
 }
 
+const CONDITION_LABELS: Record<string, string> = {
+  approvals: "Approvals",
+  threads_resolved: "Unresolved threads",
+  no_changes_requested: "Changes requested",
+  no_blocking_labels: "Blocking label",
+  no_conflict: "Conflict",
+  not_draft: "Draft",
+  hygiene: "Hygiene",
+};
+
+function formatCheckLabel(c: GateCheck, t: (s: string) => string): string {
+  if (c.name.startsWith("hygiene:")) {
+    const id = c.name.slice("hygiene:".length).replace(/_/g, " ");
+    return `${t("Hygiene")} (${id})${c.detail ? `: ${t(c.detail)}` : ""}`;
+  }
+  const base = t(CONDITION_LABELS[c.condition] ?? c.name.replace(/_/g, " "));
+  if (c.condition === "not_draft" && !c.ok) return t("Draft PR");
+  if (!c.detail) return base;
+  return `${base}: ${c.detail}`;
+}
+
 function NotReadyList({ v }: { v: MergeView }) {
   const t = useT();
   const toast = useToast();
   const force = useAct((n: number) => api.post(`/api/merge-schedule/${v.repo}/schedule`, { number: n, force: true }), [["merge-schedule"]]);
+  const [query, setQuery] = useState("");
+  const [filter, setFilter] = useState<string>("all");
+  const [showAll, setShowAll] = useState(false);
+  const [expanded, setExpanded] = useState<Record<number, boolean>>({});
   if (!v.not_ready.length) return null;
+
+  const failingOf = (r: NotReady): GateCheck[] =>
+    r.checks && r.checks.length > 0
+      ? r.checks.filter((c) => !c.ok)
+      : r.reasons.map((x) => ({ condition: x.split(":")[0].trim().replace(/ /g, "_"), name: x, ok: false, detail: "" }));
+
+  const almostReadyCount = v.not_ready.filter((r) => !r.draft && failingOf(r).length === 1).length;
+  const condCounts = new Map<string, number>();
+  for (const r of v.not_ready) {
+    const seen = new Set(failingOf(r).map((c) => c.condition));
+    for (const cond of seen) condCounts.set(cond, (condCounts.get(cond) ?? 0) + 1);
+  }
+  const activeConds = [...READY].filter((c) => (condCounts.get(c) ?? 0) > 0);
+
+  const q = query.trim().toLowerCase();
+  const filtered = v.not_ready.filter((r) => {
+    const failing = failingOf(r);
+    if (filter === "almost" && (r.draft || failing.length !== 1)) return false;
+    if (filter !== "all" && filter !== "almost" && !failing.some((c) => c.condition === filter)) return false;
+    if (!q) return true;
+    const hay = `#${r.number} ${r.number} ${r.title} ${r.author} ${r.reasons.join(" ")}`.toLowerCase();
+    return hay.includes(q);
+  });
+
+  const LIMIT = 15;
+  const visible = showAll || q ? filtered : filtered.slice(0, LIMIT);
+  const hiddenCount = filtered.length - visible.length;
+
   return (
-    <details className="card merge-details">
-      <summary>
-        <strong>{t("Not ready yet")}</strong> <span className="muted small">({v.not_ready.length})</span>
-      </summary>
-      <div className="list">
-        {v.not_ready.map((r) => (
-          <div key={r.number} className="list-row merge-row">
-            <div className="stack merge-main">
-              <PrLink repo={v.repo} row={r} />
-              <span className="small muted">{r.reasons.map((x) => t(x)).join(" · ")}</span>
-            </div>
-            {v.can_arrange && (
-              <button
-                className="sm ghost"
-                disabled={force.isPending}
-                title={t("Run its CI on its turn though it is not ready; it merges once the merge rules hold")}
-                onClick={() =>
-                  force.mutate(r.number, {
-                    onSuccess: () => toast({ title: `${t("Scheduled by hand")} #${r.number}`, icon: "merge" }),
-                    onError: (e) => toast({ title: t("Not scheduled"), body: String((e as Error).message), icon: "x" }),
-                  })
-                }
-              >
-                {t("Schedule anyway")}
-              </button>
-            )}
-          </div>
+    <Section
+      title={t("Not ready yet")}
+      hint={t("Open PRs not yet schedulable and the exact conditions holding each one back, sorted by fewest blockers first.")}
+      aside={
+        <input
+          className="merge-search"
+          type="search"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder={t("Filter by #PR, title, author, or reason…")}
+          aria-label={t("Filter not-ready PRs")}
+        />
+      }
+    >
+      <div className="row merge-filters">
+        <button className={`chip-btn sm ${filter === "all" ? "on" : ""}`} onClick={() => setFilter("all")}>
+          {t("All")} <span className="n">{v.not_ready.length}</span>
+        </button>
+        {almostReadyCount > 0 && (
+          <button className={`chip-btn sm ${filter === "almost" ? "on" : ""}`} onClick={() => setFilter("almost")}>
+            {t("Almost ready")} <span className="n">{almostReadyCount}</span>
+          </button>
+        )}
+        {activeConds.map((c) => (
+          <button key={c} className={`chip-btn sm ${filter === c ? "on" : ""}`} onClick={() => setFilter(c)}>
+            {t(CONDITION_LABELS[c] ?? c)} <span className="n">{condCounts.get(c)}</span>
+          </button>
         ))}
       </div>
-    </details>
+      {filtered.length === 0 ? (
+        <Empty icon="check">{t("No open PR matches this filter.")}</Empty>
+      ) : (
+        <div className="list">
+          {visible.map((r) => {
+            const checks = r.checks ?? [];
+            const failing = failingOf(r);
+            const passed = checks.filter((c) => c.ok).length;
+            const isOpen = !!expanded[r.number];
+            return (
+              <div key={r.number} className="list-row merge-row">
+                <div className="stack merge-main">
+                  <span className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+                    <PrLink repo={v.repo} row={r} />
+                    {r.draft && <span className="pill merge-draft-pill">{t("Draft")}</span>}
+                  </span>
+                  <span className="row merge-meta">
+                    <span className="small muted">{r.author}</span>
+                    <CiLine ci={r.ci} />
+                    {checks.length > 0 && (
+                      <button
+                        type="button"
+                        className="merge-check-toggle small muted"
+                        onClick={() => setExpanded((prev) => ({ ...prev, [r.number]: !prev[r.number] }))}
+                      >
+                        {passed}/{checks.length} {t("met")} {isOpen ? "▴" : "▾"}
+                      </button>
+                    )}
+                  </span>
+                  <div className="row merge-blockers">
+                    {failing.map((c, i) => (
+                      <span key={`${c.name}-${i}`} className={`pill merge-blocker ${c.condition === "not_draft" ? "is-muted" : ""}`}>
+                        {formatCheckLabel(c, t)}
+                      </span>
+                    ))}
+                  </div>
+                  {isOpen && checks.length > 0 && (
+                    <ul className="merge-checklist">
+                      {checks.map((c, i) => (
+                        <li key={`${c.name}-${i}`} className={`small ${c.ok ? "is-ok" : "is-fail"}`}>
+                          <Icon name={c.ok ? "check" : "x"} size={12} />{" "}
+                          <span>{formatCheckLabel(c, t)}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+                {v.can_arrange && (
+                  <button
+                    className="sm ghost"
+                    disabled={force.isPending}
+                    title={t("Run its CI on its turn though it is not ready; it merges once the merge rules hold")}
+                    onClick={() =>
+                      force.mutate(r.number, {
+                        onSuccess: () => toast({ title: `${t("Scheduled by hand")} #${r.number}`, icon: "merge" }),
+                        onError: (e) => toast({ title: t("Not scheduled"), body: String((e as Error).message), icon: "x" }),
+                      })
+                    }
+                  >
+                    {t("Schedule anyway")}
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {!q && (hiddenCount > 0 || (showAll && filtered.length > LIMIT)) && (
+        <div className="row" style={{ marginTop: 10 }}>
+          <button className="sm ghost" onClick={() => setShowAll((s) => !s)}>
+            {showAll ? t("Show fewer") : `${t("Show all")} (${filtered.length})`}
+          </button>
+        </div>
+      )}
+    </Section>
   );
 }
 

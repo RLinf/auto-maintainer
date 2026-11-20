@@ -2812,3 +2812,69 @@ async def test_ci_waits_while_github_works_out_whether_the_pr_conflicts(
     await h.settle()
     assert (await _phase(h, 42)).phase == "resolving"
     assert not h.forge.writes_of("add_labels")
+
+
+async def test_not_ready_view_reports_all_blockers_checks_hygiene_details_and_drafts(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """The merge schedule view lists every open unarmed PR (including drafts),
+    reports all failing reasons without truncating to 3, includes full structured
+    check status with hygiene failure details, and sorts fewest blockers first."""
+    from auto_maintainer.domain.snapshot import Mergeable, Review, ReviewThread
+    from auto_maintainer.playbooks.hygiene import hygiene_key
+
+    h = harness
+    # PR #50: only 1 blocker (missing approval).
+    pr_almost = make_pr(number=50, sha="1" * 40, reviews=[])
+    # PR #51: 4+ blockers (no approvals, changes requested, unresolved thread,
+    # conflict, and failed hygiene check with message).
+    pr_many = make_pr(
+        number=51,
+        sha="2" * 40,
+        reviews=[Review(id=1, author="bob", state=ReviewEventState.CHANGES_REQUESTED)],
+        threads=[ReviewThread(id="t1", is_resolved=False, path="a.py", line=1)],
+        mergeable=Mergeable.CONFLICTING,
+    )
+    # PR #52: draft PR — still visible in not_ready (never in candidates).
+    pr_draft = _ready(52, "3" * 40, []).model_copy(update={"is_draft": True})
+    for pr in (pr_almost, pr_many, pr_draft):
+        h.forge.put_pr(pr)
+    await h.poll()
+    await h.store.set_state(
+        hygiene_key(REPO, 51),
+        {
+            "sha": "2" * 40,
+            "results": [
+                {
+                    "id": "title",
+                    "blocking": True,
+                    "passed": False,
+                    "skipped": False,
+                    "message": "must follow Conventional Commits",
+                }
+            ],
+        },
+    )
+    app = create_app(h.service, data_dir=tmp_path, allow_dev_login=True)
+    async with _as(app, "bob") as bob:
+        view = (await bob.get(f"/api/merge-schedule/{REPO}/view")).json()
+    assert not any(c["number"] == 52 for c in view["candidates"])
+    by_num = {r["number"]: r for r in view["not_ready"]}
+    assert set(by_num) >= {50, 51, 52}
+    # Sorted: non-drafts with fewest blockers first, drafts last.
+    order = [r["number"] for r in view["not_ready"] if r["number"] in (50, 51, 52)]
+    assert order == [50, 51, 52]
+    # All blockers reported (not truncated to 3) + hygiene detail preserved.
+    assert len(by_num[51]["reasons"]) >= 4
+    checks_51 = {c["name"]: c for c in by_num[51]["checks"]}
+    assert checks_51["approvals"]["ok"] is False
+    assert checks_51["no_changes_requested"]["ok"] is False
+    assert checks_51["threads_resolved"]["ok"] is False
+    assert checks_51["no_conflict"]["ok"] is False
+    assert checks_51["hygiene:title"]["ok"] is False
+    assert "Conventional Commits" in checks_51["hygiene:title"]["detail"]
+    # Draft PR clearly flagged.
+    assert by_num[52]["draft"] is True
+    assert any(
+        c["condition"] == "not_draft" and not c["ok"] for c in by_num[52]["checks"]
+    )

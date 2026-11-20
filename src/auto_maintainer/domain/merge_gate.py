@@ -113,6 +113,8 @@ def evaluate_merge_gate(
     blocking_checks: dict[str, bool],
     paused: bool,
     now: datetime,
+    *,
+    blocking_details: dict[str, str] | None = None,
 ) -> GateResult:
     """Decide whether ``pr`` can merge now, should update its branch, or must wait.
 
@@ -187,7 +189,13 @@ def evaluate_merge_gate(
     )
 
     # 3. Not a draft, no blocking labels, no unresolved threads.
-    items.append(GateItem(name="not_draft", ok=not pr.is_draft))
+    items.append(
+        GateItem(
+            name="not_draft",
+            ok=not pr.is_draft,
+            detail="draft PR" if pr.is_draft else "",
+        )
+    )
     blocking_labels = {profile.label_for(r) for r in profile.merge.blocking_roles} - {
         None
     }
@@ -298,8 +306,15 @@ def evaluate_merge_gate(
             items.append(GateItem(name=f"workflow:{wf}", ok=True))
 
     # 5. Blocking hygiene checks.
+    details = blocking_details or {}
     for check_id, passed in sorted(blocking_checks.items()):
-        items.append(GateItem(name=f"hygiene:{check_id}", ok=passed))
+        items.append(
+            GateItem(
+                name=f"hygiene:{check_id}",
+                ok=passed,
+                detail="" if passed else details.get(check_id, ""),
+            )
+        )
 
     # 6. Conflicts and branch currency.
     conflict = pr.mergeable == Mergeable.CONFLICTING
