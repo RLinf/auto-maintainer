@@ -69,11 +69,13 @@ from .snapshot import (
     CheckRun,
     CommentRef,
     IssueSnapshot,
+    IssueTimelineEntry,
     MergedPrSummary,
     PrSnapshot,
     PrTimelineEntry,
     RepoInfo,
     RunnerInfo,
+    StarHistoryRaw,
 )
 from .visibility import PublicText
 
@@ -105,6 +107,12 @@ class ForgeReader(Protocol):
     async def list_pr_timeline(
         self, repo: str, since: datetime
     ) -> list[PrTimelineEntry]: ...
+
+    async def list_issue_timeline(
+        self, repo: str, since: datetime
+    ) -> tuple[list[IssueTimelineEntry], int | None]: ...
+
+    async def get_star_history(self, repo: str, since: datetime) -> StarHistoryRaw: ...
 
     async def get_file(
         self, repo: str, path: str, ref: str | None = None

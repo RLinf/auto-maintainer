@@ -517,7 +517,7 @@ function GrantSwitch({ state, onChange, label }: { state: boolean | undefined; o
   const next = state === undefined ? true : state ? false : undefined;
   return (
     <button className={`sm ghost access-switch ${state === undefined ? "" : state ? "on" : "off"}`} title={label} onClick={() => onChange(next)}>
-      {state === undefined ? t("default") : state ? t("on") : t("off")}
+      {state === undefined ? t("default") : state ? t("On") : t("Off")}
     </button>
   );
 }

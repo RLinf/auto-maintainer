@@ -100,7 +100,11 @@ from ..domain.merge_schedule import (
     state_key,
 )
 from ..domain.permissions import Permission
-from ..domain.pr_activity import build_pr_activity
+from ..domain.pr_activity import (
+    build_issue_activity,
+    build_pr_activity,
+    build_star_history,
+)
 from ..domain.profile import Conditions, RepoProfile, Review
 from ..domain.records import (
     ActionRecord,
@@ -121,11 +125,13 @@ from ..domain.run_ci import ci_view, latest_checks, plan_run_ci
 from ..domain.scoring import Evaluation, priority_key, recompute
 from ..domain.secrets import redact_secrets
 from ..domain.snapshot import (
+    IssueTimelineEntry,
     Mergeable,
     PrSnapshot,
     PrState,
     PrTimelineEntry,
     ReviewEventState,
+    StarHistoryRaw,
 )
 from ..playbooks.base import author_is_team
 from ..playbooks.ci_doctor import failing_checks
@@ -1738,6 +1744,63 @@ def build_router() -> APIRouter:
         series = build_pr_activity(
             repo, combined, now=now, days=days, current_open=open_now
         )
+        return series.model_dump(mode="json")
+
+    @r.get("/repos/{repo:path}/issue-activity")
+    async def repo_issue_activity(
+        request: Request,
+        repo: str,
+        days: int = Query(default=30, ge=7, le=90),
+        user: User = Depends(current_user),
+    ) -> dict[str, Any]:
+        """Daily issue opened, closed, and open-backlog counts for ``repo`` over
+        the last ``days`` UTC days (cached 10 minutes per repository)."""
+        service = service_of(request)
+        repo = _repo(repo)
+        await require_view(service, user, repo)
+        now = service.clock.now()
+        since = now - timedelta(days=90)
+
+        async def read_issues() -> tuple[list[IssueTimelineEntry], int | None]:
+            try:
+                return await service.a.forge.list_issue_timeline(repo, since)
+            except Exception:
+                return [], None
+
+        entries, open_total = await service.view_cached(
+            ("issue_activity", repo), read_issues, seconds=600
+        )
+        series = build_issue_activity(
+            repo, entries, now=now, days=days, current_open=open_total
+        )
+        return series.model_dump(mode="json")
+
+    @r.get("/repos/{repo:path}/star-history")
+    async def repo_star_history(
+        request: Request,
+        repo: str,
+        days: int | None = Query(default=None, ge=7, le=90),
+        user: User = Depends(current_user),
+    ) -> dict[str, Any]:
+        """Star history curve for ``repo``: all-time cumulative when ``days`` is
+        omitted, or daily new & cumulative stars over the last ``days`` UTC days
+        (cached 30 minutes per repository)."""
+        service = service_of(request)
+        repo = _repo(repo)
+        await require_view(service, user, repo)
+        now = service.clock.now()
+        since = now - timedelta(days=90)
+
+        async def read_stars() -> StarHistoryRaw:
+            try:
+                return await service.a.forge.get_star_history(repo, since)
+            except Exception:
+                return StarHistoryRaw()
+
+        raw = await service.view_cached(
+            ("star_history", repo), read_stars, seconds=1800
+        )
+        series = build_star_history(repo, raw, now=now, days=days)
         return series.model_dump(mode="json")
 
     @r.post("/repos/{repo:path}/profile/approve")

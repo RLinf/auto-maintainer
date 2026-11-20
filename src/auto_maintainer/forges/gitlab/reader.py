@@ -43,6 +43,7 @@ from ...domain.snapshot import (
     Commit,
     IssueComment,
     IssueSnapshot,
+    IssueTimelineEntry,
     Mergeable,
     MergedPrSummary,
     PrFile,
@@ -53,6 +54,7 @@ from ...domain.snapshot import (
     Review,
     ReviewEventState,
     ReviewThread,
+    StarHistoryRaw,
     ThreadComment,
 )
 from .client import GitLabClient, GitLabError, project_id
@@ -553,6 +555,54 @@ class GitLabReader:
                 )
             )
         return out
+
+    async def list_issue_timeline(
+        self, repo: str, since: datetime
+    ) -> tuple[list[IssueTimelineEntry], int | None]:
+        items = await self._client.get(
+            f"/projects/{project_id(repo)}/issues",
+            params={
+                "state": "all",
+                "updated_after": since.isoformat(),
+                "order_by": "updated_at",
+                "sort": "desc",
+                "per_page": 100,
+            },
+            allow=OPTIONAL,
+        )
+        stats = await self._client.get(
+            f"/projects/{project_id(repo)}/issues_statistics",
+            allow=OPTIONAL,
+        )
+        open_total: int | None = None
+        if isinstance(stats, dict):
+            raw_open = ((stats.get("statistics") or {}).get("counts") or {}).get(
+                "opened"
+            )
+            if raw_open is not None:
+                open_total = int(raw_open)
+        out: list[IssueTimelineEntry] = []
+        for item in items or []:
+            state = (
+                "CLOSED" if str(item.get("state") or "").lower() == "closed" else "OPEN"
+            )
+            out.append(
+                IssueTimelineEntry(
+                    number=int(item["iid"]),
+                    state=state,
+                    created_at=_time(item.get("created_at")),
+                    closed_at=_time(item.get("closed_at")),
+                    updated_at=_time(item.get("updated_at")),
+                )
+            )
+        return out, open_total
+
+    async def get_star_history(self, repo: str, since: datetime) -> StarHistoryRaw:
+        project = await self._client.get(
+            f"/projects/{project_id(repo)}", allow=OPTIONAL
+        )
+        total = int(project.get("star_count") or 0) if isinstance(project, dict) else 0
+        return StarHistoryRaw(total=total)
 
     async def get_file(
         self, repo: str, path: str, ref: str | None = None

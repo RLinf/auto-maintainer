@@ -362,6 +362,32 @@ class PrTimelineEntry(_Model):
     updated_at: datetime | None = None
 
 
+class IssueTimelineEntry(_Model):
+    """Timestamps of one issue's lifecycle, for repository activity charts."""
+
+    number: int
+    state: str = "OPEN"
+    created_at: datetime | None = None
+    closed_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class StarPoint(_Model):
+    """One cumulative star-count observation at a point in time."""
+
+    at: datetime
+    count: int
+
+
+class StarHistoryRaw(_Model):
+    """Raw star history read from a forge: current total, exact recent star
+    timestamps, and optional all-time sampled points."""
+
+    total: int = 0
+    recent: list[datetime] = Field(default_factory=list)
+    sampled: list[StarPoint] = Field(default_factory=list)
+
+
 class RunnerInfo(_Model):
     name: str
     status: str

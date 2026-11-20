@@ -65,6 +65,7 @@ from ..domain.snapshot import (
     CommentRef,
     IssueComment,
     IssueSnapshot,
+    IssueTimelineEntry,
     MergedPrSummary,
     PrSnapshot,
     PrState,
@@ -74,6 +75,7 @@ from ..domain.snapshot import (
     ReviewEventState,
     ReviewThread,
     RunnerInfo,
+    StarHistoryRaw,
     ThreadComment,
 )
 from ..domain.visibility import PublicText
@@ -102,6 +104,7 @@ class FakeForge:
         self.merge_queue: dict[tuple[str, int], bool] = {}
         """PRs in their base's merge queue (``in_merge_queue``)."""
         self.merged: list[MergedPrSummary] = []
+        self.stars: dict[str, list[datetime]] = {}
         self.runners: list[RunnerInfo] = []
         self.writes: list[tuple[str, dict[str, Any]]] = []
         self._ids = itertools.count(1000)
@@ -196,6 +199,25 @@ class FakeForge:
                     )
                 )
         return out
+
+    async def list_issue_timeline(
+        self, repo: str, since: datetime
+    ) -> tuple[list[IssueTimelineEntry], int | None]:
+        items = [
+            IssueTimelineEntry(
+                number=i.number,
+                state="OPEN",
+                created_at=i.created_at,
+                updated_at=i.created_at,
+            )
+            for (r, _), i in sorted(self.issues.items())
+            if r == repo
+        ]
+        return items, len(items)
+
+    async def get_star_history(self, repo: str, since: datetime) -> StarHistoryRaw:
+        stamps = sorted(self.stars.get(repo, []))
+        return StarHistoryRaw(total=len(stamps), recent=stamps)
 
     async def get_file(
         self, repo: str, path: str, ref: str | None = None

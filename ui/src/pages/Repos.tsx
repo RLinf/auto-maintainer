@@ -11,7 +11,7 @@ import { RepoMachinesSection, useRepoMachines } from "../machines";
 import { LessonsTab } from "../lessons";
 import { ReviewAutomationSection } from "../reviewAutomation";
 import { PeopleTab } from "../people";
-import { PrActivitySection } from "../prActivity";
+import { RepoStatsTab } from "../prActivity";
 import { UsageTab } from "../usage";
 import { ProfileChanges, type Profile } from "../profileView";
 import { kindLabel } from "../proposal";
@@ -230,6 +230,7 @@ export function RepoDetailPage() {
   const guides = useReviewGuides(full, !!profile.data?.lock);
   const tabs = [
     { id: "overview", label: t("Overview") },
+    { id: "stats", label: t("Statistics") },
     { id: "people", label: t("People") },
     { id: "lessons", label: t("Lessons") },
     { id: "labs", label: t("Test machines"), count: usedMachines },
@@ -316,9 +317,6 @@ export function RepoDetailPage() {
 
       {tab === "overview" && (
         <div className="grid2">
-          <div style={{ gridColumn: "1 / -1" }}>
-            <PrActivitySection repo={full} />
-          </div>
           <Section title={t("Approved profile")}>
             {p.lock ? (
               <div className="stack small">
@@ -406,6 +404,7 @@ export function RepoDetailPage() {
         </Section>
       )}
 
+      {tab === "stats" && <RepoStatsTab repo={full} />}
       {tab === "people" && <PeopleTab repo={full} />}
       {tab === "lessons" && <LessonsTab repo={full} />}
 

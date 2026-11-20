@@ -43,8 +43,10 @@ reports ``BEHIND`` only when the base branch requires branches to be up to date.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
+import math
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -59,6 +61,7 @@ from ...domain.snapshot import (
     Commit,
     IssueComment,
     IssueSnapshot,
+    IssueTimelineEntry,
     Mergeable,
     MergedPrSummary,
     PrFile,
@@ -69,6 +72,8 @@ from ...domain.snapshot import (
     Review,
     ReviewEventState,
     ReviewThread,
+    StarHistoryRaw,
+    StarPoint,
     ThreadComment,
 )
 from .client import GitHubClient, GitHubError, GraphQLError
@@ -181,6 +186,32 @@ query($owner: String!, $name: String!, $cursor: String) {
       nodes {
         number state createdAt mergedAt closedAt updatedAt
       }
+    }
+  }
+}
+"""
+
+_ISSUE_TIMELINE_QUERY = """
+query($owner: String!, $name: String!, $cursor: String) {
+  repository(owner: $owner, name: $name) {
+    openIssues: issues(states: OPEN) { totalCount }
+    issues(first: 100, after: $cursor, orderBy: {field: UPDATED_AT, direction: DESC}) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        number state createdAt closedAt updatedAt
+      }
+    }
+  }
+}
+"""
+
+_STAR_RECENT_QUERY = """
+query($owner: String!, $name: String!, $cursor: String) {
+  repository(owner: $owner, name: $name) {
+    stargazerCount
+    stargazers(first: 100, after: $cursor, orderBy: {field: STARRED_AT, direction: DESC}) {
+      pageInfo { hasNextPage endCursor }
+      edges { starredAt }
     }
   }
 }
@@ -928,6 +959,152 @@ class GitHubReader:
                 break
             cursor = page["endCursor"]
         return entries
+
+    async def list_issue_timeline(
+        self, repo: str, since: datetime
+    ) -> tuple[list[IssueTimelineEntry], int | None]:
+        """Lightweight issue lifecycle timestamps updated on or after ``since``,
+        plus the repository's live open-issue count (excluding PRs)."""
+        owner, name = _split(repo)
+        cutoff = since.astimezone(UTC) if since.tzinfo else since.replace(tzinfo=UTC)
+        cursor: str | None = None
+        entries: list[IssueTimelineEntry] = []
+        open_total: int | None = None
+        for _ in range(10):
+            data = await self._client.graphql(
+                _ISSUE_TIMELINE_QUERY,
+                {"owner": owner, "name": name, "cursor": cursor},
+                repo=repo,
+            )
+            repo_data = data.get("repository") or {}
+            if open_total is None:
+                raw_open = (repo_data.get("openIssues") or {}).get("totalCount")
+                if raw_open is not None:
+                    open_total = int(raw_open)
+            block = repo_data.get("issues") or {}
+            nodes = _nodes(block)
+            if not nodes:
+                break
+            reached_cutoff = False
+            for n in nodes:
+                updated = _dt(n.get("updatedAt"))
+                if updated is not None and updated < cutoff:
+                    reached_cutoff = True
+                    break
+                entries.append(
+                    IssueTimelineEntry(
+                        number=int(n["number"]),
+                        state=str(n.get("state") or "OPEN").upper(),
+                        created_at=_dt(n.get("createdAt")),
+                        closed_at=_dt(n.get("closedAt")),
+                        updated_at=updated,
+                    )
+                )
+            page = block.get("pageInfo") or {}
+            if (
+                reached_cutoff
+                or not page.get("hasNextPage")
+                or not page.get("endCursor")
+            ):
+                break
+            cursor = page["endCursor"]
+        return entries, open_total
+
+    async def get_star_history(self, repo: str, since: datetime) -> StarHistoryRaw:
+        """Read exact recent stars since ``since`` (GraphQL) plus an evenly sampled
+        all-time star curve (REST ``star+json``) for repositories of any size."""
+        owner, name = _split(repo)
+        cutoff = since.astimezone(UTC) if since.tzinfo else since.replace(tzinfo=UTC)
+        cursor: str | None = None
+        total = 0
+        recent: list[datetime] = []
+        exhausted = False
+        for _ in range(15):
+            data = await self._client.graphql(
+                _STAR_RECENT_QUERY,
+                {"owner": owner, "name": name, "cursor": cursor},
+                repo=repo,
+            )
+            repo_data = data.get("repository") or {}
+            if repo_data.get("stargazerCount") is not None:
+                total = int(repo_data["stargazerCount"])
+            block = repo_data.get("stargazers") or {}
+            edges = block.get("edges") or []
+            if not edges:
+                exhausted = True
+                break
+            reached_cutoff = False
+            for edge in edges:
+                if not isinstance(edge, dict):
+                    continue
+                at = _dt(edge.get("starredAt"))
+                if at is None:
+                    continue
+                if at < cutoff:
+                    reached_cutoff = True
+                    break
+                recent.append(at)
+            page = block.get("pageInfo") or {}
+            if reached_cutoff:
+                break
+            if not page.get("hasNextPage") or not page.get("endCursor"):
+                exhausted = True
+                break
+            cursor = page["endCursor"]
+
+        sampled: list[StarPoint] = []
+        if total > 0 and not exhausted:
+            # Sample up to 16 evenly spaced pages (REST caps at page 400 = 40,000 stars).
+            per_page = 100
+            last_page = min(400, max(1, math.ceil(total / per_page)))
+            if last_page <= 16:
+                pages = list(range(1, last_page + 1))
+            else:
+                pages = sorted(
+                    {
+                        1,
+                        last_page,
+                        *(
+                            max(1, round(1 + k * (last_page - 1) / 15))
+                            for k in range(16)
+                        ),
+                    }
+                )
+            gate = asyncio.Semaphore(6)
+
+            async def fetch_page(page_num: int) -> list[StarPoint]:
+                async with gate:
+                    res = await self._client.get(
+                        f"/repos/{repo}/stargazers",
+                        repo=repo,
+                        params={"per_page": per_page, "page": page_num},
+                        headers={"Accept": "application/vnd.github.star+json"},
+                        allow=(403, 404, 422),
+                    )
+                if not isinstance(res, list) or not res:
+                    return []
+                pts: list[StarPoint] = []
+                first_at = _dt(res[0].get("starred_at"))
+                if first_at is not None:
+                    pts.append(
+                        StarPoint(at=first_at, count=(page_num - 1) * per_page + 1)
+                    )
+                if len(res) > 1:
+                    last_at = _dt(res[-1].get("starred_at"))
+                    if last_at is not None:
+                        pts.append(
+                            StarPoint(
+                                at=last_at,
+                                count=min(total, (page_num - 1) * per_page + len(res)),
+                            )
+                        )
+                return pts
+
+            chunks = await asyncio.gather(*(fetch_page(p) for p in pages))
+            for pts in chunks:
+                sampled.extend(pts)
+
+        return StarHistoryRaw(total=total, recent=recent, sampled=sampled)
 
     # ------------------------------------------------------------------ contents
 
