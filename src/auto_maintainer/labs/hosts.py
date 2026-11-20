@@ -139,6 +139,12 @@ class LocalLabHost(_Host):
     def __init__(self, name: str) -> None:
         self.name = name
 
+    def ssh_command(self) -> str | None:
+        return None
+
+    def mirror_url(self, path: str) -> str:
+        return path
+
     async def _shell(
         self,
         script: str,
@@ -192,6 +198,28 @@ class SshLabHost(_Host):
                 self._options += ["-o", f"{option}={value}"]
         if identity_file:
             self._options += ["-o", "IdentitiesOnly=yes"]
+
+    def ssh_command(self) -> str:
+        """``GIT_SSH_COMMAND`` using this host's validated SSH options and ControlMaster."""
+        parts = [
+            "ssh",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ControlMaster=auto",
+            "-o",
+            f"ControlPath={self._control}",
+            "-o",
+            "ControlPersist=10m",
+            "-o",
+            "ServerAliveInterval=30",
+            *self._options,
+        ]
+        return " ".join(shlex.quote(p) for p in parts)
+
+    def mirror_url(self, path: str) -> str:
+        """SSH URL of bare mirror ``path`` on this host for ``git push``."""
+        return f"ssh://{self.host}/{path.lstrip('/')}"
 
     async def _shell(
         self,

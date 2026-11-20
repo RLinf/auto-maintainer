@@ -488,7 +488,8 @@ class LabReproducePayload(_Payload):
     brief: str = ""
     """For a reproduction a review asked for: the reviewer's brief, as the review
     skill describes it (what to follow, the hardware it needs)."""
-    timeout_seconds: int = 1800
+    timeout_seconds: int | None = None
+    """Optional cap on the session's idle time limit; ``None`` uses the machine/repo limit."""
     sides: list[Literal["base", "head"]] = Field(
         default_factory=lambda: ["base", "head"]
     )

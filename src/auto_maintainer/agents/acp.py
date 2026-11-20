@@ -31,6 +31,7 @@ import asyncio
 import contextlib
 import json
 import os
+import re
 import signal
 import tempfile
 import time
@@ -79,6 +80,37 @@ MAX_CONTINUATIONS = 3
 
 MAX_ASKS = 3
 """Questions an agent may ask with its own question tool in one run."""
+
+WAKEUP_SETTLE_SECONDS = 30.0
+"""Seconds of silence after a background subagent wakes an ACP session before
+treating the follow-up message as complete."""
+
+_BACKGROUND_TOOL_CUES = (
+    "invoke_subagent",
+    "subagent",
+    "run_workflow",
+    "swarm",
+    "schedule",
+)
+_WAIT_RE = re.compile(
+    r"\b("
+    r"waiting\s+(for|on)\b|"
+    r"awaiting\b|"
+    r"standing\s+by\b|"
+    r"will\s+(wait|finalize|complete|report|summarize|update)\b.*\b(once|when|after)\b|"
+    r"(once|when)\s+(it|they|the\s+\w+(?:\s+\w+){0,4})\s+"
+    r"(completes?|finish(?:es)?|returns?|replies?|reports?\s+back)\b|"
+    r"before\s+finaliz(ing|e)\b|"
+    r"wait\s+for\s+(its|their|the)\s+"
+    r"(reply|response|result|completion|output|reproduction|subagent|run)\b"
+    r")",
+    re.IGNORECASE,
+)
+_BG_CUE_RE = re.compile(
+    r"\b(subagent|sub-agent|background|reproduc\w*|workflow|swarm|timer|cron|"
+    r"conversation://|reply|report\s+back|finaliz\w*|completes?|finish(?:es)?)\b",
+    re.IGNORECASE,
+)
 
 ANSWERED = (
     "{by} answered your question:\n{answers}\n\nGo on with your task from where you "
@@ -349,11 +381,17 @@ class AcpConversation(Conversation):
     takes_messages = True
 
     def __init__(
-        self, runtime: AcpRuntime, task: AgentTask, files: RunFiles | None = None
+        self,
+        runtime: AcpRuntime,
+        task: AgentTask,
+        files: RunFiles | None = None,
+        *,
+        wakeup_settle: float = WAKEUP_SETTLE_SECONDS,
     ) -> None:
         self.runtime = runtime
         self.task = task
         self.files = files
+        self.wakeup_settle = wakeup_settle
         self.asking: list[dict[str, Any]] = []
         """Questions the agent asked with its own tool during the current turn."""
         self.asks = 0
@@ -375,6 +413,15 @@ class AcpConversation(Conversation):
         self.loading = False
         """Whether ``session/load`` is under way: the agent replays the session's
         history, which is not this run's work and is not reported again."""
+        self.background_launched = 0
+        """Background subagents or workflows launched during the session."""
+        self.active_tools: set[str] = set()
+        """In-flight tool call IDs."""
+        self.awaiting_wakeup = False
+        """Whether ``session/prompt`` returned ``end_turn`` while a background
+        subagent is still running and will wake the session via ``session/update``."""
+        self.wakeup_spoke = False
+        """Whether the session wrote message text after waking from a subagent."""
 
     # -- Conversation ------------------------------------------------------------------
 
@@ -450,6 +497,10 @@ class AcpConversation(Conversation):
 
     def tell(self, text: str) -> list[str]:
         self.told.append(text)
+        if self.awaiting_wakeup:
+            self.awaiting_wakeup = False
+            self.wakeup_spoke = False
+            return self._told_turn().send
         if self.cancelling or "session/prompt" not in self.pending.values():
             # Before the first turn the message goes with the task; between turns
             # it starts the next one.
@@ -464,6 +515,34 @@ class AcpConversation(Conversation):
                 }
             )
         ]
+
+    def idle_timeout(self) -> float | None:
+        if self.awaiting_wakeup and self.wakeup_spoke and not self.active_tools:
+            return self.wakeup_settle
+        return None
+
+    def on_idle(self) -> Step:
+        if not (self.awaiting_wakeup and self.wakeup_spoke and not self.active_tools):
+            return Step()
+        self._flush()
+        if _waiting_on_background(self.last_message):
+            self.wakeup_spoke = False
+            return Step()
+        self.awaiting_wakeup = False
+        self.wakeup_spoke = False
+        return Step(events=[partial(text=self.last_message)], done=True)
+
+    def on_eof(self) -> Step:
+        if not self.awaiting_wakeup:
+            return Step()
+        self._flush()
+        self.awaiting_wakeup = False
+        self.wakeup_spoke = False
+        return (
+            Step(events=[partial(text=self.last_message)])
+            if self.last_message
+            else Step()
+        )
 
     # -- internals ---------------------------------------------------------------------
 
@@ -601,6 +680,39 @@ class AcpConversation(Conversation):
                     send=[self._prompt(CONTINUE.format(refused=refused))],
                 )
             usage = result.get("usage") or {}
+            usage_payload = (
+                {
+                    "input_tokens": int(usage.get("inputTokens") or 0)
+                    + int(usage.get("cachedReadTokens") or 0)
+                    + int(usage.get("cachedWriteTokens") or 0),
+                    "cached_input_tokens": int(usage.get("cachedReadTokens") or 0),
+                    "output_tokens": int(usage.get("outputTokens") or 0)
+                    + int(usage.get("thoughtTokens") or 0),
+                }
+                if usage
+                else None
+            )
+            if (
+                stop == "end_turn"
+                and self.background_launched > 0
+                and _waiting_on_background(self.last_message)
+            ):
+                # Some ACP agents (Antigravity) return end_turn when yielding to a
+                # background subagent, then stream the wakeup reply asynchronously
+                # via session/update notifications with no new session/prompt response.
+                self.awaiting_wakeup = True
+                self.wakeup_spoke = False
+                self.active_tools.clear()
+                return Step(
+                    events=[
+                        AgentEvent(
+                            type=AgentEventType.MESSAGE,
+                            text="[waiting for background subagent to finish]",
+                        ),
+                        partial(text=self.last_message, usage=usage_payload),
+                    ],
+                    done=False,
+                )
             error = (
                 None if stop in _OK_STOPS else f"the agent stopped: {stop or 'unknown'}"
             )
@@ -608,18 +720,7 @@ class AcpConversation(Conversation):
                 events=[
                     partial(
                         text=self.last_message,
-                        usage={
-                            "input_tokens": int(usage.get("inputTokens") or 0)
-                            + int(usage.get("cachedReadTokens") or 0)
-                            + int(usage.get("cachedWriteTokens") or 0),
-                            "cached_input_tokens": int(
-                                usage.get("cachedReadTokens") or 0
-                            ),
-                            "output_tokens": int(usage.get("outputTokens") or 0)
-                            + int(usage.get("thoughtTokens") or 0),
-                        }
-                        if usage
-                        else None,
+                        usage=usage_payload,
                         is_error=bool(error) or None,
                         error=error,
                     )
@@ -718,7 +819,10 @@ class AcpConversation(Conversation):
             text = content.get("text") if isinstance(content, dict) else None
             if text:
                 self.current.append(str(text))
-                self.spoke = self.spoke or bool(str(text).strip())
+                has_text = bool(str(text).strip())
+                self.spoke = self.spoke or has_text
+                if self.awaiting_wakeup and has_text:
+                    self.wakeup_spoke = True
                 return [AgentEvent(type=AgentEventType.MESSAGE, text=str(text))]
             return []
         if kind == "agent_thought_chunk":
@@ -731,6 +835,13 @@ class AcpConversation(Conversation):
             )
         if kind == "tool_call":
             self._flush()
+            if _is_background_tool(update):
+                self.background_launched += 1
+            tool_id = update.get("toolCallId")
+            if tool_id:
+                self.active_tools.add(str(tool_id))
+            if self.awaiting_wakeup:
+                self.wakeup_spoke = False
             asked = _asked_questions(update)
             if asked:
                 self.asking = asked
@@ -745,6 +856,9 @@ class AcpConversation(Conversation):
             "completed",
             "failed",
         ):
+            tool_id = update.get("toolCallId")
+            if tool_id:
+                self.active_tools.discard(str(tool_id))
             return [
                 AgentEvent(
                     type=AgentEventType.TOOL_RESULT,
@@ -784,6 +898,23 @@ def _kind_of(options: list[dict[str, Any]], option_id: str) -> str:
 
 def _line(obj: dict[str, Any]) -> str:
     return json.dumps(obj, ensure_ascii=False)
+
+
+def _is_background_tool(update: dict[str, Any]) -> bool:
+    """Whether ``tool_call`` launches a background subagent or workflow that can
+    wake the session asynchronously after ``end_turn``."""
+    label = f"{update.get('name') or ''} {update.get('title') or ''}".lower()
+    return any(cue in label for cue in _BACKGROUND_TOOL_CUES)
+
+
+def _waiting_on_background(text: str) -> bool:
+    """Whether ``text`` looks like an agent yielding its turn while a background
+    subagent or workflow finishes."""
+    stripped = text.strip()
+    if not stripped:
+        return True
+    tail = stripped.rsplit("\n\n", 1)[-1][-600:]
+    return bool(_WAIT_RE.search(tail) and _BG_CUE_RE.search(tail))
 
 
 def _asked_questions(update: dict[str, Any]) -> list[dict[str, Any]]:

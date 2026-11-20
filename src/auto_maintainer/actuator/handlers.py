@@ -673,6 +673,7 @@ async def _lab_reproduce(
             # The agent goes on without the machine, and says why.
             return {"refused": why}
     info = await x.reader.get_repo(action.repo)
+    push_fn = getattr(x.workspace, "push_mirror", None)
     workdir = await x.workspace.prepare(
         action.repo, pr.number, pr.head_sha, info.default_branch
     )
@@ -684,9 +685,13 @@ async def _lab_reproduce(
             or f"origin/{info.default_branch}"
         )
         refs = {"base": base, "head": pr.head_sha}
-        code = {
-            side: await x.workspace.archive(workdir, refs[side]) for side in p.sides
-        }
+        code = (
+            {}
+            if callable(push_fn)
+            else {
+                side: await x.workspace.archive(workdir, refs[side]) for side in p.sides
+            }
+        )
     finally:
         await x.workspace.release(workdir)
     job_id = action.provenance.job_id
@@ -695,16 +700,43 @@ async def _lab_reproduce(
         if x.lab_progress is not None and job_id:
             await x.lab_progress(job_id, action.repo, pr.number, p.lab, step)
 
-    out = await x.labs.open_session(
-        p,
-        action.repo,
-        pr.number,
-        code,
-        holder=action.id,
-        binding=profile.labs.get(p.lab) if profile else None,
-        progress=progress,
-        job=job_id,
-    )
+    if callable(push_fn):
+
+        async def sync_git(target_url: str, ssh_command: str | None) -> None:
+            await push_fn(
+                action.repo,
+                info.default_branch,
+                pr.head_sha,
+                target_url,
+                ssh_command=ssh_command,
+                number=pr.number,
+            )
+
+        out = await x.labs.open_session(
+            p,
+            action.repo,
+            pr.number,
+            code,
+            holder=action.id,
+            binding=profile.labs.get(p.lab) if profile else None,
+            progress=progress,
+            job=job_id,
+            sync_git=sync_git,
+            default_branch=info.default_branch,
+            head_sha=pr.head_sha,
+            base_sha=base,
+        )
+    else:
+        out = await x.labs.open_session(
+            p,
+            action.repo,
+            pr.number,
+            code,
+            holder=action.id,
+            binding=profile.labs.get(p.lab) if profile else None,
+            progress=progress,
+            job=job_id,
+        )
     return {**out, "base_sha": base, "head_sha": pr.head_sha}
 
 

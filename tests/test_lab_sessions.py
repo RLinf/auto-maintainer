@@ -132,17 +132,22 @@ async def test_what_a_login_shell_prints_before_the_command_is_dropped() -> None
     assert (result.exit_code, result.stdout, lines) == (3, "one\n", ["one"])
 
 
-async def test_lab_takes_the_gpus_a_run_needs_only_when_they_are_idle(
+async def test_lab_exposes_all_idle_gpus_without_leasing(
     tmp_path: Path,
 ) -> None:
-    """A session asks for more GPUs from inside it and gets them only all at once;
-    the commands after it see every GPU it holds, and it can give some back."""
+    """Sessions see every currently idle GPU without SQLite leasing, excluding busy
+    GPUs; ``lab --gpus`` refreshes idle GPUs or clears them with ``0``."""
     from auto_maintainer.domain.ports import GpuStatus
     from auto_maintainer.store.sqlite import SqliteStore
 
     host = FakeLabHost(
         "gpu-01",
-        gpus=[GpuStatus(index=i, memory_used_mib=0) for i in range(4)],
+        gpus=[
+            GpuStatus(index=0, memory_used_mib=0),
+            GpuStatus(index=1, memory_used_mib=24000, processes=1),
+            GpuStatus(index=2, memory_used_mib=0),
+            GpuStatus(index=3, memory_used_mib=0),
+        ],
     )
     store = await SqliteStore.open(tmp_path / "am.db")
     labs = LabExecutor({}, {}, store, FixedClock())
@@ -171,24 +176,23 @@ async def test_lab_takes_the_gpus_a_run_needs_only_when_they_are_idle(
             "act_other001",
             binding=LabBinding(),
         )
-        assert (mine["gpus"], other["gpus"]) == ([0], [1])
+        assert mine["gpus"] == [0, 2, 3]
+        assert other["gpus"] == [0, 2, 3], "no leasing: both sessions see all idle GPUs"
         token = labs.session_token(mine["session"])
         assert token
-        code, _, err = await _lab(server, token, "--gpus", "4")
-        assert code == 1 and "not idle" in err, "three more are not free at once"
-        assert labs.session_info(token)["gpus"] == [0], "it took none of them"
-        code, out, _ = await _lab(server, token, "--gpus", "3")
-        assert code == 0 and "holds 3 GPU(s): 0, 2, 3" in out
         await _lab(server, token, "--", "nvidia-smi")
         assert host.commands[-1][2]["CUDA_VISIBLE_DEVICES"] == "0,2,3"
-        code, out, _ = await _lab(server, token, "--gpus", "1")
-        assert code == 0 and "holds 1 GPU(s): 0" in out
-        other_token = labs.session_token(other["session"])
-        assert other_token
-        code, out, _ = await _lab(server, other_token, "--gpus", "3")
-        assert code == 0 and "1, 2, 3" in out, "what it gave back is free again"
+        code, out, _ = await _lab(server, token, "--gpus", "0")
+        assert code == 0 and "holds 0 GPU(s)" in out
+        await _lab(server, token, "--", "echo cpu")
+        assert host.commands[-1][2]["CUDA_VISIBLE_DEVICES"] == ""
+        code, _, err = await _lab(server, token, "--gpus", "4")
+        assert code == 1 and "not idle" in err
+        code, out, _ = await _lab(server, token, "--gpus", "3")
+        assert code == 0 and "holds 3 GPU(s): 0, 2, 3" in out
     finally:
         await server.stop()
+        await store.close()
         shutil.rmtree(folder, ignore_errors=True)
 
 

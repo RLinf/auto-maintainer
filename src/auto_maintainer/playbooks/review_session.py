@@ -80,30 +80,31 @@ REPRODUCTION_GIVE_UP_SECONDS = 12 * 3600
 """How long after it started a review stops waiting for its reproduction."""
 
 MACHINE = """Test machine {lab} is yours while you work: run on it whatever your skill has you run.
-- `lab -- 'COMMAND'` (one quoted string) runs COMMAND in a fresh shell in a copy of the PR's head on the machine, after the machine's own setup; `lab --side base -- 'COMMAND'` runs it in the code before the PR. Chain what needs one shell with `&&`.
+- `lab -- 'COMMAND'` (one quoted string) runs COMMAND in a fresh shell in a real git worktree of the PR's head on the machine, after the machine's own setup; `lab --side base -- 'COMMAND'` runs it in the code before the PR. Chain what needs one shell with `&&`.
 - Keep environments, downloaded checkpoints and datasets, and caches in `$AM_LAB_KEEP`, this PR's folder on the machine: later sessions of the PR get it too, while the copies of the code are fresh each session and removed with it. Look there first; an earlier session may have left what you need.
-- The session holds {gpus} now. `lab --gpus N` makes it hold N, waiting up to `--wait MINUTES` for them to be idle; the commands after it see all of them. `lab --info` says what it holds and how long it has left, and `lab --timeout MINUTES -- 'COMMAND'` gives a long command more time.
+- Idle GPUs visible now via `CUDA_VISIBLE_DEVICES`: {gpus}. `lab --gpus N` refreshes idle GPUs (waiting up to `--wait MINUTES` until N are idle); `lab --info` shows status, and `lab --timeout MINUTES -- 'COMMAND'` sets a per-command limit (active downloads and runs extend the session automatically).
 - Run each `lab` command in the foreground until it exits, even when it takes many minutes; if your tool moves it to the background, wait on it there. The end of your turn ends the session and stops everything it started, servers in the background too.
 - The working directory here is a checkout of the PR's head to read; the PR's code runs on the machine, through `lab`. To read GitHub (this PR, its reviews and CI, other PRs and issues), use gh; it reads only.
 - The machine is shared: it refuses commands that would reach beyond the session (sudo, shutting it down, killing processes it did not start, stopping every Ray job, writing system folders).{setup}{about}"""
 
 EXPERIMENTS = """Use the machine to test what you read, not only to run the skill's checks: when you suspect a bug, a regression, or a claim that may not hold, write a small script or test that shows it, run it on the head (and with `--side base` to compare), and give what it showed as the finding's evidence. Report only what you ran and saw."""
 
-REPRODUCTION = """Whether this PR needs a reproduction is yours to decide, as the skill says. You do not reproduce it yourself: when it needs one, start the skill's reproduction agent with `lab --reproduce`, giving it on standard input the brief the skill describes (`lab --reproduce <<'EOF'` ... `EOF`). A fresh agent then runs it on {lab} while you review, so start it as soon as you know. When your review is written, you get the run's record to complete it; until then, where the skill asks how the PR was reproduced, say that the run is underway. That agent works in this PR's `$AM_LAB_KEEP` too, so keep what you set up there in a folder of your own, and it needs the machine's GPUs: take one only for a check that needs it, and give it back (`lab --gpus 0`) once that check is done."""
+REPRODUCTION = """Whether this PR needs a reproduction is yours to decide, as the skill says. Follow your skill's reproduction workflow directly using `lab --`, or start the skill's reproduction agent with `lab --reproduce`, giving it on standard input the brief the skill describes (`lab --reproduce <<'EOF'` ... `EOF`)."""
 
 FINISH = """The reproduction you started has ended; its record is below. Finish your review with it, as the skill says: fill in where the skill asks how the PR was reproduced from the record (the settings it used, the functional and the metric result, the first failure and every intervention, and whether the documentation could be followed), and change a finding or the verdict only where the run settles it.{session} Then give your whole review again, as before.
 
 {record}"""
 """The turn that resumes a review's agent once its reproduction ended."""
 
-
 EARLIER = """What earlier agents did on test machines for this PR, newest first: when, at which commit, what they concluded, and the commands they ran with their exit codes. Start from it: what they set up for this PR may still be in `$AM_LAB_KEEP`; what they established at the same commit need not be shown again; what failed for a reason that still holds need not be tried the same way. It is a record of what ran, not a verdict: report only what you saw yourself."""
 
 EARLIER_PLAYBOOKS = ("reproduce", "review", "followup", "fix_ci")
-EARLIER_RUNS = 3
-"""How many earlier runs on a machine a session is told about."""
-EARLIER_COMMANDS = 16
-"""How many commands of each: its first ones (how it set up) and its last ones."""
+EARLIER_RUNS = 2
+"""How many earlier runs on a machine a fallback session is told about."""
+EARLIER_COMMANDS = 8
+"""How many commands of each same-commit run: its first ones and its last ones."""
+EARLIER_OLD_COMMANDS = 4
+"""How many commands of an older-commit run."""
 
 
 def _command_line(c: object) -> str:
@@ -157,14 +158,15 @@ async def earlier_work(ctx: PlaybookContext, pr: PrSnapshot) -> str:
         if result.get("conclusion"):
             lines.append(f"Conclusion: {result['conclusion']}")
         if result.get("notes"):
-            lines.append(f"Notes: {str(result['notes'])[:2000]}")
-        if len(commands) > EARLIER_COMMANDS:
-            first = EARLIER_COMMANDS // 3
-            skipped = len(commands) - EARLIER_COMMANDS
+            lines.append(f"Notes: {str(result['notes'])[:600]}")
+        cmd_limit = EARLIER_COMMANDS if commit == pr.head_sha else EARLIER_OLD_COMMANDS
+        if len(commands) > cmd_limit:
+            first = max(1, cmd_limit // 2)
+            skipped = len(commands) - cmd_limit
             commands = [
                 *commands[:first],
                 f"- … {skipped} more …",
-                *commands[-(EARLIER_COMMANDS - first) :],
+                *commands[-(cmd_limit - first) :],
             ]
         if commands:
             lines.append("Commands:\n" + "\n".join(commands))
@@ -173,7 +175,7 @@ async def earlier_work(ctx: PlaybookContext, pr: PrSnapshot) -> str:
             break
     if not runs:
         return ""
-    return EARLIER + "\n" + untrusted("earlier.work", "\n\n".join(runs), 16_000)
+    return EARLIER + "\n" + untrusted("earlier.work", "\n\n".join(runs), 6_000)
 
 
 def held_gpus(opened: dict[str, Any]) -> list[int]:
@@ -233,7 +235,7 @@ class ReviewMachine:
     token: str | None = None
     lab: str | None = None
     gpus: list[int] = field(default_factory=list)
-    """The GPUs the session held when it opened."""
+    """The idle GPUs visible to the session when it opened."""
     note: str = ""
     """Why the review runs nothing, for its prompt and result; empty with a session."""
     commands: list[dict[str, object]] = field(default_factory=list)
@@ -406,15 +408,15 @@ async def review_machine(
 
 
 def session_task_fields(ctx: PlaybookContext, machine: ReviewMachine) -> dict[str, Any]:
-    """What the review's agent task gets with a session: its token, the socket, and
-    all the time the session has left plus some to write the review."""
+    """What the review's agent task gets with a session: its lab session token/socket
+    and headroom for large checkpoint downloads plus reproduction and review."""
     if not machine.token or not machine.session_id or ctx.lab_sessions is None:
         return {}
+    left = ctx.lab_sessions.seconds_left(machine.session_id)
     return {
         "lab_session": machine.token,
         "env": {"AM_LAB_SOCKET": str(ctx.service.lab_socket or "")},
-        "min_timeout_seconds": ctx.lab_sessions.seconds_left(machine.session_id)
-        + SESSION_GRACE_SECONDS,
+        "min_timeout_seconds": max(left * 2, 7200) + SESSION_GRACE_SECONDS,
     }
 
 

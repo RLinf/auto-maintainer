@@ -233,17 +233,20 @@ class GitWorkspace:
     async def _git(
         self, repo: str, *args: str, cwd: Path, check: bool = True, timeout: float = 900
     ) -> str:
-        argv = [
-            "git",
-            "-c",
-            f"credential.helper={_HELPER}",
-            "-c",
-            "core.quotepath=off",
-            *args,
-        ]
         return (
             await run(
-                argv, cwd=cwd, env=await self._env(repo), timeout=timeout, check=check
+                [
+                    "git",
+                    "-c",
+                    f"credential.helper={_HELPER}",
+                    "-c",
+                    "core.quotepath=off",
+                    *args,
+                ],
+                cwd=cwd,
+                env=await self._env(repo),
+                timeout=timeout,
+                check=check,
             )
         ).stdout
 
@@ -292,6 +295,62 @@ class GitWorkspace:
                 check=True,
             )
         return path
+
+    async def push_mirror(
+        self,
+        repo: str,
+        default_branch: str,
+        head_sha: str,
+        target_url: str,
+        *,
+        ssh_command: str | None = None,
+        number: int | None = None,
+    ) -> None:
+        """Incrementally push ``origin/<default_branch>`` and ``head_sha`` from the
+        service's bare mirror to a bare mirror on a test machine. Forge credentials
+        stay on the service host; the test machine only receives git objects."""
+        lock = self._locks.setdefault(repo, asyncio.Lock())
+        async with lock:
+            mirror = await self._ensure_mirror(repo)
+            refspecs = [
+                f"+refs/heads/{default_branch}:refs/remotes/origin/{default_branch}"
+            ]
+            if number is not None:
+                refspecs.append(f"+refs/pull/{number}/head:refs/pull/{number}/head")
+            try:
+                await self._fetch(repo, mirror, *refspecs)
+            except ProcError:
+                if not await self._has(mirror, head_sha):
+                    raise
+                log.warning(
+                    "push_mirror: forge fetch failed for %s; using local mirror copy of %s",
+                    repo,
+                    head_sha[:12],
+                )
+            if not await self._has(mirror, head_sha):
+                await self._fetch(repo, mirror, head_sha)
+            env = await self._env(repo)
+            if ssh_command:
+                env["GIT_SSH_COMMAND"] = ssh_command
+            pr_ref = (
+                f"refs/heads/pr-{number}"
+                if number is not None
+                else f"refs/heads/sha-{head_sha[:12]}"
+            )
+            argv = [
+                "git",
+                "-c",
+                f"credential.helper={_HELPER}",
+                "-c",
+                "core.quotepath=off",
+                "push",
+                "-q",
+                "--force",
+                target_url,
+                f"refs/remotes/origin/{default_branch}:refs/remotes/origin/{default_branch}",
+                f"{head_sha}:{pr_ref}",
+            ]
+            await run(argv, cwd=mirror, env=env, timeout=1800, check=True)
 
     async def prepare(
         self,

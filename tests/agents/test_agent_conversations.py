@@ -1121,3 +1121,102 @@ async def test_an_acp_session_that_cannot_load_starts_afresh(
     assert prompt["params"]["prompt"][0]["text"].startswith("Review it."), (
         "the fresh session gets the whole task"
     )
+
+
+async def test_acp_waits_for_background_subagent_wakeup(tmp_path: Path) -> None:
+    """When an ACP agent (such as Antigravity) returns ``end_turn`` while waiting
+    for a background ``invoke_subagent``, the runtime keeps stdin open until the
+    asynchronous ``session/update`` wakeup streams the final report and settles."""
+    import sys
+
+    from auto_maintainer.agents.acp import (
+        AcpConversation,
+        AcpRuntime,
+        _waiting_on_background,
+    )
+    from auto_maintainer.agents.exec import RunFiles
+
+    assert _waiting_on_background(
+        "Waiting for the independent GPU reproduction run (abc) to complete before finalizing the review."
+    )
+    assert _waiting_on_background(
+        "I've launched the `research` subagent (conversation://123) and am waiting for its reply."
+    )
+    assert _waiting_on_background("")
+    assert not _waiting_on_background(
+        "# PR Review\n\nFound a deadlock where worker is waiting for a lock.\n\n## Verdict\nRequest changes."
+    )
+
+    script = tmp_path / "fake_acp.py"
+    script.write_text(
+        """
+import json, sys, time
+
+def emit(obj):
+    sys.stdout.write(json.dumps(obj) + "\\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    msg = json.loads(line)
+    mid = msg.get("id")
+    method = msg.get("method")
+    if method == "initialize":
+        emit({"jsonrpc": "2.0", "id": mid, "result": {"protocolVersion": 1}})
+    elif method == "session/new":
+        emit({"jsonrpc": "2.0", "id": mid, "result": {"sessionId": "s1"}})
+    elif method == "session/prompt":
+        emit({"jsonrpc": "2.0", "method": "session/update", "params": {"update": {
+            "sessionUpdate": "tool_call",
+            "toolCallId": "tc1",
+            "title": "Run invoke_subagent",
+            "kind": "other",
+        }}})
+        emit({"jsonrpc": "2.0", "method": "session/update", "params": {"update": {
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "tc1",
+            "status": "completed",
+        }}})
+        emit({"jsonrpc": "2.0", "method": "session/update", "params": {"update": {
+            "sessionUpdate": "agent_message_chunk",
+            "content": {"type": "text", "text": "Waiting for the GPU reproduction subagent to finish before finalizing the review."},
+        }}})
+        emit({"jsonrpc": "2.0", "id": mid, "result": {
+            "stopReason": "end_turn",
+            "usage": {"inputTokens": 100, "outputTokens": 20},
+        }})
+        time.sleep(0.15)
+        emit({"jsonrpc": "2.0", "method": "session/update", "params": {"update": {
+            "sessionUpdate": "tool_call",
+            "toolCallId": "tc2",
+            "title": "Read log",
+            "kind": "read",
+        }}})
+        emit({"jsonrpc": "2.0", "method": "session/update", "params": {"update": {
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "tc2",
+            "status": "completed",
+        }}})
+        emit({"jsonrpc": "2.0", "method": "session/update", "params": {"update": {
+            "sessionUpdate": "agent_message_chunk",
+            "content": {"type": "text", "text": "# Final PR Review\\n\\nConfirmed 10 bugs and GPU reproduction."},
+        }}})
+""",
+        encoding="utf-8",
+    )
+
+    class _FakeAcp(AcpRuntime):
+        name = "fake_acp"
+
+        def acp_argv(self, task: AgentTask, files: RunFiles, binary: str) -> list[str]:
+            return [binary, str(script)]
+
+        def conversation(self, task: AgentTask, files: RunFiles):
+            return AcpConversation(self, task, files, wakeup_settle=0.25)
+
+    rt = _FakeAcp(binary=sys.executable, runs_dir=tmp_path / "runs")
+    events, result = await _run(rt, _task(tmp_path))
+    assert result.ok is True
+    assert "# Final PR Review" in result.text
+    assert "Confirmed 10 bugs and GPU reproduction." in result.text
+    assert result.usage.input_tokens == 100
+    assert any("waiting for background subagent" in e.text for e in events)

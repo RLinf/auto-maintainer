@@ -63,6 +63,13 @@ TAIL_LINES = 150
 GPU_POLL_SECONDS = 30
 """How often a session waiting for more GPUs (``grow_gpus``) looks again."""
 
+MAX_SESSION_SECONDS = 6 * 3600
+"""Hard wall-clock ceiling for an active session whose deadline slides while commands
+run (e.g. large checkpoint/dataset downloads followed by GPU training)."""
+
+SLIDE_SAVE_INTERVAL = 30.0
+"""Minimum seconds between persisting sliding deadline updates while output streams."""
+
 
 SESSIONS_KEY = "lab-sessions:open"
 """Where open sessions are recorded, so a restart cleans up their run folders."""
@@ -75,6 +82,33 @@ agent."""
 
 KEEP_VAR = "AM_LAB_KEEP"
 """Set in every command to the PR's lasting folder (``keep_path``)."""
+
+HEAD_VAR = "AM_LAB_HEAD"
+"""Set in every command to the session's copy of the PR's head, when present."""
+
+BASE_VAR = "AM_LAB_BASE"
+"""Set in every command to the session's copy of the base branch, when present."""
+
+_RESTORE_INSTRUCTIONS_SH = r"""
+set -e
+wt=%(wt)s
+ref=%(ref)s
+head_files=$(git -C "$wt" ls-tree -r --name-only HEAD)
+base_files=$(git -C "$wt" ls-tree -r --name-only "$ref" 2>/dev/null || true)
+is_inst() {
+  case "$1" in
+    AGENTS.md|*/AGENTS.md|CLAUDE.md|*/CLAUDE.md|GEMINI.md|*/GEMINI.md|.cursorrules|*/.cursorrules|copilot-instructions.md|*/copilot-instructions.md) return 0 ;;
+    .claude/*|*/.claude/*|.agents/*|*/.agents/*|.codex/*|*/.codex/*|.cursor/*|*/.cursor/*|.gemini/*|*/.gemini/*|.opencode/*|*/.opencode/*) return 0 ;;
+  esac
+  return 1
+}
+printf '%%s\n' "$head_files" | while IFS= read -r p; do
+  if [ -n "$p" ] && is_inst "$p"; then rm -f "$wt/$p"; fi
+done
+printf '%%s\n' "$base_files" | while IFS= read -r p; do
+  if [ -n "$p" ] && is_inst "$p"; then printf '%%s\0' "$p"; fi
+done | xargs -0 -r git -C "$wt" checkout -q "$ref" --
+"""
 
 KEEP_FOLDER = "keep"
 """Under a machine's work folder: one folder per PR, where its sessions keep
@@ -195,6 +229,12 @@ class LabSession:
     before: list[str]
     forbid: list[str]
     deadline: datetime
+    idle_limit: int = 1800
+    """Seconds the session stays alive after its last command activity."""
+    hard_deadline: datetime | None = None
+    """Absolute ceiling beyond which sliding activity extensions stop."""
+    active_commands: int = 0
+    """Number of commands currently running in this session."""
     progress: Callable[[LabProgress], Awaitable[None]] | None = None
     log: list[dict[str, Any]] = field(default_factory=list)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -206,11 +246,22 @@ class LabSession:
     """The job whose agent works in the session, for its live view after a restart."""
     ready: bool = False
     """Its code is on the machine; a session a restart finds before that is removed."""
+    worktree: str | None = None
+    """Real git worktree of the PR head on the test machine, when created from a mirror."""
+    mirror: str | None = None
+    """Bare git mirror on the test machine backing ``worktree``."""
 
     @property
     def gpu(self) -> int | None:
         """Its first GPU, for those who know a session by one."""
         return self.gpus[0] if self.gpus else None
+
+    def slide(self, now: datetime) -> None:
+        """Extend the inactivity deadline on command activity up to ``hard_deadline``."""
+        cap = self.hard_deadline or self.deadline
+        self.deadline = min(
+            cap, max(self.deadline, now + timedelta(seconds=self.idle_limit))
+        )
 
     def record(self) -> dict[str, Any]:
         """What survives a restart: everything but its token and its callbacks."""
@@ -228,8 +279,12 @@ class LabSession:
             "before": self.before,
             "forbid": self.forbid,
             "deadline": self.deadline.isoformat(),
+            "idle_limit": self.idle_limit,
+            "hard_deadline": (self.hard_deadline or self.deadline).isoformat(),
             "job": self.job,
             "ready": self.ready,
+            "worktree": self.worktree,
+            "mirror": self.mirror,
             "log": [{k: v for k, v in e.items() if k != "tail"} for e in self.log],
         }
 
@@ -383,6 +438,16 @@ class LabExecutor:
             ],
         }
 
+    async def idle_gpus(self, lab: str) -> list[int]:
+        """All currently idle GPUs on ``lab`` (no SQLite leasing)."""
+        host = self.hosts.get(lab)
+        if host is None:
+            return []
+        thresholds = self.thresholds.get(lab, GpuThresholds())
+        return sorted(
+            g.index for g in await host.gpu_status() if is_idle(g, thresholds)
+        )
+
     async def open_session(
         self,
         payload: LabReproducePayload,
@@ -393,11 +458,16 @@ class LabExecutor:
         binding: LabBinding | None = None,
         progress: Callable[[LabProgress], Awaitable[None]] | None = None,
         job: str | None = None,
+        *,
+        sync_git: Callable[[str, str | None], Awaitable[None]] | None = None,
+        default_branch: str | None = None,
+        head_sha: str | None = None,
+        base_sha: str | None = None,
     ) -> dict[str, Any]:
-        """Open an approved reproduction's session: lease a GPU when it needs one,
-        copy each side's code (base64 tar.gz) into a run folder of its own on the
-        machine, and keep the machine for the agent until ``close_session`` or the
-        time limit. Returns the session's id (its token stays in memory)."""
+        """Open a session on the test machine: expose all currently idle GPUs (no
+        leasing), create a real git worktree from a bare mirror when ``sync_git`` is
+        given (else unpack archive copies), and keep the session until ``close_session``
+        or the time limit."""
         machine = self.machines.get(payload.lab)
         host = self.hosts.get(payload.lab)
         why = unusable(repo, payload.lab, machine, binding, payload.requested_by)
@@ -416,32 +486,32 @@ class LabExecutor:
         root = await self._root(payload.lab, host, machine)
         run_dir = f"{root}/{repo.replace('/', '__')}-{number}-{holder[-8:]}"
         keep = keep_path(root, repo, number)
-        limit = min(payload.timeout_seconds, time_limit(machine, binding))
+        machine_limit = time_limit(machine, binding)
+        limit = (
+            min(payload.timeout_seconds, machine_limit)
+            if payload.timeout_seconds is not None
+            else machine_limit
+        )
         session_id = new_id("lab")
         env: dict[str, str] = {RUN_TAG: session_id, KEEP_VAR: keep}
-        gpus: list[int] = []
-        if payload.needs_gpu or payload.wants_gpu:
-            await tell(phase=f"Looking for idle GPUs on {payload.lab}")
-            # As many as it asks for that are idle now; the agent asks for more,
-            # and waits for them, from inside the session (``grow_gpus``).
-            for _ in range(max(1, payload.gpus)):
-                gpu = await self._lease_gpu(payload.lab, host, holder, limit)
-                if gpu is None:
-                    break
-                gpus.append(gpu)
-            if not gpus and payload.needs_gpu:
-                return {
-                    "lab": payload.lab,
-                    "deferred": True,
-                    "reason": "no idle GPU on the machine; nothing ran",
-                }
-            await tell(
-                phase=f"Leased GPU {', '.join(map(str, gpus))}"
-                if gpus
-                else "No idle GPU yet; the agent can ask for one"
-            )
-        # The GPUs it holds are the only ones it sees: the rest are other people's.
+        if "head" in payload.sides:
+            env[HEAD_VAR] = f"{run_dir}/head"
+        if "base" in payload.sides:
+            env[BASE_VAR] = f"{run_dir}/base"
+
+        # Expose all currently idle GPUs directly without leasing.
+        gpus = await self.idle_gpus(payload.lab)
+        if not gpus and payload.needs_gpu:
+            return {
+                "lab": payload.lab,
+                "deferred": True,
+                "reason": "no idle GPU on the machine; nothing ran",
+            }
         env["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, gpus))
+        if gpus:
+            await tell(phase=f"Idle GPUs on {payload.lab}: {', '.join(map(str, gpus))}")
+
+        now = self.clock.now()
         session = LabSession(
             id=session_id,
             token=secrets.token_urlsafe(32),
@@ -455,29 +525,82 @@ class LabExecutor:
             env=env,
             before=setup_lines(machine, binding),
             forbid=forbidden(machine, binding),
-            deadline=self.clock.now() + timedelta(seconds=limit),
+            deadline=now + timedelta(seconds=limit),
+            idle_limit=limit,
+            hard_deadline=now + timedelta(seconds=max(limit, MAX_SESSION_SECONDS)),
             progress=progress,
             job=job,
         )
         await self._remember(session)
-        # The PR's lasting folder is made (and marked used) with the first copy.
-        lasting = f"mkdir -p {shlex.quote(keep)} && touch {shlex.quote(keep + '/' + KEEP_MARK)} && "
-        for side in payload.sides:
-            await tell(side, phase=f"Copying the {side} code to {payload.lab}")
-            put = await host.run(
-                lasting + f"mkdir -p {shlex.quote(run_dir + '/' + side)} && base64 -d "
-                f"| tar -xzf - -C {shlex.quote(run_dir + '/' + side)}",
-                timeout=900,
-                stdin=code[side],
+
+        used_git = False
+        if (
+            sync_git is not None
+            and default_branch
+            and head_sha
+            and callable(getattr(host, "mirror_url", None))
+            and callable(getattr(host, "ssh_command", None))
+        ):
+            mirror = f"{root}/mirrors/{repo.replace('/', '__')}.git"
+            await tell(phase=f"Syncing git mirror on {payload.lab}")
+            init = await host.run(
+                f"mkdir -p {shlex.quote(root + '/mirrors')} {shlex.quote(keep)} "
+                f"{shlex.quote(run_dir)} && touch {shlex.quote(keep + '/' + KEEP_MARK)} "
+                f"&& ([ -d {shlex.quote(mirror + '/objects')} ] || git init -q --bare {shlex.quote(mirror)})",
+                timeout=120,
             )
-            lasting = ""
-            if put.exit_code != 0:
-                await self.close_session(session.id)
-                return {
-                    "lab": payload.lab,
-                    "error": f"could not copy the {side} code to the machine",
-                    "tail": _tail(put.stdout + "\n" + put.stderr),
-                }
+            if init.exit_code == 0:
+                await sync_git(host.mirror_url(mirror), host.ssh_command())  # type: ignore[attr-defined]
+                head_wt = f"{run_dir}/head"
+                await tell("head", phase=f"Checking out PR worktree on {payload.lab}")
+                wt_cmd = (
+                    f"git --git-dir {shlex.quote(mirror)} worktree add -q --detach "
+                    f"{shlex.quote(head_wt)} {shlex.quote(head_sha)}"
+                )
+                wt_res = await host.run(wt_cmd, timeout=300)
+                if wt_res.exit_code == 0:
+                    # Restore instruction/skill files from default branch so PR cannot hijack them.
+                    await host.run(
+                        _RESTORE_INSTRUCTIONS_SH
+                        % {
+                            "wt": shlex.quote(head_wt),
+                            "ref": shlex.quote(f"origin/{default_branch}"),
+                        },
+                        timeout=120,
+                    )
+                    if "base" in payload.sides and base_sha:
+                        await host.run(
+                            f"git --git-dir {shlex.quote(mirror)} worktree add -q --detach "
+                            f"{shlex.quote(run_dir + '/base')} {shlex.quote(base_sha)}",
+                            timeout=300,
+                        )
+                    session.worktree = head_wt
+                    session.mirror = mirror
+                    used_git = True
+
+        if not used_git:
+            # Archive fallback (fakes, non-git machines, or when git mirror sync is unavailable).
+            lasting = f"mkdir -p {shlex.quote(keep)} && touch {shlex.quote(keep + '/' + KEEP_MARK)} && "
+            for side in payload.sides:
+                if side not in code:
+                    continue
+                await tell(side, phase=f"Copying the {side} code to {payload.lab}")
+                put = await host.run(
+                    lasting
+                    + f"mkdir -p {shlex.quote(run_dir + '/' + side)} && base64 -d "
+                    f"| tar -xzf - -C {shlex.quote(run_dir + '/' + side)}",
+                    timeout=900,
+                    stdin=code[side],
+                )
+                lasting = ""
+                if put.exit_code != 0:
+                    await self.close_session(session.id)
+                    return {
+                        "lab": payload.lab,
+                        "error": f"could not copy the {side} code to the machine",
+                        "tail": _tail(put.stdout + "\n" + put.stderr),
+                    }
+
         self._sessions[session.id] = session
         self._opening.pop(session.id, None)
         session.ready = True
@@ -492,6 +615,7 @@ class LabExecutor:
             "gpu": session.gpu,
             "gpus": session.gpus,
             "sides": session.sides,
+            "worktree": session.worktree,
             "expires_at": session.deadline.isoformat(),
         }
 
@@ -547,8 +671,10 @@ class LabExecutor:
             return {"error": "there is no open session for this token"}
         if side not in session.sides:
             return {"error": f"this session has no {side!r} side: {session.sides}"}
-        left = (session.deadline - self.clock.now()).total_seconds()
-        if left <= 0:
+        now = self.clock.now()
+        hard_deadline = session.hard_deadline or session.deadline
+        hard_left = (hard_deadline - now).total_seconds()
+        if hard_left <= 0 or (session.active_commands == 0 and session.deadline <= now):
             return {"error": "the session's time is up"}
         refused = script_refusals(command, session.forbid)
         if refused:
@@ -559,25 +685,42 @@ class LabExecutor:
         host = self.hosts.get(session.lab)
         if host is None:
             return {"error": f"there is no test machine named {session.lab!r}"}
-        timeout = min(left, timeout_seconds or left)
+        # Slide the inactivity deadline forward while commands run so large
+        # checkpoint/dataset downloads or long GPU runs are never cut off early;
+        # callers may still bound a single command with ``timeout_seconds``.
+        session.slide(now)
+        timeout = min(hard_left, timeout_seconds) if timeout_seconds else hard_left
         merged: deque[str] = deque(maxlen=TAIL_LINES)
+        last_saved = now
 
         async def output(line: str) -> None:
+            nonlocal last_saved
             merged.append(line)
+            cur = self.clock.now()
+            session.slide(cur)
+            if (cur - last_saved).total_seconds() >= SLIDE_SAVE_INTERVAL:
+                last_saved = cur
+                with contextlib.suppress(Exception):
+                    await self._save(session)
             await session.tell(side, line=line)
             if on_line is not None:
                 with contextlib.suppress(Exception):
                     await on_line(line)
 
-        async with session.lock:
-            await session.tell(side, phase=f"$ {command[:300]}")
-            result = await host.run(
-                "\n".join([*session.before, command]),
-                cwd=f"{session.run_dir}/{side}",
-                env=session.env,
-                timeout=timeout,
-                on_output=output,
-            )
+        session.active_commands += 1
+        try:
+            async with session.lock:
+                await session.tell(side, phase=f"$ {command[:300]}")
+                result = await host.run(
+                    "\n".join([*session.before, command]),
+                    cwd=f"{session.run_dir}/{side}",
+                    env=session.env,
+                    timeout=timeout,
+                    on_output=output,
+                )
+        finally:
+            session.active_commands = max(0, session.active_commands - 1)
+            session.slide(self.clock.now())
         outcome = {
             "exit_code": result.exit_code,
             "timed_out": result.timed_out,
@@ -602,11 +745,9 @@ class LabExecutor:
     async def grow_gpus(
         self, token: str, count: int, wait_seconds: int = 0
     ) -> dict[str, Any]:
-        """Make the session hold ``count`` GPUs: give back those beyond it, or lease
-        the missing ones, only all at once (two sessions waiting for the same GPUs
-        never hold part of them each), waiting up to ``wait_seconds`` (and no longer
-        than the session lasts) for enough to be idle. Its later commands see every
-        GPU it holds."""
+        """Refresh the session's visible idle GPUs (no SQLite leasing): wait up to
+        ``wait_seconds`` until at least ``count`` GPUs are idle, or set to empty when
+        ``count == 0``."""
         session = self._by_token(token)
         if session is None:
             return {"error": "there is no open session for this token"}
@@ -614,41 +755,31 @@ class LabExecutor:
         if host is None:
             return {"error": f"there is no test machine named {session.lab!r}"}
         count = max(0, min(int(count), 64))
-        for gpu in session.gpus[count:]:
-            await self._release(session.lab, gpu, session.holder)
-        session.gpus = session.gpus[:count]
-        until = min(
-            self.clock.now() + timedelta(seconds=max(0, wait_seconds)),
-            session.deadline,
-        )
-        waited = False
-        while len(session.gpus) < count:
-            ttl = int((session.deadline - self.clock.now()).total_seconds())
-            got = await self._lease_all(
-                session.lab,
-                host,
-                session.holder,
-                max(ttl, 60),
-                count - len(session.gpus),
-                exclude=set(session.gpus),
+        if count == 0:
+            session.gpus = []
+        else:
+            until = min(
+                self.clock.now() + timedelta(seconds=max(0, wait_seconds)),
+                session.deadline,
             )
-            if got:
-                session.gpus = sorted(session.gpus + got)
-                break
-            if self.clock.now() >= until:
-                break
-            if not waited:
-                waited = True
-                await session.tell(
-                    phase=f"Waiting for {count - len(session.gpus)} more idle GPUs"
-                )
-            await asyncio.sleep(GPU_POLL_SECONDS)
+            waited = False
+            while True:
+                idle = await self.idle_gpus(session.lab)
+                if len(idle) >= count or self.clock.now() >= until:
+                    session.gpus = idle
+                    break
+                if not waited:
+                    waited = True
+                    await session.tell(
+                        phase=f"Waiting for {count} idle GPUs ({len(idle)} idle now)"
+                    )
+                await asyncio.sleep(GPU_POLL_SECONDS)
         session.env["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, session.gpus))
         await self._save(session)
         await session.tell(
-            phase=f"Holds GPU {', '.join(map(str, session.gpus))}"
+            phase=f"Visible GPUs: {', '.join(map(str, session.gpus))}"
             if session.gpus
-            else "Holds no GPU"
+            else "No GPUs selected"
         )
         return {"gpus": session.gpus, "wanted": count}
 
@@ -723,7 +854,10 @@ class LabExecutor:
             session.closed = True
             await session.tell(phase=f"Removing the run folder on {session.lab}")
             await self._clean(
-                session.lab, session.run_dir, session.gpus, session.holder, session.id
+                session.lab,
+                session.run_dir,
+                session.id,
+                mirror=session.mirror,
             )
             await self._forget(session_id)
         return {
@@ -734,9 +868,16 @@ class LabExecutor:
         }
 
     async def expire_sessions(self) -> int:
-        """Close the sessions past their time limit; how many."""
+        """Close sessions that are idle past their sliding deadline or past their
+        hard wall-clock ceiling; never interrupt an actively running command before
+        its hard ceiling."""
         now = self.clock.now()
-        late = [s.id for s in self._sessions.values() if s.deadline <= now]
+        late = [
+            s.id
+            for s in self._sessions.values()
+            if (s.hard_deadline or s.deadline) <= now
+            or (s.active_commands == 0 and s.deadline <= now)
+        ]
         for session_id in late:
             await self.close_session(session_id)
         return len(late)
@@ -761,9 +902,8 @@ class LabExecutor:
                 await self._clean(
                     record["lab"],
                     record["run_dir"],
-                    _gpus(record),
-                    record["holder"],
                     str(record.get("id") or session_id),
+                    mirror=record.get("mirror"),
                 )
         await self.store.set_state(SESSIONS_KEY, kept)
         return cleaned
@@ -791,8 +931,14 @@ class LabExecutor:
                 before=list(record.get("before") or []),
                 forbid=list(record.get("forbid") or []),
                 deadline=deadline,
+                idle_limit=int(record.get("idle_limit") or 1800),
+                hard_deadline=datetime.fromisoformat(str(record["hard_deadline"]))
+                if record.get("hard_deadline")
+                else deadline,
                 job=record.get("job"),
                 ready=True,
+                worktree=record.get("worktree"),
+                mirror=record.get("mirror"),
                 log=list(record.get("log") or []),
             )
         except (KeyError, TypeError, ValueError):
@@ -817,14 +963,22 @@ class LabExecutor:
         self,
         lab: str,
         run_dir: str,
-        gpus: list[int],
-        holder: str,
         session_id: str | None = None,
+        *,
+        mirror: str | None = None,
     ) -> None:
-        """Stop what the session started (``STOP``), remove its run folder, and give
-        back its GPUs. The PR's lasting folder stays."""
+        """Stop what the session started (``STOP``), remove any git worktrees and
+        its run folder. The PR's lasting folder stays."""
         host = self.hosts.get(lab)
         if host is not None:
+            wt_clean = ""
+            if mirror:
+                qmirror = shlex.quote(mirror)
+                wt_clean = (
+                    f"git --git-dir {qmirror} worktree remove --force {shlex.quote(run_dir + '/head')} 2>/dev/null || true; "
+                    f"git --git-dir {qmirror} worktree remove --force {shlex.quote(run_dir + '/base')} 2>/dev/null || true; "
+                    f"git --git-dir {qmirror} worktree prune 2>/dev/null || true; "
+                )
             with contextlib.suppress(Exception):
                 await host.run(
                     STOP
@@ -834,11 +988,10 @@ class LabExecutor:
                         ),
                         "dir": shlex.quote(run_dir),
                     }
+                    + wt_clean
                     + f"rm -rf {shlex.quote(run_dir)}",
                     timeout=300,
                 )
-        for gpu in gpus:
-            await self._release(lab, gpu, holder)
 
     async def _root(self, lab: str, host: LabHost, machine: LabMachine) -> str:
         """The machine's work folder, made absolute against its login's home."""
@@ -975,10 +1128,8 @@ class LabExecutor:
         gpu: int | None = None
         deferred = False
         if template.needs_gpu and not payload.cpu_only:
-            gpu = await self._lease_gpu(
-                payload.lab, host, holder, template.timeout_seconds
-            )
-            if gpu is None:
+            idle = await self.idle_gpus(payload.lab)
+            if not idle:
                 if not template.cpu_fallback:
                     return {
                         "passed": False,
@@ -988,7 +1139,8 @@ class LabExecutor:
                 command_template, deferred = template.cpu_fallback, True
                 env["CUDA_VISIBLE_DEVICES"] = ""
             else:
-                env["CUDA_VISIBLE_DEVICES"] = str(gpu)
+                gpu = idle[0]
+                env["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, idle))
         elif template.needs_gpu:
             command_template = template.cpu_fallback or template.run
             env["CUDA_VISIBLE_DEVICES"] = ""
@@ -1002,7 +1154,6 @@ class LabExecutor:
         command = command_template.format(**args)
         refused = guard(command, binding, worktree, throwaway)
         if refused:
-            await self._release(payload.lab, gpu, holder)
             return {"passed": False, "refused": refused}
         if binding.guard.ray_private_instance:
             env["AM_RAY_TEMP_DIR"] = f"/tmp/ray-pr-{number}"
@@ -1043,60 +1194,6 @@ class LabExecutor:
             if throwaway:
                 cleanup += f"; rm -rf {shlex.quote(throwaway)}"
             await host.run(cleanup, timeout=300)
-            await self._release(payload.lab, gpu, holder)
-
-    async def _lease_gpu(
-        self, lab: str, host: LabHost, holder: str, ttl: int
-    ) -> int | None:
-        thresholds = self.thresholds.get(lab, GpuThresholds())
-        for gpu in [g for g in await host.gpu_status() if is_idle(g, thresholds)]:
-            if await self.store.acquire_lease(
-                lab, f"gpu{gpu.index}", holder, ttl + 600, self.clock.now()
-            ):
-                again = {g.index: g for g in await host.gpu_status()}
-                if gpu.index in again and is_idle(again[gpu.index], thresholds):
-                    return gpu.index
-                await self.store.release_lease(lab, f"gpu{gpu.index}", holder)
-        return None
-
-    async def _lease_all(
-        self,
-        lab: str,
-        host: LabHost,
-        holder: str,
-        ttl: int,
-        count: int,
-        exclude: set[int] | None = None,
-    ) -> list[int]:
-        """Lease ``count`` idle GPUs at once, or none; never those in ``exclude``."""
-        thresholds = self.thresholds.get(lab, GpuThresholds())
-        idle = [
-            g.index
-            for g in await host.gpu_status()
-            if is_idle(g, thresholds) and g.index not in (exclude or set())
-        ]
-        if len(idle) < count:
-            return []
-        got: list[int] = []
-        for index in idle:
-            if await self.store.acquire_lease(
-                lab, f"gpu{index}", holder, ttl + 600, self.clock.now()
-            ):
-                got.append(index)
-                if len(got) == count:
-                    break
-        again = {g.index: g for g in await host.gpu_status()}
-        if len(got) < count or not all(
-            i in again and is_idle(again[i], thresholds) for i in got
-        ):
-            for index in got:
-                await self.store.release_lease(lab, f"gpu{index}", holder)
-            return []
-        return got
-
-    async def _release(self, lab: str, gpu: int | None, holder: str) -> None:
-        if gpu is not None:
-            await self.store.release_lease(lab, f"gpu{gpu}", holder)
 
 
 def _gpus(record: dict[str, Any]) -> list[int]:

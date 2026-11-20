@@ -96,7 +96,6 @@ from .review_form import fill_form, forget_report, keep_report, saved_report
 from .review_session import (
     ReviewMachine,
     close,
-    earlier_work,
     finish_prompt,
     reproduction_outcome,
     reproduction_running,
@@ -501,18 +500,23 @@ async def review_prompt(
     and what the maintainers taught or turned down."""
     if machine.token:
         testing = machine.testing(ctx, reproduce=True)
-        earlier = await earlier_work(ctx, pr)
-        testing = f"{testing}\n\n{earlier}" if earlier else testing
     else:
         testing = NOTHING_RUNS.format(
             note=machine.note or "No test machine is attached to this review."
         )
     lessons = await ctx.knowledge.review_lessons(pr.repo, profile)
+    full_scope = (
+        f"This is a full review of the entire PR diff (`origin/{base_ref}...HEAD`), "
+        "not only the latest commit. Even when earlier review comments exist on the PR, "
+        "audit every changed area thoroughly for bugs, regressions, and design issues; "
+        "check existing PR comments only so you do not repeat issues already posted."
+    )
     return "\n\n".join(
         part
         for part in [
             review_call(profile, ctx.service.skills_dir, workdir, pr, "review"),
             checkout_line(pr.head_sha, base_ref),
+            full_scope,
             review_rules(profile, ctx.requested_by),
             testing,
             testing_block(await reproduction_record(ctx.store, pr.repo, pr.number)),

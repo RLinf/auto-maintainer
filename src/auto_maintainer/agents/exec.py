@@ -382,6 +382,19 @@ class Conversation:
         it into account and finishes with its result as before."""
         return []
 
+    def idle_timeout(self) -> float | None:
+        """Seconds of silence on stdout before ``on_idle`` is called; ``None`` waits
+        until the next line or the task deadline."""
+        return None
+
+    def on_idle(self) -> Step:
+        """Called when stdout stayed silent for ``idle_timeout`` seconds."""
+        return Step()
+
+    def on_eof(self) -> Step:
+        """Called when the CLI closes standard output."""
+        return Step()
+
 
 def _gh_through_proxy(config_dir: Path) -> None:
     """``gh`` settings that send its requests through the GitHub read proxy."""
@@ -1064,12 +1077,23 @@ class ExecRuntime:
                         reading = asyncio.ensure_future(proc.stdout.readline())  # type: ignore[union-attr]
                     if box is not None and waiting is None:
                         waiting = asyncio.ensure_future(box.get())
+                    idle = talk.idle_timeout() if talk is not None else None
+                    wait_for = min(remaining, idle) if idle is not None else remaining
                     ready, _ = await asyncio.wait(
                         [f for f in (reading, waiting) if f is not None],
-                        timeout=remaining,
+                        timeout=wait_for,
                         return_when=asyncio.FIRST_COMPLETED,
                     )
                     if not ready:
+                        if idle is not None and idle < remaining:
+                            assert talk is not None
+                            step = talk.on_idle()
+                            for event in self._absorb(step.events, state):
+                                yield event
+                            await _write_lines(proc.stdin, step.send)
+                            if step.done:
+                                _close_stdin(proc)
+                            continue
                         timed_out = True
                         break
                     if waiting is not None and waiting in ready:
@@ -1090,6 +1114,9 @@ class ExecRuntime:
                     raw = reading.result()
                     reading = None
                     if not raw:
+                        if talk is not None:
+                            for event in self._absorb(talk.on_eof().events, state):
+                                yield event
                         break
                     line = raw.decode("utf-8", "replace").rstrip("\n")
                     transcript.write(_transcript_line(line) + "\n")

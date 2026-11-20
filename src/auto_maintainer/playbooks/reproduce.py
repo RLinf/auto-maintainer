@@ -562,6 +562,9 @@ class ReproducePlaybook(Playbook):
                 else ": reproduce what the PR adds or claims, as your skill says."
             )
         )
+        session_limit = payload.timeout_seconds or (
+            time_limit(machine, profile.labs.get(lab)) if machine else 3600
+        )
         prompt = "\n\n".join(
             part
             for part in [
@@ -583,7 +586,7 @@ class ReproducePlaybook(Playbook):
                     machine.description if machine else "",
                     held_gpus(record.external_ref),
                     setup_lines(machine, profile.labs.get(lab)) if machine else None,
-                    payload.timeout_seconds // 60,
+                    session_limit // 60,
                     machine.suited_for if machine else "",
                 ),
                 await earlier_work(ctx, pr),
@@ -603,9 +606,9 @@ class ReproducePlaybook(Playbook):
                     output_schema=ReproReport.model_json_schema(),
                     skill_dirs=ctx.skill_dirs(),
                     repo=pr.repo,
-                    # The agent may use the whole session, then write its report.
+                    # Allow headroom for large model/dataset downloads plus execution.
                     min_timeout_seconds=max(
-                        payload.timeout_seconds,
+                        session_limit * 2,
                         ctx.lab_sessions.seconds_left(session_id),
                     )
                     + SESSION_GRACE_SECONDS,
