@@ -7,7 +7,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Fragment, useEffect, useState, type ReactNode } from "react";
 import { api, ApiError } from "./api";
-import { copyText } from "./clipboard";
+import { copyableDeviceCode, copyText } from "./clipboard";
 import { ErrorBox, Section, Status } from "./components";
 import { useT } from "./i18n";
 import { Icon } from "./icons";
@@ -193,7 +193,7 @@ function AddForge({ onClose }: { onClose: () => void }) {
         <span className="small row" style={{ gap: 8 }}>
           2. {t("Enter this code there:")}
           <code style={{ fontSize: 16, letterSpacing: 2 }}>{started.code}</code>
-          <button className="ghost sm" onClick={() => void copyText(started.code ?? "")} title={t("Copy")}>
+          <button className="ghost sm" onClick={() => void copyText(copyableDeviceCode(started.code ?? "", kind === "github" ? "GitHub" : kind))} title={t("Copy")}>
             <Icon name="check" size={13} />
           </button>
         </span>

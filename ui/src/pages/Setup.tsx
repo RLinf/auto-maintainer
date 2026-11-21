@@ -9,7 +9,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { api, ApiError } from "../api";
-import { copyText } from "../clipboard";
+import { copyableDeviceCode, copyBeforeOpen, copyText } from "../clipboard";
 import { ErrorBox, Status, useAct } from "../components";
 import { useT } from "../i18n";
 import { Icon, type IconName } from "../icons";
@@ -597,7 +597,14 @@ export function GhWebLogin({
   const [copyFailed, setCopyFailed] = useState(false);
   const copy = () => {
     if (!code) return;
-    void copyText(code.code).then((ok) => {
+    void copyText(copyableDeviceCode(code.code, site)).then((ok) => {
+      setCopied(ok);
+      setCopyFailed(!ok);
+    });
+  };
+  const copyAndOpen = () => {
+    if (!code) return;
+    void copyBeforeOpen(copyableDeviceCode(code.code, site)).then((ok) => {
       setCopied(ok);
       setCopyFailed(!ok);
     });
@@ -615,7 +622,7 @@ export function GhWebLogin({
           {code ? (
             <>
               <div className="row" style={{ gap: 8 }}>
-                <span className="code" style={{ fontSize: 22, userSelect: "all" }} title={t("Click to select the code")}>
+                <span className="code" style={{ fontSize: 22, letterSpacing: "0.08em", fontVariantNumeric: "tabular-nums", userSelect: "all" }} title={t("Click to select the code")}>
                   {code.code}
                 </span>
                 <button className="ghost sm" onClick={copy}>
@@ -623,9 +630,14 @@ export function GhWebLogin({
                 </button>
               </div>
               {copyFailed && <span className="small" style={{ color: "var(--warn)" }}>{t("This browser would not copy it. Click the code to select it, then press Ctrl+C (⌘C on a Mac).")}</span>}
-              <a className="button primary" href={code.url} target="_blank" rel="noopener noreferrer" onClick={copy}>
+              <a className="button primary" href={code.url} target="_blank" rel="noopener noreferrer" onClick={copyAndOpen}>
                 {site === "GitHub" ? t("Copy the code and open GitHub") : `${t("Copy the code and open")} ${site}`} <Icon name="external" size={12} />
               </a>
+              {site === "GitHub" && (
+                <span className="small muted">
+                  {t("On a phone: long-press the first box on GitHub and tap the system Paste menu (tapping the keyboard's clipboard bar often pastes only the first character), or type the 8 characters directly.")}
+                </span>
+              )}
               <span className="small muted row" style={{ gap: 6 }}>
                 <span className="typing" aria-hidden>
                   <span />
