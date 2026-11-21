@@ -241,6 +241,7 @@ export function ReviewCard({
     );
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [who, setWho] = useAgentChoice("review");
+  const [filtersOpen, setFiltersOpen] = useState(false);
   const query = params.get("rq") ?? "";
   const rawOnly = params.get("only");
   const only: "owner" | "reviewer" | null = rawOnly === "owner" || rawOnly === "reviewer" ? rawOnly : null;
@@ -264,6 +265,7 @@ export function ReviewCard({
   };
   const setShowAll = (v: boolean) => updateParams({ rall: v ? "1" : null });
   const filtering = Boolean(query || only || staffed || need);
+  const extraFilterCount = (staffed ? 1 : 0) + (need ? 1 : 0);
   const aliasOf = useAliasOf();
   const words = query.toLowerCase().split(/\s+/).filter(Boolean);
   const searching = words.length > 0;
@@ -292,96 +294,112 @@ export function ReviewCard({
   const allChecked = shown.length > 0 && shown.every((p) => selected.has(prKey(p)));
   return (
     <section id="review" className="card" data-tour="home-review">
-      <div className="row" style={{ marginBottom: 10 }}>
-        <input
-          type="checkbox"
-          aria-label={t("Select all")}
-          checked={allChecked}
-          onChange={() => setSelected(allChecked ? new Set() : new Set(shown.map(prKey)))}
-        />
-        <h2>{t("Pull requests to review")}</h2>
-        <span className="small muted" title={searching ? t("PRs that match, of the open PRs") : undefined}>
-          {searching || only ? `${sorted.length} / ${all.length}` : need ? `${sorted.length} / ${rows.length}` : rows.length}
-        </span>
-        <span className="spacer" />
-        <AgentPicker value={who} onChange={setWho} />
-        <button className="primary" disabled={!chosen.length || review.isPending} onClick={() => start(chosen)}>
-          <Icon name="pr" size={15} />
-          {review.isPending ? t("Starting…") : chosen.length ? `${t("Review")} ${chosen.length}` : t("Review selected")}
-        </button>
+      <div className="review-card-head">
+        <div className="review-card-title">
+          <input
+            type="checkbox"
+            aria-label={t("Select all")}
+            checked={allChecked}
+            onChange={() => setSelected(allChecked ? new Set() : new Set(shown.map(prKey)))}
+          />
+          <h2>{t("Pull requests to review")}</h2>
+          <span className="small muted" title={searching ? t("PRs that match, of the open PRs") : undefined}>
+            {searching || only ? `${sorted.length} / ${all.length}` : need ? `${sorted.length} / ${rows.length}` : rows.length}
+          </span>
+        </div>
+        <div className="review-card-actions">
+          <AgentPicker value={who} onChange={setWho} />
+          <button className="primary" disabled={!chosen.length || review.isPending} onClick={() => start(chosen)}>
+            <Icon name="pr" size={15} />
+            {review.isPending ? t("Starting…") : chosen.length ? `${t("Review")} ${chosen.length}` : t("Review selected")}
+          </button>
+        </div>
       </div>
-      <div className="row" style={{ gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
-      <label className="search" style={{ flex: 1 }}>
-        <Icon name="search" />
-        <input
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          onKeyDown={(e) => e.key === "Escape" && setQuery("")}
-          placeholder={t("Search open PRs: title, #number, author, label, reviewer")}
-          aria-label={t("Search open PRs")}
-        />
-        {query && (
-          <button type="button" className="ghost icon sm" aria-label={t("Clear the search")} onClick={() => setQuery("")}>
-            <Icon name="x" size={13} />
+      <div className={`review-filters${filtersOpen || extraFilterCount > 0 ? " expanded" : ""}`}>
+        <label className="search review-search">
+          <Icon name="search" />
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => e.key === "Escape" && setQuery("")}
+            placeholder={t("Search open PRs: title, #number, author, label, reviewer")}
+            aria-label={t("Search open PRs")}
+          />
+          {query && (
+            <button type="button" className="ghost icon sm" aria-label={t("Clear the search")} onClick={() => setQuery("")}>
+              <Icon name="x" size={13} />
+            </button>
+          )}
+        </label>
+        <div className="review-filter-bar">
+          <button
+            type="button"
+            className={`chip-btn ${only === "owner" ? "on" : ""}`}
+            aria-pressed={only === "owner"}
+            title={t("PRs you own here: you answer for their progress")}
+            onClick={() => setOnly(only === "owner" ? null : "owner")}
+            style={{ borderStyle: "solid", height: 34 }}
+          >
+            {t("Owned by me")} {ownedCount > 0 && <span className="n">{ownedCount}</span>}
           </button>
-        )}
-      </label>
-        <button
-          type="button"
-          className={`chip-btn ${only === "owner" ? "on" : ""}`}
-          aria-pressed={only === "owner"}
-          title={t("PRs you own here: you answer for their progress")}
-          onClick={() => setOnly(only === "owner" ? null : "owner")}
-          style={{ flex: "none", borderStyle: "solid", height: 34 }}
-        >
-          {t("Owned by me")} {ownedCount > 0 && <span className="n">{ownedCount}</span>}
-        </button>
-        <button
-          type="button"
-          className={`chip-btn ${only === "reviewer" ? "on" : ""}`}
-          aria-pressed={only === "reviewer"}
-          title={t("PRs you review here; a review GitHub requested of you does not count")}
-          onClick={() => setOnly(only === "reviewer" ? null : "reviewer")}
-          style={{ flex: "none", borderStyle: "solid", height: 34 }}
-        >
-          {t("I review")} {reviewingCount > 0 && <span className="n">{reviewingCount}</span>}
-        </button>
-        <select value={staffed} onChange={(e) => setStaffed(e.target.value as Staffed)} aria-label={t("Owners and reviewers")} title={t("Owners and reviewers")} style={{ flex: "none", height: 34, width: "auto" }}>
-          {(Object.keys(STAFFED) as Staffed[]).map((k) => (
-            <option key={k} value={k}>
-              {t(STAFFED[k].label)}
-            </option>
-          ))}
-        </select>
-        <select value={need} onChange={(e) => setNeed(e.target.value as Needed)} aria-label={t("Review needed")} title={t("Review needed")} style={{ flex: "none", height: 34, width: "auto" }}>
-          {(Object.keys(NEEDED) as Needed[]).map((k) => {
-            const n = rows.filter(NEEDED[k].keep).length;
-            return (
+          <button
+            type="button"
+            className={`chip-btn ${only === "reviewer" ? "on" : ""}`}
+            aria-pressed={only === "reviewer"}
+            title={t("PRs you review here; a review GitHub requested of you does not count")}
+            onClick={() => setOnly(only === "reviewer" ? null : "reviewer")}
+            style={{ borderStyle: "solid", height: 34 }}
+          >
+            {t("I review")} {reviewingCount > 0 && <span className="n">{reviewingCount}</span>}
+          </button>
+          <button
+            type="button"
+            className={`chip-btn review-filter-toggle ${filtersOpen || extraFilterCount > 0 ? "on" : ""}`}
+            aria-expanded={filtersOpen || extraFilterCount > 0}
+            onClick={() => setFiltersOpen((o) => !o)}
+            style={{ borderStyle: "solid", height: 34 }}
+          >
+            <Icon name="filter" size={14} />
+            {t("Filter")}
+            {extraFilterCount > 0 && <span className="n">{extraFilterCount}</span>}
+          </button>
+          <select value={staffed} onChange={(e) => setStaffed(e.target.value as Staffed)} aria-label={t("Owners and reviewers")} title={t("Owners and reviewers")} className="review-extra-filter">
+            {(Object.keys(STAFFED) as Staffed[]).map((k) => (
               <option key={k} value={k}>
-                {t(NEEDED[k].label)}
-                {n ? ` (${n})` : ""}
+                {t(STAFFED[k].label)}
               </option>
-            );
-          })}
-        </select>
-        {filtering && (
-          <button type="button" className="ghost sm" onClick={() => updateParams({ rq: null, only: null, staffed: null, need: null })}>
-            {t("Reset")}
-          </button>
-        )}
-        <select
-          value={order}
-          onChange={(e) => setOrder(e.target.value as ReviewOrder)}
-          aria-label={t("Sort by")}
-          title={t("Sort by")}
-          style={{ flex: "none", height: 34, width: "auto" }}
-        >
-          {(Object.keys(REVIEW_ORDERS) as ReviewOrder[]).map((k) => (
-            <option key={k} value={k}>
-              {t(REVIEW_ORDERS[k].label)}
-            </option>
-          ))}
-        </select>
+            ))}
+          </select>
+          <select value={need} onChange={(e) => setNeed(e.target.value as Needed)} aria-label={t("Review needed")} title={t("Review needed")} className="review-extra-filter">
+            {(Object.keys(NEEDED) as Needed[]).map((k) => {
+              const n = rows.filter(NEEDED[k].keep).length;
+              return (
+                <option key={k} value={k}>
+                  {t(NEEDED[k].label)}
+                  {n ? ` (${n})` : ""}
+                </option>
+              );
+            })}
+          </select>
+          {filtering && (
+            <button type="button" className="ghost sm" onClick={() => updateParams({ rq: null, only: null, staffed: null, need: null })}>
+              {t("Reset")}
+            </button>
+          )}
+          <select
+            value={order}
+            onChange={(e) => setOrder(e.target.value as ReviewOrder)}
+            aria-label={t("Sort by")}
+            title={t("Sort by")}
+            className="review-sort"
+          >
+            {(Object.keys(REVIEW_ORDERS) as ReviewOrder[]).map((k) => (
+              <option key={k} value={k}>
+                {t(REVIEW_ORDERS[k].label)}
+              </option>
+            ))}
+          </select>
+        </div>
       </div>
       {loading ? (
         <Skeleton rows={4} />
@@ -500,9 +518,9 @@ export function AgentWork({ me }: { me: Me }) {
   ];
   return (
     <section id="work" className="card" data-tour="home-work">
-      <div className="row" style={{ marginBottom: 8, flexWrap: "wrap" }}>
+      <div className="work-head">
         <h2>{t("Agents' work")}</h2>
-        <div className="segmented" role="tablist">
+        <div className="segmented work-tabs" role="tablist">
           {tabs.map((x) => (
             <button key={x.id} role="tab" aria-selected={shown === x.id} className={shown === x.id ? "on" : ""} onClick={() => setTab(x.id)}>
               {x.label}
@@ -511,7 +529,7 @@ export function AgentWork({ me }: { me: Me }) {
           ))}
         </div>
         <span className="spacer" />
-        <button className={`chip-btn ${everyone ? "on" : ""}`} style={{ borderStyle: "solid" }} onClick={() => setEveryone(!everyone)}>
+        <button className={`chip-btn work-scope ${everyone ? "on" : ""}`} style={{ borderStyle: "solid" }} onClick={() => setEveryone(!everyone)}>
           {everyone ? t("Everyone's") : t("Mine")}
         </button>
       </div>

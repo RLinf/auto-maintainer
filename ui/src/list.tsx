@@ -278,8 +278,11 @@ export function ListToolbar<T>({
     return () => window.removeEventListener("keydown", onKey);
   }, []);
   const sortLabel = list.sorts.find((s) => s.id === list.sortId)?.label;
+  const [facetsOpen, setFacetsOpen] = useState(false);
+  const activeFacetCount = list.facets.reduce((n, f) => n + ((list.selectedFacets[f.id]?.length ?? 0) > 0 ? 1 : 0), 0);
+  const collapseFacetsOnPhone = list.facets.length > 2;
   return (
-    <div className="toolbar">
+    <div className={`toolbar${facetsOpen ? " facets-open" : ""}${collapseFacetsOnPhone ? " has-many-facets" : ""}`}>
       <label className="search">
         <Icon name="search" />
         <input
@@ -304,44 +307,73 @@ export function ListToolbar<T>({
           aria-label={placeholder}
           data-list-search
         />
-        <span className="kbd">/</span>
+        {draft ? (
+          <button
+            type="button"
+            className="ghost icon sm"
+            aria-label={t("Clear the search")}
+            onClick={() => {
+              dirty.current = false;
+              setDraft("");
+              list.setQuery("");
+            }}
+          >
+            <Icon name="x" size={13} />
+          </button>
+        ) : (
+          <span className="kbd hide-phone">/</span>
+        )}
       </label>
+      {collapseFacetsOnPhone && (
+        <button
+          type="button"
+          className={`chip-btn toolbar-filter-toggle ${facetsOpen || activeFacetCount > 0 ? "on" : ""}`}
+          aria-expanded={facetsOpen}
+          onClick={() => setFacetsOpen((o) => !o)}
+          style={{ borderStyle: "solid" }}
+        >
+          <Icon name="filter" size={14} />
+          {t("Filter")}
+          {activeFacetCount > 0 && <span className="n">{activeFacetCount}</span>}
+        </button>
+      )}
       {list.facets.map((f) => {
         const chosen = list.selectedFacets[f.id] ?? [];
         return (
-          <Popover
-            key={f.id}
-            label={f.label}
-            trigger={(_, toggle) => (
-              <button className={`chip-btn ${chosen.length ? "on" : ""}`} onClick={toggle} aria-haspopup="menu">
-                {chosen.length ? <Icon name="filter" size={14} /> : <Icon name="plus" size={14} />}
-                {f.label}
-                {chosen.length === 1 ? <>: {chosen[0]}</> : chosen.length > 1 ? <span className="n">{chosen.length}</span> : null}
-              </button>
-            )}
-          >
-            {() => (
-              <>
-                <div className="menu-label">{f.label}</div>
-                {list.facetCounts(f).map(([value, n]) => (
-                  <button key={value} className="menu-item" role="menuitemcheckbox" aria-checked={chosen.includes(value)} onClick={() => list.toggleFacet(f.id, value)}>
-                    <span className="menu-check">{chosen.includes(value) ? <Icon name="check" size={14} /> : null}</span>
-                    <span className="truncate">{value}</span>
-                    <span className="right">{n}</span>
-                  </button>
-                ))}
-                {!list.facetCounts(f).length && <div className="menu-item muted">No values</div>}
-                {chosen.length > 0 && (
-                  <>
-                    <div className="menu-sep" />
-                    <button className="menu-item" onClick={() => list.clearFacet(f.id)}>
-                      Clear {f.label.toLowerCase()}
+          <span key={f.id} className={`toolbar-facet${chosen.length ? " is-active" : ""}`}>
+            <Popover
+              label={f.label}
+              trigger={(_, toggle) => (
+                <button className={`chip-btn ${chosen.length ? "on" : ""}`} onClick={toggle} aria-haspopup="menu">
+                  {chosen.length ? <Icon name="filter" size={14} /> : <Icon name="plus" size={14} />}
+                  {f.label}
+                  {chosen.length === 1 ? <>: {chosen[0]}</> : chosen.length > 1 ? <span className="n">{chosen.length}</span> : null}
+                </button>
+              )}
+            >
+              {() => (
+                <>
+                  <div className="menu-label">{f.label}</div>
+                  {list.facetCounts(f).map(([value, n]) => (
+                    <button key={value} className="menu-item" role="menuitemcheckbox" aria-checked={chosen.includes(value)} onClick={() => list.toggleFacet(f.id, value)}>
+                      <span className="menu-check">{chosen.includes(value) ? <Icon name="check" size={14} /> : null}</span>
+                      <span className="truncate">{value}</span>
+                      <span className="right">{n}</span>
                     </button>
-                  </>
-                )}
-              </>
-            )}
-          </Popover>
+                  ))}
+                  {!list.facetCounts(f).length && <div className="menu-item muted">No values</div>}
+                  {chosen.length > 0 && (
+                    <>
+                      <div className="menu-sep" />
+                      <button className="menu-item" onClick={() => list.clearFacet(f.id)}>
+                        Clear {f.label.toLowerCase()}
+                      </button>
+                    </>
+                  )}
+                </>
+              )}
+            </Popover>
+          </span>
         );
       })}
       {list.filtering && (

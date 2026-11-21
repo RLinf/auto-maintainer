@@ -49,13 +49,16 @@ export function PageHead({
             ))}
           </nav>
         )}
-        <h1>{title}</h1>
+        <div className="page-head-title-row">
+          <h1>{title}</h1>
+          {guide && <span className="page-head-guide-mobile">{guide}</span>}
+        </div>
         {sub && <div className="sub">{sub}</div>}
       </div>
       {(actions || guide) && (
         <div className="actions">
           {actions}
-          {guide}
+          {guide && <span className="page-head-guide-desktop">{guide}</span>}
         </div>
       )}
     </div>

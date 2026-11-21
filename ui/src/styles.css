@@ -224,6 +224,10 @@ code { background: var(--code-bg); padding: 1px 5px; border-radius: 5px; }
 .content { max-width: 1320px; margin: 0 auto; padding: 24px 20px 120px; display: flex; flex-direction: column; gap: 18px; min-width: 0; }
 .page-head { display: flex; align-items: flex-start; gap: 14px; flex-wrap: wrap; }
 .page-head .titles { display: flex; flex-direction: column; gap: 4px; min-width: 0; flex: 1 1 320px; }
+.page-head-title-row { display: flex; align-items: flex-start; gap: 8px; min-width: 0; }
+.page-head-title-row > h1 { flex: 1 1 auto; min-width: 0; }
+.page-head-guide-mobile { display: none; flex-shrink: 0; }
+.page-head-guide-desktop { display: inline-flex; }
 .page-head .sub { color: var(--muted); font-size: 13px; }
 /* A PR's number beside its title opens the PR on GitHub. */
 .pr-number { color: var(--muted); font-weight: 400; white-space: nowrap; }
@@ -404,6 +408,8 @@ tr:hover .row-action, .row-action:focus-visible { opacity: 1; }
 
 /* ---- data table ---------------------------------------------------------------------- */
 .toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.toolbar-filter-toggle { display: none; }
+.toolbar-facet { display: inline-flex; }
 .search {
   display: flex; align-items: center; gap: 8px; height: 34px; padding: 0 10px; min-width: 240px; flex: 0 1 320px;
   border: 1px solid var(--border); border-radius: 10px; background: var(--surface); color: var(--muted);
@@ -718,6 +724,28 @@ details > summary { cursor: pointer; color: var(--text-2); }
 .status-line a:hover { color: var(--accent); text-decoration: none; }
 .schedule-line { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border); }
 .schedule-line .chip-btn { border-style: solid; height: 28px; }
+.work-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+.review-card-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+.review-card-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.review-card-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-left: auto; }
+.review-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 8px; }
+.review-search { flex: 1 1 260px; min-width: 200px; }
+.review-filter-bar { display: contents; }
+.review-filter-toggle { display: none; }
+.review-extra-filter, .review-sort { flex: none; height: 34px; width: auto; }
+.decisions-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+@media (max-width: 900px) {
+  /* Prevent PR titles on Home from being squeezed into tall narrow columns on tablets & phones. */
+  .list-row.pr-row { flex-wrap: wrap; align-items: flex-start; gap: 6px 10px; padding: 12px 2px; }
+  .list-row.pr-row > input { order: -2; margin: 3px 0 0; flex-shrink: 0; }
+  .list-row.pr-row > .main { order: -1; flex: 1 1 calc(100% - 40px); min-width: 0; }
+  .list-row.pr-row > .main .t { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow-wrap: break-word; line-height: 1.4; }
+  .list-row.pr-row > .main .meta { white-space: normal; margin-top: 2px; }
+  .list-row.pr-row > .pill,
+  .list-row.pr-row > .progress-inline,
+  .list-row.pr-row > .small { align-self: center; }
+  .list-row.pr-row > .pill.tier { margin-left: 25px; }
+}
 
 /* small utilities */
 .ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
@@ -1086,13 +1114,67 @@ details.pv-section[open] > summary { margin-bottom: 6px; }
 
 /* ---- narrow screens & phones (last, so it overrides the components above) --------- */
 @media (max-width: 640px) {
+  .content { padding: 14px 12px 92px; gap: 14px; }
+  .card { padding: 14px; border-radius: var(--r); }
+  .tabs { scrollbar-width: none; }
+  .tabs::-webkit-scrollbar { display: none; }
+  .page-head { gap: 10px; }
+  .page-head-guide-mobile { display: inline-flex; }
+  .page-head-guide-desktop { display: none; }
+  .page-head .actions:empty { display: none; }
+  .page-head .actions { gap: 6px; }
+  .page-head .actions > button:not(.icon),
+  .page-head .actions > .button:not(.icon) { height: 32px; padding: 0 10px; font-size: 13px; }
+  .hero { flex-wrap: nowrap; align-items: flex-start; gap: 8px; }
+  .hero > .titles { flex: 1 1 auto; min-width: 0; }
+  .hero h1 { font-size: 22px; }
+  .status-line { gap: 4px 12px; font-size: 13px; }
+
+  /* Home: AgentWork header, ReviewCard search/filters, and Decisions header. */
+  .work-head { gap: 8px; }
+  .work-head > h2 { order: 1; }
+  .work-head > .spacer { display: none; }
+  .work-head > .work-scope { order: 2; margin-left: auto; height: 28px; padding: 0 10px; font-size: 12.5px; }
+  .work-head > .work-tabs { order: 3; width: 100%; display: flex; }
+  .work-head > .work-tabs button { flex: 1 1 0; padding: 0 6px; font-size: 12.5px; }
+
+  .review-card-head { flex-direction: column; align-items: stretch; gap: 8px; }
+  .review-card-actions { margin-left: 0; width: 100%; gap: 6px; }
+  .review-card-actions > .row,
+  .review-card-actions > select { flex: 1 1 auto; min-width: 0; }
+  .review-card-actions select { width: 100%; min-width: 0; }
+  .review-card-actions > button.primary { height: 32px; padding: 0 12px; font-size: 13px; flex-shrink: 0; }
+
+  .review-filters { flex-direction: column; align-items: stretch; gap: 8px; }
+  .review-filters > .review-search { flex: none; width: 100%; min-width: 0; height: 38px; }
+  .review-filter-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .review-filter-bar > .chip-btn { height: 30px !important; padding: 0 9px; font-size: 12.5px; }
+  .review-filter-toggle { display: inline-flex; }
+  .review-filters:not(.expanded) .review-extra-filter { display: none; }
+  .review-filters.expanded .review-extra-filter { flex: 1 1 calc(50% - 4px); min-width: 140px; height: 32px; font-size: 13px; }
+  .review-sort { margin-left: auto; height: 30px; font-size: 12.5px; padding: 0 8px; }
+
+  .decisions-head { gap: 8px; }
+  .decisions-head > h2 { order: 1; }
+  .decisions-head > .spacer { display: none; }
+  .decisions-head > .decisions-sort { order: 2; margin-left: auto; }
+  .decisions-head > .decisions-tabs { order: 3; width: 100%; }
+
+  /* ListToolbar: full-width search + compact collapsible facets on phones. */
+  .toolbar { gap: 6px; }
+  .toolbar > .search { flex: 1 1 100%; width: 100%; min-width: 0; height: 38px; }
+  .toolbar.has-many-facets .toolbar-filter-toggle { display: inline-flex; height: 32px; padding: 0 10px; font-size: 13px; }
+  .toolbar.has-many-facets:not(.facets-open) .toolbar-facet:not(.is-active) { display: none; }
+  .toolbar .chip-btn { height: 30px; padding: 0 9px; font-size: 12.5px; }
+  .toolbar > .spacer { flex: 1 1 0; min-width: 0; }
+
   .search { min-width: 0; flex: 1 1 100%; width: 100%; }
   .title-cell { min-width: 0; }
   .usage-agent-main, .reviewer-addressed { min-width: 0; }
   .usage-agent-main, .usage-quota { flex: 1 1 100%; }
   .log-filter { width: 100%; flex: 1 1 100%; }
-  .page-head .titles, .hero > .titles { flex: 1 1 100%; }
-  .page-head h1 { font-size: 20px; overflow-wrap: anywhere; }
+  .page-head .titles { flex: 1 1 100%; }
+  .page-head h1 { font-size: 19px; line-height: 1.3; overflow-wrap: break-word; }
 
   /* Every multi-column grid collapses to a single column. */
   .grid2,
@@ -1160,35 +1242,34 @@ details.pv-section[open] > summary { margin-bottom: 6px; }
   /* A table with a primary column (including the PR list) renders each row as a stacked card. */
   table.cards, table.cards tbody { display: block; }
   table.cards thead { display: none; }
-  table.cards tr { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 12px 14px; border-bottom: 1px solid var(--border); }
+  table.cards tr { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 6px 12px; padding: 12px 14px; border-bottom: 1px solid var(--border); }
   table.cards tr:last-child { border-bottom: none; }
-  table.cards td { display: block; padding: 0; border: 0; min-width: 0; max-width: 100%; text-align: left; font-size: 13px; overflow-wrap: anywhere; }
-  table.cards td.check { order: -2; width: auto; padding: 0; }
-  table.cards td.primary { order: -1; flex: 1 1 calc(100% - 36px); font-size: 14px; }
+  table.cards td { display: block; padding: 0; border: 0; min-width: 0; max-width: 100%; text-align: left; font-size: 13px; overflow-wrap: break-word; }
+  table.cards td.check { order: -2; width: auto; padding: 3px 0 0; }
+  table.cards td.check input { margin: 0; display: block; }
+  table.cards td.primary { order: -1; flex: 1 1 calc(100% - 40px); font-size: 14px; min-width: 0; }
   table.cards tr:not(:has(> td.check)) > td.primary { flex-basis: 100%; }
-  table.cards td.primary a { font-size: 15px; }
+  table.cards td.primary a { font-size: 15px; line-height: 1.4; }
   table.cards td[data-label]:not(.primary)::before { content: attr(data-label); color: var(--muted); font-size: 11px; }
-  table.cards td[data-label]:not(.primary) { display: inline-grid; grid-template-columns: auto minmax(0, 1fr); column-gap: 6px; align-items: baseline; justify-content: start; }
+  table.cards td[data-label]:not(.primary) { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  table.cards td[data-label]:not(.primary) > .stack { flex-direction: row; align-items: center; gap: 6px; flex-wrap: wrap; }
   table.cards td.hide-phone, table.cards td.hide-narrow { display: none !important; }
   table.cards .group-row td { flex: 1 1 100%; }
 
   /* List rows, PR rows, review progress, People roles, Chat, SignIn, and floating bars. */
   .list-row .t, .work-row .t {
-    white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow-wrap: anywhere;
+    white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow-wrap: break-word;
   }
-  .list-row .meta { white-space: normal; overflow-wrap: anywhere; }
+  .list-row .meta { white-space: normal; overflow-wrap: break-word; }
   .list-row .row-actions { display: none; }
   .hide-phone { display: none; }
-  .fab { width: 50px; height: 50px; padding: 0; right: 16px; bottom: 16px; }
+  .fab { width: 44px; height: 44px; padding: 0; right: 12px; bottom: 14px; opacity: 0.92; }
   .fab .fab-label { display: none; }
-  .work-row { flex-wrap: wrap; row-gap: 4px; }
-  .work-row > .main { flex: 1 1 calc(100% - 48px); }
-  .work-row > .pill { margin-left: 44px; }
+  .work-row { flex-wrap: wrap; align-items: flex-start; row-gap: 4px; padding: 10px 4px; }
+  .work-row > .main { flex: 1 1 calc(100% - 46px); }
+  .work-row > .pill { margin-left: 44px; margin-top: 2px; }
   .work-row .t { -webkit-line-clamp: 3; }
-  .list-row.pr-row { flex-wrap: wrap; row-gap: 6px; }
-  .list-row.pr-row > input { order: -2; }
-  .list-row.pr-row > .main { order: -1; flex: 1 1 calc(100% - 34px); }
-  .list-row.pr-row > .small { flex: 1 1 auto; }
+  .list-row.pr-row > .small:empty { display: none; }
   .progress-reviewer > .main { flex: 1 1 calc(100% - 64px); }
   .comment-items { margin-left: 10px; }
   .comment-item { flex-wrap: wrap; }
@@ -1245,9 +1326,15 @@ details.pv-section[open] > summary { margin-bottom: 6px; }
 .merge-checklist li.is-fail { color: var(--text); font-weight: 500; }
 .merge-checklist li.is-ok { color: var(--muted); }
 .clamp1 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
-@media (max-width: 640px) {
-  .merge-row { flex-wrap: wrap; }
-  .merge-actions { width: 100%; justify-content: flex-start; padding-left: 36px; }
+@media (max-width: 720px) {
+  /* Give PR titles in Merge scheduling the full row width so action buttons never squeeze them into tall narrow columns. */
+  .merge-row { flex-wrap: wrap; gap: 8px 10px; padding: 12px 2px; }
+  .merge-row > .merge-main { flex: 1 1 100%; min-width: 0; }
+  .merge-row:has(> .merge-pos) > .merge-main { flex: 1 1 calc(100% - 36px); }
+  .merge-pr { overflow-wrap: break-word; line-height: 1.4; }
+  .merge-actions { width: 100%; justify-content: flex-start; padding-left: 0; }
+  .merge-row:has(> .merge-pos) > .merge-actions { padding-left: 34px; }
+  .merge-search { min-width: 0; max-width: none; }
   .merge-controls { padding: 12px; }
 }
 .merge-words { margin: 0; padding: 6px 10px; border-left: 3px solid var(--border-strong); color: var(--text-2); white-space: pre-wrap; }

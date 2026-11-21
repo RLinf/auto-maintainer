@@ -189,10 +189,10 @@ export default function HomePage({ me }: { me: Me }) {
       <ReviewCard rows={needs} all={rows} loading={prs.isLoading} me={me} searchParams={viewParams} />
 
       <section id="decisions" className="stack" style={{ gap: 12, minWidth: 0 }}>
-        <div className="row">
+        <div className="decisions-head">
           <h2 style={{ fontSize: 17 }}>{t("Needs your decision")}</h2>
           <span className="spacer" />
-          <div className="row" style={{ gap: 4, flexWrap: "wrap" }}>
+          <div className="decisions-tabs row" style={{ gap: 4, flexWrap: "wrap" }}>
             {tabs.map((tab) => (
               <button key={tab.id} className={`chip-btn ${show === tab.id ? "on" : ""}`} style={{ borderStyle: "solid", height: 30 }} onClick={() => setShow(tab.id)}>
                 {tab.label}
@@ -200,7 +200,7 @@ export default function HomePage({ me }: { me: Me }) {
               </button>
             ))}
           </div>
-          <button className="ghost sm" onClick={() => setOrder(order === "new" ? "old" : "new")} title={t("Sort")}>
+          <button className="ghost sm decisions-sort" onClick={() => setOrder(order === "new" ? "old" : "new")} title={t("Sort")}>
             <Icon name={order === "new" ? "sortDesc" : "sortAsc"} size={14} />
             {order === "new" ? t("Newest first") : t("Oldest first")}
           </button>
