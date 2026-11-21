@@ -95,6 +95,7 @@ from .api import (
     require_view,
     service_of,
     shows_maintainer,
+    visible_repos,
 )
 from .api import (
     _run_now as run_now,
@@ -676,6 +677,49 @@ async def _config_maintainer(service: Service, user: User, repo: str) -> None:
 def build_router() -> APIRouter:
     r = APIRouter(prefix="/api/merge-schedule")
 
+    @r.get("/my-failures")
+    async def my_failures(
+        request: Request, user: User = Depends(current_user)
+    ) -> dict[str, Any]:
+        """Scheduled PRs that ``user`` armed and whose CI failed (in the failure
+        lane), across the repositories ``user`` may see, so the dashboard can remind
+        the scheduler to fix them."""
+        service = service_of(request)
+        repos = await visible_repos(service, user)
+        me = user.login.lower()
+        items: list[dict[str, Any]] = []
+        for repo in repos:
+            arms = await service.store.list_arms(repo)
+            mine = [a for a in arms if a.armed_by.lower() == me]
+            if not mine:
+                continue
+            snaps = {p.number: p for p in await service.store.list_snapshots(repo)}
+            for arm in mine:
+                state = await _state(service, repo, arm.number)
+                if state.phase != "failed":
+                    continue
+                pr = snaps.get(arm.number) or await service.store.get_snapshot(
+                    repo, arm.number
+                )
+                if pr is None or pr.state != PrState.OPEN:
+                    continue
+                items.append(
+                    {
+                        "repo": repo,
+                        "number": pr.number,
+                        "title": pr.title,
+                        "url": pr.url,
+                        "detail": state.detail,
+                        "failed_jobs": state.failed_jobs,
+                        "causes": state.causes,
+                        "since": state.since.isoformat() if state.since else None,
+                        "scheduled_by": arm.armed_by,
+                        "conflict": pr.mergeable == Mergeable.CONFLICTING,
+                    }
+                )
+        items.sort(key=lambda x: x["since"] or "", reverse=True)
+        return {"failures": items}
+
     @r.get("/{repo:path}/view")
     async def view(
         request: Request, repo: str, user: User = Depends(current_user)
@@ -876,6 +920,7 @@ def build_router() -> APIRouter:
         effective = await access_of(service, user, repo)
         return {
             **shared,
+            "me": user.login,
             "can_arrange": effective.can(Grant.MERGE_SCHEDULE),
             "can_configure": await shows_maintainer(service, user, repo),
             "github_permission": str(await permission(service, user, repo)),
@@ -1076,6 +1121,7 @@ def build_router() -> APIRouter:
         state.started_at = None
         state.running_since = None
         state.looked_into = []
+        state.cancel_to_rerun = []
         state.finding = ""
         state.not_before = None
         await service.store.set_state(

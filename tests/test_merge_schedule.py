@@ -2878,3 +2878,217 @@ async def test_not_ready_view_reports_all_blockers_checks_hygiene_details_and_dr
     assert any(
         c["condition"] == "not_draft" and not c["ok"] for c in by_num[52]["checks"]
     )
+
+
+async def test_early_flaky_failure_in_running_workflow_cancels_then_reruns(
+    harness: Harness,
+) -> None:
+    """When a job fails with a flake while long-tail jobs in the SAME workflow run
+    are still running, diagnose immediately, cancel the running workflow, and rerun
+    once GitHub finishes cancelling it — up to max_per_sha."""
+    h = harness
+    _flaky(h)
+    h.runner.on("ci_root_cause", lambda t: {"causes": []})
+    h.forge.job_logs[420] = "NCCL timeout on the runner\n"
+    pr = _ready(
+        42,
+        "a" * 40,
+        [
+            _job(420, "unit", "failure", 4200, workflow="CI", attempt=1),
+            _job(421, "e2e-long", None, 4200, workflow="CI", attempt=1),
+        ],
+    )
+    h.forge.put_pr(pr)
+    await _schedule(h, 42)
+    await h.settle()
+
+    # Diagnosed immediately while e2e-long is still in flight; workflow cancelled,
+    # NOT rerun yet because GitHub rejects rerun-failed-jobs on in-progress runs.
+    assert h.forge.writes_of("cancel_run") == [{"repo": REPO, "run_id": 4200}]
+    assert h.forge.writes_of("rerun_failed_jobs") == []
+    state = await _phase(h, 42)
+    assert state.phase == "rerunning"
+    assert state.cancel_to_rerun == [4200]
+    assert "cancelling running CI to rerun" in state.detail
+
+    # While GitHub is still stopping the run, another wake waits without rerunning.
+    h.clock.advance(seconds=15)
+    await h.emit(Event(kind=EventKind.CHECKS_COMPLETED, repo=REPO, number=42))
+    await h.settle()
+    assert h.forge.writes_of("rerun_failed_jobs") == []
+    assert (await _phase(h, 42)).cancel_to_rerun == [4200]
+
+    # Once GitHub finishes cancelling run 4200, rerun-failed-jobs fires immediately.
+    h.clock.advance(seconds=15)
+    h.forge.put_pr(
+        pr.model_copy(
+            update={
+                "checks": [
+                    _job(420, "unit", "failure", 4200, workflow="CI", attempt=1),
+                    _job(421, "e2e-long", "cancelled", 4200, workflow="CI", attempt=1),
+                ]
+            }
+        )
+    )
+    await h.emit(Event(kind=EventKind.CHECKS_COMPLETED, repo=REPO, number=42))
+    await h.settle()
+    assert h.forge.writes_of("rerun_failed_jobs") == [{"repo": REPO, "run_id": 4200}]
+    state = await _phase(h, 42)
+    assert state.phase == "rerunning" and state.cancel_to_rerun == []
+
+    # Attempt 2 flakes again mid-run: distinct cancel key -> cancels & reruns again.
+    h.clock.advance(minutes=5)
+    h.forge.job_logs[422] = "NCCL timeout on the runner\n"
+    h.forge.put_pr(
+        pr.model_copy(
+            update={
+                "checks": [
+                    _job(422, "unit", "failure", 4200, workflow="CI", attempt=2),
+                    _job(423, "e2e-long", None, 4200, workflow="CI", attempt=2),
+                ]
+            }
+        )
+    )
+    await h.emit(Event(kind=EventKind.CHECKS_COMPLETED, repo=REPO, number=42))
+    await h.settle()
+    assert len(h.forge.writes_of("cancel_run")) == 2
+    assert (await _phase(h, 42)).cancel_to_rerun == [4200]
+
+    h.clock.advance(seconds=30)
+    h.forge.put_pr(
+        pr.model_copy(
+            update={
+                "checks": [
+                    _job(422, "unit", "failure", 4200, workflow="CI", attempt=2),
+                    _job(423, "e2e-long", "cancelled", 4200, workflow="CI", attempt=2),
+                ]
+            }
+        )
+    )
+    await h.emit(Event(kind=EventKind.CHECKS_COMPLETED, repo=REPO, number=42))
+    await h.settle()
+    assert len(h.forge.writes_of("rerun_failed_jobs")) == 2
+    assert (await _phase(h, 42)).cancel_to_rerun == []
+
+    # Attempt 3 flakes past max_per_sha (2): moves to failure lane without cancelling.
+    h.clock.advance(minutes=5)
+    h.forge.job_logs[424] = "NCCL timeout on the runner\n"
+    h.forge.put_pr(
+        pr.model_copy(
+            update={
+                "checks": [
+                    _job(424, "unit", "failure", 4200, workflow="CI", attempt=3),
+                    _job(425, "e2e-long", None, 4200, workflow="CI", attempt=3),
+                ]
+            }
+        )
+    )
+    await h.emit(Event(kind=EventKind.CHECKS_COMPLETED, repo=REPO, number=42))
+    await h.settle()
+    assert len(h.forge.writes_of("cancel_run")) == 2
+    assert len(h.forge.writes_of("rerun_failed_jobs")) == 2
+    assert (await _phase(h, 42)).phase == "failed"
+
+
+async def test_early_real_failure_in_running_workflow_surfaces_and_reminds_scheduler(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """When a job fails with a real (non-flaky) failure while other jobs in the
+    same workflow are still running, surface it immediately in the failure lane,
+    notify @scheduler, expose it via /api/merge-schedule/my-failures, and allow
+    retrying even while the long-tail job is still running."""
+    h = harness
+    h.runner.on(
+        "ci_diagnose",
+        lambda t: {
+            "category": "pr_caused",
+            "confidence": 0.9,
+            "explanation": "assertion breaks",
+        },
+    )
+    h.runner.on(
+        "ci_root_cause",
+        lambda t: {
+            "causes": [
+                {
+                    "jobs": ["unit"],
+                    "failing": "tests/test_m.py::test_x",
+                    "origin": "change",
+                    "cause": "Return value changed from int to None.",
+                    "confidence": 0.9,
+                }
+            ]
+        },
+    )
+    h.forge.job_logs[420] = "FAILED tests/test_m.py::test_x\nAssertionError\n"
+    pr = _ready(
+        42,
+        "a" * 40,
+        [
+            _job(420, "unit", "failure", 4200, workflow="CI", attempt=1),
+            _job(421, "e2e-long", None, 4200, workflow="CI", attempt=1),
+        ],
+    )
+    h.forge.put_pr(pr)
+    await h.poll()
+    await _schedule(h, 42)
+    await h.settle()
+
+    # Moves to failure lane immediately while e2e-long is still running.
+    state = await _phase(h, 42)
+    assert state.phase == "failed"
+    assert state.failed_jobs == ["unit"]
+    assert state.causes and "Return value changed" in state.causes[0]
+    assert h.forge.writes_of("rerun_failed_jobs") == []
+
+    # Notifies the scheduler (@maria) with the failure and root cause.
+    notifies = [
+        r
+        for r in await h.store.list_actions(
+            repo=REPO, number=42, kinds=[ActionKind.NOTIFY]
+        )
+        if r.action.payload.get("event") == "merge.failed"
+    ]
+    assert len(notifies) == 1
+    msg = notifies[0].action.payload["text"]
+    assert "@maria" in msg and "Return value changed" in msg
+
+    # Dashboard endpoints surface the failure to maria (scheduler), not bob.
+    app = create_app(h.service, data_dir=tmp_path, allow_dev_login=True)
+    async with _as(app, "maria") as maria:
+        view = (await maria.get(f"/api/merge-schedule/{REPO}/view")).json()
+        assert view["me"] == "maria"
+        assert [f["number"] for f in view["failed"]] == [42]
+        assert view["failed"][0]["scheduled_by"] == "maria"
+
+        mine = (await maria.get("/api/merge-schedule/my-failures")).json()
+        assert [f["number"] for f in mine["failures"]] == [42]
+        assert mine["failures"][0]["failed_jobs"] == ["unit"]
+        assert mine["failures"][0]["scheduled_by"] == "maria"
+    async with _as(app, "bob") as bob:
+        other = (await bob.get("/api/merge-schedule/my-failures")).json()
+        assert other["failures"] == []
+
+    # Pressing Retry while e2e-long is still running cancels 4200 then reruns it.
+    async with _as(app, "maria") as maria:
+        out = await maria.post(f"/api/merge-schedule/{REPO}/42/retry")
+        assert out.status_code == 200, out.text
+    await h.settle()
+    assert h.forge.writes_of("cancel_run") == [{"repo": REPO, "run_id": 4200}]
+    assert (await _phase(h, 42)).cancel_to_rerun == [4200]
+
+    h.clock.advance(seconds=30)
+    h.forge.put_pr(
+        pr.model_copy(
+            update={
+                "checks": [
+                    _job(420, "unit", "failure", 4200, workflow="CI", attempt=1),
+                    _job(421, "e2e-long", "cancelled", 4200, workflow="CI", attempt=1),
+                ]
+            }
+        )
+    )
+    await h.emit(Event(kind=EventKind.CHECKS_COMPLETED, repo=REPO, number=42))
+    await h.settle()
+    assert h.forge.writes_of("rerun_failed_jobs") == [{"repo": REPO, "run_id": 4200}]
+    assert (await _phase(h, 42)).cancel_to_rerun == []

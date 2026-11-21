@@ -284,6 +284,7 @@ a.tile:hover, button.tile:hover { text-decoration: none; border-color: var(--bor
   padding: 14px 16px 14px 18px; display: flex; flex-direction: column; gap: 10px; box-shadow: var(--shadow-sm);
 }
 .feed-item::before { content: ""; position: absolute; left: 0; top: 12px; bottom: 12px; width: 3px; border-radius: 0 3px 3px 0; background: var(--accent); }
+.feed-item.kind-ci_failed::before { background: var(--bad); }
 .feed-item.kind-question::before { background: var(--t1); }
 .feed-item.kind-proposal::before { background: var(--accent); }
 .feed-item.kind-memory::before { background: var(--accent-2); }

@@ -102,7 +102,6 @@ from ..domain.records import ActionStatus, RootCause
 from ..domain.run_ci import ci_view, latest_checks, rerun_targets, unfinished_runs
 from ..domain.snapshot import (
     CheckConclusion,
-    CheckStatus,
     Mergeable,
     PrSnapshot,
     PrState,
@@ -141,6 +140,12 @@ WAIT_SECONDS = 600
 """How long a scheduled PR's job waits for an event (CI, a review, a push) before it
 reads the PR again anyway: what it waits for can come without one (a conflict
 GitHub works out later, a check reported late), and a read costs no agent."""
+RUNNING_POLL_SECONDS = 120
+"""How often a scheduled PR whose CI is actively running is checked again when no
+event arrives, so mid-run failures are diagnosed promptly."""
+CANCEL_POLL_SECONDS = 30
+"""How quickly the schedule checks back after cancelling an in-progress workflow
+run for a flaky failure, so the rerun starts as soon as GitHub marks it cancelled."""
 BLOCKED_SECONDS = 900
 """How often a PR blocked on something only a person mends is looked at again."""
 RATE_LIMIT_SECONDS = 600
@@ -703,6 +708,117 @@ class MergePlaybook(Playbook):
                 wait=wait,
                 result={"phase": "rerunning"},
             )
+        if state.cancel_to_rerun:
+            unfinished_now = unfinished_runs(pr.checks)
+            still_stopping = [
+                rid for rid in state.cancel_to_rerun if rid in unfinished_now
+            ]
+            ready_to_rerun = [
+                rid for rid in state.cancel_to_rerun if rid not in unfinished_now
+            ]
+            if ready_to_rerun:
+                ready_set = set(ready_to_rerun)
+                latest = latest_checks(pr.checks)
+                targets = [t for t in rerun_targets(latest) if t.run_id in ready_set]
+                again: list[Action] = []
+                rerun_run_ids: set[int] = set()
+                for target in targets:
+                    if state.retry:
+                        rerun_run_ids.add(target.run_id)
+                        again.append(
+                            step(
+                                ActionKind.CI_RERUN_FAILED,
+                                RerunPayload(
+                                    run_id=target.run_id,
+                                    workflow=target.workflow,
+                                    attempt=target.attempt,
+                                    requested=True,
+                                ),
+                                f"retry:{target.run_id}:{state.retries}",
+                                "rerunning after cancelling running CI as a maintainer asked",
+                            )
+                        )
+                        continue
+                    done = await reruns_at_head(ctx, pr, target.run_id)
+                    if done < profile.ci.rerun.max_per_sha:
+                        rerun_run_ids.add(target.run_id)
+                        again.append(
+                            step(
+                                ActionKind.CI_RERUN_FAILED,
+                                RerunPayload(
+                                    run_id=target.run_id,
+                                    workflow=target.workflow,
+                                    attempt=target.attempt,
+                                ),
+                                f"rerun:{target.run_id}:{done}",
+                                "rerunning after cancelling running CI on a flaky failure",
+                            )
+                        )
+                state.cancel_to_rerun = still_stopping
+                if not still_stopping:
+                    state.retry = False
+                if again:
+                    handled_ids = [
+                        c.id
+                        for c in latest
+                        if c.run_id in rerun_run_ids
+                        and (c.failed or c.conclusion == CheckConclusion.CANCELLED)
+                    ]
+                    state.rerun_of = list(
+                        dict.fromkeys([*state.rerun_of, *handled_ids])
+                    )[-200:]
+                    await self._set(
+                        ctx,
+                        profile,
+                        info,
+                        pr,
+                        state,
+                        "rerunning",
+                        "rerunning CI after cancelling on a flaky failure",
+                    )
+                    return PlaybookResult(
+                        actions=again,
+                        wait=wait.model_copy(
+                            update={
+                                "seconds": CANCEL_POLL_SECONDS
+                                if still_stopping
+                                else WAIT_SECONDS,
+                                "reason": "rerunning after flaky cancel",
+                            }
+                        ),
+                        result={"phase": "rerunning"},
+                    )
+                if still_stopping and landing:
+                    await self._note(
+                        ctx,
+                        pr,
+                        state,
+                        "rerunning",
+                        state.detail or "waiting for cancelled CI to stop",
+                    )
+                    return PlaybookResult(
+                        wait=wait.model_copy(
+                            update={
+                                "seconds": CANCEL_POLL_SECONDS,
+                                "reason": "waiting for cancelled CI to stop",
+                            }
+                        ),
+                        result={"phase": "rerunning"},
+                    )
+            elif still_stopping and landing:
+                return PlaybookResult(
+                    wait=wait.model_copy(
+                        update={
+                            "seconds": CANCEL_POLL_SECONDS,
+                            "reason": "waiting for cancelled CI to stop",
+                        }
+                    ),
+                    result={"phase": "rerunning"},
+                )
+            elif still_stopping:
+                # Cancel did not land within LANDING_SECONDS: clear and reassess.
+                state.cancel_to_rerun = []
+                state.retry = False
         view = ci_view(pr, profile.label_for("ci_gate"), profile.ci.start)
         start = profile.ci.start
         if view.state == "gated" and view.label:
@@ -790,24 +906,20 @@ class MergePlaybook(Playbook):
                 result={"phase": "approval"},
             )
         if view.state == "running":
-            # A workflow run that ended is judged now, whatever else still runs
-            # (another workflow, an outside service's check such as Read the
-            # Docs): its flakes are rerun at once, a real failure fails the PR.
-            unfinished = {
-                c.run_id
-                for c in latest_checks(pr.checks)
-                if c.run_id and c.status != CheckStatus.COMPLETED
-            }
-            ended = [
+            # Diagnose any failed workflow job immediately without waiting for the
+            # rest of the workflow (or other long-tail jobs) to finish: flakes cancel
+            # the still-running workflow and rerun it; real failures surface at once
+            # and alert the scheduler.
+            failed_now = [
                 c
                 for c in failing_checks(pr, profile)
                 if c.run_id
-                and c.run_id not in unfinished
                 and c.id not in state.rerun_of
+                and c.run_id not in state.cancel_to_rerun
             ]
-            if ended:
+            if failed_now:
                 return await self._failed_ci(
-                    ctx, profile, info, pr, arm, state, wait, step, checks=ended
+                    ctx, profile, info, pr, arm, state, wait, step, checks=failed_now
                 )
             asked = {c.id for c in failing_checks(pr, profile)} & set(state.rerun_of)
             if state.phase == "rerunning" and asked and landing:
@@ -854,12 +966,13 @@ class MergePlaybook(Playbook):
             else what
         )
         await self._set(ctx, profile, info, pr, state, phase, detail)
-        # Read again at the limit, and at least every ``WAIT_SECONDS`` before and
-        # after it: what it waits for may come without an event.
+        # Read again at the limit, and frequently while CI is running so mid-run
+        # failures are caught promptly even without a webhook.
+        poll_cap = RUNNING_POLL_SECONDS if phase == "running" else WAIT_SECONDS
         left = (
-            max(60, min(WAIT_SECONDS, int((limit - minutes) * 60)))
+            max(60, min(poll_cap, int((limit - minutes) * 60)))
             if minutes < limit
-            else WAIT_SECONDS
+            else poll_cap
         )
         return PlaybookResult(
             actions=actions,
@@ -895,17 +1008,55 @@ class MergePlaybook(Playbook):
         judged once they end."""
         partial = checks is not None
         checks = checks if checks is not None else failing_checks(pr, profile)
-        if state.retry and not partial:
+        if state.retry:
             # A maintainer sent it back from the failure lane: run what failed
-            # again, past the budget, before judging it anew.
-            state.retry = False
+            # again, past the budget, before judging it anew. If a failed run still
+            # has jobs in flight, cancel it first and rerun once it stops.
             view = ci_view(pr, profile.label_for("ci_gate"), profile.ci.start)
             runs = {c.run_id for c in [*checks, *view.cancelled] if c.run_id}
+            unfinished_now = unfinished_runs(pr.checks)
+            running_to_cancel = {
+                rid: unfinished_now[rid] for rid in runs if rid in unfinished_now
+            }
             targets = [
-                t for t in rerun_targets(latest_checks(pr.checks)) if t.run_id in runs
+                t
+                for t in rerun_targets(latest_checks(pr.checks))
+                if t.run_id in runs and t.run_id not in running_to_cancel
             ]
-            if targets:
-                state.rerun_of = [c.id for c in [*checks, *view.cancelled]]
+            if targets or running_to_cancel:
+                actions_retry: list[Action] = [
+                    step(
+                        ActionKind.CI_RERUN_FAILED,
+                        RerunPayload(
+                            run_id=t.run_id,
+                            workflow=t.workflow,
+                            attempt=t.attempt,
+                            requested=True,
+                        ),
+                        f"retry:{t.run_id}:{state.retries}",
+                        "a maintainer sent it back to run again",
+                    )
+                    for t in targets
+                ]
+                if running_to_cancel:
+                    state.cancel_to_rerun = sorted(
+                        {*state.cancel_to_rerun, *running_to_cancel}
+                    )
+                    actions_retry.append(
+                        cancel_runs_action(
+                            pr,
+                            running_to_cancel,
+                            "cancelling running CI to rerun as a maintainer asked",
+                            by=arm.armed_by,
+                            scheduled=int(arm.armed_at.timestamp()),
+                            tag=f"retry:{state.retries}",
+                        )
+                    )
+                else:
+                    state.retry = False
+                state.rerun_of = list(
+                    dict.fromkeys([c.id for c in [*checks, *view.cancelled]])
+                )
                 await self._set(
                     ctx,
                     profile,
@@ -913,26 +1064,23 @@ class MergePlaybook(Playbook):
                     pr,
                     state,
                     "rerunning",
-                    "running what failed again, as a maintainer asked",
+                    "cancelling running CI to rerun, as a maintainer asked"
+                    if running_to_cancel
+                    else "running what failed again, as a maintainer asked",
                 )
                 return PlaybookResult(
-                    actions=[
-                        step(
-                            ActionKind.CI_RERUN_FAILED,
-                            RerunPayload(
-                                run_id=t.run_id,
-                                workflow=t.workflow,
-                                attempt=t.attempt,
-                                requested=True,
-                            ),
-                            f"retry:{t.run_id}:{state.retries}",
-                            "a maintainer sent it back to run again",
-                        )
-                        for t in targets
-                    ],
-                    wait=wait,
+                    actions=actions_retry,
+                    wait=wait.model_copy(
+                        update={
+                            "seconds": CANCEL_POLL_SECONDS,
+                            "reason": "cancelling running CI to retry",
+                        }
+                    )
+                    if running_to_cancel
+                    else wait,
                     result={"phase": "rerunning", "retry": state.retries},
                 )
+            state.retry = False
         if not checks:
             # Only cancelled runs: nothing failed, the run stopped short.
             view = ci_view(pr, profile.label_for("ci_gate"), profile.ci.start)
@@ -971,9 +1119,35 @@ class MergePlaybook(Playbook):
             "looking at the failed jobs: " + ", ".join(c.name for c in checks),
         )
         failures = await first_looks(ctx, pr, profile, checks)
+        unfinished = unfinished_runs(pr.checks)
         reruns: list[Action] = []
+        to_cancel: dict[int, str] = {}
+        cancel_done: dict[int, int] = {}
         retrying: set[int] = set()
         rerun = profile.ci.rerun
+
+        def queue_retry(f: Any, done: int, rationale: str) -> None:
+            rid = f.check.run_id
+            if not rid:
+                return
+            retrying.add(f.check.id)
+            if rid in unfinished:
+                to_cancel[rid] = unfinished[rid]
+                cancel_done[rid] = min(cancel_done.get(rid, done), done)
+            elif rid not in {a.payload["run_id"] for a in reruns}:
+                reruns.append(
+                    step(
+                        ActionKind.CI_RERUN_FAILED,
+                        RerunPayload(
+                            run_id=rid,
+                            workflow=f.check.workflow,
+                            attempt=f.check.run_attempt,
+                        ),
+                        f"rerun:{rid}:{done}",
+                        rationale,
+                    )
+                )
+
         for f in failures:
             if not f.check.run_id:
                 continue
@@ -989,20 +1163,7 @@ class MergePlaybook(Playbook):
             if done >= limit:
                 f.reruns = done
                 continue
-            retrying.add(f.check.id)
-            if f.check.run_id not in {a.payload["run_id"] for a in reruns}:
-                reruns.append(
-                    step(
-                        ActionKind.CI_RERUN_FAILED,
-                        RerunPayload(
-                            run_id=f.check.run_id,
-                            workflow=f.check.workflow,
-                            attempt=f.check.run_attempt,
-                        ),
-                        f"rerun:{f.check.run_id}:{done}",
-                        f"{f.check.name}: {f.diagnosis.explanation}",
-                    )
-                )
+            queue_retry(f, done, f"{f.check.name}: {f.diagnosis.explanation}")
         stuck = [f for f in failures if f.check.id not in retrying]
         found: tuple[list[RootCause] | None, str] | None = None
         by_job: dict[str, RootCause] = {}
@@ -1033,20 +1194,7 @@ class MergePlaybook(Playbook):
                     f.reruns = done
                     continue
                 f.reruns = 0
-                retrying.add(f.check.id)
-                if f.check.run_id not in {a.payload["run_id"] for a in reruns}:
-                    reruns.append(
-                        step(
-                            ActionKind.CI_RERUN_FAILED,
-                            RerunPayload(
-                                run_id=f.check.run_id,
-                                workflow=f.check.workflow,
-                                attempt=f.check.run_attempt,
-                            ),
-                            f"rerun:{f.check.run_id}:{done}",
-                            f"{f.check.name}: {cause.cause}",
-                        )
-                    )
+                queue_retry(f, done, f"{f.check.name}: {cause.cause}")
             stuck = [f for f in failures if f.check.id not in retrying]
 
         def caused_here(f: Any) -> bool:
@@ -1058,7 +1206,7 @@ class MergePlaybook(Playbook):
         # An outside service's failed check (no run here to rerun) that the PR did
         # not cause waits for the reruns of the others, and is judged after them.
         later = [f for f in stuck if not f.check.run_id and not caused_here(f)]
-        if len(later) < len(stuck) or not reruns:
+        if len(later) < len(stuck) or (not reruns and not to_cancel):
             jobs = ", ".join(f.check.name for f in stuck or failures) or "CI"
             return await self._fail(
                 ctx, profile, pr, arm, state, f"{jobs} failed", failures, found
@@ -1071,16 +1219,44 @@ class MergePlaybook(Playbook):
         # again (a rerun asked for twice would run twice).
         state.rerun_of = [*state.rerun_of, *handled][-200:] if partial else handled
         names = ", ".join(f.check.name for f in failures if f.check.id in retrying)
-        detail = f"rerunning {names}"
-        if later:
-            detail += (
-                "; " + ", ".join(f.check.name for f in later) + " cannot be rerun "
-                "from here and is judged once the reruns end"
+        actions: list[Action] = [*reruns]
+        if to_cancel:
+            state.cancel_to_rerun = sorted({*state.cancel_to_rerun, *to_cancel})
+            tag = f"flaky:{min(cancel_done.values())}"
+            actions.append(
+                cancel_runs_action(
+                    pr,
+                    to_cancel,
+                    f"cancelling running CI to rerun flaky {names}",
+                    by=arm.armed_by,
+                    scheduled=int(arm.armed_at.timestamp()),
+                    tag=tag,
+                )
             )
-        elif partial:
-            detail += " while the rest of CI runs"
+            detail = f"cancelling running CI to rerun {names} (flaky)"
+        else:
+            detail = f"rerunning {names}"
+            if later:
+                detail += (
+                    "; " + ", ".join(f.check.name for f in later) + " cannot be rerun "
+                    "from here and is judged once the reruns end"
+                )
+            elif partial:
+                detail += " while the rest of CI runs"
         await self._set(ctx, profile, info, pr, state, "rerunning", detail)
-        return PlaybookResult(actions=reruns, wait=wait, result={"phase": "rerunning"})
+        next_wait = (
+            wait.model_copy(
+                update={
+                    "seconds": CANCEL_POLL_SECONDS,
+                    "reason": "cancelling running CI to rerun flaky failure",
+                }
+            )
+            if to_cancel
+            else wait
+        )
+        return PlaybookResult(
+            actions=actions, wait=next_wait, result={"phase": "rerunning"}
+        )
 
     async def _look_into(
         self,
@@ -1287,9 +1463,13 @@ class MergePlaybook(Playbook):
         why: str,
         actions: list[Action] | None = None,
     ) -> PlaybookResult:
-        """Put the PR in the failure lane, with what ``state`` says failed, and pass
-        the turn on."""
-        actions = [*(actions or []), self._tell(pr, arm, "merge.failed", why)]
+        """Put the PR in the failure lane, with what ``state`` says failed, remind
+        the scheduler to fix it, and pass the turn on."""
+        state.cancel_to_rerun = []
+        alert = f"{why} — @{arm.armed_by}, please fix or intervene"
+        if state.causes:
+            alert += "\n" + "\n".join(state.causes[:3])
+        actions = [*(actions or []), self._tell(pr, arm, "merge.failed", alert)]
         info = await ctx.forge.get_repo(pr.repo)
         events = await self._set(
             ctx, profile, info, pr, state, "failed", why, wake=True
@@ -2126,6 +2306,7 @@ class MergePlaybook(Playbook):
                 state.phase = "queued"
             state.updates = 0
             state.cancelled = []
+            state.cancel_to_rerun = []
             return arm
         await ctx.store.delete_arm(pr.repo, pr.number)
         left = await self._leave(ctx, profile, pr.repo, pr.number)
@@ -2187,6 +2368,7 @@ def cancel_runs_action(
     *,
     by: str,
     scheduled: int | None = None,
+    tag: str = "",
 ) -> Action:
     """A ``ci.cancel`` of ``pr``'s unfinished workflow runs ``runs`` (run id to
     workflow), drafted for ``by``: the merge schedule's step for the PR ``by``
@@ -2204,7 +2386,8 @@ def cancel_runs_action(
         head_sha=pr.head_sha,
         discriminator=(f"schedule:{scheduled}:" if scheduled is not None else "")
         + "cancel:"
-        + ",".join(str(r) for r in sorted(runs)),
+        + ",".join(str(r) for r in sorted(runs))
+        + (f":{tag}" if tag else ""),
         rationale=why,
         draft_for=by,
     )

@@ -198,6 +198,7 @@ interface CiNow {
 
 interface MergeView {
   repo: string;
+  me?: string;
   ci_now: CiNow[];
   enabled: boolean;
   can_arrange: boolean;
@@ -351,10 +352,11 @@ export default function MergePage() {
         <div className="stack" style={{ gap: 18 }}>
           <ScopeBanner v={v} />
           <GithubPermBanner v={v} />
+          <MyFailedBanner v={v} />
           <Controls v={v} />
           <ScheduleSection v={v} />
-          {v.ci_now.length > 0 && <CiNowSection v={v} />}
           {v.failed.length > 0 && <FailureLane v={v} />}
+          {v.ci_now.length > 0 && <CiNowSection v={v} />}
           <Candidates v={v} />
           <NotReadyList v={v} />
           {v.draft && <DraftRules v={v} draft={v.draft} />}
@@ -413,6 +415,36 @@ function GithubPermBanner({ v }: { v: MergeView }) {
         {t("You have merge-schedule permission on the service, but your GitHub permission on")} <span className="mono">{v.repo}</span>{" "}
         {t("is")} <strong className="mono">{perm}</strong> — {t("scheduling merges here requires GitHub")}{" "}
         <strong className="mono">{who}</strong> {t("access")}.
+      </span>
+    </div>
+  );
+}
+
+function MyFailedBanner({ v }: { v: MergeView }) {
+  const t = useT();
+  if (!v.me) return null;
+  const me = v.me.toLowerCase();
+  const mine = v.failed.filter((f) => f.scheduled_by.toLowerCase() === me);
+  if (!mine.length) return null;
+  return (
+    <div className="card row small" style={{ gap: 8, flexWrap: "wrap", borderColor: "var(--bad)", color: "var(--bad)" }}>
+      <Icon name="alert" size={14} />
+      <span>
+        <strong>
+          {mine.length} {t(mine.length === 1 ? "PR you scheduled failed CI and needs your fix" : "PRs you scheduled failed CI and need your fix")}:
+        </strong>{" "}
+        {mine.map((f, i) => (
+          <span key={f.number}>
+            {i > 0 && ", "}
+            <Link to={prPath(v.repo, f.number)} style={{ color: "inherit", textDecoration: "underline" }}>
+              #{f.number}
+            </Link>
+          </span>
+        ))}
+        {" · "}
+        <a href="#failure-lane" style={{ color: "inherit", textDecoration: "underline" }}>
+          {t("Jump to failure lane")}
+        </a>
       </span>
     </div>
   );
@@ -722,56 +754,67 @@ function FailureLane({ v }: { v: MergeView }) {
   const flaky = useAct((n: number) => api.post(`/api/merge-schedule/${v.repo}/${n}/flaky`), [["merge-schedule"]]);
   const remove = useAct((n: number) => api.del(`/api/merge-schedule/${v.repo}/${n}`), [["merge-schedule"]]);
   const check = useCheckOne(v.repo);
+  const me = (v.me ?? "").toLowerCase();
   return (
-    <Section tour="merge-failed" title={t("Failure lane")} hint={t("Set aside after their CI really failed; the next PR took the turn.")}>
-      <div className="list">
-        {v.failed.map((f) => (
-          <div key={f.number} className="list-row merge-row">
-            <span className="merge-pos">
-              <Icon name="x" size={14} />
-            </span>
-            <div className="stack merge-main">
-              <PrLink repo={v.repo} row={f} />
-              <span className="small" style={{ color: "var(--bad)" }}>
-                {f.detail}
-                {f.since && (
-                  <span className="muted">
-                    {" · "}
-                    <When at={f.since} />
+    <div id="failure-lane">
+      <Section tour="merge-failed" title={t("Failure lane")} hint={t("Set aside after their CI really failed; the next PR took the turn.")}>
+        <div className="list">
+          {v.failed.map((f) => {
+            const isMine = !!me && f.scheduled_by.toLowerCase() === me;
+            return (
+              <div key={f.number} className="list-row merge-row">
+                <span className="merge-pos">
+                  <Icon name="x" size={14} />
+                </span>
+                <div className="stack merge-main">
+                  <PrLink repo={v.repo} row={f} />
+                  <span className="row merge-meta">
+                    <span className="small" style={{ color: "var(--bad)" }}>
+                      {f.detail}
+                    </span>
+                    {f.since && (
+                      <span className="small muted">
+                        <When at={f.since} />
+                      </span>
+                    )}
+                    <span className="small muted">
+                      {t("scheduled by")} {f.scheduled_by}
+                    </span>
+                    {isMine && <span className="pill status-bad">{t("Scheduled by you · needs fix")}</span>}
                   </span>
+                  {f.causes.length > 0 && <Markdown className="md merge-causes" text={f.causes.join("\n")} />}
+                  {f.finding && <span className="small merge-finding">{f.finding}</span>}
+                </div>
+                <WatchButton job={f.job} busy={false} />
+                <AskButton repo={v.repo} number={f.number} />
+                <CheckOneButton check={check} number={f.number} />
+                {v.can_arrange && (
+                  <div className="row merge-actions">
+                    {f.conflict && <ResolveConflictsButton repo={v.repo} number={f.number} base={f.base} canPush={v.signed_in} size="sm" />}
+                    <FixCiButton repo={v.repo} number={f.number} failed={f.failed_jobs.length ? f.failed_jobs : f.ci.failed} canPush={v.signed_in} size="sm" />
+                    <button className="sm" disabled={retry.isPending} onClick={() => retry.mutate(f.number)}>
+                      {t("Retry")}
+                    </button>
+                    <button
+                      className="sm"
+                      disabled={flaky.isPending || !f.failed_jobs.length}
+                      title={t("Mark these failures flaky, so the same failure is rerun from now on, and run them again")}
+                      onClick={() => flaky.mutate(f.number)}
+                    >
+                      {t("Flaky, rerun")}
+                    </button>
+                    <button className="sm ghost" disabled={remove.isPending} onClick={() => remove.mutate(f.number)}>
+                      {t("Unschedule")}
+                    </button>
+                  </div>
                 )}
-              </span>
-              {f.causes.length > 0 && <Markdown className="md merge-causes" text={f.causes.join("\n")} />}
-              {f.finding && <span className="small merge-finding">{f.finding}</span>}
-            </div>
-            <WatchButton job={f.job} busy={false} />
-            <AskButton repo={v.repo} number={f.number} />
-            <CheckOneButton check={check} number={f.number} />
-            {v.can_arrange && (
-              <div className="row merge-actions">
-                {f.conflict && <ResolveConflictsButton repo={v.repo} number={f.number} base={f.base} canPush={v.signed_in} size="sm" />}
-                <FixCiButton repo={v.repo} number={f.number} failed={f.failed_jobs.length ? f.failed_jobs : f.ci.failed} canPush={v.signed_in} size="sm" />
-                <button className="sm" disabled={retry.isPending} onClick={() => retry.mutate(f.number)}>
-                  {t("Retry")}
-                </button>
-                <button
-                  className="sm"
-                  disabled={flaky.isPending || !f.failed_jobs.length}
-                  title={t("Mark these failures flaky, so the same failure is rerun from now on, and run them again")}
-                  onClick={() => flaky.mutate(f.number)}
-                >
-                  {t("Flaky, rerun")}
-                </button>
-                <button className="sm ghost" disabled={remove.isPending} onClick={() => remove.mutate(f.number)}>
-                  {t("Unschedule")}
-                </button>
               </div>
-            )}
-          </div>
-        ))}
-      </div>
-      <ErrorBox error={retry.error || remove.error || flaky.error} />
-    </Section>
+            );
+          })}
+        </div>
+        <ErrorBox error={retry.error || remove.error || flaky.error} />
+      </Section>
+    </div>
   );
 }
 

@@ -3031,6 +3031,15 @@ const zh: Record<string, string> = {
   "What can I do on this dashboard?": "我能在这个控制台上做什么？",
   "Model name for this CLI; leave empty for the default. Press Enter to save.": "传给此 CLI 的模型名；留空使用默认。按回车保存。",
   "Model name for quick tasks; leave empty to use the same model. Press Enter to save.": "快速任务使用的模型名；留空则使用同一模型。按回车保存。",
+  "PR you scheduled failed CI and needs your fix": "个你调度的 PR CI 失败，需要修复",
+  "PRs you scheduled failed CI and need your fix": "个你调度的 PR CI 失败，需要修复",
+  "Jump to failure lane": "跳转到失败队列",
+  "Scheduled by you · needs fix": "由你调度 · 需要修复",
+  "Scheduled CI failed": "已调度的 CI 失败",
+  "CI failures": "CI 失败",
+  "needs your fix": "需要你修复",
+  "Open PR": "查看 PR",
+  "Open failure lane": "查看失败队列",
 };
 
 const LangContext = createContext<{ lang: Lang; setLang: (l: Lang) => void }>({ lang: "zh", setLang: () => {} });

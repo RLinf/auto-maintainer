@@ -3,14 +3,16 @@
 // click (and when reviews run on their own); and every decision waiting on the user,
 // answerable in place.
 
+import { useQuery } from "@tanstack/react-query";
 import { useMemo, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { addressedTo, api, type Me, type ServiceView } from "../api";
-import { CaughtUp, ErrorBox, Status, Tier, timeOf, useAct } from "../components";
+import { CaughtUp, ErrorBox, prPath, Status, Tier, timeOf, useAct, When } from "../components";
 import { useMemoryChanges, useProposals, usePrs, useQuestions, useRepos, useService } from "../data";
 import { useT } from "../i18n";
 import { RepoTabs, useRepoScope } from "../repoScope";
 import { Icon } from "../icons";
+import { Markdown } from "../markdown";
 import { ProposalCard, ServiceMergeBaseButton } from "../proposal";
 import { Skeleton, useRememberedView, useTab } from "../ui";
 import { ACTIVE, useWork } from "../jobs";
@@ -21,7 +23,20 @@ import { QuestionCard } from "./Questions";
 
 const NEEDS_REVIEW = new Set(["NEW_REVIEW", "FOLLOWUP_REVIEW", "APPROVED_NEW_COMMITS"]);
 
-type Kind = "question" | "proposal" | "memory" | "update";
+type Kind = "ci_failed" | "question" | "proposal" | "memory" | "update";
+
+interface ScheduledFailure {
+  repo: string;
+  number: number;
+  title: string;
+  url: string;
+  detail: string;
+  failed_jobs: string[];
+  causes: string[];
+  since: string | null;
+  scheduled_by: string;
+  conflict: boolean;
+}
 
 interface FeedItem {
   id: string;
@@ -32,6 +47,7 @@ interface FeedItem {
 }
 
 const KIND_LABEL: Record<Kind, string> = {
+  ci_failed: "Scheduled CI failed",
   question: "Agent question",
   proposal: "Approval",
   memory: "Memory change",
@@ -51,6 +67,11 @@ export default function HomePage({ me }: { me: Me }) {
   const memory = useMemoryChanges();
   const repos = useRepos();
   const service = useService();
+  const myFailures = useQuery({
+    queryKey: ["merge-schedule", "my-failures"],
+    queryFn: () => api.get<{ failures: ScheduledFailure[] }>("/api/merge-schedule/my-failures"),
+    refetchInterval: 30_000,
+  });
 
   // One repository at a time: priorities come from each repository's own rubric, so
   // PRs, counts, and tiers are never mixed across repositories.
@@ -70,18 +91,22 @@ export default function HomePage({ me }: { me: Me }) {
 
   const items = useMemo<FeedItem[]>(() => {
     const out: FeedItem[] = [];
+    for (const f of (myFailures.data?.failures ?? []).filter((x) => inScope(x.repo))) {
+      out.push({ id: `ci_failed:${f.repo}#${f.number}`, kind: "ci_failed", at: f.since, node: <ScheduledFailureCard item={f} />, mine: true });
+    }
     for (const q of (questions.data ?? []).filter((x) => inScope(x.repo) && addressedTo(x, me.login))) out.push({ id: q.id, kind: "question", at: q.created_at, node: <QuestionCard question={q} compact />, mine: q.asked_for === me.login });
     for (const p of (proposals.data ?? []).filter((x) => inScope(x.repo) && (x.waits_on_me ?? x.can_decide !== false))) out.push({ id: p.id, kind: "proposal", at: p.created_at, node: <ProposalCard proposal={p} compact /> });
     for (const c of (memory.data ?? []).filter((x) => !scope || !x.repos.length || x.repos.includes(scope))) out.push({ id: c.id, kind: "memory", at: c.created_at, node: <ChangeCard change={c} compact /> });
     for (const u of updates) out.push(u);
     return out;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [questions.data, proposals.data, memory.data, updates, me.login, scope]);
+  }, [myFailures.data, questions.data, proposals.data, memory.data, updates, me.login, scope]);
 
-  const counts: Record<Kind, number> = { question: 0, proposal: 0, memory: 0, update: 0 };
+  const counts: Record<Kind, number> = { ci_failed: 0, question: 0, proposal: 0, memory: 0, update: 0 };
   for (const i of items) counts[i.kind] += 1;
   const tabs = [
     { id: "all", label: t("All"), count: items.length },
+    ...(counts.ci_failed ? [{ id: "ci_failed", label: t("CI failures"), count: counts.ci_failed }] : []),
     { id: "question", label: t("Questions"), count: counts.question },
     { id: "proposal", label: t("Approvals"), count: counts.proposal },
     { id: "memory", label: t("Memory"), count: counts.memory },
@@ -195,7 +220,11 @@ export default function HomePage({ me }: { me: Me }) {
               <div key={i.id} className={`feed-item kind-${i.kind}`}>
                 <div className="head">
                   <span className="kind-chip">{t(KIND_LABEL[i.kind])}</span>
-                  {i.mine && <span className="pill status-warn">{t("asks you")}</span>}
+                  {i.mine && (
+                    <span className={`pill ${i.kind === "ci_failed" ? "status-bad" : "status-warn"}`}>
+                      {i.kind === "ci_failed" ? t("needs your fix") : t("asks you")}
+                    </span>
+                  )}
                 </div>
                 {i.node}
               </div>
@@ -209,6 +238,43 @@ export default function HomePage({ me }: { me: Me }) {
           </div>
         )}
       </section>
+    </div>
+  );
+}
+
+// ---- scheduled CI failures in the feed ------------------------------------------------------
+
+function ScheduledFailureCard({ item }: { item: ScheduledFailure }) {
+  const t = useT();
+  return (
+    <div className="stack" style={{ gap: 6 }}>
+      <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+        <Link to={prPath(item.repo, item.number)} style={{ fontWeight: 600 }}>
+          <span className="mono muted">
+            {item.repo}#{item.number}
+          </span>{" "}
+          {item.title}
+        </Link>
+        {item.since && (
+          <span className="small muted">
+            <When at={item.since} />
+          </span>
+        )}
+      </div>
+      {item.detail && (
+        <span className="small" style={{ color: "var(--bad)" }}>
+          {item.detail}
+        </span>
+      )}
+      {item.causes.length > 0 && <Markdown className="md merge-causes" text={item.causes.slice(0, 3).join("\n")} />}
+      <div className="row" style={{ gap: 10, flexWrap: "wrap" }}>
+        <Link to={prPath(item.repo, item.number)} className="small">
+          {t("Open PR")}
+        </Link>
+        <Link to="/merge#failure-lane" className="small">
+          {t("Open failure lane")}
+        </Link>
+      </div>
     </div>
   );
 }

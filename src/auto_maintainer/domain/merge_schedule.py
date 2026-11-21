@@ -185,6 +185,10 @@ class ScheduleState(BaseModel):
     """Workflow runs at its head the schedule cancelled while another PR held the
     turn (``playbooks/merge.py:_quiet``): its own turn runs them again, whatever the
     rerun budget."""
+    cancel_to_rerun: list[int] = Field(default_factory=list)
+    """Workflow runs at its head cancelled on an early flaky failure while other
+    jobs were still running: rerun within ``ci.rerun.max_per_sha`` as soon as
+    GitHub finishes cancelling them."""
     blocked_rule: str = ""
     """The forge's own merge verdict (``PrSnapshot.merge_state``) held back a merge
     that the service's merge gate allowed, at this head."""
