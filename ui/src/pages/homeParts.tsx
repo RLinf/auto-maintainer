@@ -1,14 +1,13 @@
 // Home's working parts: what a first-time user does first, the PRs to review with one
 // click (and which agent reviews them), and when reviews start on their own.
 
-import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState, type ReactNode } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
-import { api, type AgentJob, type ChatThread, type Me, type PrRow, type RepoRow, type ReviewStart } from "../api";
+import { api, type AgentJob, type Me, type PrRow, type RepoRow, type ReviewStart } from "../api";
 import { useAgent } from "../agent";
 import { agentName, AgentPicker, reviewToast, useAgentChoice } from "../agentPicker";
 import { ErrorBox, prPath, Quality, Tier, timeOf, useAct, When } from "../components";
-import { priorityRank, prKey, REVIEW_STATES, useSettings } from "../data";
+import { priorityRank, prKey, REVIEW_STATES } from "../data";
 import { useT } from "../i18n";
 import { Icon } from "../icons";
 import { ACTIVE, needsMe, ScoringRow, useWork, WorkRow } from "../jobs";
@@ -29,14 +28,10 @@ function readHidden(): boolean {
   }
 }
 
-export function GettingStarted({ repos, prs }: { repos: RepoRow[]; prs: PrRow[] }) {
+export function GettingStarted({ repos }: { repos: RepoRow[] }) {
   const t = useT();
-  const agent = useAgent();
   const navigate = useNavigate();
   const [hidden, setHidden] = useState(readHidden);
-  const settings = useSettings(!hidden);
-  const threads = useQuery({ queryKey: ["chat", "threads"], queryFn: () => api.get<ChatThread[]>("/api/chat/threads"), enabled: !hidden });
-  const reviewed = prs.some((p) => p.review_activity.posted || p.review_activity.draft || p.review_activity.job);
   const pending = repos.find((r) => !r.active);
   const steps: { done: boolean; title: string; body: string; action: string; run: () => void }[] = [
     {
@@ -53,35 +48,6 @@ export function GettingStarted({ repos, prs }: { repos: RepoRow[]; prs: PrRow[] 
       action: t("Review it"),
       run: () => navigate(pending ? `/repos/${pending.repo}?tab=candidate` : "/repos"),
     },
-    {
-      done: reviewed,
-      title: t("Review your first pull requests"),
-      body: t("Select PRs below and press Review; the drafts come back to you."),
-      action: t("Go"),
-      run: () => document.getElementById("review")?.scrollIntoView({ behavior: "smooth" }),
-    },
-    {
-      done: prs.some((p) => p.review_activity.posted),
-      title: t("Discuss a draft with the agent"),
-      body: t("Open a review's live view: ask why it found something, push back, or have it revise the draft, then post it."),
-      action: t("Open"),
-      run: () => document.getElementById("work")?.scrollIntoView({ behavior: "smooth" }),
-    },
-    {
-      // Someone who does not run the service has nothing to pick here.
-      done: settings.data ? settings.data.document === null || !!settings.data.document.trim().replace(/^schema: 1\s*$/, "") : false,
-      title: t("Pick agents and models"),
-      body: t("Which agents run and on which model providers. Ask the agent to change it."),
-      action: t("Open"),
-      run: () => navigate("/settings"),
-    },
-    {
-      done: (threads.data ?? []).length > 0,
-      title: t("Ask the agent something"),
-      body: t("It is on every page and knows what the page shows."),
-      action: t("Ask"),
-      run: () => agent.open(),
-    },
   ];
   const left = steps.filter((s) => !s.done).length;
   if (hidden || left === 0) return null;
@@ -94,7 +60,9 @@ export function GettingStarted({ repos, prs }: { repos: RepoRow[]; prs: PrRow[] 
           {steps.length - left}/{steps.length} {t("done")}
         </span>
         <button
-          className="ghost sm right"
+          className="ghost icon sm right"
+          aria-label={t("Hide")}
+          title={t("Hide")}
           onClick={() => {
             setHidden(true);
             try {
@@ -104,7 +72,7 @@ export function GettingStarted({ repos, prs }: { repos: RepoRow[]; prs: PrRow[] 
             }
           }}
         >
-          {t("Hide")}
+          <Icon name="x" size={14} />
         </button>
       </div>
       <div className="steps">
@@ -116,7 +84,7 @@ export function GettingStarted({ repos, prs }: { repos: RepoRow[]; prs: PrRow[] 
               <span className="small muted">{s.body}</span>
             </span>
             {!s.done && (
-              <button className="sm" onClick={s.run}>
+              <button className="sm primary" onClick={s.run}>
                 {s.action}
               </button>
             )}

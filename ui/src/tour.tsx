@@ -393,8 +393,9 @@ function readHidden(): boolean {
 }
 
 /** The walkthroughs, the ones for this person first. On Home (`welcome`) it greets a
- *  newcomer, with the way into the guide, and hides once they hide it or have walked
- *  through every one meant for them. */
+ *  newcomer with a single compact banner for the most relevant next walkthrough,
+ *  leaving the full list on the Guide page (`<ToursCard />`), and hides once they
+ *  dismiss it or have walked through every one meant for them. */
 export function ToursCard({ welcome = false }: { welcome?: boolean }) {
   const t = useT();
   const { lang } = useLang();
@@ -405,34 +406,61 @@ export function ToursCard({ welcome = false }: { welcome?: boolean }) {
   const roles = rolesOf(access.data);
   const forMe = (tour: Tour) => tour.who.some((r) => roles.has(r));
   const tours = [...TOURS].sort((a, b) => Number(forMe(b)) - Number(forMe(a)));
-  const next = tours.find((tour) => forMe(tour) && !finished.has(tour.id));
+  const remaining = tours.filter((tour) => forMe(tour) && !finished.has(tour.id));
+  const next = remaining[0];
   if (welcome && (hidden || !next)) return null;
-  return (
-    <section className={`card tours ${welcome ? "start" : ""}`} id="tours">
-      <div className="row" style={{ marginBottom: 10, flexWrap: "wrap" }}>
-        <Icon name="compass" />
-        <strong style={{ fontSize: 15 }}>{welcome && !finished.size ? t("New here? Take a walkthrough") : t("Walkthroughs")}</strong>
-        <span className="small muted">{t("A few steps on the real pages: each points at what you use and says what it does.")}</span>
-        {welcome && (
-          <Link className="button ghost sm right" to="/guide">
+
+  if (welcome && next) {
+    const dismiss = () => {
+      setHidden(true);
+      try {
+        localStorage.setItem(HIDDEN_KEY, "1");
+      } catch {
+        // it then hides for this page only
+      }
+    };
+    return (
+      <section className="card welcome-banner" id="tours">
+        <div className="welcome-banner-head">
+          <span className="tour-item-icon">
+            <Icon name={next.icon as IconName} size={15} />
+          </span>
+          <div className="welcome-banner-text">
+            <div className="row" style={{ gap: 6 }}>
+              <strong style={{ fontSize: 14.5 }}>{finished.size ? tx(next.title) : `${t("New here?")} ${tx(next.title)}`}</strong>
+              <span className="small muted">
+                · {next.steps.length} {t("steps")}
+              </span>
+            </div>
+            <span className="small muted">{tx(next.summary)}</span>
+          </div>
+          <button className="ghost icon sm welcome-banner-close" onClick={dismiss} aria-label={t("Hide")} title={t("Hide")}>
+            <Icon name="x" size={14} />
+          </button>
+        </div>
+        <div className="welcome-banner-actions">
+          <button className="primary sm" onClick={() => startTour(next.id)}>
+            <Icon name="play" size={13} />
+            {t("Start walkthrough")}
+          </button>
+          <Link className="button ghost sm" to="/guide#tours">
+            {t("All walkthroughs")}
+            {remaining.length > 1 ? ` (${remaining.length})` : ""}
+          </Link>
+          <Link className="button ghost sm" to="/guide">
             {t("Open the guide")}
           </Link>
-        )}
-        {welcome && (
-          <button
-            className="ghost sm"
-            onClick={() => {
-              setHidden(true);
-              try {
-                localStorage.setItem(HIDDEN_KEY, "1");
-              } catch {
-                // it then hides for this page only
-              }
-            }}
-          >
-            {t("Hide")}
-          </button>
-        )}
+        </div>
+      </section>
+    );
+  }
+
+  return (
+    <section className="card tours" id="tours">
+      <div className="row" style={{ marginBottom: 10, flexWrap: "wrap" }}>
+        <Icon name="compass" />
+        <strong style={{ fontSize: 15 }}>{t("Walkthroughs")}</strong>
+        <span className="small muted">{t("A few steps on the real pages: each points at what you use and says what it does.")}</span>
       </div>
       <div className="tour-list">
         {tours.map((tour) => {

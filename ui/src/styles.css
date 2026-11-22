@@ -1658,8 +1658,21 @@ details.pv-section[open] > summary { margin-bottom: 6px; }
 .tour-item { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--r); background: var(--surface); }
 .tour-item-icon { display: inline-grid; place-items: center; width: 28px; height: 28px; border-radius: 8px; background: var(--accent-soft); color: var(--accent); flex: none; }
 .tour-item.done .tour-item-icon { background: var(--ok-bg); color: var(--ok); }
+.welcome-banner {
+  display: flex; flex-direction: column; gap: 10px; padding: 12px 14px;
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: linear-gradient(135deg, var(--accent-soft), var(--surface) 65%);
+}
+.welcome-banner-head { display: flex; align-items: flex-start; gap: 10px; min-width: 0; }
+.welcome-banner-text { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
+.welcome-banner-close { flex: none; margin: -2px -4px 0 0; }
+.welcome-banner-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding-left: 38px; }
+.welcome-banner-actions .button.sm { height: 28px; padding: 0 9px; font-size: 12.5px; border-radius: 8px; }
 @media (max-width: 640px) {
-  .tour-card, .tour-card.placed { left: 16px; right: 16px; bottom: 16px; top: auto; width: auto; transform: none; }
+  .tour-card, .tour-card.placed { left: 12px; right: 12px; bottom: max(12px, env(safe-area-inset-bottom)); top: auto; width: auto; transform: none; }
+  .welcome-banner-actions { padding-left: 0; }
+  .tour-item { flex-wrap: wrap; align-items: flex-start; }
+  .tour-item > button { margin-left: 38px; }
 }
 @media (prefers-reduced-motion: reduce) {
   .tour-hole { transition: none; }

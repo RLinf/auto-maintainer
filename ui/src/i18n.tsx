@@ -3041,6 +3041,8 @@ const zh: Record<string, string> = {
   "Open PR": "查看 PR",
   "Open failure lane": "查看失败队列",
   "On a phone: long-press the first box on GitHub and tap the system Paste menu (tapping the keyboard's clipboard bar often pastes only the first character), or type the 8 characters directly.": "手机端提示：请在 GitHub 验证页长按第 1 个输入框并点系统菜单的「粘贴」（直接点输入法剪贴板栏往往只会粘进第 1 个字符），或直接手动输入这 8 位字符。",
+  "Start walkthrough": "开始导览",
+  "All walkthroughs": "全部导览",
 };
 
 const LangContext = createContext<{ lang: Lang; setLang: (l: Lang) => void }>({ lang: "zh", setLang: () => {} });
