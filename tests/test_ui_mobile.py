@@ -169,7 +169,7 @@ def test_mobile_css_collapses_grids_and_relaxes_fixed_widths() -> None:
         # Primary-column tables (including Pull requests) become stacked cards at <=640px.
         assert _decls_for(blocks, "table.cards", vw).get("display") == "block"
         assert _decls_for(blocks, "table.cards thead", vw).get("display") == "none"
-        assert "calc(100% - 36px)" in _decls_for(
+        assert "calc(100% - 40px)" in _decls_for(
             blocks, "table.cards td.primary", vw
         ).get("flex", "")
 
