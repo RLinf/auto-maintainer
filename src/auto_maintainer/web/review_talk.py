@@ -190,7 +190,12 @@ def _route(
 
 
 async def _checkout(
-    service: Service, thread: ChatThread, record: ActionRecord, pr: PrSnapshot
+    service: Service,
+    thread: ChatThread,
+    record: ActionRecord,
+    pr: PrSnapshot,
+    *,
+    resume_work: bool = True,
 ) -> tuple[Path, str]:
     """The conversation's checkout of the reviewed commit, kept for the whole
     conversation so a session can resume there, and the default branch."""
@@ -199,7 +204,11 @@ async def _checkout(
         return Path(thread.workdir), info.default_branch
     # The first checkout goes where the review's was, so its agent's session
     # resumes with everything it read.
-    kept = await work_session(service, thread) if not thread.workdir else None
+    kept = (
+        await work_session(service, thread)
+        if resume_work and not thread.workdir
+        else None
+    )
     path = await service.a.workspace.prepare(
         pr.repo,
         pr.number,
@@ -208,7 +217,10 @@ async def _checkout(
         at=Path(kept["workdir"]) if kept else None,
     )
     thread.workdir = str(path)
-    take_up_work(service, thread, kept, path)
+    if resume_work:
+        take_up_work(service, thread, kept, path)
+    else:
+        thread.session = None
     await service.store.save_thread(thread)
     return path, info.default_branch
 
@@ -653,12 +665,6 @@ def build_router() -> APIRouter:
             target = f"{job.repo}#{job.number}" if job.number is not None else job.repo
             raise HTTPException(409, f"{target} is not available now")
         record = await fix_draft(service, job)
-        route = _route(
-            service,
-            profile,
-            TaskKind.FIX,
-            record.action.payload.get("runtime") if record else None,
-        )
         lock = _turns.setdefault(thread_id_of(job), asyncio.Lock())
         if lock.locked():
             running = await service.store.get_thread(thread_id_of(job))
@@ -675,7 +681,20 @@ def build_router() -> APIRouter:
                 number=job.number,
                 job_id=job.id,
             )
-            default_agent = await service.runs_on_for(route, user.login, "fix")
+            explicit_default = body.agent == ""
+            ran_on = record.action.payload.get("runtime") if record else None
+            sticky_runtime = None if explicit_default else (thread.runtime or ran_on)
+            route = _route(service, profile, TaskKind.FIX, sticky_runtime)
+            profile_route = profile.route(str(TaskKind.FIX), service.info.routing)
+            default_agent = (
+                await service.runs_on_for(profile_route, user.login, "fix")
+                if explicit_default
+                else (
+                    sticky_runtime
+                    if sticky_runtime and route.primary == sticky_runtime
+                    else await service.runs_on_for(route, user.login, "fix")
+                )
+            )
             apply_thread_agent(service, thread, body.agent, default_agent=default_agent)
             await service.store.save_thread(thread)
             return await fix_turn(
@@ -690,6 +709,8 @@ def build_router() -> APIRouter:
                 route,
                 getattr(request.app.state, "records", None),
                 getattr(request.app.state, "live_turns", None),
+                explicit_default=explicit_default,
+                sticky_runtime=sticky_runtime,
             )
 
     return r
@@ -783,11 +804,18 @@ async def _turn(
             update={"body": pending.body, "result": pending.result or payload.result}
         )
     kind = task_kind_of(payload)
-    base_route = _route(service, profile, kind, payload.runtime)
+    explicit_default = agent == ""
+    sticky_runtime = None if explicit_default else (thread.runtime or payload.runtime)
+    base_route = _route(service, profile, kind, sticky_runtime)
+    profile_route = profile.route(str(kind), service.info.routing)
     default_agent = (
-        payload.runtime
-        if payload.runtime and base_route.primary == payload.runtime
-        else await service.runs_on_for(base_route, user.login, str(kind))
+        await service.runs_on_for(profile_route, user.login, str(kind))
+        if explicit_default
+        else (
+            sticky_runtime
+            if sticky_runtime and base_route.primary == sticky_runtime
+            else await service.runs_on_for(base_route, user.login, str(kind))
+        )
     )
     apply_thread_agent(service, thread, agent, default_agent=default_agent)
     text, removed = redact_secrets(said)
@@ -810,7 +838,12 @@ async def _turn(
         )
     history = await service.store.list_messages(thread.id)
     head = record.action.head_sha or pr.head_sha
-    workdir, default_branch = await _checkout(service, thread, record, pr)
+    resume_work = agent is None or (
+        explicit_default and default_agent == payload.runtime
+    )
+    workdir, default_branch = await _checkout(
+        service, thread, record, pr, resume_work=resume_work
+    )
     diff = await service.a.workspace.diff(workdir, f"origin/{default_branch}", head)
     own_format = owns_format(kind, profile, workdir)
     model = answer_model(kind)
@@ -885,10 +918,15 @@ async def _turn(
         pr=job.number,
         job_id=run,
         requested_by=user.login,
-        # The agent that wrote the review answers for it, before the person's own.
+        # The agent that wrote the review answers for it, before the person's own,
+        # unless the reviewer explicitly switched back to their default agent.
         agent_chosen=bool(thread.agent)
         or resumed is not None
-        or route.primary == payload.runtime,
+        or (
+            not explicit_default
+            and sticky_runtime is not None
+            and route.primary == sticky_runtime
+        ),
         untrusted_input=not await author_is_team(service.a.forge, profile, pr),
         resume_session=resume,
         fresh_prompt=fresh if resume else None,

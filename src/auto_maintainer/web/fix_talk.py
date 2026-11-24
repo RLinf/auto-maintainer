@@ -215,6 +215,8 @@ async def _checkout(
     default_branch: str,
     base: str,
     patch: str,
+    *,
+    resume_work: bool = True,
 ) -> Path:
     """The conversation's checkout of ``base`` with ``patch`` applied: the one it
     kept while it still holds exactly that (a session resumes there), else a new one."""
@@ -226,7 +228,11 @@ async def _checkout(
         await ws.release(thread.workdir)
     # The first checkout goes where the change was made, so its agent's session
     # resumes with everything it read and did.
-    kept = await work_session(service, thread) if not thread.workdir else None
+    kept = (
+        await work_session(service, thread)
+        if resume_work and not thread.workdir
+        else None
+    )
     path = await ws.prepare(
         repo, number, base, default_branch, at=Path(kept["workdir"]) if kept else None
     )
@@ -238,7 +244,10 @@ async def _checkout(
             409, f"the change no longer applies to {short_sha(base)}: {e}"
         ) from e
     thread.workdir = str(path)
-    take_up_work(service, thread, kept, path)
+    if resume_work:
+        take_up_work(service, thread, kept, path)
+    else:
+        thread.session = None
     await service.store.save_thread(thread)
     return path
 
@@ -257,6 +266,8 @@ async def fix_turn(
     live: LiveTurns | None = None,
     *,
     resumed: Resumed | None = None,
+    explicit_default: bool = False,
+    sticky_runtime: str | None = None,
 ) -> dict[str, Any]:
     """One turn of the conversation about a fix: ``user``'s message and the agent's
     answer, which may change the files (design 5.5); ``resumed``, the turn a restart
@@ -302,7 +313,14 @@ async def fix_turn(
         )
     history = await service.store.list_messages(thread.id)
     workdir = await _checkout(
-        service, thread, job.repo, job.number, info.default_branch, base, patch
+        service,
+        thread,
+        job.repo,
+        job.number,
+        info.default_branch,
+        base,
+        patch,
+        resume_work=not explicit_default and not thread.agent,
     )
     request = "\n\n".join(
         part
@@ -386,6 +404,11 @@ async def fix_turn(
         prompt = f"{RESUMED_TURN}\n\n{prompt}"
     run = new_id("run")
     token, door_env = await open_door(door, user.login)
+    effective_sticky = (
+        None
+        if explicit_default
+        else (sticky_runtime or (payload.runtime if payload is not None else None))
+    )
     task = AgentTask(
         kind=TaskKind.FIX,
         activity="fix_talk",
@@ -397,10 +420,15 @@ async def fix_turn(
         pr=job.number,
         job_id=run,
         requested_by=user.login,
-        # The agent that made the change answers for it, before the person's own.
+        # The agent that made the change answers for it, before the person's own,
+        # unless the person explicitly switched back to their default agent.
         agent_chosen=bool(thread.agent)
         or resumed is not None
-        or (payload is not None and turn.primary == payload.runtime),
+        or (
+            not explicit_default
+            and effective_sticky is not None
+            and turn.primary == effective_sticky
+        ),
         untrusted_input=untrusted_input,
         resume_session=resume,
         fresh_prompt=fresh if resume else None,

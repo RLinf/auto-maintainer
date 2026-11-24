@@ -4914,15 +4914,16 @@ async def _request_review(
     for job in await service.store.list_jobs(active, repo=repo):
         if job.playbook not in ("review", "followup") or job.number != number:
             continue
-        last = job.events[-1] if job.events else {}
-        payload = last.get("payload") or {}
+        first = job.events[0] if job.events else {}
+        payload = first.get("payload") or {}
         if own and str(payload.get("by") or "").lower() != user.login.lower():
             continue
         if full and not payload.get("full"):
             continue
-        if (last.get("sha") or "")[:12] == head and (
-            payload.get("agent") or default_agent
-        ) == chosen:
+        existing_agent = payload.get("agent") or await service.runs_on_for(
+            route, payload.get("by"), job.playbook
+        )
+        if (first.get("sha") or "")[:12] == head and existing_agent == chosen:
             return {
                 **out,
                 "run": "joined",
@@ -5004,7 +5005,7 @@ async def review_activity(service: Service, repo: str) -> dict[int, dict[str, An
             continue
         row = out.setdefault(job.number, {})
         if "job" not in row:
-            payload = (job.events[-1].get("payload") if job.events else None) or {}
+            payload = (job.events[0].get("payload") if job.events else None) or {}
             row["job"] = {
                 "id": job.id,
                 "playbook": job.playbook,

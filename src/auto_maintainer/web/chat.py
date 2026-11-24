@@ -940,7 +940,7 @@ async def _run_turn(
                 continue
             if p.kind == "governance":
                 if p.repo in repos:
-                    jobs.append(await _governance(service, user, p))
+                    jobs.append(await _governance(service, user, p, agent=thread.agent))
                 continue
             if p.kind == "change":
                 repo_by_lower = {r.lower(): r for r in repos}
@@ -956,6 +956,7 @@ async def _run_turn(
                                 matched,
                                 p.number or None,
                                 p.request,
+                                agent=thread.agent,
                                 draft=p.draft,
                                 thread_id=thread_id,
                                 source="chat",
@@ -971,7 +972,7 @@ async def _run_turn(
                 continue
             if p.repo not in repos:
                 continue
-            created += await _propose(service, user, p)
+            created += await _propose(service, user, p, agent=thread.agent)
         reply = "\n\n".join([answer.reply, *notes]) if notes else answer.reply
         message = ChatMessage(
             thread_id=thread_id,
@@ -1515,7 +1516,9 @@ async def _start_improve(
     return event.id
 
 
-async def _governance(service: Any, user: User, p: ProposedAction) -> str:
+async def _governance(
+    service: Any, user: User, p: ProposedAction, *, agent: str | None = None
+) -> str:
     """Start the agent on ``p.repo``'s People record; returns the request event's id,
     which the jobs API resolves to the job. What it drafts waits for a maintainer."""
     instruction, _ = redact_secrets(p.request.strip())
@@ -1527,6 +1530,7 @@ async def _governance(service: Any, user: User, p: ProposedAction) -> str:
             "by": user.login,
             "mode": p.people_mode,
             "instruction": instruction,
+            **({"agent": agent} if agent else {}),
         },
         source="chat",
     )
@@ -1611,7 +1615,9 @@ async def save_lesson(service: Any, user: User, p: ProposedAction) -> str:
     return change.id
 
 
-async def _propose(service: Any, user: User, p: ProposedAction) -> list[str]:
+async def _propose(
+    service: Any, user: User, p: ProposedAction, *, agent: str | None = None
+) -> list[str]:
     """Turn a chat proposal into actions that wait for the maintainer's approval."""
     if p.kind == "review" and p.number:
         await service.bus.publish(
@@ -1622,6 +1628,7 @@ async def _propose(service: Any, user: User, p: ProposedAction) -> list[str]:
                 payload={
                     "command": "review",
                     "by": user.login,
+                    **({"agent": agent} if agent else {}),
                     **({"full": True} if p.full else {}),
                 },
                 source="chat",

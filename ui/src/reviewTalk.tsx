@@ -49,14 +49,27 @@ export function ReviewTalk({ job, me, active }: { job: AgentJob; me: string; act
   const listening = !!talk.data?.listening;
   const agent = pickedAgent ?? talk.data?.agent ?? talk.data?.runtime ?? job.agent ?? "";
   const send = useMutation({
-    mutationFn: ({ said, chosen }: { said: string; chosen: string | undefined }) =>
-      api.post<ChatMessage & { fork?: string }>(`/api/jobs/${job.id}/talk`, {
+    mutationFn: async ({ said, chosen, wasListening }: { said: string; chosen: string | undefined; wasListening: boolean }) => {
+      const answer = await api.post<ChatMessage & { fork?: string }>(`/api/jobs/${job.id}/talk`, {
         text: said,
-        ...(chosen !== undefined && !listening ? { agent: chosen } : {}),
-      }),
-    onSuccess: async (answer) => {
+        ...(chosen !== undefined && !wasListening ? { agent: chosen } : {}),
+      });
+      return { answer, chosen, wasListening };
+    },
+    onSuccess: async ({ answer, chosen, wasListening }) => {
+      if (!wasListening && chosen !== undefined) {
+        client.setQueryData<ReviewTalkState>(["job", job.id, "talk"], (prev) =>
+          prev
+            ? {
+                ...prev,
+                agent: chosen || null,
+                runtime: answer.runtime ?? (chosen || null),
+              }
+            : prev,
+        );
+      }
       await client.invalidateQueries({ queryKey: ["job", job.id, "talk"] });
-      setPickedAgent(undefined);
+      if (!wasListening) setPickedAgent(undefined);
       // The turn ran on the person's own copy: that is where it goes on.
       if (answer.fork) openJob(answer.fork);
     },
@@ -100,7 +113,7 @@ export function ReviewTalk({ job, me, active }: { job: AgentJob; me: string; act
     if (!clean || !canSend) return;
     setPendingText(clean);
     setText("");
-    send.mutate({ said: clean, chosen: pickedAgent });
+    send.mutate({ said: clean, chosen: pickedAgent, wasListening: listening });
   };
 
   // A merge into a self-improvement PR has no conversation: the service answers 404.

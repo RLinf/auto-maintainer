@@ -372,8 +372,9 @@ export function Conversation({
     }) => {
       const agentField = chosen !== undefined ? { agent: chosen } : {};
       let id = threadId;
+      let created: ChatThread | null = null;
       if (!id) {
-        const created = await api.post<ChatThread>("/api/chat/threads", { text: message, context: ctx, ...agentField });
+        created = await api.post<ChatThread>("/api/chat/threads", { text: message, context: ctx, ...agentField });
         id = created.id;
         onThread(id);
       }
@@ -383,9 +384,26 @@ export function Conversation({
         client_message_id: clientMessageId,
         ...agentField,
       });
-      return { id, res };
+      return { id, res, created, chosen };
     },
-    onSuccess: ({ id, res }) => {
+    onSuccess: ({ id, res, created, chosen }) => {
+      client.setQueryData<ChatThread[]>(["chat", "threads"], (prev) => {
+        const list = prev ?? [];
+        const patch = (th: ChatThread): ChatThread => ({
+          ...th,
+          ...(chosen !== undefined
+            ? {
+                agent: chosen || null,
+                runtime: chosen && th.runtime === chosen ? th.runtime : null,
+              }
+            : {}),
+          live_run: res.live ? res.run : null,
+        });
+        if (list.some((th) => th.id === id)) {
+          return list.map((th) => (th.id === id ? patch(th) : th));
+        }
+        return created ? [patch(created), ...list] : list;
+      });
       client.setQueryData<ChatMessage[]>(["chat", "messages", id], (prev) => {
         if (!prev) return res.reply ? [res.message, res.reply] : [res.message];
         let next = prev.some((m) => m.id === res.message.id) ? prev : [...prev, res.message];

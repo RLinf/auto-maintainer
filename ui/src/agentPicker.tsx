@@ -2,7 +2,7 @@
 // agent (one they run on their own model API or sign-in), else the one its route runs
 // on (the first usable agent in its order), or one they pick among the agents usable here.
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { ReviewStart } from "./api";
 import { openJob } from "./openJob";
 import { useSettings } from "./data";
@@ -12,16 +12,40 @@ import { agentName, resolveAgentChoices } from "./prActions";
 
 export { agentName };
 
-/** The agent last picked for ``task``, remembered in this browser. */
+const listeners = new Map<string, Set<(v: string) => void>>();
+
+function readStored(key: string): string {
+  try {
+    return localStorage.getItem(key) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+/** The agent last picked for ``task``, remembered in this browser, normalized against
+ * the currently usable agents and synced across pickers on the same page. */
 export function useAgentChoice(task: string): [string, (v: string) => void] {
   const key = `am.agent.${task}`;
-  const [value, setValue] = useState(() => {
-    try {
-      return localStorage.getItem(key) ?? "";
-    } catch {
-      return "";
+  const [value, setValue] = useState(() => readStored(key));
+  useEffect(() => {
+    setValue(readStored(key));
+    let setForKey = listeners.get(key);
+    if (!setForKey) {
+      setForKey = new Set();
+      listeners.set(key, setForKey);
     }
-  });
+    setForKey.add(setValue);
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === key) setValue(e.newValue ?? "");
+    };
+    window.addEventListener("storage", onStorage);
+    return () => {
+      setForKey?.delete(setValue);
+      if (setForKey && setForKey.size === 0) listeners.delete(key);
+      window.removeEventListener("storage", onStorage);
+    };
+  }, [key]);
+  const { current } = useAgentOptions(value, task);
   const set = (v: string) => {
     setValue(v);
     try {
@@ -29,8 +53,9 @@ export function useAgentChoice(task: string): [string, (v: string) => void] {
     } catch {
       // the choice then lasts for this page only
     }
+    listeners.get(key)?.forEach((fn) => fn(v));
   };
-  return [value, set];
+  return [current, set];
 }
 
 /** Usable agents, the default agent for ``task``, and display labels for an agent picker. */
@@ -88,6 +113,7 @@ export function AgentPicker({
         style={{ height: compact ? 28 : 34, minWidth: 0 }}
       >
         <option value="">{defaultLabel}</option>
+        {current && !others.some((a) => a.name === current) && <option value={current}>{label(current)}</option>}
         {others.map((a) => (
           <option key={a.name} value={a.name}>
             {label(a.name)}

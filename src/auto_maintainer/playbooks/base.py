@@ -59,7 +59,7 @@ from ..domain.profile import RepoProfile, Route
 from ..domain.progress import agent_session_key, work_session_key
 from ..domain.records import Job
 from ..domain.review import ReviewClassification, classify_review_state
-from ..domain.settings import LabMachine
+from ..domain.settings import KEEPS_OWN_PRIMARY, LabMachine
 from ..domain.snapshot import CheckRun, PrSnapshot, RunnerInfo
 from ..profiles.governance import GovernanceRecords
 from ..profiles.knowledge import Knowledge
@@ -335,12 +335,7 @@ class PlaybookContext:
             task = task.model_copy(update={"prompt": f"{task.prompt}\n\n{earlier}"})
         task_kind = kind or task.kind
         route = self.route(task_kind)
-        if self.agent and task_kind in (
-            TaskKind.REVIEW,
-            TaskKind.FOLLOWUP,
-            TaskKind.FIX,
-            TaskKind.REPRODUCE,
-        ):
+        if self.agent and str(task_kind) not in KEEPS_OWN_PRIMARY:
             # The requester chose the agent; verification keeps its own route.
             route = route.model_copy(update={"primary": self.agent, "fallback": []})
             task = task.model_copy(update={"agent_chosen": True})

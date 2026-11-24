@@ -476,5 +476,192 @@ async def test_switching_agent_in_review_and_people_conversations(demo) -> None:
         assert h.runner.routes[-1].primary == "codex"
 
 
+async def test_review_talk_switching_to_default_agent_drops_original_runtime(
+    demo,
+) -> None:
+    """When a review ran on another runtime, switching the review conversation's
+    picker back to the default agent (``agent=""``) must drop the original runtime
+    and session and run the user's default route instead of sticking on the review's
+    runtime."""
+    from auto_maintainer.domain.progress import work_session_key
+
+    h, app = demo
+    h.service.info.routing["review"] = Route(
+        primary="antigravity", fallback=["claude-code"]
+    )
+    h.service.settings.routing["review"] = Route(
+        primary="antigravity", fallback=["claude-code"]
+    )
+    async with _as(app, "maria") as maria:
+        # Produce a review on claude-code (different from the default antigravity).
+        await maria.post(
+            "/api/reviews",
+            json={"prs": [{"repo": REPO, "number": 42}], "agent": "claude-code"},
+        )
+        await h.settle()
+        work = (await maria.get(f"/api/work?repo={REPO}&number=42")).json()
+        [job] = [j for j in work if j["playbook"] == "review"]
+        await h.store.set_state(
+            work_session_key(job["id"]),
+            {
+                "runtime": "claude-code",
+                "session": "s_work_cc",
+                "workdir": str(h.service.a.workspace.root / "kept"),
+            },
+        )
+
+        # Explicitly switching to the default agent ("") on the very first turn must
+        # NOT resume claude-code's work session or pin claude-code via agent_chosen.
+        r1 = await maria.post(
+            f"/api/jobs/{job['id']}/talk",
+            json={"text": "Re-check with default agent", "agent": ""},
+        )
+        assert r1.status_code == 200, r1.text
+        assert r1.json()["runtime"] == "antigravity"
+        assert h.runner.routes[-1].primary == "antigravity"
+        assert h.runner.tasks[-1].agent_chosen is False
+        assert h.runner.tasks[-1].resume_session is None
+
+        # A follow-up message without changing the picker stays on antigravity even
+        # when antigravity returned no resumable session.
+        r2 = await maria.post(
+            f"/api/jobs/{job['id']}/talk",
+            json={"text": "And check tests too"},
+        )
+        assert r2.status_code == 200, r2.text
+        assert r2.json()["runtime"] == "antigravity"
+        assert h.runner.routes[-1].primary == "antigravity"
+
+
+async def test_chat_proposals_inherit_selected_thread_agent(demo) -> None:
+    """When a user switches a chat thread to a specific agent, review/change/governance
+    jobs spawned by that chat turn carry that chosen agent."""
+    from auto_maintainer.web.chat import ChatAnswer, ProposedAction
+
+    h, app = demo
+    h.runner.on(
+        "chat",
+        lambda _task: ChatAnswer(
+            reply="Starting those now.",
+            proposals=[
+                ProposedAction(kind="review", repo=REPO, number=42),
+                ProposedAction(
+                    kind="change", repo=REPO, number=42, request="fix typo in README"
+                ),
+                ProposedAction(
+                    kind="governance", repo=REPO, request="add bob as reviewer"
+                ),
+            ],
+        ),
+    )
+
+    async with _as(app, "maria") as maria:
+        thread = (
+            await maria.post(
+                "/api/chat/threads",
+                json={"text": "Handle PR 42", "agent": "antigravity"},
+            )
+        ).json()
+        sent = (
+            await maria.post(
+                f"/api/chat/threads/{thread['id']}/messages",
+                json={"text": "Handle PR 42", "agent": "antigravity"},
+            )
+        ).json()
+        await app.state.live_turns.wait(sent["run"], timeout=5)
+        await h.settle()
+
+    jobs = await h.store.list_jobs(limit=50)
+    by_pb = {j.playbook: j for j in jobs if j.events}
+    for pb in ("review", "fix", "governance"):
+        assert pb in by_pb, f"expected {pb} job to be started"
+        assert by_pb[pb].events[0]["payload"].get("agent") == "antigravity"
+
+    # PlaybookContext.run_agent must honor ctx.agent for governance (not only review/fix).
+    gov_runs = [
+        (t, r)
+        for t, r in zip(h.runner.tasks, h.runner.routes, strict=True)
+        if str(t.kind) == "governance"
+    ]
+    assert gov_runs, "expected governance agent run"
+    assert gov_runs[-1][0].agent_chosen is True
+    assert gov_runs[-1][1].primary == "antigravity"
+    assert gov_runs[-1][1].fallback == []
+
+
+async def test_request_review_dedup_uses_existing_jobs_requester_default(demo) -> None:
+    """An active default-agent review started by a user with a personal agent must not
+    cause another user requesting a different agent to falsely join it."""
+    from auto_maintainer.domain.records import Job, JobStatus
+
+    h, app = demo
+    h.forge.set_permission(REPO, "bob", Permission.WRITE)
+    h.service.info.routing["review"] = Route(
+        primary="antigravity", fallback=["claude-code"]
+    )
+    h.service.settings.routing["review"] = Route(
+        primary="antigravity", fallback=["claude-code"]
+    )
+
+    # Maria has claude-code as her own agent; bob has no personal agent (uses antigravity).
+    h.service.a.agents.firsts = (  # type: ignore[attr-defined]
+        lambda login: _async_firsts(login, {"maria": (["claude-code"], set())})
+    )
+    pr = await h.store.get_snapshot(REPO, 42)
+    assert pr is not None
+    # Active review job started by maria with no explicit agent (so it runs on claude-code),
+    # plus a later wake event appended so events[-1] has no payload.by / payload.sha.
+    await h.store.upsert_job(
+        Job(
+            playbook="review",
+            key=f"review:{REPO}#42:req:evt_maria",
+            repo=REPO,
+            number=42,
+            pool="agent",
+            status=JobStatus.RUNNING,
+            events=[
+                {
+                    "id": "evt_maria",
+                    "kind": "dashboard.command",
+                    "repo": REPO,
+                    "number": 42,
+                    "sha": pr.head_sha,
+                    "payload": {
+                        "command": "review",
+                        "by": "maria",
+                        "source": "dashboard",
+                    },
+                },
+                {
+                    "id": "evt_wake",
+                    "kind": "lab.session.opened",
+                    "repo": REPO,
+                    "number": 42,
+                    "sha": None,
+                    "payload": {},
+                },
+            ],
+        )
+    )
+
+    async with _as(app, "bob") as bob:
+        res = (
+            await bob.post(
+                f"/api/prs/{REPO}/42/review",
+                json={"agent": "antigravity"},
+            )
+        ).json()
+        assert res["run"] == "review", (
+            "antigravity request must not falsely join maria's claude-code job"
+        )
+        assert res["agent"] == "antigravity"
+
+
+async def _async_firsts(
+    login: str, mapping: dict[str, tuple[list[str], set[str]]]
+) -> tuple[list[str], set[str]]:
+    return mapping.get(login, ([], set()))
+
+
 async def _async_list(items: list[str]) -> list[str]:
     return items

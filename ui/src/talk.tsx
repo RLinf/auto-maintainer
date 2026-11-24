@@ -105,14 +105,27 @@ export function SharedTalk({
   const listening = !!talk.data?.listening;
   const agent = pickedAgent ?? talk.data?.agent ?? talk.data?.runtime ?? "";
   const send = useMutation({
-    mutationFn: ({ said, chosen }: { said: string; chosen: string | undefined }) =>
-      api.post<ChatMessage>(base, {
+    mutationFn: async ({ said, chosen, wasListening }: { said: string; chosen: string | undefined; wasListening: boolean }) => {
+      const answer = await api.post<ChatMessage>(base, {
         text: said,
-        ...(chosen !== undefined && !listening ? { agent: chosen } : {}),
-      }),
-    onSuccess: async () => {
+        ...(chosen !== undefined && !wasListening ? { agent: chosen } : {}),
+      });
+      return { answer, chosen, wasListening };
+    },
+    onSuccess: async ({ answer, chosen, wasListening }) => {
+      if (!wasListening && chosen !== undefined) {
+        client.setQueryData<TalkState>(queryKey, (prev) =>
+          prev
+            ? {
+                ...prev,
+                agent: chosen || null,
+                runtime: answer.runtime ?? (chosen || null),
+              }
+            : prev,
+        );
+      }
       await client.invalidateQueries({ queryKey });
-      setPickedAgent(undefined);
+      if (!wasListening) setPickedAgent(undefined);
     },
     onSettled: () => {
       setPendingText("");
@@ -153,7 +166,7 @@ export function SharedTalk({
     if (!clean || !enabled) return;
     if (!listening) setPendingText(clean);
     setText("");
-    send.mutate({ said: clean, chosen: pickedAgent });
+    send.mutate({ said: clean, chosen: pickedAgent, wasListening: listening });
   };
   // A message started elsewhere on the page: put in the box, or sent at once; each
   // once, even when the conversation opens again.
