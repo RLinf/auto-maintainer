@@ -833,6 +833,330 @@ async def test_new_commits_keep_a_schedule_and_only_the_schedulers_own_keep_it_s
         assert state.approval_needed and "until maria approves" in state.detail
 
 
+async def test_manual_ci_approval_by_scheduler_clears_unseen_and_resumes_auto_approval(
+    harness: Harness,
+) -> None:
+    """Once the maintainer who scheduled a PR by hand manually approves held CI at
+    its unseen head, ``MergeArm.unseen`` clears so later steps from that head (such
+    as a base merge that triggers held fork workflows again) auto-approve as them;
+    another author push marks it unseen again."""
+    h = harness
+    pr = _ready(42, "a" * 40, _ci(42, None))
+    h.forge.put_pr(pr)
+    await _schedule(h, 42)
+    await h.settle()
+
+    def _held(run_id: int, check_id: int) -> CheckRun:
+        return _job(check_id, "unit", None, run_id, workflow="CI").model_copy(
+            update={
+                "status": CheckStatus.QUEUED,
+                "conclusion": CheckConclusion.ACTION_REQUIRED,
+            }
+        )
+
+    # Author pushes new commits: arm becomes unseen and held CI waits for maria.
+    pr_b = pr.model_copy(
+        update={
+            "head_sha": "b" * 40,
+            "commits": [*pr.commits, Commit(sha="b" * 40, message="author fix")],
+            "checks": [_held(4300, 420)],
+        }
+    )
+    h.forge.put_pr(pr_b)
+    await h.emit(
+        Event(kind=EventKind.PR_SYNCHRONIZED, repo=REPO, number=42, sha="b" * 40)
+    )
+    await h.settle()
+    arm = await h.store.get_arm(REPO, 42)
+    assert arm is not None and arm.sha == "b" * 40 and arm.unseen
+    assert not h.forge.writes_of("approve_workflow_run")
+    assert (await _phase(h, 42)).approval_needed
+
+    # Maria approves the held workflow run as herself: arm.unseen clears.
+    [card] = await h.store.list_actions(repo=REPO, kinds=[ActionKind.CI_APPROVE_RUN])
+    proposal = await h.store.proposal_for_action(card.action.id)
+    assert proposal is not None
+    await h.service.pipeline.approve(proposal.id, "maria", post_as="maria")
+    await h.settle()
+    assert h.forge.writes_of("approve_workflow_run") == [
+        {"repo": REPO, "run_id": 4300, "by": "maria"}
+    ]
+    arm = await h.store.get_arm(REPO, 42)
+    assert arm is not None and arm.sha == "b" * 40 and not arm.unseen
+    assert not (await _phase(h, 42)).approval_needed
+
+    # Base moves: the schedule merges base in and GitHub holds CI again on the merge
+    # commit; because arm.unseen is clear, the schedule auto-approves as maria.
+    h.forge.put_pr(
+        pr_b.model_copy(update={"behind_base": True, "checks": _ci(42, None)})
+    )
+    await h.emit(Event(kind=EventKind.MERGE_QUEUE, repo=REPO, number=42))
+    await h.settle()
+    assert h.forge.writes_of("update_branch")
+    pr_c = pr_b.model_copy(
+        update={
+            "head_sha": "c" * 40,
+            "behind_base": False,
+            "commits": [
+                *pr_b.commits,
+                Commit(
+                    sha="c" * 40,
+                    message="Merge branch 'main' into change-42",
+                    author_login="maria",
+                ),
+            ],
+            "checks": [_held(4301, 421)],
+        }
+    )
+    h.forge.put_pr(pr_c)
+    await h.emit(
+        Event(kind=EventKind.PR_SYNCHRONIZED, repo=REPO, number=42, sha="c" * 40)
+    )
+    await h.settle()
+    arm = await h.store.get_arm(REPO, 42)
+    assert arm is not None and arm.sha == "c" * 40 and not arm.unseen
+    assert h.forge.writes_of("approve_workflow_run") == [
+        {"repo": REPO, "run_id": 4300, "by": "maria"},
+        {"repo": REPO, "run_id": 4301, "by": "maria"},
+    ]
+    assert not (await _phase(h, 42)).approval_needed
+
+    # Another author push marks the arm unseen again.
+    pr_d = pr_c.model_copy(
+        update={
+            "head_sha": "d" * 40,
+            "commits": [
+                *pr_c.commits,
+                Commit(sha="d" * 40, message="more from author"),
+            ],
+            "checks": [_held(4302, 422)],
+        }
+    )
+    h.forge.put_pr(pr_d)
+    await h.emit(
+        Event(kind=EventKind.PR_SYNCHRONIZED, repo=REPO, number=42, sha="d" * 40)
+    )
+    await h.settle()
+    arm = await h.store.get_arm(REPO, 42)
+    assert arm is not None and arm.sha == "d" * 40 and arm.unseen
+    assert len(h.forge.writes_of("approve_workflow_run")) == 2
+    assert (await _phase(h, 42)).approval_needed
+
+
+@pytest.mark.parametrize("before_sync", [False, True])
+async def test_run_ci_button_by_scheduler_clears_unseen(
+    harness: Harness, tmp_path: Path, before_sync: bool
+) -> None:
+    """Approving held CI from the PR page (``POST /api/prs/.../ci``) as the
+    scheduler clears ``MergeArm.unseen`` whether it happens after or before the
+    schedule processes the new head."""
+    h = harness
+    pr = _ready(42, "a" * 40, _ci(42, None))
+    h.forge.put_pr(pr)
+    await _schedule(h, 42)
+    await h.settle()
+
+    held = _job(420, "unit", None, 4300, workflow="CI").model_copy(
+        update={
+            "status": CheckStatus.QUEUED,
+            "conclusion": CheckConclusion.ACTION_REQUIRED,
+        }
+    )
+    pr_b = pr.model_copy(
+        update={
+            "head_sha": "b" * 40,
+            "commits": [*pr.commits, Commit(sha="b" * 40, message="author fix")],
+            "checks": [held],
+        }
+    )
+    h.forge.put_pr(pr_b)
+    if not before_sync:
+        await h.emit(
+            Event(kind=EventKind.PR_SYNCHRONIZED, repo=REPO, number=42, sha="b" * 40)
+        )
+        await h.settle()
+        arm = await h.store.get_arm(REPO, 42)
+        assert arm is not None and arm.sha == "b" * 40 and arm.unseen
+
+    app = create_app(h.service, data_dir=tmp_path, allow_dev_login=True)
+    async with _as(app, "maria") as maria:
+        res = await maria.post(f"/api/prs/{REPO}/42/ci")
+        assert res.status_code == 200
+        assert res.json()["actions"][0]["kind"] == "ci.approve_run"
+    await h.settle()
+    if before_sync:
+        await h.emit(
+            Event(kind=EventKind.PR_SYNCHRONIZED, repo=REPO, number=42, sha="b" * 40)
+        )
+        await h.settle()
+
+    arm = await h.store.get_arm(REPO, 42)
+    assert arm is not None and arm.sha == "b" * 40 and not arm.unseen
+    assert h.forge.writes_of("approve_workflow_run") == [
+        {"repo": REPO, "run_id": 4300, "by": "maria"}
+    ]
+
+
+async def test_schedulers_pr_fix_clears_unseen_after_author_commits(
+    harness: Harness,
+) -> None:
+    """When ``arm.unseen`` became True after author commits, the scheduler pushing
+    a ``pr.fix`` onto the PR's branch as themselves clears ``arm.unseen`` so held
+    CI resumes auto-approving."""
+    from auto_maintainer.domain.actions import FixPrPayload, make_action
+    from auto_maintainer.domain.records import ActionRecord
+
+    h = harness
+    pr = _ready(42, "a" * 40, _ci(42, None))
+    h.forge.put_pr(pr)
+    await _schedule(h, 42)
+    await h.settle()
+
+    # Author pushes b*40: arm becomes unseen.
+    pr_b = pr.model_copy(
+        update={
+            "head_sha": "b" * 40,
+            "commits": [*pr.commits, Commit(sha="b" * 40, message="author commit")],
+        }
+    )
+    h.forge.put_pr(pr_b)
+    await h.emit(
+        Event(kind=EventKind.PR_SYNCHRONIZED, repo=REPO, number=42, sha="b" * 40)
+    )
+    await h.settle()
+    arm = await h.store.get_arm(REPO, 42)
+    assert arm is not None and arm.sha == "b" * 40 and arm.unseen
+
+    # Maria pushes a pr.fix onto the PR's branch at b*40 -> c*40.
+    fix = make_action(
+        ActionKind.PR_FIX,
+        REPO,
+        FixPrPayload(
+            title="fix", body="", patch="", base_sha="b" * 40, target="branch"
+        ),
+        number=42,
+        head_sha="b" * 40,
+        discriminator="fix-after-unseen",
+    )
+    await h.store.add_action(
+        ActionRecord(
+            action=fix,
+            status=ActionStatus.EXECUTED,
+            post_as="maria",
+            external_ref={"sha": "c" * 40},
+        )
+    )
+    held = _job(421, "unit", None, 4301, workflow="CI").model_copy(
+        update={
+            "status": CheckStatus.QUEUED,
+            "conclusion": CheckConclusion.ACTION_REQUIRED,
+        }
+    )
+    h.forge.put_pr(
+        pr_b.model_copy(
+            update={
+                "head_sha": "c" * 40,
+                "commits": [
+                    *pr_b.commits,
+                    Commit(sha="c" * 40, message="fix", author_login="maria"),
+                ],
+                "checks": [held],
+            }
+        )
+    )
+    await h.emit(
+        Event(kind=EventKind.PR_SYNCHRONIZED, repo=REPO, number=42, sha="c" * 40)
+    )
+    await h.settle()
+    arm = await h.store.get_arm(REPO, 42)
+    assert arm is not None and arm.sha == "c" * 40 and not arm.unseen
+    assert h.forge.writes_of("approve_workflow_run") == [
+        {"repo": REPO, "run_id": 4301, "by": "maria"}
+    ]
+    assert not (await _phase(h, 42)).approval_needed
+
+
+@pytest.mark.parametrize("auto,approver", [(False, "walt"), (True, "maria")])
+async def test_other_approver_and_auto_arm_keep_manual_ci_approval_required(
+    harness: Harness, auto: bool, approver: str
+) -> None:
+    """Automatic approval runs as ``arm.armed_by``: another maintainer approving
+    held CI does not clear ``arm.unseen`` for ``armed_by``, and an automatic arm
+    (``arm.auto``) never resumes auto-approving held CI after manual approval."""
+    h = harness
+    await h.service.a.user_tokens.set("walt", UserToken(token="w"))
+    pr = _ready(42, "a" * 40, _ci(42, None))
+    h.forge.put_pr(pr)
+    await _schedule(h, 42, auto=auto)
+    await h.settle()
+
+    def _held(run_id: int, check_id: int) -> CheckRun:
+        return _job(check_id, "unit", None, run_id, workflow="CI").model_copy(
+            update={
+                "status": CheckStatus.QUEUED,
+                "conclusion": CheckConclusion.ACTION_REQUIRED,
+            }
+        )
+
+    pr_b = pr.model_copy(
+        update={
+            "head_sha": "b" * 40,
+            "commits": [*pr.commits, Commit(sha="b" * 40, message="author commit")],
+            "checks": [_held(4300, 420)],
+        }
+    )
+    h.forge.put_pr(pr_b)
+    await h.emit(
+        Event(kind=EventKind.PR_SYNCHRONIZED, repo=REPO, number=42, sha="b" * 40)
+    )
+    await h.settle()
+    [card] = await h.store.list_actions(repo=REPO, kinds=[ActionKind.CI_APPROVE_RUN])
+    proposal = await h.store.proposal_for_action(card.action.id)
+    assert proposal is not None
+    await h.service.pipeline.approve(proposal.id, approver, post_as=approver)
+    await h.settle()
+    assert h.forge.writes_of("approve_workflow_run") == [
+        {"repo": REPO, "run_id": 4300, "by": approver}
+    ]
+    arm = await h.store.get_arm(REPO, 42)
+    assert arm is not None and arm.unseen and arm.auto == auto
+
+    # After a base merge, held CI still waits for manual approval instead of
+    # auto-approving as maria.
+    h.forge.put_pr(
+        pr_b.model_copy(update={"behind_base": True, "checks": _ci(42, None)})
+    )
+    await h.emit(Event(kind=EventKind.MERGE_QUEUE, repo=REPO, number=42))
+    await h.settle()
+    h.forge.put_pr(
+        pr_b.model_copy(
+            update={
+                "head_sha": "c" * 40,
+                "behind_base": False,
+                "commits": [
+                    *pr_b.commits,
+                    Commit(
+                        sha="c" * 40,
+                        message="Merge branch 'main' into change-42",
+                        author_login="maria",
+                    ),
+                ],
+                "checks": [_held(4301, 421)],
+            }
+        )
+    )
+    await h.emit(
+        Event(kind=EventKind.PR_SYNCHRONIZED, repo=REPO, number=42, sha="c" * 40)
+    )
+    await h.settle()
+    arm = await h.store.get_arm(REPO, 42)
+    assert arm is not None and arm.sha == "c" * 40 and arm.unseen and arm.auto == auto
+    assert h.forge.writes_of("approve_workflow_run") == [
+        {"repo": REPO, "run_id": 4300, "by": approver}
+    ]
+    assert (await _phase(h, 42)).approval_needed
+
+
 async def test_a_follow_up_that_finds_a_major_problem_in_new_commits_unschedules(
     harness: Harness,
 ) -> None:

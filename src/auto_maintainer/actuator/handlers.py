@@ -434,10 +434,23 @@ async def _approve_runs(
     approver: str | None,
 ) -> dict[str, Any]:
     """Approve the workflow runs GitHub holds for the PR's head, as the person who
-    pressed the button (the executor gives this handler their writer)."""
+    pressed the button (the executor gives this handler their writer). When the
+    maintainer who scheduled ``pr`` by hand approves held runs at the armed head,
+    clear ``MergeArm.unseen`` so later schedule steps at or merged from this head
+    run as them again."""
     p = ApproveRunsPayload.model_validate(action.payload)
     for run_id in p.run_ids:
         await x.writer.approve_workflow_run(action.repo, run_id)
+    if p.run_ids and pr is not None and approver:
+        arm = await x.store.get_arm(action.repo, pr.number)
+        if (
+            arm is not None
+            and not arm.auto
+            and arm.unseen
+            and same_commit(arm.sha, pr.head_sha)
+            and arm.armed_by.lower() == approver.lower()
+        ):
+            await x.store.save_arm(arm.model_copy(update={"unseen": False}))
     return {"approved": p.run_ids}
 
 

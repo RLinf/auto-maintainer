@@ -58,7 +58,9 @@ class MergeArm(BaseModel):
     """Its head has commits pushed after it was scheduled, which ``armed_by`` has not
     seen (the arm follows them, ``playbooks/merge.py:_new_head``): as for an
     automatic arm, a step that runs outside code with the repository's secrets, or
-    pushes an agent's change as ``armed_by``, waits for them."""
+    pushes an agent's change as ``armed_by``, waits for them. Cleared on a hand-made
+    arm once ``armed_by`` approves held CI at the head or pushes a ``pr.fix`` onto
+    the branch as themselves."""
     forced: bool = False
     """Scheduled by hand before it met the repository's target: its CI runs on its
     turn whatever the target says, and it merges once the merge rules hold."""
