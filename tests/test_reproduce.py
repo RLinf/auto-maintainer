@@ -1546,3 +1546,110 @@ async def test_a_follow_up_starts_the_reproduction_and_revises_later(demo) -> No
     ]
     assert "python check.py" in rev.prompt
     assert follow.status == JobStatus.DONE
+
+
+def test_record_text_keeps_conclusion_and_report_when_commands_exceed_limit() -> None:
+    """Long command strings and outputs are bounded per command and serialized after
+    ``conclusion`` and ``report`` so >40,000 chars of commands never truncate them."""
+    from auto_maintainer.playbooks.reproduce import (
+        RECORD_COMMAND_CHARS,
+        RECORD_LIMIT,
+        RECORD_TAIL_CHARS,
+        _record_text,
+    )
+
+    report_body = "Detailed findings: " + ("metric=0.95 " * 50) + "FINAL_REPORT_MARKER"
+    # 1. Single command with huge command + tail (>40,000 chars) is bounded per command.
+    huge_cmd = "python train.py " + ("--arg=value " * 300)
+    huge_tail = [f"step {i}: " + ("x" * 300) for i in range(150)]
+    text = _record_text(
+        machine_description="4x A100",
+        commit="a" * 40,
+        brief="Run training smoke test",
+        conclusion="reproduced",
+        report=report_body,
+        commands=[
+            {
+                "command": huge_cmd,
+                "side": "head",
+                "exit_code": 0,
+                "tail": huge_tail,
+            }
+        ],
+    )
+    assert '"conclusion": "reproduced"' in text
+    assert report_body in text
+    assert text.index('"conclusion"') < text.index('"commands"')
+    assert text.index('"report"') < text.index('"commands"')
+    assert huge_cmd not in text
+    assert huge_cmd[:RECORD_COMMAND_CHARS] + " ...[truncated]" in text
+    assert "earlier lines omitted" in text
+    assert "step 149:" in text
+    assert len(text) < RECORD_LIMIT + 500
+
+    # 2. Many commands exceeding 40,000 chars even after per-command trimming still
+    # preserve conclusion and report completely.
+    many_commands = [
+        {
+            "command": f"python run_{i}.py " + ("a" * (RECORD_COMMAND_CHARS + 200)),
+            "side": "head",
+            "exit_code": 0,
+            "tail": [f"cmd {i} line {j}: " + ("y" * 180) for j in range(40)],
+        }
+        for i in range(30)
+    ]
+    assert sum(len(str(c)) for c in many_commands) > RECORD_LIMIT
+    text_many = _record_text(
+        machine_description="4x A100",
+        commit="a" * 40,
+        brief="Run full suite",
+        conclusion="not_reproduced",
+        report=report_body,
+        commands=many_commands,
+    )
+    assert '"conclusion": "not_reproduced"' in text_many
+    assert report_body in text_many
+    assert "[truncated]" in text_many
+    # Also verify string-typed tail is bounded.
+    str_tail = "Z" * (RECORD_TAIL_CHARS + 500) + "TAIL_END_MARKER"
+    text_str_tail = _record_text(
+        machine_description="4x A100",
+        commit="a" * 40,
+        brief="Check string tail",
+        conclusion="inconclusive",
+        report="short report",
+        commands=[
+            {"command": "echo hi", "side": "head", "exit_code": 0, "tail": str_tail}
+        ],
+    )
+    assert "TAIL_END_MARKER" in text_str_tail
+    assert str_tail not in text_str_tail
+
+
+async def test_reproduction_with_long_commands_passes_full_report_to_revision(
+    demo,
+) -> None:
+    """End-to-end: when a reproduction runs >40,000 chars of commands and output,
+    the revision agent still receives the full conclusion and report."""
+    h, app = demo
+    report_body = "Reproduction verified crash on base and fix on head. END_MARKER_42"
+    h.runner.on(
+        "reproduce",
+        lambda _t: {"conclusion": "reproduced", "comment": report_body, "notes": ""},
+    )
+    h.service.a.lab_runner.commands = [
+        {
+            "command": f"python step_{i}.py " + ("--flag=1 " * 250),
+            "side": "head",
+            "exit_code": 0,
+            "tail": [f"step {i} line {j}: " + ("log " * 60) for j in range(50)],
+        }
+        for i in range(25)
+    ]
+    async with _as(app, "maria") as maria:
+        await _review(h, maria, 42)
+        await maria.post(f"/api/prs/{REPO}/42/reproduce", json={"lab": "gpu-01"})
+        await h.settle()
+    [update] = _revisions(h)
+    assert '"conclusion": "reproduced"' in update.prompt
+    assert report_body in update.prompt

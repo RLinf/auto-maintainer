@@ -131,6 +131,18 @@ to be written."""
 REPORT_STATE = "reproduce_report:{job}"
 """A finished reproduction's record while it waits for its review's draft."""
 
+RECORD_LIMIT = 40_000
+"""Maximum length of the reproduction record passed to the review-revision agent."""
+
+RECORD_COMMAND_CHARS = 1_000
+"""Maximum length of each command string kept in the reproduction record."""
+
+RECORD_TAIL_LINES = 30
+"""Maximum trailing output lines kept per command in the reproduction record."""
+
+RECORD_TAIL_CHARS = 2_000
+"""Maximum total characters of trailing output kept per command in the reproduction record."""
+
 UPDATE = """You are revising the {what} of PR #{number} in {repo} given below. That reproduction has ended; its record is below.
 
 You have the repository checkout here to inspect any file or line the reproduction touched. Decide freely how the {what} as a whole should be updated — do not limit your edits to the reproduction section or do a mechanical text replacement:
@@ -414,21 +426,13 @@ class ReproducePlaybook(Playbook):
                 )
             return PlaybookResult(result=summary_skipped)
         machine = ctx.service.machines.get(lab)
-        record_text = untrusted(
-            "reproduction",
-            json.dumps(
-                {
-                    "machine": machine.description if machine else "",
-                    "commit": record.action.head_sha,
-                    "brief": payload.brief or payload.summary,
-                    "commands": commands,
-                    "conclusion": report.conclusion,
-                    "report": report.comment,
-                },
-                ensure_ascii=False,
-                indent=1,
-            ),
-            40_000,
+        record_text = _record_text(
+            machine_description=machine.description if machine else "",
+            commit=record.action.head_sha,
+            brief=payload.brief or payload.summary,
+            conclusion=report.conclusion,
+            report=report.comment,
+            commands=commands,
         )
         return await self._report(
             ctx,
@@ -866,6 +870,79 @@ class ReproducePlaybook(Playbook):
             + (f", asked by {by}" if by else ", after its review was posted"),
             draft_for=by,
         )
+
+
+def _trim_tail(tail: Any) -> Any:
+    """Keep the trailing output of one command within per-command limits."""
+    if isinstance(tail, str):
+        if len(tail) <= RECORD_TAIL_CHARS:
+            return tail
+        return "[truncated]\n" + tail[-RECORD_TAIL_CHARS:]
+    if not isinstance(tail, list):
+        return tail
+    lines = [str(line) for line in tail]
+    kept: list[str] = []
+    used = 0
+    for line in reversed(lines[-RECORD_TAIL_LINES:]):
+        if len(line) > RECORD_TAIL_CHARS:
+            if not kept:
+                kept.append("..." + line[-(RECORD_TAIL_CHARS - 3) :])
+                used = RECORD_TAIL_CHARS
+            break
+        cost = len(line) + (1 if kept else 0)
+        if kept and used + cost > RECORD_TAIL_CHARS:
+            break
+        kept.append(line)
+        used += cost
+    kept.reverse()
+    omitted = len(lines) - len(kept)
+    if omitted > 0:
+        kept.insert(0, f"... ({omitted} earlier lines omitted)")
+    return kept
+
+
+def _trim_command(entry: dict[str, Any]) -> dict[str, Any]:
+    """Bound ``command`` and ``tail`` of one logged command for the revision prompt."""
+    trimmed = dict(entry)
+    cmd = trimmed.get("command")
+    if isinstance(cmd, str) and len(cmd) > RECORD_COMMAND_CHARS:
+        trimmed["command"] = cmd[:RECORD_COMMAND_CHARS] + " ...[truncated]"
+    if "tail" in trimmed:
+        trimmed["tail"] = _trim_tail(trimmed["tail"])
+    return trimmed
+
+
+def _record_text(
+    *,
+    machine_description: str,
+    commit: str | None,
+    brief: str,
+    conclusion: str,
+    report: str,
+    commands: list[dict[str, Any]],
+) -> str:
+    """Build the untrusted reproduction record for the review-revision agent.
+
+    ``conclusion`` and ``report`` come before ``commands`` (and each command's
+    ``command`` and ``tail`` are bounded) so long command logs never push the
+    reproduction verdict out of the truncation window.
+    """
+    return untrusted(
+        "reproduction",
+        json.dumps(
+            {
+                "machine": machine_description,
+                "commit": commit,
+                "brief": brief,
+                "conclusion": conclusion,
+                "report": report,
+                "commands": [_trim_command(c) for c in commands],
+            },
+            ensure_ascii=False,
+            indent=1,
+        ),
+        RECORD_LIMIT,
+    )
 
 
 def _session_action(
