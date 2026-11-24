@@ -99,7 +99,13 @@ from ..domain.merge_schedule import (
 from ..domain.permissions import Permission
 from ..domain.profile import RepoProfile
 from ..domain.records import ActionStatus, RootCause
-from ..domain.run_ci import ci_view, latest_checks, rerun_targets, unfinished_runs
+from ..domain.run_ci import (
+    ci_view,
+    latest_checks,
+    rerun_targets,
+    stopped_runs,
+    unfinished_runs,
+)
 from ..domain.snapshot import (
     CheckConclusion,
     Mergeable,
@@ -169,7 +175,7 @@ MERGED_KEY = "merge-schedule-merged:{repo}"
 MERGED_KEPT = 30
 """How many merges the page lists under Merged lately."""
 
-STALLED = """CI of pull request #{number} in {repo}, at head {sha}, {what} for {minutes} minutes. Say why, from the facts below, and the one step that gets it going: `add_label` (the gate label that starts the repository's CI is missing), `approve_runs` (GitHub holds workflows until a maintainer approves running them), `rerun` (a run at this head failed or was cancelled for no reason of the change: give its run id), `wait` (runs are queued for busy runners and will start, or are still working normally), or `maintainer` (only a maintainer can do it, such as a required check from an outside service that never reports: say what in `for_maintainer`). Judge only from what is given here: do not run commands, read files, or fetch anything."""
+STALLED = """CI of pull request #{number} in {repo}, at head {sha}, {what} for {minutes} minutes. Say why, from the facts below, and the one step that gets it going: `add_label` (the gate label that starts the repository's CI is missing), `approve_runs` (GitHub holds workflows until a maintainer approves running them), `rerun` (a latest, finished run at this head — never a `[superseded]` or `[gate-stopped]` run — failed or was cancelled for no reason of the change: give its run id), `wait` (runs are queued for busy runners and will start, or are still working normally), or `maintainer` (only a maintainer can do it, such as a required check from an outside service that never reports: say what in `for_maintainer`). Judge only from what is given here: do not run commands, read files, or fetch anything."""
 
 
 class StallFinding(BaseModel):
@@ -1095,8 +1101,11 @@ class MergePlaybook(Playbook):
         if not checks:
             # Only cancelled runs: nothing failed, the run stopped short.
             view = ci_view(pr, profile.label_for("ci_gate"), profile.ci.start)
+            stopped = stopped_runs(pr.checks, profile.ci.start)
             again = []
             for target in rerun_targets(view.cancelled):
+                if target.run_id in stopped:
+                    continue
                 done = await reruns_at_head(ctx, pr, target.run_id)
                 if done < profile.ci.rerun.max_per_sha:
                     again.append(
@@ -1286,12 +1295,20 @@ class MergePlaybook(Playbook):
         if mark in state.looked_into:
             return []
         state.looked_into = [*state.looked_into[-9:], mark]
+        latest = latest_checks(pr.checks)
+        latest_set = {id(c) for c in latest}
+        stopped = stopped_runs(latest, profile.ci.start)
+        ordered_checks = [
+            *latest,
+            *(c for c in pr.checks if id(c) not in latest_set),
+        ]
         runs = "\n".join(
             f"- {c.workflow or '(no workflow)'} / {c.name}: {c.status}"
             + (f", {c.conclusion}" if c.conclusion else "")
             + (f" (run {c.run_id}, attempt {c.run_attempt or 1})" if c.run_id else "")
-            + ("" if c in latest_checks(pr.checks) else " [superseded]")
-            for c in pr.checks[:120]
+            + ("" if id(c) in latest_set else " [superseded]")
+            + (" [gate-stopped]" if id(c) in latest_set and c.run_id in stopped else "")
+            for c in ordered_checks[:120]
         )
         info = await ctx.forge.get_repo(pr.repo)
         facts = "\n".join(
@@ -1348,7 +1365,13 @@ class MergePlaybook(Playbook):
         state.finding = found.cause + (
             f" {found.for_maintainer}" if found.for_maintainer else ""
         )
+        fresh = await ctx.forge.get_pr(pr.repo, pr.number)
+        if fresh is not None:
+            if not same_commit(fresh.head_sha, pr.head_sha):
+                return []
+            pr = fresh
         latest = latest_checks(pr.checks)
+        stopped = stopped_runs(latest, profile.ci.start)
         gate_label = profile.label_for("ci_gate")
         if found.step == "add_label" and gate_label and gate_label not in pr.labels:
             return [
@@ -1374,17 +1397,32 @@ class MergePlaybook(Playbook):
                     )
                 ]
         if found.step == "rerun" and found.run_id:
-            here = [c for c in latest if c.run_id == found.run_id]
-            done = await reruns_at_head(ctx, pr, found.run_id)
-            if here and done < profile.ci.rerun.max_per_sha:
-                return [
-                    step(
-                        ActionKind.CI_RERUN_FAILED,
-                        RerunPayload(run_id=found.run_id, workflow=here[0].workflow),
-                        f"rerun:{found.run_id}:{done}",
-                        found.cause,
-                    )
-                ]
+            # Never rerun a superseded run, a gate-stopped run, or one that is
+            # still running or has nothing failed/cancelled (consistent with
+            # plan_run_ci).
+            target = next(
+                (
+                    r
+                    for r in rerun_targets(latest)
+                    if r.run_id == found.run_id and r.run_id not in stopped
+                ),
+                None,
+            )
+            if target is not None:
+                done = await reruns_at_head(ctx, pr, target.run_id)
+                if done < profile.ci.rerun.max_per_sha:
+                    return [
+                        step(
+                            ActionKind.CI_RERUN_FAILED,
+                            RerunPayload(
+                                run_id=target.run_id,
+                                workflow=target.workflow,
+                                attempt=target.attempt,
+                            ),
+                            f"rerun:{target.run_id}:{done}",
+                            found.cause,
+                        )
+                    ]
         if found.step in ("maintainer", "approve_runs", "add_label", "rerun"):
             return [self._tell(pr, arm, "merge.stalled", state.finding)]
         return []

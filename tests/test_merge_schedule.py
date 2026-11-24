@@ -41,7 +41,12 @@ from auto_maintainer.domain.merge_schedule import (
 )
 from auto_maintainer.domain.permissions import Permission
 from auto_maintainer.domain.profile import CiStart
-from auto_maintainer.domain.run_ci import ci_view, latest_checks, plan_run_ci
+from auto_maintainer.domain.run_ci import (
+    ci_view,
+    latest_checks,
+    plan_run_ci,
+    stopped_runs,
+)
 from auto_maintainer.domain.settings import UserToken
 from auto_maintainer.domain.snapshot import (
     CheckConclusion,
@@ -3416,3 +3421,291 @@ async def test_early_real_failure_in_running_workflow_surfaces_and_reminds_sched
     await h.settle()
     assert h.forge.writes_of("rerun_failed_jobs") == [{"repo": REPO, "run_id": 4200}]
     assert (await _phase(h, 42)).cancel_to_rerun == []
+
+
+def test_summary_job_in_gate_jobs_does_not_misclassify_cancelled_or_summary_failure() -> (
+    None
+):
+    overlap = CiStart(
+        gate_jobs=["check-changes", "ci-test-finish"],
+        summary_jobs=["ci-test-finish"],
+    )
+    # Cancelled run whose always() summary job ended as failure is failed, not stopped.
+    cancelled_pr = make_pr(
+        labels=["run-ci"],
+        checks=[
+            _job(1, "check-changes", "success", 200),
+            _job(2, "unit-tests", "cancelled", 200),
+            _job(3, "ci-test-finish", "failure", 200),
+        ],
+    )
+    view = ci_view(cancelled_pr, "run-ci", overlap)
+    assert view.state == "failed"
+    assert view.failed == []
+    assert [c.name for c in view.cancelled] == ["unit-tests"]
+    assert stopped_runs(cancelled_pr.checks, overlap) == set()
+    plan = plan_run_ci(cancelled_pr, "run-ci", overlap)
+    assert plan.state == "failed" and [r.run_id for r in plan.reruns] == [200]
+
+    # Summary-only failure (no cancelled jobs, gate passed) is failed, not stopped.
+    summary_only = make_pr(
+        labels=["run-ci"],
+        checks=[
+            _job(4, "check-changes", "success", 201),
+            _job(5, "unit-tests", "success", 201),
+            _job(6, "ci-test-finish", "failure", 201),
+        ],
+    )
+    view = ci_view(summary_only, "run-ci", overlap)
+    assert view.state == "failed"
+    assert [c.name for c in view.failed] == ["ci-test-finish"]
+    plan = plan_run_ci(summary_only, "run-ci", overlap)
+    assert plan.state == "failed" and [r.run_id for r in plan.reruns] == [201]
+
+    # Genuine gate-stopped run still classifies as stopped and is never rerun.
+    gate_stopped = make_pr(
+        labels=["run-ci"],
+        checks=[
+            _job(7, "check-changes", "failure", 100),
+            _job(8, "unit-tests", "skipped", 100),
+            _job(9, "ci-test-finish", "failure", 100),
+        ],
+    )
+    assert ci_view(gate_stopped, "run-ci", overlap).state == "stopped"
+    assert stopped_runs(gate_stopped.checks, overlap) == {100}
+    assert plan_run_ci(gate_stopped, "run-ci", overlap).state == "none"
+
+    # A cancelled workflow beside a gate-stopped workflow is failed and only the
+    # cancelled workflow is rerun.
+    mixed = make_pr(
+        labels=["run-ci"],
+        checks=[
+            _job(10, "check-changes", "failure", 100, workflow="CI Test"),
+            _job(11, "ci-test-finish", "failure", 100, workflow="CI Test"),
+            _job(12, "lint", "cancelled", 200, workflow="Lint"),
+        ],
+    )
+    view = ci_view(mixed, "run-ci", overlap)
+    assert view.state == "failed" and view.failed == []
+    assert [c.name for c in view.cancelled] == ["lint"]
+    plan = plan_run_ci(mixed, "run-ci", overlap)
+    assert plan.state == "failed" and [r.run_id for r in plan.reruns] == [200]
+
+    # Even if a summary job is only in gate_jobs, a cancelled run is not stopped.
+    misconfigured = CiStart(gate_jobs=["check-changes", "ci-test-finish"])
+    assert ci_view(cancelled_pr, "run-ci", misconfigured).state == "failed"
+
+
+async def test_stall_look_never_reruns_gate_stopped_run(harness: Harness) -> None:
+    h = harness
+    prompts: list[str] = []
+
+    def stalled(task):  # type: ignore[no-untyped-def]
+        prompts.append(task.prompt)
+        return {
+            "cause": "Run 100 failed at check-changes; rerunning it.",
+            "step": "rerun",
+            "run_id": 100,
+        }
+
+    h.runner.on("ci_diagnose", stalled)
+    h.forge.put_pr(
+        _ready(
+            42,
+            "a" * 40,
+            [
+                _job(1, "check-changes", "failure", 100, workflow="CI"),
+                _job(2, "unit", "skipped", 100, workflow="CI"),
+            ],
+        )
+    )
+    await _schedule(h, 42)
+    await h.settle()
+    assert (await _phase(h, 42)).phase == "starting"
+
+    h.clock.advance(minutes=25)
+    await h.service.engine.tick()
+    await h.settle()
+
+    assert len(prompts) == 1 and "[gate-stopped]" in prompts[0]
+    assert h.forge.writes_of("rerun_failed_jobs") == []
+    notifies = [
+        r
+        for r in await h.store.list_actions(
+            repo=REPO, number=42, kinds=[ActionKind.NOTIFY]
+        )
+        if r.action.payload.get("event") == "merge.stalled"
+    ]
+    assert len(notifies) == 1
+
+
+async def test_stall_look_never_reruns_superseded_run_but_reruns_eligible_latest(
+    harness: Harness,
+) -> None:
+    h = harness
+    prompts: list[str] = []
+    # Case 1: run 100 is already superseded by in-progress run 200.
+    h.runner.on(
+        "ci_diagnose",
+        lambda task: (
+            prompts.append(task.prompt)
+            or {
+                "cause": "Earlier run 100 failed.",
+                "step": "rerun",
+                "run_id": 100,
+            }
+        ),
+    )
+    h.forge.put_pr(
+        _ready(
+            42,
+            "a" * 40,
+            [
+                _job(1, "check-changes", "failure", 100, workflow="CI"),
+                _job(2, "check-changes", "success", 200, workflow="CI"),
+                _job(3, "unit", None, 200, workflow="CI"),
+            ],
+        )
+    )
+    await _schedule(h, 42)
+    await h.settle()
+    assert (await _phase(h, 42)).phase == "running"
+
+    h.clock.advance(minutes=185)
+    await h.service.engine.tick()
+    await h.settle()
+
+    assert len(prompts) == 1 and "[superseded]" in prompts[0]
+    assert h.forge.writes_of("rerun_failed_jobs") == []
+    notifies = [
+        r
+        for r in await h.store.list_actions(
+            repo=REPO, number=42, kinds=[ActionKind.NOTIFY]
+        )
+        if r.action.payload.get("event") == "merge.stalled"
+    ]
+    assert len(notifies) == 1
+
+    async def disarm(number: int) -> None:
+        await h.store.delete_arm(REPO, number)
+        await h.service.bus.publish(
+            Event(kind=EventKind.MERGE_DISARMED, repo=REPO, number=number)
+        )
+        await h.settle()
+
+    await disarm(42)
+
+    # Case 2: a newer run of the same workflow appears while the stall check runs.
+    called_case2 = False
+    h.forge.put_pr(
+        _ready(
+            43,
+            "b" * 40,
+            [
+                _job(10, "unit", None, 300, workflow="CI"),
+                _job(11, "lint", "cancelled", 301, workflow="Lint"),
+            ],
+        )
+    )
+
+    def supersedes_during_ask(task):  # type: ignore[no-untyped-def]
+        nonlocal called_case2
+        called_case2 = True
+        pr43 = h.forge.prs[(REPO, 43)]
+        h.forge.put_pr(
+            pr43.model_copy(
+                update={
+                    "checks": [
+                        *pr43.checks,
+                        _job(12, "lint", None, 302, workflow="Lint"),
+                    ]
+                }
+            )
+        )
+        return {
+            "cause": "Lint run 301 was cancelled.",
+            "step": "rerun",
+            "run_id": 301,
+        }
+
+    h.runner.on("ci_diagnose", supersedes_during_ask)
+    await _schedule(h, 43)
+    await h.settle()
+    assert (await _phase(h, 43)).phase == "running"
+    h.clock.advance(minutes=185)
+    await h.service.engine.tick()
+    await h.settle()
+    assert called_case2
+    assert h.forge.writes_of("rerun_failed_jobs") == []
+
+    await disarm(43)
+
+    # Case 3: an eligible latest finished cancelled run IS rerun.
+    h.forge.put_pr(
+        _ready(
+            44,
+            "c" * 40,
+            [
+                _job(20, "unit", None, 400, workflow="CI"),
+                _job(21, "lint", "cancelled", 401, workflow="Lint"),
+            ],
+        )
+    )
+    h.runner.on(
+        "ci_diagnose",
+        lambda task: {
+            "cause": "Lint run 401 was cancelled.",
+            "step": "rerun",
+            "run_id": 401,
+        },
+    )
+    await _schedule(h, 44)
+    await h.settle()
+    assert (await _phase(h, 44)).phase == "running"
+    h.clock.advance(minutes=185)
+    await h.service.engine.tick()
+    await h.settle()
+    assert h.forge.writes_of("rerun_failed_jobs") == [{"repo": REPO, "run_id": 401}]
+
+
+async def test_cancelled_run_with_overlapping_summary_and_gate_job_reruns_in_schedule(
+    tmp_path: Path,
+) -> None:
+    h = await Harness.create(
+        tmp_path,
+        layer={
+            "extends": ["github-actions"],
+            "merge": {"enabled": True},
+            "ci": {
+                "required_workflows": ["CI Test"],
+                "start": {
+                    "gate_jobs": ["check-changes", "ci-test-finish"],
+                    "summary_jobs": ["ci-test-finish"],
+                    "start_minutes": 5,
+                },
+            },
+            "labels": {"roles": {"ci_gate": "run-ci"}},
+        },
+    )
+    try:
+        h.forge.set_permission(REPO, "bob", Permission.WRITE)
+        await h.service.a.user_tokens.set("maria", UserToken(token="m"))
+        h.forge.put_pr(
+            _ready(
+                42,
+                "a" * 40,
+                [
+                    _job(1, "check-changes", "failure", 100, workflow="CI Test"),
+                    _job(2, "ci-test-finish", "failure", 100, workflow="CI Test"),
+                    _job(3, "check-changes", "success", 200, workflow="CI Test"),
+                    _job(4, "unit", "cancelled", 200, workflow="CI Test"),
+                    _job(5, "ci-test-finish", "failure", 200, workflow="CI Test"),
+                ],
+            )
+        )
+        await _schedule(h, 42)
+        await h.settle()
+        assert h.forge.writes_of("rerun_failed_jobs") == [{"repo": REPO, "run_id": 200}]
+        assert (await _phase(h, 42)).phase == "rerunning"
+    finally:
+        await h.close()

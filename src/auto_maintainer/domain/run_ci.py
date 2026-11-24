@@ -96,6 +96,32 @@ class CiView(BaseModel):
     """Checks the forge holds until a maintainer approves running them."""
 
 
+def _named(check: CheckRun, names: set[str]) -> bool:
+    """Whether ``check`` matches a job name in ``names``, including reusable
+    workflow jobs formatted as ``caller / job``."""
+    low = check.name.lower()
+    return low in names or low.split(" / ")[-1] in names
+
+
+def stopped_runs(checks: list[CheckRun], start: CiStart | None = None) -> set[int]:
+    """Run ids among ``latest_checks(checks)`` that stopped at a gate job
+    (``ci.start.gate_jobs``, excluding ``summary_jobs``): rerunning them replays
+    the event they started from, labels and all, so they are never rerun."""
+    if start is None or not start.gate_jobs:
+        return set()
+    gates = {j.lower() for j in start.gate_jobs}
+    summaries = {j.lower() for j in start.summary_jobs}
+    return {
+        c.run_id
+        for c in latest_checks(checks)
+        if c.run_id is not None
+        and c.status == CheckStatus.COMPLETED
+        and c.failed
+        and _named(c, gates)
+        and not _named(c, summaries)
+    }
+
+
 def ci_view(
     pr: PrSnapshot, gate_label: str | None, start: CiStart | None = None
 ) -> CiView:
@@ -107,10 +133,6 @@ def ci_view(
     optional = {j.lower() for j in start.optional_checks}
     checks = latest_checks(pr.checks)
 
-    def named(c: CheckRun, names: set[str]) -> bool:
-        # A job of a reusable workflow reads ``caller / job``.
-        return c.name.lower() in names or c.name.lower().split(" / ")[-1] in names
-
     held = [c for c in checks if c.awaiting_approval]
     done = [c for c in checks if c.status == CheckStatus.COMPLETED]
     failed = [c for c in done if c.failed]
@@ -118,9 +140,9 @@ def ci_view(
     real = [
         c
         for c in failed
-        if not named(c, gates) and not named(c, summaries) and not named(c, optional)
+        if not _named(c, gates) and not _named(c, summaries) and not _named(c, optional)
     ]
-    stopped = [c for c in failed if named(c, gates)]
+    stopped = [c for c in failed if _named(c, gates) and not _named(c, summaries)]
     running = sum(1 for c in checks if c.status != CheckStatus.COMPLETED)
     passed = sum(
         1
@@ -143,10 +165,12 @@ def ci_view(
         return CiView(state="running", failed=real, **view)
     if real:
         return CiView(state="failed", failed=real, **view)
+    if cancelled:
+        return CiView(state="failed", **view)
     if stopped:
         return CiView(state="stopped", **view)
-    summary_failed = [c for c in failed if named(c, summaries)]
-    if summary_failed or cancelled:
+    summary_failed = [c for c in failed if _named(c, summaries)]
+    if summary_failed:
         return CiView(state="failed", failed=summary_failed, **view)
     if checks:
         return CiView(state="passed", **view)
@@ -225,14 +249,9 @@ def plan_run_ci(
     view = ci_view(pr, gate_label, start)
     if view.state == "gated":
         return RunCiPlan(state="gated", label=gate_label)
-    gates = {j.lower() for j in (start.gate_jobs if start else [])}
     latest = latest_checks(pr.checks)
-    stopped_runs = {
-        c.run_id
-        for c in latest
-        if c.failed and c.name.lower().split(" / ")[-1] in gates
-    }
-    reruns = [r for r in rerun_targets(latest) if r.run_id not in stopped_runs]
+    stopped = stopped_runs(latest, start)
+    reruns = [r for r in rerun_targets(latest) if r.run_id not in stopped]
     if reruns:
         return RunCiPlan(state="failed", reruns=reruns)
     if view.state == "approval":
