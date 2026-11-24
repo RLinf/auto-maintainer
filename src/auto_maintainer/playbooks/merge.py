@@ -839,8 +839,18 @@ class MergePlaybook(Playbook):
             )
         if view.state == "approval":
             self._started(state, pr, now)
-            runs = sorted({c.run_id for c in view.held if c.run_id})
-            workflows = sorted({c.workflow or c.name for c in view.held})
+            approved = await self._approved_runs(ctx, pr)
+            held = [c for c in view.held if c.run_id and c.run_id not in approved]
+            runs = sorted({c.run_id for c in held if c.run_id})
+            workflows = sorted({c.workflow or c.name for c in (held or view.held)})
+            if not runs:
+                state.approval_needed = False
+                detail = "approving " + ", ".join(workflows)
+                await self._set(ctx, profile, info, pr, state, "starting", detail)
+                return PlaybookResult(
+                    wait=wait.model_copy(update={"seconds": start.start_minutes * 60}),
+                    result={"phase": "starting"},
+                )
             # Proposed to the scheduler either way; the pipeline approves it as them
             # only on an arm they made by hand at code they saw, so otherwise it
             # waits for them to approve running a fork's code as themselves.
@@ -858,6 +868,7 @@ class MergePlaybook(Playbook):
                     + f" until {arm.armed_by} approves running them"
                 )
             else:
+                state.approval_needed = False
                 detail = "approving " + ", ".join(workflows)
             await self._set(ctx, profile, info, pr, state, "starting", detail)
             return PlaybookResult(
@@ -2261,10 +2272,11 @@ class MergePlaybook(Playbook):
         GitHub's to say (``RepoInfo.dismisses_stale_reviews``,
         ``requires_last_push_approval``), and the merge gate reads that, with CI at
         the new head. Only a follow-up review at the new head that finds a critical
-        or major problem unschedules it. A base merge the schedule asked for, and a
-        push its scheduler approved as themselves on a PR they scheduled by hand
-        (``_scheduler_pushed``), keep the arm as seen; other commits mark it unseen
-        (``MergeArm.unseen``)."""
+        or major problem unschedules it. A base merge the schedule asked for keeps
+        the arm's seen state; a push its scheduler approved onto the branch as
+        themselves (``_scheduler_pushed``) or held CI they already ran at the new
+        head as themselves (``_scheduler_approved_ci``) marks a hand-made arm seen;
+        other commits mark it unseen (``MergeArm.unseen``)."""
         if (
             state.updated_from
             and same_commit(state.updated_from, arm.sha)
@@ -2293,10 +2305,11 @@ class MergePlaybook(Playbook):
             if f.get("severity") in ("critical", "major")
         ]
         if not serious:
+            seen = pushed == "pushed" or await self._scheduler_approved_ci(ctx, pr, arm)
             arm = arm.model_copy(
                 update={
                     "sha": pr.head_sha,
-                    "unseen": arm.unseen or pushed != "pushed",
+                    "unseen": not seen,
                 }
             )
             await ctx.store.save_arm(arm)
@@ -2329,12 +2342,13 @@ class MergePlaybook(Playbook):
     async def _scheduler_pushed(
         self, ctx: PlaybookContext, pr: PrSnapshot, arm: MergeArm
     ) -> Literal["pushed", "pushing"] | None:
-        """``pushed`` when the PR's head is a ``pr.fix`` onto its branch, from the
-        armed head, that the maintainer who scheduled it by hand approved as
-        themselves: they saw the change, and keeping their arm keeps the steps only
-        their schedule approves (a fork's held workflows). ``pushing`` while such a
-        push runs and its new head is not recorded yet. An arm automatic scheduling
-        made is never kept this way: nobody saw the code it armed."""
+        """``pushed`` when the PR's head is a ``pr.fix`` onto its branch that the
+        maintainer who scheduled it by hand approved and pushed as themselves: they
+        saw the change, and marking their arm seen lets the steps only their
+        schedule approves (a fork's held workflows) run as them. ``pushing`` while
+        such a push from the armed head runs and its new head is not recorded yet.
+        An arm automatic scheduling made is never kept seen this way: nobody saw
+        the code it armed."""
         if arm.auto:
             return None
         records = await ctx.store.list_actions(
@@ -2348,7 +2362,6 @@ class MergePlaybook(Playbook):
             for r in records
             if (r.post_as or "").lower() == arm.armed_by.lower()
             and r.action.payload.get("target") == "branch"
-            and same_commit(r.action.payload.get("base_sha"), arm.sha)
         ]
         if any(
             r.status == ActionStatus.EXECUTED
@@ -2356,9 +2369,50 @@ class MergePlaybook(Playbook):
             for r in theirs
         ):
             return "pushed"
-        if any(r.status == ActionStatus.INTENT for r in theirs):
+        if any(
+            r.status == ActionStatus.INTENT
+            and same_commit(r.action.payload.get("base_sha"), arm.sha)
+            for r in theirs
+        ):
             return "pushing"
         return None
+
+    async def _approved_runs(self, ctx: PlaybookContext, pr: PrSnapshot) -> set[int]:
+        """Workflow run IDs already approved at ``pr.head_sha`` by an executed
+        ``ci.approve_run`` action (whether through the schedule or the PR page)."""
+        records = await ctx.store.list_actions(
+            repo=pr.repo,
+            number=pr.number,
+            kinds=[ActionKind.CI_APPROVE_RUN],
+            statuses=[ActionStatus.EXECUTED],
+        )
+        return {
+            int(run_id)
+            for r in records
+            if same_commit(r.action.head_sha, pr.head_sha)
+            for run_id in (r.action.payload.get("run_ids") or [])
+        }
+
+    async def _scheduler_approved_ci(
+        self, ctx: PlaybookContext, pr: PrSnapshot, arm: MergeArm
+    ) -> bool:
+        """Whether the maintainer who scheduled ``pr`` by hand already ran
+        ``ci.approve_run`` at ``pr.head_sha`` as themselves (for example from the PR
+        page before the schedule moved ``arm.sha`` to this head)."""
+        if arm.auto:
+            return False
+        records = await ctx.store.list_actions(
+            repo=pr.repo,
+            number=pr.number,
+            kinds=[ActionKind.CI_APPROVE_RUN],
+            statuses=[ActionStatus.EXECUTED],
+        )
+        return any(
+            (r.post_as or "").lower() == arm.armed_by.lower()
+            and same_commit(r.action.head_sha, pr.head_sha)
+            and bool(r.action.payload.get("run_ids"))
+            for r in records
+        )
 
 
 def cancel_runs_action(
