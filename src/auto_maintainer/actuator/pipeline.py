@@ -679,9 +679,8 @@ class ActionPipeline:
         ]
         await self.store.save_proposal(proposal)
 
-    async def reject(self, proposal_id: str, login: str, reason: str) -> Proposal:
-        if not reason.strip():
-            raise ApprovalError("a rejection needs a reason")
+    async def reject(self, proposal_id: str, login: str, reason: str = "") -> Proposal:
+        clean = reason.strip()
         proposal = await self.store.get_proposal(proposal_id)
         if proposal is None or proposal.state != ProposalState.PENDING:
             raise ApprovalError(f"proposal {proposal_id} is not pending")
@@ -689,11 +688,13 @@ class ActionPipeline:
         proposal.state = ProposalState.REJECTED
         proposal.decided_by = login
         proposal.decided_at = self.clock.now()
-        proposal.reason = reason
+        proposal.reason = clean or None
         await self.store.save_proposal(proposal)
         if record is not None:
             record.status = ActionStatus.DENIED
-            record.error = f"rejected by {login}: {reason}"
+            record.error = (
+                f"rejected by {login}: {clean}" if clean else f"rejected by {login}"
+            )
             await self.store.save_action(record)
             await self.store.add_signal(
                 Signal(
@@ -701,7 +702,7 @@ class ActionPipeline:
                     repo=record.action.repo,
                     number=record.action.number,
                     source=login,
-                    payload={"action_kind": record.action.kind, "reason": reason},
+                    payload={"action_kind": record.action.kind, "reason": clean},
                 )
             )
             await self.store.add_audit(
@@ -711,7 +712,7 @@ class ActionPipeline:
                     number=record.action.number,
                     actor=login,
                     action_id=record.action.id,
-                    summary=f"rejected: {reason}",
+                    summary=f"rejected: {clean}" if clean else "rejected",
                 )
             )
             await self.bus.publish(

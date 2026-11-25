@@ -2199,8 +2199,9 @@ class Service:
         return decisions, state
 
     async def reject_memory_change(
-        self, change_id: str, login: str, reason: str
+        self, change_id: str, login: str, reason: str = ""
     ) -> MemoryChange:
+        clean = reason.strip()
         change = await self.store.get_memory_change(change_id)
         if change is None or change.state != MemoryChangeState.OPEN:
             raise ValueError(f"memory change {change_id} is not open")
@@ -2215,12 +2216,18 @@ class Service:
             if not decision.allowed:
                 raise PermissionError(decision.reason)
         change.state = MemoryChangeState.REJECTED
-        change.rejected_reason = f"{login}: {reason}"
+        change.rejected_reason = (
+            f"{login}: {clean}" if clean else f"rejected by {login}"
+        )
         await self.store.save_memory_change(change)
         await self.a.memory.drop_change(change)
         await self.store.add_audit(
             AuditEntry(
-                kind="memory", actor=login, summary=f"rejected {change.title}: {reason}"
+                kind="memory",
+                actor=login,
+                summary=f"rejected {change.title}: {clean}"
+                if clean
+                else f"rejected {change.title}",
             )
         )
         return change

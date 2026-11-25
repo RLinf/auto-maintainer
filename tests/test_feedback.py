@@ -260,3 +260,28 @@ async def test_rejection_learning_deduplicates_against_pending_and_consolidates(
     text = change.files[path]
     assert text is not None
     assert text == f"# Review lessons\n- {consolidated}\n"
+
+
+async def test_rejecting_without_a_reason_succeeds_and_skips_learning(
+    h: Harness,
+) -> None:
+    """Rejections allow omitting the reason: the proposal is rejected, learning
+    skips without running an agent, and the next prompt omits an empty Why."""
+    await h.emit(_request())
+    proposal, _ = await _labels_proposal(h)
+    assert proposal is not None
+
+    rejected = await h.service.pipeline.reject(proposal.id, "maria", "   ")
+    await h.settle()
+
+    assert rejected.state == ProposalState.REJECTED
+    assert rejected.reason is None
+    record = await h.store.get_action(proposal.action_id)
+    assert record is not None and record.error == "rejected by maria"
+    assert not _tasks(h, "learn")
+
+    from auto_maintainer.playbooks.feedback import rejections_block, rejections_on
+
+    block = rejections_block(await rejections_on(h.store, REPO, 42))
+    assert "maria turned down labels enhancement, documentation at" in block
+    assert "Why:" not in block

@@ -101,7 +101,8 @@ def rejections_block(rejections: list[Rejection]) -> str:
         )
         at = f" at {r.head_sha[:7]}" if r.head_sha else ""
         lines.append(
-            f"- {r.by or 'a reviewer'} turned down {what}{at}. Why: {r.reason}"
+            f"- {r.by or 'a reviewer'} turned down {what}{at}."
+            + (f" Why: {r.reason}" if r.reason else "")
         )
     return (
         "Reviewers of this repository turned these proposals down on this PR. Do not "

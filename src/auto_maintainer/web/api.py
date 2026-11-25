@@ -1005,7 +1005,7 @@ class ApproveBody(BaseModel):
 
 
 class RejectBody(BaseModel):
-    reason: str
+    reason: str = ""
 
 
 class EditBody(BaseModel):
@@ -4202,7 +4202,7 @@ def build_router() -> APIRouter:
     async def reject(
         request: Request,
         proposal_id: str,
-        body: RejectBody,
+        body: RejectBody | None = None,
         user: User = Depends(current_user),
     ) -> dict[str, Any]:
         service = service_of(request)
@@ -4212,7 +4212,7 @@ def build_router() -> APIRouter:
         await require_decide(service, user, proposal)
         try:
             proposal = await service.pipeline.reject(
-                proposal_id, user.login, body.reason
+                proposal_id, user.login, body.reason if body else ""
             )
         except ValueError as e:
             raise HTTPException(409, str(e)) from e
@@ -4553,13 +4553,13 @@ def build_router() -> APIRouter:
     async def reject_memory(
         request: Request,
         change_id: str,
-        body: RejectBody,
+        body: RejectBody | None = None,
         user: User = Depends(current_user),
     ) -> dict[str, Any]:
         service = service_of(request)
         try:
             change = await service.reject_memory_change(
-                change_id, user.login, body.reason
+                change_id, user.login, body.reason if body else ""
             )
         except PermissionError as e:
             raise HTTPException(403, str(e)) from e

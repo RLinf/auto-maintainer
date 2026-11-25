@@ -612,3 +612,42 @@ async def test_a_maintainer_changes_and_removes_members_directly_and_a_reviewer_
             and c.get("reason") == "stepped down"
             for c in page["governance"]["history"]
         )
+
+
+async def test_reject_endpoints_allow_empty_or_omitted_reason(demo) -> None:
+    """Both proposal and memory-change reject endpoints accept an empty or omitted
+    reason."""
+    h, app = demo
+    async with _as(app, "maria") as maria:
+        await maria.post(
+            f"/api/prs/{REPO}/42/review",
+            json={},
+        )
+        await h.settle()
+        proposals = (await maria.get("/api/proposals")).json()
+        assert proposals
+        res_prop = await maria.post(
+            f"/api/proposals/{proposals[0]['id']}/reject", json={}
+        )
+        assert res_prop.status_code == 200, res_prop.text
+        assert res_prop.json()["state"] == "rejected"
+        assert res_prop.json()["reason"] is None
+
+    from auto_maintainer.domain.memory import MemoryChange, Tier
+
+    change = MemoryChange(
+        tier=Tier.T1,
+        title="draft note",
+        files={f"repos/{REPO}/notes.md": "hello\n"},
+        repos=[REPO],
+        requested_by="walt",
+    )
+    await h.store.save_memory_change(change)
+
+    async with _as(app, "maria") as maria:
+        res_mem = await maria.post(
+            f"/api/memory/changes/{change.id}/reject", json={"reason": ""}
+        )
+        assert res_mem.status_code == 200, res_mem.text
+        assert res_mem.json()["state"] == "rejected"
+        assert res_mem.json()["rejected_reason"] == "rejected by maria"

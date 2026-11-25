@@ -389,7 +389,7 @@ const zh: Record<string, string> = {
   "Discard edits": "放弃修改",
   "Show what will be posted": "显示将发布的内容",
   "Hide what will be posted": "隐藏将发布的内容",
-  "Reason (required)": "理由（必填）",
+  "Reason (optional)": "理由（可选）",
   "Select all": "全选",
   "Ask about these": "询问这些",
   "Approving…": "批准中…",
