@@ -35,13 +35,29 @@ from ..domain.scoring import Rubric
 from ..domain.secrets import find_secrets
 from ..domain.visibility import GUARD_KEY, PublicText
 
-_FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
-_CODE_RE = re.compile(r"`[^`\n]*`")
-_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+_FENCE_OPEN_RE = re.compile(r"[ \t]*((?:>[ \t]*)*)(`{3,}|~{3,})([^\n]*)")
+_PARA_BREAK_RE = re.compile(r"\r?\n(?:[ \t]*>)*[ \t]*\r?\n")
+_BLOCKQUOTE_RE = re.compile(r"(?m)^[ \t]*>.*$")
+_MD_LINK_RE = re.compile(r"\[[^\]\n]+\]\([^)\n]+\)")
+_URL_RE = re.compile(r"https?://\S+")
+_SUB_RE = re.compile(r"<sub>.*?</sub>", re.DOTALL | re.IGNORECASE)
+_QUOTED_RE = re.compile(
+    r'"[^"\n]*"'
+    r"|“[^”\n]*”"
+    r"|(?<!\w)'[^'\n]*'(?!\w)"
+    r"|‘[^’\n]*’"
+    r"|「[^」\n]*」"
+    r"|『[^』\n]*』"
+    r"|《[^》\n]*》"
+    r"|〈[^〉\n]*〉"
+    r"|【[^】\n]*】"
+)
 _MENTION_RE = re.compile(
     r"(?<![\w@/.-])@([A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:\[bot\])?)(?![\w-])"
 )
-_CJK_RE = re.compile(r"[㐀-䶿一-鿿぀-ヿ가-힯]")
+_CJK_CLASS = r"㐀-䶿一-鿿぀-ヿ가-힯"
+_CJK_RE = re.compile(rf"[{_CJK_CLASS}]")
+_CJK_RUN_RE = re.compile(rf"[{_CJK_CLASS}]{{12,}}")
 _SCORE_RE = re.compile(r"\b(score|tier)\s*[:=]\s*\d", re.IGNORECASE)
 
 
@@ -76,8 +92,131 @@ class GuardResult:
 
 
 def _prose(text: str) -> str:
-    """Text outside code blocks, inline code, and HTML comments."""
-    return _CODE_RE.sub(" ", _FENCE_RE.sub(" ", _COMMENT_RE.sub(" ", text)))
+    """Text outside fenced code blocks, inline code spans, and HTML comments."""
+    out: list[str] = []
+    n = len(text)
+    i = 0
+    at_line_start = True
+
+    while i < n:
+        if at_line_start:
+            fence = _FENCE_OPEN_RE.match(text, i)
+            if fence is not None:
+                prefix, marker, info = fence.groups()
+                ch = marker[0]
+                if ch == "~" or "`" not in info:
+                    line_end = text.find("\n", fence.end())
+                    if line_end != -1:
+                        depth = prefix.count(">")
+                        close_re = re.compile(
+                            rf"^[ \t]*(?:>[ \t]*){{{depth}}}{re.escape(ch)}{{{len(marker)},}}[ \t\r]*$",
+                            re.MULTILINE,
+                        )
+                        closed = close_re.search(text, line_end + 1)
+                        if closed is not None:
+                            end = closed.end()
+                            if end < n and text[end] == "\n":
+                                end += 1
+                            out.append("\n")
+                            i = end
+                            at_line_start = True
+                            continue
+
+        if text.startswith("<!--", i):
+            end = text.find("-->", i + 4)
+            if end != -1:
+                comment_end = end + 3
+                out.append("\n" if "\n" in text[i:comment_end] else " ")
+                i = comment_end
+                at_line_start = False
+                continue
+
+        if text[i] == "\\" and i + 1 < n and text[i + 1] == "`":
+            out.append(text[i : i + 2])
+            i += 2
+            at_line_start = False
+            continue
+
+        if text[i] == "`":
+            j = i
+            while j < n and text[j] == "`":
+                j += 1
+            ticks = j - i
+            para_end = _PARA_BREAK_RE.search(text, j)
+            limit = para_end.start() if para_end is not None else n
+            k = j
+            matched_end = -1
+            while k < limit:
+                k = text.find("`", k, limit)
+                if k == -1:
+                    break
+                k_end = k
+                while k_end < limit and text[k_end] == "`":
+                    k_end += 1
+                if k_end - k == ticks:
+                    matched_end = k_end
+                    break
+                k = k_end
+            if matched_end != -1:
+                out.append(" ")
+                i = matched_end
+            else:
+                out.append(text[i:j])
+                i = j
+            at_line_start = False
+            continue
+
+        ch = text[i]
+        out.append(ch)
+        i += 1
+        at_line_start = ch == "\n"
+
+    return "".join(out)
+
+
+def _strip_quoted(prose: str) -> str:
+    """Prose without blockquotes, Markdown links, URLs, or single-line quotes."""
+    text = _BLOCKQUOTE_RE.sub(" ", prose)
+    text = _MD_LINK_RE.sub(" ", text)
+    text = _URL_RE.sub(" ", text)
+    return _QUOTED_RE.sub(" ", text)
+
+
+def _has_cjk_prose(text: str) -> bool:
+    letters = [c for c in text if c.isalpha()]
+    if not letters:
+        return False
+    cjk = len(_CJK_RE.findall(text))
+    if not cjk:
+        return False
+    if cjk / len(letters) > 0.15:
+        return True
+    if _CJK_RUN_RE.search(text):
+        return True
+    for line in text.splitlines():
+        line_cjk = len(_CJK_RE.findall(line))
+        if not line_cjk:
+            continue
+        line_letters = sum(1 for c in line if c.isalpha())
+        if not line_letters:
+            continue
+        ratio = line_cjk / line_letters
+        if (line_cjk >= 4 and ratio > 0.5) or (line_cjk >= 8 and ratio > 0.25):
+            return True
+    return False
+
+
+def _not_english(prose: str) -> bool:
+    """Whether ``prose`` is written in a CJK language rather than English.
+
+    Quotes, blockquotes, and Markdown links are discounted when the text also
+    has unquoted prose, so English reviews on bilingual repositories can cite
+    short non-English titles or snippets without being blocked.
+    """
+    body = _SUB_RE.sub(" ", prose)
+    own = _strip_quoted(body)
+    target = own if any(c.isalpha() for c in own) else _URL_RE.sub(" ", body)
+    return _has_cjk_prose(target)
 
 
 def _tier_names(profile: RepoProfile) -> list[str]:
@@ -127,13 +266,14 @@ def check_text(
                 f"mentions @{login}, who is not the PR author or a code owner of the touched paths"
             )
 
-    if language and profile.languages.public.lower().startswith("en"):
-        letters = [c for c in prose if c.isalpha()]
-        cjk = len(_CJK_RE.findall(prose))
-        if letters and cjk / len(letters) > 0.02:
-            result.errors.append(
-                f"is not in the public language ({profile.languages.public})"
-            )
+    if (
+        language
+        and profile.languages.public.lower().startswith("en")
+        and _not_english(prose)
+    ):
+        result.errors.append(
+            f"is not in the public language ({profile.languages.public})"
+        )
 
     for phrase in profile.languages.style_phrases:
         if phrase and phrase.lower() in lowered:
