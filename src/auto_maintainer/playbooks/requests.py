@@ -24,6 +24,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from ..domain.actions import ActionKind, ActionStatus
 from ..domain.events import Event, EventKind
@@ -32,6 +33,9 @@ from ..domain.ports import Store
 from ..domain.profile import RepoProfile
 from ..domain.records import ActionRecord
 from ..domain.review import ReviewState
+
+if TYPE_CHECKING:
+    from .base import PlaybookContext
 
 AUTO_EVENTS = (EventKind.PR_OPENED, EventKind.PR_SYNCHRONIZED, EventKind.PR_RECONCILED)
 FOLLOWUP_STATES = (ReviewState.FOLLOWUP_REVIEW, ReviewState.APPROVED_NEW_COMMITS)
@@ -176,3 +180,30 @@ async def recorded_review(store: Store, repo: str, number: int) -> ActionRecord 
         if record.action.head_sha:
             return record
     return None
+
+
+async def supersede_older_reviews(
+    ctx: PlaybookContext,
+    repo: str,
+    number: int,
+    head_sha: str,
+    *,
+    check_current: bool = False,
+) -> int:
+    """Retire pending review drafts and other pending items from earlier reviews of
+    older commits of ``repo#number``. With ``check_current``, skip when a newer
+    snapshot shows the PR already moved past ``head_sha`` so a finishing older job
+    never supersedes a newer review's draft."""
+    if ctx.drafts is None or not head_sha:
+        return 0
+    if check_current:
+        latest = await ctx.store.get_snapshot(repo, number)
+        if (
+            latest is not None
+            and latest.head_sha
+            and not same_commit(latest.head_sha, head_sha)
+        ):
+            return 0
+    return await ctx.drafts.supersede_review_drafts(
+        repo, number, head_sha, exclude_job_id=ctx.job.id
+    )

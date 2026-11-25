@@ -1140,6 +1140,183 @@ async def test_a_requested_draft_outlives_a_push_and_posts_on_its_commit(
     assert posted["commit_sha"] == "a" * 40
 
 
+async def test_supersede_review_drafts_clears_older_review_items_and_keeps_same_head_and_unrelated(
+    harness: Harness,
+) -> None:
+    """When a newer review runs at head ``b``, pending review drafts (even with
+    ``draft_for``), ``review.update`` drafts, and pending items from earlier
+    ``review``/``followup`` runs at older heads are superseded, while same-head
+    review drafts and unrelated proposals stay."""
+    from auto_maintainer.domain.actions import (
+        ActionKind,
+        FixPrPayload,
+        LabelPayload,
+        Provenance,
+        RequestReviewersPayload,
+        ReviewPostPayload,
+        ReviewUpdatePayload,
+        ThreadReplyPayload,
+        make_action,
+    )
+
+    await _auto(
+        harness,
+        review_post="propose",
+        review_update="propose",
+        label_apply="propose",
+        pr_request_reviewers="propose",
+        thread_reply="propose",
+    )
+    harness.forge.put_pr(_pr())
+
+    older_draft = make_action(
+        ActionKind.REVIEW_POST,
+        "acme/widget",
+        ReviewPostPayload(body="Older review."),
+        number=42,
+        head_sha="a" * 40,
+        discriminator="old-review",
+        draft_for="maria",
+    ).model_copy(update={"provenance": Provenance(job_id="job_old", playbook="review")})
+    older_update = make_action(
+        ActionKind.REVIEW_UPDATE,
+        "acme/widget",
+        ReviewUpdatePayload(
+            target="review", target_id=7, body="Edited older review.", revises="act_1"
+        ),
+        number=42,
+        head_sha="a" * 40,
+        discriminator="old-update",
+        draft_for="maria",
+    )
+    older_label = make_action(
+        ActionKind.LABEL_APPLY,
+        "acme/widget",
+        LabelPayload(roles=["changes_requested"]),
+        number=42,
+        head_sha="a" * 40,
+        discriminator="review",
+        draft_for="maria",
+    ).model_copy(update={"provenance": Provenance(job_id="job_old", playbook="review")})
+    older_reviewers = make_action(
+        ActionKind.PR_REQUEST_REVIEWERS,
+        "acme/widget",
+        RequestReviewersPayload(logins=["walt"]),
+        number=42,
+        head_sha="a" * 40,
+        draft_for="maria",
+    ).model_copy(update={"provenance": Provenance(job_id="job_old", playbook="review")})
+    older_reply = make_action(
+        ActionKind.THREAD_REPLY,
+        "acme/widget",
+        ThreadReplyPayload(comment_id=9, body="Resolved."),
+        number=42,
+        head_sha="a" * 40,
+        discriminator="F1",
+        draft_for="maria",
+    ).model_copy(
+        update={"provenance": Provenance(job_id="job_old_fu", playbook="followup")}
+    )
+    same_head_draft = make_action(
+        ActionKind.REVIEW_POST,
+        "acme/widget",
+        ReviewPostPayload(body="Same-head other agent."),
+        number=42,
+        head_sha="b" * 40,
+        discriminator="same-head",
+        draft_for="walt",
+    ).model_copy(update={"provenance": Provenance(job_id="job_b", playbook="review")})
+    unrelated_triage = make_action(
+        ActionKind.LABEL_APPLY,
+        "acme/widget",
+        LabelPayload(labels=["bug"]),
+        number=42,
+        head_sha="a" * 40,
+        discriminator="triage",
+    ).model_copy(update={"provenance": Provenance(job_id="job_tri", playbook="triage")})
+    unrelated_fix = make_action(
+        ActionKind.PR_FIX,
+        "acme/widget",
+        FixPrPayload(
+            title="Fix",
+            body="Fixes the bug.",
+            patch="diff --git a/x b/x\n",
+            base_sha="a" * 40,
+            requested_by="maria",
+        ),
+        number=42,
+        head_sha="a" * 40,
+        discriminator="fix-1",
+        draft_for="maria",
+    ).model_copy(update={"provenance": Provenance(job_id="job_fix", playbook="fix")})
+    excluded_job_item = make_action(
+        ActionKind.REVIEW_POST,
+        "acme/widget",
+        ReviewPostPayload(body="Excluded job."),
+        number=42,
+        head_sha="a" * 40,
+        discriminator="excluded",
+        draft_for="maria",
+    ).model_copy(update={"provenance": Provenance(job_id="job_cur", playbook="review")})
+
+    for action in (
+        older_draft,
+        older_update,
+        older_label,
+        older_reviewers,
+        older_reply,
+        same_head_draft,
+        unrelated_triage,
+        unrelated_fix,
+        excluded_job_item,
+    ):
+        await harness.service.pipeline.submit(action)
+
+    cleared = await harness.service.pipeline.supersede_review_drafts(
+        "acme/widget", 42, "b" * 40, exclude_job_id="job_cur"
+    )
+    assert cleared == 5
+    pending_ids = {
+        p.action_id for p in await harness.store.list_proposals(ProposalState.PENDING)
+    }
+    assert pending_ids == {
+        same_head_draft.id,
+        unrelated_triage.id,
+        unrelated_fix.id,
+        excluded_job_item.id,
+    }
+    for superseded_action in (
+        older_draft,
+        older_update,
+        older_label,
+        older_reviewers,
+        older_reply,
+    ):
+        rec = await harness.store.get_action(superseded_action.id)
+        prop = await harness.store.proposal_for_action(superseded_action.id)
+        assert rec is not None and rec.status == ActionStatus.SUPERSEDED
+        assert prop is not None and prop.state == ProposalState.SUPERSEDED
+
+    # A late-finishing older job checking current head does not supersede a newer draft.
+    from auto_maintainer.domain.events import Event, EventKind
+    from auto_maintainer.domain.records import Job
+    from auto_maintainer.playbooks.requests import supersede_older_reviews
+
+    await harness.store.save_snapshot(_pr().model_copy(update={"head_sha": "b" * 40}))
+    ctx = await harness.service.context_for(
+        Job(playbook="review", key="late", repo="acme/widget", number=42),
+        Event(kind=EventKind.PR_SYNCHRONIZED, repo="acme/widget", number=42),
+    )
+    assert (
+        await supersede_older_reviews(
+            ctx, "acme/widget", 42, "a" * 40, check_current=True
+        )
+        == 0
+    )
+    kept = await harness.store.proposal_for_action(same_head_draft.id)
+    assert kept is not None and kept.state == ProposalState.PENDING
+
+
 async def test_a_post_the_policy_refuses_after_approval_stays_a_draft(
     harness: Harness,
 ) -> None:

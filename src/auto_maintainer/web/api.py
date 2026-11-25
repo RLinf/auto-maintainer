@@ -4966,6 +4966,8 @@ async def _request_review(
         source="dashboard",
     )
     await service.bus.publish(event)
+    if pr.state == PrState.OPEN and pr.head_sha:
+        await service.pipeline.supersede_review_drafts(repo, number, pr.head_sha)
     return {
         **out,
         "run": run,

@@ -371,3 +371,110 @@ async def test_a_recorded_review_makes_the_next_push_a_follow_up(
         assert "Missing case" in followup.prompt, "it follows up the recorded findings"
     finally:
         await h.close()
+
+
+async def test_a_new_review_supersedes_older_head_review_drafts_and_items(
+    tmp_path: Path,
+) -> None:
+    """Requested review drafts outlive a push, then are superseded once a new review
+    runs at a newer head (even when requested by another reviewer). A skipped review
+    request leaves existing drafts untouched."""
+    from auto_maintainer.domain.snapshot import IssueComment
+
+    h = await Harness.create(tmp_path, layer={"extends": ["dco"]})
+    try:
+        _answers(h)
+        h.forge.put_pr(_pr(42, "1" * 40))
+        await h.poll()
+
+        # First review at head 1... for maria.
+        await h.emit(_request(42, by="maria"))
+        pending_1 = await h.store.list_proposals(ProposalState.PENDING)
+        assert len(pending_1) == 1
+        draft_1 = await h.store.get_action(pending_1[0].action_id)
+        assert draft_1 is not None and draft_1.action.head_sha == "1" * 40
+
+        # Push head 2...: maria's requested draft stays pending until a new review runs.
+        pr = await h.forge.get_pr(REPO, 42)
+        h.forge.put_pr(pr.model_copy(update={"head_sha": "2" * 40}))
+        await h.poll()
+        assert [p.id for p in await h.store.list_proposals(ProposalState.PENDING)] == [
+            pending_1[0].id
+        ]
+
+        # Unauthorized /am review skips and must not supersede existing drafts.
+        pr = await h.forge.get_pr(REPO, 42)
+        h.forge.put_pr(
+            pr.model_copy(
+                update={
+                    "comments": [
+                        IssueComment(id=9, author="outsider", body="/am review")
+                    ]
+                }
+            )
+        )
+        await h.poll()
+        assert [p.id for p in await h.store.list_proposals(ProposalState.PENDING)] == [
+            pending_1[0].id
+        ]
+
+        # Another reviewer (walt) triggers a review at head 2...: maria's older draft
+        # at head 1... is superseded and only walt's draft at head 2... remains pending.
+        await h.emit(_request(42, by="walt"))
+        pending_2 = await h.store.list_proposals(ProposalState.PENDING)
+        assert len(pending_2) == 1
+        draft_2 = await h.store.get_action(pending_2[0].action_id)
+        assert draft_2 is not None and draft_2.action.head_sha == "2" * 40
+        assert pending_2[0].requested_by == "walt"
+        old_prop = await h.store.get_proposal(pending_1[0].id)
+        assert old_prop is not None and old_prop.state == ProposalState.SUPERSEDED
+    finally:
+        await h.close()
+
+
+async def test_a_followup_review_supersedes_older_head_pending_review_drafts(
+    tmp_path: Path,
+) -> None:
+    """When a PR already has a posted review, triggering a follow-up at head c
+    supersedes unposted follow-up drafts from an earlier head b."""
+    h = await Harness.create(tmp_path, layer={"extends": ["dco"]})
+    try:
+        _answers(h)
+        h.forge.put_pr(_pr(42, "a" * 40))
+        await h.poll()
+
+        # First review at head a, posted so subsequent commits run followup.
+        await h.emit(_request(42, by="maria"))
+        [first] = await h.store.list_proposals(ProposalState.PENDING)
+        await h.service.pipeline.approve(first.id, "maria")
+        await h.settle()
+
+        # Head b: maria requests a follow-up, leaving its draft pending.
+        pr = await h.forge.get_pr(REPO, 42)
+        h.forge.put_pr(pr.model_copy(update={"head_sha": "b" * 40}))
+        await h.poll()
+        await h.emit(_request(42, by="maria"))
+        pending_b = await h.store.list_proposals(ProposalState.PENDING)
+        assert pending_b
+        b_review = [
+            p
+            for p in pending_b
+            if (await h.store.get_action(p.action_id)).action.kind
+            == ActionKind.REVIEW_POST
+        ]
+        assert len(b_review) == 1
+
+        # Head c: walt triggers a follow-up -> supersedes maria's pending follow-up at b.
+        pr = await h.forge.get_pr(REPO, 42)
+        h.forge.put_pr(pr.model_copy(update={"head_sha": "c" * 40}))
+        await h.poll()
+        await h.emit(_request(42, by="walt"))
+        pending_c = await h.store.list_proposals(ProposalState.PENDING)
+        assert pending_c
+        for p in pending_c:
+            rec = await h.store.get_action(p.action_id)
+            assert rec is not None and rec.action.head_sha == "c" * 40
+        old = await h.store.get_proposal(b_review[0].id)
+        assert old is not None and old.state == ProposalState.SUPERSEDED
+    finally:
+        await h.close()
