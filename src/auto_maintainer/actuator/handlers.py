@@ -498,11 +498,26 @@ async def _merge(
         # PR with the queue's own message once the queue's checks pass.
         await x.writer.enqueue_merge(action.repo, pr.number, action.head_sha)
         return {"queued": True, "method": p.method}
+    had = mentioned(
+        "\n".join([pr.title, pr.body, *(c.message for c in pr.commits if c.message)])
+    )
     subject = await x.public(
-        action, profile, p.subject, marker_kind="merge", pr=pr, bare=True
+        action,
+        profile,
+        p.subject,
+        marker_kind="merge",
+        pr=pr,
+        bare=True,
+        also_mention=had,
     )
     body = await x.public(
-        action, profile, p.body or " ", marker_kind="merge", pr=pr, bare=True
+        action,
+        profile,
+        p.body or " ",
+        marker_kind="merge",
+        pr=pr,
+        bare=True,
+        also_mention=had,
     )
     sha = await x.writer.merge(
         action.repo, pr.number, action.head_sha, p.method, subject, body

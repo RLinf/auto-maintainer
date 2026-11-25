@@ -21,7 +21,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from ..domain.actions import Action, LabReproducePayload, LabRunPayload
+from ..domain.actions import Action, ActionKind, LabReproducePayload, LabRunPayload
 from ..domain.clock import Clock
 from ..domain.codeowners import codeowners_locations, owners_of_paths, parse_codeowners
 from ..domain.labs import LabProgress
@@ -177,7 +177,12 @@ class ExecContext:
             allowed.update(await self.code_owners(profile, pr.paths))
         entities = await self.knowledge.internal_entities(profile.repo, profile)
         public, _warnings = make_public(
-            text, profile, allowed, entities, tiers=action.kind not in TIER_BLIND
+            text,
+            profile,
+            allowed,
+            entities,
+            tiers=action.kind not in TIER_BLIND,
+            language=action.kind != ActionKind.PR_MERGE,
         )
         return public
 

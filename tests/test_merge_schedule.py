@@ -3709,3 +3709,100 @@ async def test_cancelled_run_with_overlapping_summary_and_gate_job_reruns_in_sch
         assert (await _phase(h, 42)).phase == "rerunning"
     finally:
         await h.close()
+
+
+async def test_merge_succeeds_when_commit_history_mentions_priority_tier_or_mentions(
+    harness: Harness,
+) -> None:
+    """PRs whose own commit messages mention P0/P1, @handles, or non-English text
+    still squash-merge cleanly through the leak guard."""
+    h = harness
+    pr = _ready(42, "a" * 40, _ci(42, "success")).model_copy(
+        update={
+            "commits": [
+                Commit(
+                    sha="a" * 40,
+                    message="docs: fix P0 bugs and 中文说明, thanks @contributor",
+                    author_login="alice",
+                )
+            ]
+        }
+    )
+    h.forge.put_pr(pr)
+    await _schedule(h, 42)
+    await h.settle()
+    merges = h.forge.writes_of("merge")
+    assert len(merges) == 1
+    assert "fix P0 bugs" in merges[0]["body"]
+
+
+async def test_missed_failed_merge_action_blocks_instead_of_looping_in_merging(
+    harness: Harness,
+) -> None:
+    """If a PR_MERGE action failed while the merge job was busy (so action.failed
+    was missed), the next wake must transition to blocked instead of re-submitting
+    the same idempotency key and staying stuck in merging forever."""
+    from auto_maintainer.domain.actions import MergePayload, Provenance, make_action
+    from auto_maintainer.domain.records import ActionRecord
+
+    h = harness
+    h.service.info.started_at = h.clock.now()
+    h.clock.advance(seconds=10)
+
+    pr = _ready(42, "a" * 40, _ci(42, "success"))
+    h.forge.put_pr(pr)
+    # Pre-seed the exact PR_MERGE action as FAILED during this service start,
+    # simulating an action that failed while the job was busy and missed action.failed.
+    arm = MergeArm(
+        repo=REPO,
+        number=42,
+        sha=pr.head_sha,
+        armed_by="maria",
+        armed_at=h.clock.now(),
+        armer_permission=Permission.ADMIN,
+        position=1.0,
+    )
+    await h.store.save_arm(arm)
+    disc = f"schedule:{int(arm.armed_at.timestamp())}:merge"
+    failed_action = make_action(
+        ActionKind.PR_MERGE,
+        REPO,
+        MergePayload(
+            method="squash",
+            subject=f"{pr.title} (#42)",
+            body="",
+            armed_by=arm.armed_by,
+        ),
+        number=42,
+        head_sha=pr.head_sha,
+        discriminator=disc,
+        provenance=Provenance(
+            playbook="merge",
+            requested_by=arm.armed_by,
+            scheduled_by=arm.armed_by,
+        ),
+    )
+    await h.store.add_action(
+        ActionRecord(
+            action=failed_action,
+            status=ActionStatus.FAILED,
+            error="GitHub refused: required status check missing",
+            created_at=h.clock.now(),
+            updated_at=h.clock.now(),
+        )
+    )
+    await h.emit(
+        Event(
+            kind=EventKind.MERGE_ARMED,
+            repo=REPO,
+            number=42,
+            sha=pr.head_sha,
+            payload={"by": "maria", "armed_at": arm.armed_at.isoformat()},
+        )
+    )
+    await h.settle()
+    st = await _phase(h, 42)
+    assert st.phase == "blocked"
+    assert "required status check missing" in st.detail
+    assert st.merge_attempts == 1
+    assert not h.forge.writes_of("merge")

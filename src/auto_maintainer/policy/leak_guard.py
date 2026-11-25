@@ -50,10 +50,13 @@ def mentioned(text: str) -> set[str]:
     return {login.lower() for login in _MENTION_RE.findall(_prose(text))}
 
 
-TIER_BLIND = frozenset({ActionKind.REVIEW_POST, ActionKind.REVIEW_UPDATE})
-"""Action kinds whose text comes from agents never shown a PR's priority tier or
-score, so a tier name in it is the review's own severity label. Scores stay
-refused there (``_SCORE_RE``)."""
+TIER_BLIND = frozenset(
+    {ActionKind.REVIEW_POST, ActionKind.REVIEW_UPDATE, ActionKind.PR_MERGE}
+)
+"""Action kinds whose text never comes from an agent shown a PR's priority tier or
+score: reviews (whose guides rank findings on ``P0``-``P3``) and merge commit
+messages (built from the PR's own title and commits). Scores stay refused there
+(``_SCORE_RE``)."""
 
 
 class LeakError(ValueError):
@@ -91,8 +94,10 @@ def check_text(
     internal_entities: list[str],
     *,
     tiers: bool = True,
+    language: bool = True,
 ) -> GuardResult:
-    """What is wrong with ``text`` as public text; ``tiers`` refuses tier names."""
+    """What is wrong with ``text`` as public text; ``tiers`` refuses tier names,
+    ``language`` enforces ``profile.languages.public``."""
     result = GuardResult()
     for kind in find_secrets(text):
         result.errors.append(f"contains what looks like a {kind}")
@@ -122,7 +127,7 @@ def check_text(
                 f"mentions @{login}, who is not the PR author or a code owner of the touched paths"
             )
 
-    if profile.languages.public.lower().startswith("en"):
+    if language and profile.languages.public.lower().startswith("en"):
         letters = [c for c in prose if c.isalpha()]
         cjk = len(_CJK_RE.findall(prose))
         if letters and cjk / len(letters) > 0.02:
@@ -143,9 +148,17 @@ def make_public(
     internal_entities: list[str],
     *,
     tiers: bool = True,
+    language: bool = True,
 ) -> tuple[PublicText, list[str]]:
     """Return ``PublicText`` and style warnings, or raise ``LeakError``."""
-    result = check_text(text, profile, allowed_mentions, internal_entities, tiers=tiers)
+    result = check_text(
+        text,
+        profile,
+        allowed_mentions,
+        internal_entities,
+        tiers=tiers,
+        language=language,
+    )
     if not result.ok:
         raise LeakError(result.errors)
     return PublicText(text, profile.repo, _key=GUARD_KEY), result.warnings

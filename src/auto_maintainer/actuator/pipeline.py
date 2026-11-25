@@ -432,7 +432,12 @@ class ActionPipeline:
         out: list[str] = []
         for text in _public_texts(action):
             result = check_text(
-                text, profile, {"*"}, entities, tiers=action.kind not in TIER_BLIND
+                text,
+                profile,
+                {"*"},
+                entities,
+                tiers=action.kind not in TIER_BLIND,
+                language=action.kind != ActionKind.PR_MERGE,
             )
             out += [
                 f"blocked: {e}" for e in result.errors if "mentions @" not in e

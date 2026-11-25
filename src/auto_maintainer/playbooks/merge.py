@@ -98,7 +98,7 @@ from ..domain.merge_schedule import (
 )
 from ..domain.permissions import Permission
 from ..domain.profile import RepoProfile
-from ..domain.records import ActionStatus, RootCause
+from ..domain.records import ActionRecord, ActionStatus, RootCause
 from ..domain.run_ci import (
     ci_view,
     latest_checks,
@@ -570,18 +570,71 @@ class MergePlaybook(Playbook):
                 else methods[0]
             )
             queue = bool(info.merge_queue)
-            action = step(
-                ActionKind.PR_MERGE,
-                MergePayload(
-                    method=method,
-                    subject=subject,
-                    body=body,
-                    armed_by=arm.armed_by,
-                    queue=queue,
+
+            def make_merge() -> Action:
+                return step(
+                    ActionKind.PR_MERGE,
+                    MergePayload(
+                        method=method,
+                        subject=subject,
+                        body=body,
+                        armed_by=arm.armed_by,
+                        queue=queue,
+                    ),
+                    f"merge:{state.merge_attempts}"
+                    if state.merge_attempts
+                    else "merge",
+                    "the merge gate holds",
+                )
+
+            action = make_merge()
+            existing = next(
+                (
+                    r
+                    for r in await ctx.store.list_actions(
+                        repo=pr.repo,
+                        number=pr.number,
+                        kinds=[ActionKind.PR_MERGE],
+                        limit=20,
+                    )
+                    if r.action.idempotency_key == action.idempotency_key
                 ),
-                f"merge:{state.merge_attempts}" if state.merge_attempts else "merge",
-                "the merge gate holds",
+                None,
             )
+            if existing is not None:
+                if existing.status in (
+                    ActionStatus.PROPOSED,
+                    ActionStatus.QUEUED,
+                    ActionStatus.INTENT,
+                ):
+                    return PlaybookResult(
+                        wait=wait.model_copy(
+                            update={"action_ids": [existing.action.id]}
+                        ),
+                        result={"phase": "merging"},
+                    )
+                if existing.status == ActionStatus.EXECUTED:
+                    if existing.external_ref.get("queued"):
+                        state.queued = True
+                        return await self._in_queue(
+                            ctx, profile, info, pr, arm, state, wait
+                        )
+                    await ctx.store.delete_arm(pr.repo, pr.number)
+                    return await self._leave(
+                        ctx, profile, pr.repo, pr.number, merged=True
+                    )
+                if existing.status == ActionStatus.FAILED:
+                    started = ctx.service.started_at
+                    if started is not None and existing.updated_at < started:
+                        state.merge_attempts += 1
+                        action = make_merge()
+                    else:
+                        _, why, scope = self._explain_failure(
+                            existing, existing.error or "it failed"
+                        )
+                        return await self._block(
+                            ctx, profile, pr, arm, state, why, scope
+                        )
             state.queued = queue
             await self._set(
                 ctx,
@@ -2255,6 +2308,11 @@ class MergePlaybook(Playbook):
         if record_ is None or record_.action.provenance.scheduled_by != arm.armed_by:
             return None
         error = str(event.payload.get("error") or record_.error or "it failed")
+        return self._explain_failure(record_, error)
+
+    def _explain_failure(
+        self, record_: ActionRecord, error: str
+    ) -> tuple[ActionKind, str, str]:
         kind = record_.action.kind
         if "RateLimited" in error or "rate limit" in error.lower():
             return kind, f"{RATE_LIMITED} refused it: {error[:300]}", ""

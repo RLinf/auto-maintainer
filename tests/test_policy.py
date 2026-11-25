@@ -243,7 +243,16 @@ def test_tier_names_are_refused_only_where_the_writer_knew_the_tier() -> None:
     assert check_text(finding, profile, set(), [], tiers=False).ok
     assert not check_text("score: 78 overall", profile, set(), [], tiers=False).ok
     assert ActionKind.REVIEW_POST in TIER_BLIND
+    assert ActionKind.PR_MERGE in TIER_BLIND
     assert ActionKind.COMMENT_UPSERT not in TIER_BLIND
+    assert check_text(
+        "* docs: fix P0 bugs and 中文说明",
+        profile,
+        set(),
+        [],
+        tiers=False,
+        language=False,
+    ).ok
 
 
 async def test_only_writes_to_the_forge_count_toward_the_hourly_cap(
