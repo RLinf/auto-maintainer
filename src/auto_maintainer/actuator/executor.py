@@ -46,6 +46,7 @@ AS_PERSON = frozenset(
         ActionKind.PR_EDIT,
         ActionKind.CI_APPROVE_RUN,
         ActionKind.THREAD_RESOLVE,
+        ActionKind.CODE_PR,
     }
 )
 """Action kinds a maintainer may run with their own GitHub account."""
@@ -183,7 +184,11 @@ class Actuator:
                     "a posted review is edited only by whoever posted it: "
                     f"{action.payload.get('author') or 'the service'}"
                 )
-            if record.post_as and action.kind in AS_PERSON:
+            if (
+                record.post_as
+                and action.kind in AS_PERSON
+                and action.kind != ActionKind.CODE_PR
+            ):
                 writer = await x.writer_as(record.post_as) if x.writer_as else None
                 if writer is None:
                     raise RuntimeError(
@@ -202,7 +207,9 @@ class Actuator:
                     x = dataclasses.replace(x, publisher=publisher)
             running = True
             ref = await spec.run(x, action, profile, pr, record.approver)
-            if record.post_as:
+            if action.kind == ActionKind.CODE_PR:
+                record.post_as = ref.get("posted_as")
+            elif record.post_as:
                 ref = {**ref, "posted_as": record.post_as}
         except Noop as e:
             return await self._finish(record, ActionStatus.NOOP, error=str(e))

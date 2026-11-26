@@ -259,6 +259,7 @@ class SelfImprove(Playbook):
                 patch=changes.patch,
                 base_sha=changes.base_sha,
                 requested_by=by,
+                approved_by=approved_by,
                 thread_id=thread_id,
             ),
             discriminator=branch,

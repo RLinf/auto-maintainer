@@ -56,6 +56,7 @@ from ..domain.actions import (
     ThreadResolvePayload,
 )
 from ..domain.diffs import commentable, fits
+from ..domain.forges import info_of
 from ..domain.ids import same_commit
 from ..domain.labs import LabProgress
 from ..domain.markers import parse_markers
@@ -1000,8 +1001,11 @@ async def _code_pr(
 ) -> dict[str, Any]:
     """Open a PR on the service's own repository, pushing the patch first when one is given.
 
-    Opening the PR changes nothing the service runs; a maintainer of that repository
-    still has to approve the merge and the deploy.
+    When the requester approved starting the self-improvement and has a working
+    sign-in on the code repository's forge, the PR is opened under their account
+    (falling back to the service's account if the forge refuses them). Opening the
+    PR changes nothing the service runs; a maintainer of that repository still has
+    to approve the merge and the deploy.
     """
     if not x.code_repo:
         raise RuntimeError("no code repo is configured")
@@ -1014,9 +1018,41 @@ async def _code_pr(
         commit = await x.publisher.publish(
             x.code_repo, p.base_sha, p.patch, p.branch, f"{p.title}{trailers}\n"
         )
-    ref = await x.writer.create_service_pr(
-        x.code_repo, p.branch, x.code_branch, p.title, p.body
+    as_person = (
+        p.requested_by
+        if (
+            p.requested_by
+            and p.approved_by
+            and p.requested_by.lower() == p.approved_by.lower()
+            and info_of(p.requested_by).id == info_of(x.code_repo).id
+        )
+        else None
     )
+    opened_as: str | None = None
+    ref = None
+    if as_person and x.writer_as is not None:
+        user_writer = await x.writer_as(as_person)
+        if user_writer is not None:
+            try:
+                ref = await user_writer.create_service_pr(
+                    x.code_repo, p.branch, x.code_branch, p.title, p.body
+                )
+                opened_as = as_person
+            except Exception as e:
+                if getattr(e, "status", None) in (401, 403, 404, 422):
+                    log.warning(
+                        "could not open self-improvement PR on %s as %s (%s); "
+                        "opening as the service instead",
+                        x.code_repo,
+                        as_person,
+                        e,
+                    )
+                else:
+                    raise
+    if ref is None:
+        ref = await x.writer.create_service_pr(
+            x.code_repo, p.branch, x.code_branch, p.title, p.body
+        )
     if p.thread_id:
         await x.store.add_message(
             ChatMessage(
@@ -1029,7 +1065,12 @@ async def _code_pr(
                 ),
             )
         )
-    return {"pr": ref.id, "url": ref.url, "commit": commit}
+    return {
+        "pr": ref.id,
+        "url": ref.url,
+        "commit": commit,
+        **({"posted_as": opened_as} if opened_as else {}),
+    }
 
 
 async def _code_update(

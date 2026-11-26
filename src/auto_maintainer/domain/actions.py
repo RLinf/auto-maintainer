@@ -507,6 +507,7 @@ class CodePrPayload(_Payload):
     """``git diff --binary`` of the change; empty when ``branch`` already exists."""
     base_sha: str = ""
     requested_by: str | None = None
+    approved_by: str | None = None
     thread_id: str | None = None
     """The chat thread the request came from, told about the PR."""
 

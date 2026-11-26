@@ -586,6 +586,7 @@ class FakeForge:
             title=title,
             body=body,
             number=n,
+            author=self.login,
         )
         return CommentRef(id=n)
 

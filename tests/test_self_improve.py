@@ -651,3 +651,113 @@ def test_only_files_keeps_resolved_files_from_git_patches() -> None:
     assert only_files("README.md\nbrought by main\n", {"docs/design.md"}) == ""
     assert only_files("+++ README.md\nbrought by main\n", {"docs/design.md"}) == ""
     assert only_files("", {"docs/design.md"}) == ""
+
+
+async def test_self_improve_pr_opens_under_requesters_account(
+    h: Harness, tmp_path: Path
+) -> None:
+    """When the requester approves starting a self-improvement and has a working
+    sign-in, the PR on code_repo is opened by their account, not the service's."""
+    from auto_maintainer.domain.ports import UserToken
+
+    await h.service.a.user_tokens.set("walt", UserToken(token="w"))  # type: ignore[union-attr]
+    h.runner.on(
+        "chat",
+        lambda task: {
+            "reply": "I can change my code for that once you approve.",
+            "proposals": [{"kind": "improve", "request": "Add a ping endpoint."}],
+        },
+    )
+    h.runner.on("self_improve", _implement)
+    app = create_app(h.service, data_dir=tmp_path, allow_dev_login=True)
+    async with _client(app, "walt") as walt:
+        thread = (await walt.post("/api/chat/threads", json={"text": "ping"})).json()
+        base = f"/api/chat/threads/{thread['id']}"
+        sent = (
+            await walt.post(f"{base}/messages", json={"text": "Can you answer pings?"})
+        ).json()
+        await app.state.live_turns.wait(sent["run"], timeout=5)
+        [card] = (await walt.get(f"{base}/messages")).json()[-1]["requests"]
+        await walt.post(f"{base}/requests/{card['id']}/approve")
+        await h.settle()
+
+    [pr] = h.forge.writes_of("create_service_pr")
+    assert pr["author"] == "walt"
+    [record] = await h.store.list_actions(repo=CODE, kinds=[ActionKind.CODE_PR])
+    assert record.status == ActionStatus.EXECUTED
+    assert record.post_as == "walt"
+    assert record.external_ref.get("posted_as") == "walt"
+
+
+async def test_self_improve_pr_falls_back_to_service_when_requester_lacks_access(
+    h: Harness, tmp_path: Path
+) -> None:
+    """If the forge refuses the requester's account when opening the PR (e.g. they
+    lack write access to code_repo), the actuator falls back to the service account
+    without pushing a second time."""
+    from auto_maintainer.domain.events import Event, EventKind
+    from auto_maintainer.domain.ports import UserToken
+
+    await h.service.a.user_tokens.set("walt", UserToken(token="w"))  # type: ignore[union-attr]
+    original_writer_as = h.service.actuator.x.writer_as
+
+    class _RefusingWriter:
+        async def create_service_pr(self, *args, **kwargs):
+            err = RuntimeError("Resource not accessible by integration")
+            err.status = 403  # type: ignore[attr-defined]
+            raise err
+
+    async def _writer_as(login: str):
+        if login == "walt":
+            return _RefusingWriter()
+        return await original_writer_as(login) if original_writer_as else None
+
+    h.service.actuator.x.writer_as = _writer_as
+    h.runner.on("self_improve", _implement)
+    await h.emit(
+        Event(
+            kind=EventKind.DASHBOARD_COMMAND,
+            payload={
+                "command": "improve",
+                "request": "Add a ping endpoint.",
+                "by": "walt",
+                "approved_by": "walt",
+            },
+        )
+    )
+    assert len(h.service.a.publisher.published) == 1  # type: ignore[union-attr]
+    [pr] = h.forge.writes_of("create_service_pr")
+    assert pr["author"] == h.forge.login
+    [record] = await h.store.list_actions(repo=CODE, kinds=[ActionKind.CODE_PR])
+    assert record.status == ActionStatus.EXECUTED
+    assert record.post_as is None
+    assert "posted_as" not in record.external_ref
+
+
+async def test_self_improve_never_uses_requesters_token_when_someone_else_approved(
+    h: Harness, tmp_path: Path
+) -> None:
+    """A guest requester's token is never used when the owner approved starting the
+    self-improvement on their behalf."""
+    from auto_maintainer.domain.events import Event, EventKind
+    from auto_maintainer.domain.ports import UserToken
+
+    await h.service.a.user_tokens.set("eve", UserToken(token="e"))  # type: ignore[union-attr]
+    h.runner.on("self_improve", _implement)
+    await h.emit(
+        Event(
+            kind=EventKind.DASHBOARD_COMMAND,
+            payload={
+                "command": "improve",
+                "request": "Add a ping endpoint.",
+                "by": "eve",
+                "approved_by": "maria",
+            },
+        )
+    )
+    [pr] = h.forge.writes_of("create_service_pr")
+    assert pr["author"] == h.forge.login
+    [record] = await h.store.list_actions(repo=CODE, kinds=[ActionKind.CODE_PR])
+    assert record.status == ActionStatus.EXECUTED
+    assert record.post_as is None
+    assert "posted_as" not in record.external_ref

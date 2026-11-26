@@ -40,6 +40,7 @@ from ..domain.actions import (
 )
 from ..domain.clock import Clock
 from ..domain.events import Event, EventKind
+from ..domain.forges import info_of
 from ..domain.ids import same_commit
 from ..domain.memory import Signal, SignalKind
 from ..domain.ports import EventSink, Store
@@ -361,8 +362,35 @@ class ActionPipeline:
             DecisionKind.PROPOSE: ActionStatus.PROPOSED,
             DecisionKind.EXECUTE: ActionStatus.QUEUED,
         }[decision.kind]
+        approver: str | None = None
+        post_as: str | None = None
+        if action.kind == ActionKind.CODE_PR and decision.kind == DecisionKind.EXECUTE:
+            requested_by = (
+                action.payload.get("requested_by") or action.provenance.requested_by
+            )
+            approved_by = action.payload.get("approved_by")
+            if (
+                requested_by
+                and approved_by
+                and requested_by.lower() == approved_by.lower()
+            ):
+                approver = requested_by
+                if (
+                    info_of(requested_by).id == info_of(action.repo).id
+                    and self.signed_in is not None
+                    and await self.signed_in(requested_by)
+                ):
+                    post_as = requested_by
+            elif approved_by:
+                approver = approved_by
         record, new = await self.store.add_action(
-            ActionRecord(action=action, decision=decision, status=status)
+            ActionRecord(
+                action=action,
+                decision=decision,
+                status=status,
+                approver=approver,
+                post_as=post_as,
+            )
         )
         if not new:
             return record
