@@ -69,6 +69,7 @@ from ..domain.approvals import (
     ApprovalStatus,
     approval_status,
     approval_summary,
+    approved_at_head,
     completeness,
 )
 from ..domain.codeowners import (
@@ -3393,7 +3394,9 @@ def build_router() -> APIRouter:
         repository, reviewers by them or by the PR's owners. A login need not have
         signed in here, but it must be a GitHub user who can see the repository. For
         reviewers with ``request_review``, their review is also requested on GitHub,
-        as the repository's ``pr.request_reviewers`` rule allows."""
+        as the repository's ``pr.request_reviewers`` rule allows, skipping the PR's
+        author, users already requested, and reviewers who already approved the
+        current head commit."""
         service = service_of(request)
         repo = _repo(repo)
         await require_view(service, user, repo)
@@ -3448,11 +3451,14 @@ def build_router() -> APIRouter:
             )
         )
         requested: dict[str, Any] | None = None
+        requested_already = {r.lower() for r in pr.requested_reviewers}
+        approved = approved_at_head(pr)
         ask = [
             lg
             for lg in logins
             if lg.lower() != pr.author.lower()
-            and lg.lower() not in {r.lower() for r in pr.requested_reviewers}
+            and lg.lower() not in requested_already
+            and lg.lower() not in approved
         ]
         if (
             body.role == "reviewer"

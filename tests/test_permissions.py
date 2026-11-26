@@ -31,10 +31,12 @@ import yaml
 from auto_maintainer.actuator.pipeline import ApprovalError
 from auto_maintainer.domain.actions import (
     ActionKind,
+    ActionStatus,
     ApprovePrPayload,
     LabelPayload,
     PrEditPayload,
     Provenance,
+    RequestReviewersPayload,
     make_action,
 )
 from auto_maintainer.domain.ids import new_id
@@ -42,7 +44,13 @@ from auto_maintainer.domain.memory import profile_path
 from auto_maintainer.domain.permissions import Permission
 from auto_maintainer.domain.records import AgentRunRecord, Job
 from auto_maintainer.domain.settings import UserToken
-from auto_maintainer.domain.snapshot import Mergeable, PrFile, RepoInfo
+from auto_maintainer.domain.snapshot import (
+    Mergeable,
+    PrFile,
+    RepoInfo,
+    Review,
+    ReviewEventState,
+)
 from auto_maintainer.profiles.governance import governance_path
 from auto_maintainer.profiles.layers import dump_yaml, parse_yaml
 from auto_maintainer.testing.demo import DEMO_GOVERNANCE, build_demo
@@ -598,3 +606,130 @@ async def test_the_pr_list_ranks_an_overridden_p0_above_higher_scored_p1s(demo) 
         rows = (await maria.get("/api/prs")).json()
         assert rows[0]["number"] == last and rows[0]["tier"] == "P0"
         assert "_rank" not in rows[0]
+
+
+async def test_assign_and_request_reviewers_skip_reviewers_who_approved_current_head(
+    demo,
+) -> None:
+    """Assigning someone who already approved the current head adds them locally
+    without re-requesting their review on GitHub; pr.request_reviewers also skips
+    them on the live PR read (and still requests reviewers who only approved an
+    earlier commit or whose approval was dismissed)."""
+    h, app = demo
+    for login in ("andy", "sherlock", "older", "dismissed", "fresh"):
+        h.forge.set_permission(REPO, login, Permission.WRITE)
+    pr = await h.store.get_snapshot(REPO, 42)
+    assert pr is not None
+    head = pr.head_sha
+    old_sha = ("0" if head[0] != "0" else "1") * 40
+    updated = pr.model_copy(
+        update={
+            "reviews": [
+                Review(
+                    id=1,
+                    author="Andy",
+                    state=ReviewEventState.APPROVED,
+                    commit_sha=head,
+                ),
+                Review(
+                    id=2,
+                    author="Andy",
+                    state=ReviewEventState.COMMENTED,
+                    commit_sha=head,
+                ),
+                Review(
+                    id=3,
+                    author="sherlock",
+                    state=ReviewEventState.APPROVED,
+                    commit_sha=head,
+                ),
+                Review(
+                    id=4,
+                    author="older",
+                    state=ReviewEventState.APPROVED,
+                    commit_sha=old_sha,
+                ),
+                Review(
+                    id=5,
+                    author="dismissed",
+                    state=ReviewEventState.APPROVED,
+                    commit_sha=head,
+                ),
+                Review(
+                    id=6,
+                    author="dismissed",
+                    state=ReviewEventState.DISMISSED,
+                    commit_sha=head,
+                ),
+            ]
+        }
+    )
+    h.forge.prs[(REPO, 42)] = updated
+    await h.store.save_snapshot(updated)
+
+    async with _as(app, "maria") as maria:
+        only_approved = (
+            await maria.post(
+                f"/api/prs/{REPO}/42/assignees",
+                json={"logins": ["andy", "sherlock"], "role": "reviewer"},
+            )
+        ).json()
+        assert only_approved["requested"] is None
+        assert {"andy", "sherlock"} <= {a["login"] for a in only_approved["assignees"]}
+        await h.settle()
+        assert [w for w in h.forge.writes if w[0] == "request_reviewers"] == []
+
+        mixed = (
+            await maria.post(
+                f"/api/prs/{REPO}/42/assignees",
+                json={
+                    "logins": ["andy", "older", "dismissed", "fresh"],
+                    "role": "reviewer",
+                },
+            )
+        ).json()
+        assert mixed["requested"]["status"] in {"queued", "executed"}
+        await h.settle()
+        [request] = [w for w in h.forge.writes if w[0] == "request_reviewers"]
+        assert request[1]["logins"] == ["older", "dismissed", "fresh"]
+
+    # Even if a pr.request_reviewers action arrives with already-approved reviewers
+    # (for instance, from CODEOWNERS or a stale cached snapshot), the actuator
+    # handler checks the live PR snapshot and skips them.
+    h.forge.writes.clear()
+    await _levels(h, pr_request_reviewers="auto")
+    noop_record = await h.service.pipeline.submit(
+        make_action(
+            ActionKind.PR_REQUEST_REVIEWERS,
+            REPO,
+            RequestReviewersPayload(logins=["andy", "Sherlock"]),
+            number=42,
+            head_sha=head,
+            discriminator="all-approved",
+        )
+    )
+    await h.settle()
+    done_noop = await h.store.get_action(noop_record.action.id)
+    assert done_noop is not None and done_noop.status == ActionStatus.NOOP
+    assert [w for w in h.forge.writes if w[0] == "request_reviewers"] == []
+
+    # Mixed action with a reviewer already requested (different case) and one who
+    # approved the current head only requests the remaining reviewer.
+    h.forge.prs[(REPO, 42)] = updated.model_copy(
+        update={"requested_reviewers": ["Older"]}
+    )
+    partial_record = await h.service.pipeline.submit(
+        make_action(
+            ActionKind.PR_REQUEST_REVIEWERS,
+            REPO,
+            RequestReviewersPayload(logins=["andy", "older", "fresh"]),
+            number=42,
+            head_sha=head,
+            discriminator="partial-approved",
+        )
+    )
+    await h.settle()
+    done_partial = await h.store.get_action(partial_record.action.id)
+    assert done_partial is not None and done_partial.status == ActionStatus.EXECUTED
+    [request] = [w for w in h.forge.writes if w[0] == "request_reviewers"]
+    assert request[1]["logins"] == ["fresh"]
