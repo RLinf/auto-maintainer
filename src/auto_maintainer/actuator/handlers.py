@@ -55,6 +55,7 @@ from ..domain.actions import (
     ThreadReplyPayload,
     ThreadResolvePayload,
 )
+from ..domain.approvals import approved_at_head
 from ..domain.diffs import commentable, fits
 from ..domain.ids import same_commit
 from ..domain.labs import LabProgress
@@ -413,15 +414,21 @@ async def _request_reviewers(
 ) -> dict[str, Any]:
     assert pr is not None
     p = RequestReviewersPayload.model_validate(action.payload)
+    requested = {r.lower() for r in pr.requested_reviewers}
+    approved = approved_at_head(pr)
     logins = [
         lg
         for lg in p.logins
         if lg.lower() != pr.author.lower()
-        and lg not in pr.requested_reviewers
+        and lg.lower() not in requested
+        and lg.lower() not in approved
         and "/" not in lg
     ]
     if not logins:
-        raise Noop("every suggested reviewer is already requested or is the author")
+        raise Noop(
+            "every suggested reviewer is already requested, approved this head, "
+            "or is the author"
+        )
     await x.writer.request_reviewers(action.repo, pr.number, logins)
     return {"requested": logins}
 

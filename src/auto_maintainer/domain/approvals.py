@@ -29,6 +29,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Collection
+from datetime import datetime
 
 from pydantic import BaseModel, Field
 
@@ -61,6 +62,29 @@ class ApprovalStatus(BaseModel):
     """``CodeOwnerReport.waiting``: for each missing code-owner approval, the owners
     any one of whom may give it."""
     last_push_approval: bool | None = None
+
+
+def approved_at_head(pr: PrSnapshot) -> set[str]:
+    """Lowercased logins whose latest verdict on ``pr`` is an approval of its
+    current head commit. A comment or pending review leaves an earlier verdict
+    standing, as on GitHub; a dismissal or request for changes replaces it."""
+    latest: dict[str, tuple[datetime | None, ReviewEventState, str | None]] = {}
+    for review in pr.reviews:
+        if review.state in (ReviewEventState.COMMENTED, ReviewEventState.PENDING):
+            continue
+        key = review.author.lower()
+        prev = latest.get(key)
+        if prev is None or (
+            review.submitted_at is None
+            or prev[0] is None
+            or review.submitted_at >= prev[0]
+        ):
+            latest[key] = (review.submitted_at, review.state, review.commit_sha)
+    return {
+        key
+        for key, (_, state, sha) in latest.items()
+        if state == ReviewEventState.APPROVED and same_commit(sha, pr.head_sha)
+    }
 
 
 def approval_status(

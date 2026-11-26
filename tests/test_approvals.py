@@ -18,7 +18,9 @@ each changed file."""
 
 from __future__ import annotations
 
-from auto_maintainer.domain.approvals import approval_status
+from datetime import UTC, datetime
+
+from auto_maintainer.domain.approvals import approval_status, approved_at_head
 from auto_maintainer.domain.codeowners import code_owner_report, parse_codeowners
 from auto_maintainer.domain.snapshot import PrFile, RepoInfo, Review, ReviewEventState
 from auto_maintainer.testing.fakes import make_pr
@@ -213,3 +215,80 @@ def test_one_share_says_how_close_a_pr_is_to_ready() -> None:
 
     no_threads = share(_pr(_approve(1, "zhu"), _approve(2, "guo"), _approve(3, "lin")))
     assert no_threads.value == 1, "reviewed by all, approved, nothing left to resolve"
+
+
+def test_approved_at_head_tracks_latest_verdict_at_current_commit() -> None:
+    older = "a" * 40
+    t1 = datetime(2026, 11, 26, 1, 0, tzinfo=UTC)
+    t2 = datetime(2026, 11, 26, 2, 0, tzinfo=UTC)
+    pr = _pr(
+        # Approved at head, then commented -> approval still stands.
+        Review(
+            id=1,
+            author="AndyLin",
+            state=ReviewEventState.APPROVED,
+            commit_sha=HEAD,
+            submitted_at=t1,
+        ),
+        Review(
+            id=2,
+            author="AndyLin",
+            state=ReviewEventState.COMMENTED,
+            commit_sha=HEAD,
+            submitted_at=t2,
+        ),
+        # Approved an earlier commit -> does not count as approved at head.
+        Review(
+            id=3,
+            author="guo",
+            state=ReviewEventState.APPROVED,
+            commit_sha=older,
+            submitted_at=t1,
+        ),
+        # Approved at head, then dismissed -> no longer approved.
+        Review(
+            id=4,
+            author="zhu",
+            state=ReviewEventState.APPROVED,
+            commit_sha=HEAD,
+            submitted_at=t1,
+        ),
+        Review(
+            id=5,
+            author="zhu",
+            state=ReviewEventState.DISMISSED,
+            commit_sha=HEAD,
+            submitted_at=t2,
+        ),
+        # Requested changes earlier, then approved at head (listed out of order).
+        Review(
+            id=6,
+            author="lin",
+            state=ReviewEventState.APPROVED,
+            commit_sha=HEAD,
+            submitted_at=t2,
+        ),
+        Review(
+            id=7,
+            author="lin",
+            state=ReviewEventState.CHANGES_REQUESTED,
+            commit_sha=older,
+            submitted_at=t1,
+        ),
+        # Approved at head, then requested changes -> no longer approved.
+        Review(
+            id=8,
+            author="pan",
+            state=ReviewEventState.APPROVED,
+            commit_sha=HEAD,
+            submitted_at=t1,
+        ),
+        Review(
+            id=9,
+            author="pan",
+            state=ReviewEventState.CHANGES_REQUESTED,
+            commit_sha=HEAD,
+            submitted_at=t2,
+        ),
+    )
+    assert approved_at_head(pr) == {"andylin", "lin"}

@@ -1369,7 +1369,7 @@ Service defaults set every action kind that touches a repository to `shadow`. Th
 | `ci.rerun_failed` | `auto` | `auto` | automatic reruns within `ci.rerun.max_per_sha`; ones a maintainer asks for past it |
 | `ci.approve_run` | `shadow` | `shadow` | a person's Approve and run CI press creates one, run at once as them, and the merge schedule drafts one for the PR's scheduler (approved as them for a PR they scheduled by hand, a card for one automatic scheduling armed): it lets GitHub run a first-time contributor's workflows |
 | `ci.cancel` | `shadow` | `shadow` | the merge schedule drafts one for a scheduled PR whose CI runs while another holds the turn (approved by the schedule), and a maintainer's Cancel CI or Unschedule on the Merge page creates one, run at once as their press |
-| `pr.request_reviewers` | `propose` | `auto` | from `CODEOWNERS`; a maintainer's assignment on the dashboard is drafted for them and runs at once |
+| `pr.request_reviewers` | `propose` | `auto` | from `CODEOWNERS`; a maintainer's assignment on the dashboard is drafted for them and runs at once; skips reviewers already requested or who already approved the current head |
 | `pr.approve` | `shadow` | `shadow` | only a person's Approve press creates one, run at once as them; `off` removes the button's effect |
 | `thread.resolve` | `shadow` | `shadow` | only a person's Resolve press on a review comment creates one (maintainers, the PR's owners, or the comment's author), run at once as them; the service's account never resolves a comment |
 | `pr.update_branch`, `pr.merge` | `propose` | `auto` once armed | merge gate (5.5); a person's Merge now press runs at once as them, without the gate, unless `pr.merge` is `off` |
