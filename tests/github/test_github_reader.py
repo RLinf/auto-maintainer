@@ -558,10 +558,23 @@ async def test_lists_one_query_cuts_short_are_read_to_the_end(client, router):
     fails its CI, and the oldest threads still count."""
     node = load_fixture("pr_node.json")
     node["id"] = "PR_1"
+    node["commits"]["pageInfo"] = {"hasPreviousPage": True, "startCursor": "c1"}
     node["reviewThreads"]["pageInfo"] = {"hasPreviousPage": True, "startCursor": "t1"}
     suite = node["headCommit"]["nodes"][0]["commit"]["checkSuites"]["nodes"][0]
     suite["id"] = "CS_1"
     suite["checkRuns"]["pageInfo"] = {"hasNextPage": True, "endCursor": "r1"}
+    earlier_commit = {
+        "commit": {
+            "oid": "0000111122223333444455556666777788889999",
+            "message": "feat: initial work",
+            "committedDate": "2026-09-30T10:00:00Z",
+            "author": {
+                "name": "Carol",
+                "email": "carol@example.com",
+                "user": {"login": "carol"},
+            },
+        }
+    }
     older = {
         "id": "PRRT_old",
         "isResolved": True,
@@ -588,6 +601,14 @@ async def test_lists_one_query_cuts_short_are_read_to_the_end(client, router):
         if "node(id: $id)" not in query:
             return httpx.Response(200, json={"data": {"repository": {"p42": node}}})
         asked.append(variables)
+        if variables["id"] == "PR_1" and "commits" in query:
+            page = {"pageInfo": {"hasPreviousPage": False, "startCursor": None}}
+            return httpx.Response(
+                200,
+                json={
+                    "data": {"node": {"commits": {**page, "nodes": [earlier_commit]}}}
+                },
+            )
         if variables["id"] == "PR_1" and "reviewThreads" in query:
             page = {"pageInfo": {"hasPreviousPage": False, "startCursor": None}}
             return httpx.Response(
@@ -604,13 +625,19 @@ async def test_lists_one_query_cuts_short_are_read_to_the_end(client, router):
     router.post("/graphql").mock(side_effect=graphql)
     pr = await GitHubReader(client).get_pr("acme/widget", 42)
     assert pr is not None
+    assert pr.commits[0].sha == "0000111122223333444455556666777788889999"
+    assert pr.commits[0].author_login == "carol"
     assert pr.threads[0].id == "PRRT_old", "older threads come first"
     assert (
         len(pr.threads)
         == len(load_fixture("pr_node.json")["reviewThreads"]["nodes"]) + 1
     )
     assert any(c.id == 99 and c.conclusion == "failure" for c in pr.checks)
-    assert {(a["id"], a["cursor"]) for a in asked} == {("PR_1", "t1"), ("CS_1", "r1")}
+    assert {(a["id"], a["cursor"]) for a in asked} == {
+        ("PR_1", "c1"),
+        ("PR_1", "t1"),
+        ("CS_1", "r1"),
+    }
 
 
 async def test_a_ruleset_narrows_the_merge_methods(client, router):

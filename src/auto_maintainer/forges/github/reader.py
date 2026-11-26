@@ -82,6 +82,7 @@ PR_BATCH = 10
 LIGHT_PAGE = 50
 
 _FILE = "path additions deletions changeType"
+_COMMIT = "commit { oid message committedDate author { name email user { login } } }"
 _REVIEW = "databaseId author { login } state body submittedAt commit { oid }"
 _COMMENT = "databaseId author { login } body createdAt updatedAt"
 _THREAD = (
@@ -103,7 +104,7 @@ fragment PrFields on PullRequest {
   mergeable mergeStateStatus additions deletions
   labels(first: 50) { nodes { name } }
   files(first: 100) { FORWARD nodes { FILE } }
-  commits(last: 100) { nodes { commit { oid message committedDate author { name email user { login } } } } }
+  commits(last: 100) { BACKWARD nodes { COMMIT } }
   reviews(last: 50) { BACKWARD nodes { REVIEW } }
   comments(last: 100) { BACKWARD nodes { COMMENT } }
   reviewThreads(last: 50) { BACKWARD nodes { THREAD } }
@@ -129,6 +130,7 @@ fragment PrFields on PullRequest {
 """.replace("FORWARD", _FORWARD)
     .replace("BACKWARD", _BACKWARD)
     .replace("FILE", _FILE)
+    .replace("COMMIT", _COMMIT)
     .replace("REVIEW", _REVIEW)
     .replace("COMMENT", _COMMENT)
     .replace("THREAD", _THREAD)
@@ -140,6 +142,7 @@ _MORE_PAGES = 20
 
 _MORE: dict[str, tuple[str, str, bool]] = {
     "files": ("files(first: 100, after: $cursor)", _FILE, True),
+    "commits": ("commits(last: 100, before: $cursor)", _COMMIT, False),
     "reviews": ("reviews(last: 100, before: $cursor)", _REVIEW, False),
     "comments": ("comments(last: 100, before: $cursor)", _COMMENT, False),
     "reviewThreads": ("reviewThreads(last: 100, before: $cursor)", _THREAD, False),

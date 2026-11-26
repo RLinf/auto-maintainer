@@ -610,11 +610,7 @@ class TestMergeGate:
         )
         subject, body = squash_message(pr, profile)
         assert subject.endswith("(#42)")
-        assert (
-            body.count("Signed-off-by: A <a@x>") == 1
-            and "Co-authored-by: B <b@x>" in body
-            and "Reviewed-by" not in body
-        )
+        assert body == "Signed-off-by: A <a@x>\nCo-authored-by: B <b@x>"
 
     def test_squash_message_keeps_sign_offs_unless_the_repository_says_not(
         self,
@@ -628,11 +624,11 @@ class TestMergeGate:
             ]
         )
         _, body = squash_message(pr, RepoProfile(repo="acme/widget"))
-        assert body.endswith("\n\nSigned-off-by: A <a@x>")
+        assert body == "Signed-off-by: A <a@x>"
         none = RepoProfile.model_validate(
             {"repo": "acme/widget", "merge": {"message": {"preserve_trailers": []}}}
         )
-        assert "Signed-off-by" not in squash_message(pr, none)[1]
+        assert squash_message(pr, none)[1] == ""
 
 
 def test_markers_and_commands() -> None:
@@ -762,6 +758,37 @@ def test_commit_trailers() -> None:
     )
     assert c.trailers == [("Signed-off-by", "A <a@x>"), ("Co-authored-by", "B <b@x>")]
     assert Commit(sha="1" * 40, message="feat: x").trailers == []
+    # CRLF line endings and trailer immediately following a body line.
+    crlf = Commit(
+        sha="2" * 40,
+        message="feat: y\r\n\r\nSome body.\r\nSigned-off-by: A <a@x>\r\nCo-authored-by: B <b@x>\r\n",
+    )
+    assert crlf.trailers == [
+        ("Signed-off-by", "A <a@x>"),
+        ("Co-authored-by", "B <b@x>"),
+    ]
+    # Trailing `# Conflicts:` block left by git merge must not hide trailers.
+    conflict = Commit(
+        sha="3" * 40,
+        message=(
+            "Merge remote-tracking branch 'origin/main' into feat\n\n"
+            "Signed-off-by: A <a@x>\n\n"
+            "# Conflicts:\n#\tfoo.py\n"
+        ),
+    )
+    assert conflict.trailers == [("Signed-off-by", "A <a@x>")]
+    # Blank line between trailers keeps both; non-trailer prose earlier in body is ignored.
+    gapped = Commit(
+        sha="4" * 40,
+        message=(
+            "feat: z\n\nNote: not a trailer\nMore text.\n\n"
+            "Signed-off-by: A <a@x>\n\nCo-authored-by: B <b@x>"
+        ),
+    )
+    assert gapped.trailers == [
+        ("Signed-off-by", "A <a@x>"),
+        ("Co-authored-by", "B <b@x>"),
+    ]
 
 
 def test_review_progress_counts_each_reviewers_resolved_threads_over_time() -> None:
@@ -973,13 +1000,16 @@ def test_the_squash_signs_off_for_the_authors_only_when_asked_and_none_did() -> 
         ]
     )
     plain = RepoProfile(repo="acme/widget")
-    assert "Signed-off-by" not in squash_message(unsigned, plain)[1]
+    plain_body = squash_message(unsigned, plain)[1]
+    assert plain_body == "Co-authored-by: carol <carol@users.noreply.github.com>"
     asked = RepoProfile.model_validate(
         {"repo": "acme/widget", "merge": {"message": {"signoff_from_authors": True}}}
     )
     _, body = squash_message(unsigned, asked)
-    assert body.endswith(
-        "Signed-off-by: Alice <a@x>\nSigned-off-by: carol <carol@users.noreply.github.com>"
+    assert body == (
+        "Signed-off-by: Alice <a@x>\n"
+        "Signed-off-by: carol <carol@users.noreply.github.com>\n"
+        "Co-authored-by: carol <carol@users.noreply.github.com>"
     ), body
     signed = unsigned.model_copy(
         update={
@@ -988,8 +1018,97 @@ def test_the_squash_signs_off_for_the_authors_only_when_asked_and_none_did() -> 
             ]
         }
     )
-    assert squash_message(signed, asked)[1].endswith("Signed-off-by: Dan <d@x>"), (
+    assert squash_message(signed, asked)[1] == "Signed-off-by: Dan <d@x>", (
         "a sign-off of their own is kept, and none is added"
+    )
+
+
+def test_squash_message_credits_commit_coauthors_and_deduplicates() -> None:
+    """Squashing a multi-author PR adds Co-authored-by for other human commit
+    authors (matching GitHub's default squash attribution), skips bots and
+    base-branch merges, deduplicates against commit trailers case-insensitively,
+    and respects preserve_trailers."""
+    from auto_maintainer.domain.merge_gate import squash_message
+
+    pr = make_pr(
+        author="alice",
+        commits=[
+            Commit(
+                sha="1" * 40,
+                message="feat: core\n\nSigned-off-by: Alice <a@x>\nCo-Authored-By: Claude <noreply@anthropic.com>",
+                author_login="alice",
+                author_name="Alice",
+                author_email="a@x",
+            ),
+            Commit(
+                sha="2" * 40,
+                message="Merge branch 'main' into feat",
+                author_login="updater",
+                author_name="Updater",
+                author_email="u@x",
+            ),
+            Commit(
+                sha="3" * 40,
+                message="chore: bump",
+                author_login="dependabot[bot]",
+                author_name="dependabot[bot]",
+                author_email="49699333+dependabot[bot]@users.noreply.github.com",
+            ),
+            Commit(
+                sha="4" * 40,
+                message="perf: speed up\n\nSigned-off-by: Bob <b@x>\nCo-authored-by: Claude <noreply@anthropic.com>",
+                author_login="bob",
+                author_name="Bob",
+                author_email="b@x",
+            ),
+            Commit(
+                sha="5" * 40,
+                message="fix: second commit by bob",
+                author_login="bob",
+                author_name="Bob Alt",
+                author_email="bob-alt@x",
+            ),
+            Commit(
+                sha="6" * 40,
+                message="docs: unlinked commit by external contributor",
+                author_login=None,
+                author_name="Carol",
+                author_email="c@x",
+            ),
+            Commit(
+                sha="7" * 40,
+                message="fix: unlinked commit with PR author's own email",
+                author_login=None,
+                author_name="Alice",
+                author_email="a@x",
+            ),
+            Commit(
+                sha="8" * 40,
+                message="fix: apply suggestion\r\n\r\nCo-authored-by: Dan <d@x>\r\n",
+                author_login="dan",
+                author_name="Dan",
+                author_email="d@x",
+            ),
+        ],
+    )
+    _, body = squash_message(pr, RepoProfile(repo="acme/widget"))
+    assert body.splitlines() == [
+        "Signed-off-by: Alice <a@x>",
+        "Signed-off-by: Bob <b@x>",
+        "Co-Authored-By: Claude <noreply@anthropic.com>",
+        "Co-authored-by: Dan <d@x>",
+        "Co-authored-by: Bob <b@x>",
+        "Co-authored-by: Carol <c@x>",
+    ], body
+
+    no_coauthors = RepoProfile.model_validate(
+        {
+            "repo": "acme/widget",
+            "merge": {"message": {"preserve_trailers": ["Signed-off-by"]}},
+        }
+    )
+    assert squash_message(pr, no_coauthors)[1] == (
+        "Signed-off-by: Alice <a@x>\nSigned-off-by: Bob <b@x>"
     )
 
 

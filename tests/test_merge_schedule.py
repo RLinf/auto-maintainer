@@ -3714,18 +3714,32 @@ async def test_cancelled_run_with_overlapping_summary_and_gate_job_reruns_in_sch
 async def test_merge_succeeds_when_commit_history_mentions_priority_tier_or_mentions(
     harness: Harness,
 ) -> None:
-    """PRs whose own commit messages mention P0/P1, @handles, or non-English text
-    still squash-merge cleanly through the leak guard."""
+    """PRs whose title mentions P0/P1 or @handles, or whose trailers have
+    non-English contributor names, still squash-merge cleanly through the leak
+    guard, without dumping individual commit subjects into the merge body."""
     h = harness
     pr = _ready(42, "a" * 40, _ci(42, "success")).model_copy(
         update={
+            "title": "docs: fix P0 bugs, thanks @contributor",
             "commits": [
                 Commit(
                     sha="a" * 40,
-                    message="docs: fix P0 bugs and 中文说明, thanks @contributor",
+                    message=(
+                        "docs: fix P0 bugs and 中文说明\n\n"
+                        "Signed-off-by: 廖睿浩 <liao@example.com>"
+                    ),
                     author_login="alice",
-                )
-            ]
+                    author_name="廖睿浩",
+                    author_email="liao@example.com",
+                ),
+                Commit(
+                    sha="b" * 40,
+                    message="fix: follow-up",
+                    author_login="bob",
+                    author_name="李文博",
+                    author_email="li@example.com",
+                ),
+            ],
         }
     )
     h.forge.put_pr(pr)
@@ -3733,7 +3747,10 @@ async def test_merge_succeeds_when_commit_history_mentions_priority_tier_or_ment
     await h.settle()
     merges = h.forge.writes_of("merge")
     assert len(merges) == 1
-    assert "fix P0 bugs" in merges[0]["body"]
+    assert merges[0]["subject"] == "docs: fix P0 bugs, thanks @contributor (#42)"
+    assert merges[0]["body"] == (
+        "Signed-off-by: 廖睿浩 <liao@example.com>\nCo-authored-by: 李文博 <li@example.com>"
+    )
 
 
 async def test_missed_failed_merge_action_blocks_instead_of_looping_in_merging(

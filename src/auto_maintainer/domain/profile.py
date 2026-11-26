@@ -348,8 +348,9 @@ class Arming(_Section):
 
 DEFAULT_TRAILERS = ("Signed-off-by", "Co-authored-by")
 """The trailers a squash keeps unless a repository says otherwise: GitHub's own
-squash keeps every commit message, so sign-offs (which a repository's checks on
-its default branch may require) and co-authors survive it."""
+squash keeps commit trailers and credits other commit authors with
+``Co-authored-by``, so sign-offs (which a repository's checks on its default
+branch may require) and co-authors survive it."""
 
 
 class MergeMessage(_Section):

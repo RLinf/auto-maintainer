@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Literal
 
@@ -29,6 +30,7 @@ from .run_ci import latest_checks
 from .snapshot import (
     CheckConclusion,
     CheckStatus,
+    Commit,
     Mergeable,
     PrSnapshot,
     RepoInfo,
@@ -360,6 +362,33 @@ def evaluate_merge_gate(
     return GateResult(outcome="merge", items=items)
 
 
+_EMAIL_RE = re.compile(r"<([^<>\s]+@[^<>\s]+)>")
+
+
+def _trailer_email(value: str) -> str:
+    """Lowercased email inside ``Name <email>``, or ``""`` when absent."""
+    m = _EMAIL_RE.search(value)
+    return m.group(1).strip().lower() if m else ""
+
+
+def _commit_identity(c: Commit) -> tuple[str, str, str] | None:
+    """``(login, name, email)`` of a human non-merge commit author, or ``None``."""
+    login = (c.author_login or "").strip()
+    if is_bot(login) or c.subject.startswith(("Merge branch ", "Merge remote-")):
+        return None
+    name = (c.author_name or "").strip() or login
+    email = (c.author_email or "").strip() or (
+        f"{login}@users.noreply.github.com" if login else ""
+    )
+    if (
+        not name
+        or not email
+        or email.lower().endswith("[bot]@users.noreply.github.com")
+    ):
+        return None
+    return login, name, email
+
+
 def author_signoffs(pr: PrSnapshot) -> list[str]:
     """``Signed-off-by`` lines in the name of the PR's commit authors, as their
     commits name them, each once, in the order they first committed: never for a
@@ -367,19 +396,10 @@ def author_signoffs(pr: PrSnapshot) -> list[str]:
     commits there)."""
     lines: list[str] = []
     for c in pr.commits:
-        login = (c.author_login or "").strip()
-        if is_bot(login) or c.subject.startswith(("Merge branch ", "Merge remote-")):
+        ident = _commit_identity(c)
+        if ident is None:
             continue
-        name = (c.author_name or "").strip() or login
-        email = (c.author_email or "").strip() or (
-            f"{login}@users.noreply.github.com" if login else ""
-        )
-        if (
-            not name
-            or not email
-            or email.lower().endswith("[bot]@users.noreply.github.com")
-        ):
-            continue
+        _, name, email = ident
         line = f"Signed-off-by: {name} <{email}>"
         if line not in lines:
             lines.append(line)
@@ -390,26 +410,88 @@ def author_signoffs(pr: PrSnapshot) -> list[str]:
     return lines
 
 
+def author_coauthors(pr: PrSnapshot) -> list[str]:
+    """``Co-authored-by`` lines for every human commit author on the PR other than
+    the PR's author, each once in the order they first committed, matching GitHub's
+    default squash attribution: never for a bot, nor for a merge of the base branch."""
+    pr_author = (pr.author or "").strip().lower()
+    pr_author_emails = {
+        c.author_email.strip().lower()
+        for c in pr.commits
+        if pr_author
+        and c.author_login
+        and c.author_login.strip().lower() == pr_author
+        and c.author_email
+    }
+    lines: list[str] = []
+    seen_logins: set[str] = set()
+    seen_emails: set[str] = set()
+    for c in pr.commits:
+        ident = _commit_identity(c)
+        if ident is None:
+            continue
+        login, name, email = ident
+        login_low = login.lower()
+        email_low = email.lower()
+        if pr_author and (
+            (login_low and login_low == pr_author)
+            or (not login_low and email_low in pr_author_emails)
+        ):
+            continue
+        if email_low in seen_emails or (login_low and login_low in seen_logins):
+            continue
+        seen_emails.add(email_low)
+        if login_low:
+            seen_logins.add(login_low)
+        lines.append(f"Co-authored-by: {name} <{email}>")
+    return lines
+
+
 def squash_message(pr: PrSnapshot, profile: RepoProfile) -> tuple[str, str]:
-    """The merge subject and body: commit subjects, then preserved trailers; with
-    ``signoff_from_authors``, the authors' sign-offs when no commit has one."""
+    """The merge subject and body: only preserved trailers (such as ``Signed-off-by``
+    and ``Co-authored-by``, plus ``Co-authored-by`` for the PR's other human commit
+    authors when kept, and with ``signoff_from_authors``, the authors' sign-offs
+    when no commit has one). Individual commit subjects are omitted."""
     message = profile.merge.message
     subject = message.subject.format(title=pr.title, number=pr.number)
     keep = {t.lower() for t in message.preserve_trailers}
-    subjects = [f"* {c.subject}" for c in pr.commits if c.subject]
-    trailers: list[str] = []
+    other_trailers: list[str] = []
+    coauthor_trailers: list[str] = []
+    seen_trailers: set[tuple[str, str]] = set()
+    seen_coauthor_emails: set[str] = set()
     for c in pr.commits:
         for key, value in c.trailers:
+            key_low = key.lower()
+            if key_low not in keep:
+                continue
+            dedup_key = (key_low, value.lower())
+            if dedup_key in seen_trailers:
+                continue
             line = f"{key}: {value}"
-            if key.lower() in keep and line not in trailers:
-                trailers.append(line)
+            if key_low == "co-authored-by":
+                email = _trailer_email(value)
+                if email and email in seen_coauthor_emails:
+                    continue
+                if email:
+                    seen_coauthor_emails.add(email)
+                seen_trailers.add(dedup_key)
+                coauthor_trailers.append(line)
+            else:
+                seen_trailers.add(dedup_key)
+                other_trailers.append(line)
     if (
         message.signoff_from_authors
         and "signed-off-by" in keep
-        and not any(t.lower().startswith("signed-off-by:") for t in trailers)
+        and not any(t.lower().startswith("signed-off-by:") for t in other_trailers)
     ):
-        trailers = [*author_signoffs(pr), *trailers]
-    body = "\n".join(subjects)
-    if trailers:
-        body = f"{body}\n\n" + "\n".join(trailers) if body else "\n".join(trailers)
-    return subject, body
+        other_trailers = [*author_signoffs(pr), *other_trailers]
+    if "co-authored-by" in keep:
+        for line in author_coauthors(pr):
+            email = _trailer_email(line)
+            if email and email in seen_coauthor_emails:
+                continue
+            if email:
+                seen_coauthor_emails.add(email)
+            coauthor_trailers.append(line)
+    trailers = [*other_trailers, *coauthor_trailers]
+    return subject, "\n".join(trailers)

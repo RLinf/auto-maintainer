@@ -99,15 +99,39 @@ class Commit(_Model):
 
     @property
     def trailers(self) -> list[tuple[str, str]]:
-        """``(key, value)`` pairs from the last paragraph of the message."""
-        paragraphs = [p for p in self.message.strip().split("\n\n") if p.strip()]
-        if len(paragraphs) < 2:
+        """``(key, value)`` trailer pairs at the end of the message (after the subject).
+
+        Handles CRLF line endings, trailing ``# ...`` comment blocks (such as
+        git's ``# Conflicts:``), blank lines between trailers, and trailers
+        attached directly to the last body line.
+        """
+        lines = self.message.replace("\r\n", "\n").replace("\r", "\n").splitlines()
+        if len(lines) < 2:
             return []
-        found = []
-        for line in paragraphs[-1].splitlines():
-            m = _TRAILER_RE.match(line.strip())
-            if m:
-                found.append((m.group(1), m.group(2)))
+        i = len(lines) - 1
+        while i >= 1:
+            s = lines[i].strip()
+            if not s or s.startswith("#"):
+                i -= 1
+                continue
+            break
+        found: list[tuple[str, str]] = []
+        while i >= 1:
+            s = lines[i].strip()
+            if not s:
+                j = i - 1
+                while j >= 1 and not lines[j].strip():
+                    j -= 1
+                if j >= 1 and _TRAILER_RE.match(lines[j].strip()):
+                    i = j
+                    continue
+                break
+            m = _TRAILER_RE.match(s)
+            if not m:
+                break
+            found.append((m.group(1), m.group(2)))
+            i -= 1
+        found.reverse()
         return found
 
 

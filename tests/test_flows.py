@@ -679,10 +679,19 @@ async def test_merge_waits_for_gate_then_merges_with_trailers(harness: Harness) 
         # GitHub has worked out that it merges cleanly.
         mergeable=Mergeable.MERGEABLE,
         commits=[
-            Commit(sha="c" * 40, message=_signed("fix(core): handle empty batches")),
+            Commit(
+                sha="c" * 40,
+                message=_signed("fix(core): handle empty batches"),
+                author_login="alice",
+                author_name="Alice",
+                author_email="alice@example.com",
+            ),
             Commit(
                 sha="e" * 40,
                 message="test: cover it\n\nSigned-off-by: Alice <alice@example.com>\nCo-authored-by: Bo <bo@example.com>",
+                author_login="carol",
+                author_name="Carol",
+                author_email="carol@example.com",
             ),
         ],
         reviews=[
@@ -734,8 +743,11 @@ async def test_merge_waits_for_gate_then_merges_with_trailers(harness: Harness) 
     merges = harness.forge.writes_of("merge")
     assert len(merges) == 1
     assert merges[0]["subject"] == "fix(core): handle empty batches (#42)"
-    assert "Signed-off-by: Alice <alice@example.com>" in merges[0]["body"]
-    assert "Co-authored-by: Bo <bo@example.com>" in merges[0]["body"]
+    assert merges[0]["body"] == (
+        "Signed-off-by: Alice <alice@example.com>\n"
+        "Co-authored-by: Bo <bo@example.com>\n"
+        "Co-authored-by: Carol <carol@example.com>"
+    )
     assert await harness.store.get_arm("acme/widget", 42) is None
     _ = Event
 

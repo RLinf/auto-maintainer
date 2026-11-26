@@ -259,9 +259,9 @@ class GitLabWriter:
             raise ValueError(
                 f"merge method must be squash, merge, or rebase, got {method!r}"
             )
-        message = (
-            f"{_public(subject, repo, 'subject')}\n\n{_public(body, repo, 'body')}"
-        )
+        subject_text = _public(subject, repo, "subject")
+        body_text = _public(body, repo, "body")
+        message = f"{subject_text}\n\n{body_text}" if body_text else subject_text
         payload: dict[str, Any] = {"sha": sha, "squash": method == "squash"}
         if method == "squash":
             payload["squash_commit_message"] = message
