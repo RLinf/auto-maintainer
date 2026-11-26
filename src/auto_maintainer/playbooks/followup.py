@@ -78,6 +78,7 @@ from .requests import (
     review_request,
     settle_delay,
     starts_review,
+    supersede_older_reviews,
 )
 from .review import reproduction_record
 from .review_form import fill_form, forget_report, keep_report, saved_report
@@ -179,6 +180,7 @@ class Followup(Playbook):
             return PlaybookResult(
                 result={"skipped": f"state is {state}", "handed_to": "review"}
             )
+        await supersede_older_reviews(ctx, pr.repo, pr.number, pr.head_sha)
         prior = await self._prior_findings(ctx, pr)
 
         info = await ctx.forge.get_repo(pr.repo)
@@ -345,6 +347,9 @@ class Followup(Playbook):
                     draft_for=request.by if request else None,
                 )
             )
+        await supersede_older_reviews(
+            ctx, pr.repo, pr.number, pr.head_sha, check_current=True
+        )
         return PlaybookResult(
             actions=actions,
             result={

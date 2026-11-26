@@ -1698,3 +1698,61 @@ async def test_the_waiting_count_holds_ones_own_drafts_not_every_reviewers(
             if p["action"]["action"]["kind"] == "review.post"
         }
     assert mine.get(43) is True and not mine.get(42)
+
+
+async def test_requesting_a_review_on_the_dashboard_immediately_supersedes_older_head_drafts(
+    demo,
+) -> None:
+    """Triggering a review on a newer head clears pending drafts from older heads at
+    once (even before the new job runs), while a second agent on the same head keeps
+    the current head's draft."""
+    from auto_maintainer.domain.actions import ProposalState
+
+    h, app = demo
+    await _review(app, "maria", 42, agent="codex")
+    await h.settle()
+    old_drafts = [
+        p
+        for p in await h.store.list_proposals(ProposalState.PENDING, REPO)
+        if (await h.store.get_action(p.action_id)).action.number == 42
+        and (await h.store.get_action(p.action_id)).action.kind
+        == ActionKind.REVIEW_POST
+    ]
+    assert len(old_drafts) == 1
+
+    # Author pushes a new commit: maria's requested draft survives the push.
+    pr = h.forge.prs[(REPO, 42)]
+    h.forge.put_pr(pr.model_copy(update={"head_sha": "e" * 40}))
+    await h.poll()
+    still = await h.store.get_proposal(old_drafts[0].id)
+    assert still is not None and still.state == ProposalState.PENDING
+
+    # Walt requests a review at the new head: older draft is superseded immediately
+    # upon triggering (before h.settle() even runs the new review).
+    started = await _review(app, "walt", 42, agent="codex")
+    assert started["run"] == "review"
+    cleared = await h.store.get_proposal(old_drafts[0].id)
+    assert cleared is not None and cleared.state == ProposalState.SUPERSEDED
+
+    await h.settle()
+    at_e = [
+        p
+        for p in await h.store.list_proposals(ProposalState.PENDING, REPO)
+        if (await h.store.get_action(p.action_id)).action.number == 42
+        and (await h.store.get_action(p.action_id)).action.kind
+        == ActionKind.REVIEW_POST
+    ]
+    assert len(at_e) == 1 and at_e[0].requested_by == "walt"
+
+    # A different agent on the SAME head keeps walt's draft at head e.
+    second = await _review(app, "maria", 42, agent="claude-code")
+    assert second["run"] == "review"
+    await h.settle()
+    both = [
+        p
+        for p in await h.store.list_proposals(ProposalState.PENDING, REPO)
+        if (await h.store.get_action(p.action_id)).action.number == 42
+        and (await h.store.get_action(p.action_id)).action.kind
+        == ActionKind.REVIEW_POST
+    ]
+    assert {p.requested_by for p in both} == {"walt", "maria"}

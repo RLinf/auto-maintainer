@@ -204,8 +204,9 @@ class LabSessionControl(Protocol):
 
 
 class DraftEditor(Protocol):
-    """Revises a draft that still waits for a decision (the actuator's pipeline).
-    Playbooks use it only to add to their own drafts, never to decide one."""
+    """Updates pending drafts through the actuator's pipeline: revises a draft
+    (``save_edits``) or retires stale review drafts from older commits when a newer
+    review runs (``supersede_review_drafts``), never approving or rejecting one."""
 
     async def save_edits(
         self,
@@ -215,6 +216,15 @@ class DraftEditor(Protocol):
         *,
         person: bool = True,
     ) -> Any: ...
+
+    async def supersede_review_drafts(
+        self,
+        repo: str,
+        number: int,
+        head_sha: str,
+        *,
+        exclude_job_id: str | None = None,
+    ) -> int: ...
 
 
 RESUMED = """The service restarted while you were working on this task. This is the same session: go on from where you were. Whatever was still running when the service stopped was stopped; run it again if you need its result.{lab} Finish the task; it follows as it was first given."""

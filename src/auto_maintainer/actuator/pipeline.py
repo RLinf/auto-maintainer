@@ -61,6 +61,12 @@ log = logging.getLogger(__name__)
 
 PAUSE_KEY = "paused"
 
+REVIEW_PLAYBOOKS = frozenset({"review", "followup"})
+"""Playbooks whose pending outputs are retired when a newer review runs."""
+
+REVIEW_ACTION_KINDS = frozenset({ActionKind.REVIEW_POST, ActionKind.REVIEW_UPDATE})
+"""Action kinds that represent a review draft or revision even without playbook provenance."""
+
 RUN_ON_REQUEST = frozenset({ActionKind.LAB_REPRODUCE})
 """Drafts that run once made, approved by the person they are drafted for: a
 reproduction someone asked for, whose request is its approval. The repository's
@@ -735,11 +741,31 @@ class ActionPipeline:
             )
         return proposal
 
+    async def _supersede(self, proposal: Proposal, record: ActionRecord) -> None:
+        proposal.state = ProposalState.SUPERSEDED
+        await self.store.save_proposal(proposal)
+        record.status = ActionStatus.SUPERSEDED
+        await self.store.save_action(record)
+        await self.bus.publish(
+            Event(
+                kind=EventKind.PROPOSAL_DECIDED,
+                repo=record.action.repo,
+                number=record.action.number,
+                payload={
+                    "proposal": proposal.id,
+                    "action_id": record.action.id,
+                    "state": ProposalState.SUPERSEDED.value,
+                },
+                source="pipeline",
+            )
+        )
+
     async def supersede_stale(self, repo: str, number: int, head_sha: str) -> int:
         """Mark pending proposals for an older head of ``repo#number`` as superseded.
 
-        A review draft a reviewer asked for stays: it reviews its own commit, and
-        posts there when approved (``HandlerSpec.approved_on_its_commit``).
+        A review draft a reviewer asked for stays until a newer review starts: it
+        reviews its own commit, and posts there when approved
+        (``HandlerSpec.approved_on_its_commit``).
         """
         count = 0
         for proposal in await self.store.list_proposals(ProposalState.PENDING, repo):
@@ -755,10 +781,44 @@ class ActionPipeline:
             ):
                 continue
             if not same_commit(record.action.head_sha, head_sha):
-                proposal.state = ProposalState.SUPERSEDED
-                await self.store.save_proposal(proposal)
-                record.status = ActionStatus.SUPERSEDED
-                await self.store.save_action(record)
+                await self._supersede(proposal, record)
+                count += 1
+        return count
+
+    async def supersede_review_drafts(
+        self,
+        repo: str,
+        number: int,
+        head_sha: str,
+        *,
+        exclude_job_id: str | None = None,
+    ) -> int:
+        """Mark pending review drafts and other pending items produced by earlier
+        reviews of ``repo#number`` for an older head than ``head_sha`` as superseded.
+
+        Unlike ``supersede_stale`` on push, this includes requested ``review.post``
+        drafts (``draft_for`` set), ``review.update`` drafts, and pending side
+        actions from ``review`` or ``followup`` playbooks. Pending items at
+        ``head_sha`` stay, so separate-agent or per-reviewer drafts on the same
+        commit are kept.
+        """
+        if not head_sha:
+            return 0
+        count = 0
+        for proposal in await self.store.list_proposals(ProposalState.PENDING, repo):
+            record = await self.store.get_action(proposal.action_id)
+            if (
+                record is None
+                or record.action.number != number
+                or not record.action.head_sha
+                or (
+                    exclude_job_id and record.action.provenance.job_id == exclude_job_id
+                )
+                or not _from_review(record.action)
+            ):
+                continue
+            if not same_commit(record.action.head_sha, head_sha):
+                await self._supersede(proposal, record)
                 count += 1
         return count
 
@@ -775,6 +835,13 @@ class ActionPipeline:
                 await self._redecide(record, proposal.decided_by)
                 released += 1
         return released
+
+
+def _from_review(action: Action) -> bool:
+    return (
+        action.kind in REVIEW_ACTION_KINDS
+        or action.provenance.playbook in REVIEW_PLAYBOOKS
+    )
 
 
 def _public_texts(action: Action) -> list[str]:
