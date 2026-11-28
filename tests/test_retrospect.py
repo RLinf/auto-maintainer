@@ -261,6 +261,7 @@ async def test_only_the_owner_turns_a_suggestion_into_a_self_improvement(
                 ]
             }
         ]
+        assert (await maria.get("/api/settings")).json()["pending"] == []
         out = await maria.post(
             f"/api/learning/suggestions/{suggestion['id']}/approve",
             json={"text": "Add libx to agent.Dockerfile, pinned."},

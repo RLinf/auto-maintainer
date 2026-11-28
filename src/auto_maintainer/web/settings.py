@@ -40,6 +40,7 @@ from ..domain.settings import (
     PROVIDER_ID,
     PROVIDER_PROTOCOLS,
     SECRET_NAME,
+    SETTINGS_PATH,
     DeployChecks,
     LabMachine,
     ModelSpec,
@@ -123,7 +124,7 @@ async def settings_view(service: Service, user: User) -> dict[str, Any]:
     pending = [
         c
         for c in await service.store.list_memory_changes(MemoryChangeState.OPEN)
-        if c.service
+        if c.service and SETTINGS_PATH in c.files
     ]
     people = service.a.people
     own = set(await service.own_agents(user.login))
