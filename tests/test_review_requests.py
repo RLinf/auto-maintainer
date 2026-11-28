@@ -872,6 +872,84 @@ async def test_a_repository_can_turn_label_suggestions_off(demo) -> None:
         ]
 
 
+async def test_ready_review_does_not_propose_ci_gate_by_default_while_run_ci_still_works(
+    demo,
+) -> None:
+    h, app = demo
+    h.runner.on("review", lambda t: report())
+    h.runner.on("form", _review_with_labels([]))
+    await _review(app, "maria", 43)
+    await h.settle()
+    async with _as(app, "maria") as maria:
+        proposals = (await maria.get("/api/proposals")).json()
+        assert not [
+            p for p in proposals if p["action"]["action"]["kind"] == "label.ci_gate"
+        ]
+        # Run CI still uses labels.roles.ci_gate even though reviews do not suggest it.
+        out = await maria.post(f"/api/prs/{REPO}/43/ci")
+        assert out.status_code == 200, out.text
+    await h.settle()
+    assert "run-ci" in h.forge.prs[(REPO, 43)].labels
+
+
+async def test_review_suggest_ci_gate_opt_in_skips_present_and_rejected(demo) -> None:
+    from auto_maintainer.domain.memory import profile_path
+    from auto_maintainer.profiles.layers import dump_yaml, parse_yaml
+
+    h, app = demo
+    layer = parse_yaml(h.memory.files[profile_path(REPO)], "settings")
+    layer["review"] = {**(layer.get("review") or {}), "suggest_ci_gate": True}
+    h.memory.files[profile_path(REPO)] = dump_yaml(layer)
+    await h.approve_directly(REPO, "maria")
+    h.runner.on("review", lambda t: report())
+    h.runner.on("form", _review_with_labels([]))
+    h.runner.on("learn", lambda t: {"disposition": "PR_SPECIFIC", "why": "w"})
+
+    # PR #42 already has run-ci -> no label.ci_gate proposal.
+    pr42 = h.forge.prs[(REPO, 42)]
+    h.forge.put_pr(pr42.model_copy(update={"labels": [*pr42.labels, "run-ci"]}))
+    await _review(app, "maria", 42)
+    await h.settle()
+    async with _as(app, "maria") as maria:
+        assert not [
+            p
+            for p in (await maria.get("/api/proposals")).json()
+            if p["action"]["action"]["kind"] == "label.ci_gate"
+            and p["action"]["action"]["number"] == 42
+        ]
+
+    # PR #43 lacks run-ci -> proposed when suggest_ci_gate is enabled.
+    await _review(app, "maria", 43)
+    await h.settle()
+    async with _as(app, "maria") as maria:
+        gate_props = [
+            p
+            for p in (await maria.get("/api/proposals")).json()
+            if p["action"]["action"]["kind"] == "label.ci_gate"
+            and p["action"]["action"]["number"] == 43
+        ]
+        assert len(gate_props) == 1
+        rejected = await maria.post(
+            f"/api/proposals/{gate_props[0]['id']}/reject",
+            json={"reason": "do not trigger CI from review"},
+        )
+        assert rejected.status_code == 200, rejected.text
+    await h.settle()
+
+    # After rejection on #43, another full review does not propose label.ci_gate again.
+    async with _as(app, "maria") as maria:
+        again = await maria.post(f"/api/prs/{REPO}/43/review", json={"full": True})
+        assert again.status_code == 200, again.text
+    await h.settle()
+    async with _as(app, "maria") as maria:
+        assert not [
+            p
+            for p in (await maria.get("/api/proposals")).json()
+            if p["action"]["action"]["kind"] == "label.ci_gate"
+            and p["action"]["action"]["number"] == 43
+        ]
+
+
 # -- the repository's own review format ----------------------------------------------
 
 

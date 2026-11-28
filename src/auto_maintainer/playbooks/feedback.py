@@ -29,7 +29,7 @@ from ..domain.actions import ActionKind, ProposalState
 from ..domain.ports import Store
 from .prompts import untrusted
 
-LABEL_KINDS = frozenset({ActionKind.LABEL_APPLY})
+LABEL_KINDS = frozenset({ActionKind.LABEL_APPLY, ActionKind.LABEL_CI_GATE})
 EXCERPT_CHARS = 600
 """How much of a rejected text the next agent sees."""
 
@@ -47,6 +47,8 @@ class Rejection:
     by: str
     at: datetime | None
     head_sha: str | None
+    roles: tuple[str, ...] = ()
+    """For a role-label proposal (such as ``label.ci_gate``): the roles turned down."""
 
 
 async def rejections_on(store: Store, repo: str, number: int) -> list[Rejection]:
@@ -63,15 +65,21 @@ async def rejections_on(store: Store, repo: str, number: int) -> list[Rejection]
             action = record.action
             payload = action.payload
             if state == ProposalState.EXECUTED:
-                labels, reason = tuple(proposal.declined), "removed before approving"
+                labels, roles, reason = (
+                    tuple(proposal.declined),
+                    (),
+                    "removed before approving",
+                )
             else:
                 labels = tuple(payload.get("labels") or ())
+                roles = tuple(payload.get("roles") or ())
                 reason = proposal.reason or ""
             body = payload.get("body")
             out.append(
                 Rejection(
                     kind=str(action.kind),
                     labels=labels if action.kind in LABEL_KINDS else (),
+                    roles=roles if action.kind in LABEL_KINDS else (),
                     excerpt=body[:EXCERPT_CHARS] if isinstance(body, str) else "",
                     reason=reason,
                     by=proposal.decided_by or "",
@@ -87,6 +95,11 @@ def declined_labels(rejections: list[Rejection]) -> set[str]:
     return {label for r in rejections for label in r.labels}
 
 
+def declined_roles(rejections: list[Rejection]) -> set[str]:
+    """Label roles reviewers turned down on the PR; none of them is proposed again."""
+    return {role for r in rejections for role in r.roles}
+
+
 def rejections_block(rejections: list[Rejection]) -> str:
     """The prompt part that tells the agent what reviewers turned down on this PR
     and why, or nothing when they turned nothing down."""
@@ -94,11 +107,12 @@ def rejections_block(rejections: list[Rejection]) -> str:
         return ""
     lines = []
     for r in rejections:
-        what = (
-            f"labels {', '.join(r.labels)}"
-            if r.labels
-            else f"{r.kind}" + (f" beginning: {r.excerpt}" if r.excerpt else "")
-        )
+        if r.labels:
+            what = f"labels {', '.join(r.labels)}"
+        elif r.roles:
+            what = f"{r.kind} ({', '.join(r.roles)})"
+        else:
+            what = f"{r.kind}" + (f" beginning: {r.excerpt}" if r.excerpt else "")
         at = f" at {r.head_sha[:7]}" if r.head_sha else ""
         lines.append(
             f"- {r.by or 'a reviewer'} turned down {what}{at}."

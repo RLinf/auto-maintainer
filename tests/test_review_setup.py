@@ -158,6 +158,31 @@ async def test_maintainers_choose_the_skill_and_say_how_to_review(demo) -> None:
         proposed = (await walt.put(url, json={"instructions": ""})).json()
         assert not proposed["applied"], "a reviewer only proposes"
 
+    async with _as(app, "maria") as maria:
+        before_gate = (await maria.get(url)).json()
+        assert before_gate["suggest_ci_gate"] is False
+        assert before_gate["ci_gate_label"] == "run-ci"
+        saved = (await maria.put(url, json={"suggest_ci_gate": True})).json()
+        assert saved["applied"]
+        layer = parse_yaml(h.memory.files[profile_path(REPO)], "settings")
+        assert layer["review"]["suggest_ci_gate"] is True
+        assert (await maria.get(url)).json()["suggest_ci_gate"] is True
+        await maria.put(url, json={"suggest_ci_gate": False})
+        layer = parse_yaml(h.memory.files[profile_path(REPO)], "settings")
+        assert "suggest_ci_gate" not in layer["review"]
+        assert (await maria.get(url)).json()["suggest_ci_gate"] is False
+
+
+async def test_doctor_flags_suggest_ci_gate_without_ci_gate_role() -> None:
+    from auto_maintainer.profiles.doctor import run_doctor
+    from auto_maintainer.testing.fakes import FakeForge
+
+    forge = FakeForge()
+    profile = _profile(suggest_ci_gate=True)
+    items = await run_doctor(profile, forge, set())
+    checks = {i.check: i for i in items}
+    assert "review ci_gate" in checks and not checks["review ci_gate"].ok
+
 
 async def test_onboarding_asks_how_to_review_without_a_review_skill(
     tmp_path: Path,

@@ -292,6 +292,10 @@ export interface ReviewGuides {
   quality_guide: string | null;
   /** Whether every open PR gets a quick score before its review. */
   quick_quality: boolean;
+  /** Whether a ready first review proposes the repository's ci_gate label. */
+  suggest_ci_gate: boolean;
+  /** Configured labels.roles.ci_gate name, if any. */
+  ci_gate_label: string | null;
   /** Rules quick scores follow, drawn automatically from the quick scores reviews corrected. */
   quick_lessons: { rules?: string[]; at?: string; misses?: number };
   quick_misses: { number: number; quick: number; review: number; at: string }[];

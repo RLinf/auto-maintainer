@@ -87,6 +87,7 @@ const LABELS: Record<string, string> = {
   "review.max_inline_comments": "Most inline comments",
   "review.suggest_labels": "Suggest labels",
   "review.max_suggested_labels": "Most suggested labels",
+  "review.suggest_ci_gate": "Suggest CI gate label",
   "labels.roles.needs_review": "Label for PRs that need review",
   "labels.roles.changes_requested": "Label when changes are requested",
   "labels.roles.ci_gate": "Label that lets CI run",

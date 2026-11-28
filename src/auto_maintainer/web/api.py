@@ -1469,6 +1469,8 @@ class ReviewGuidesBody(BaseModel):
     quality_guide: str | None = Field(default=None, max_length=8000)
     """Empty, or the service's default, restores the default."""
     quick_quality: bool = True
+    suggest_ci_gate: bool | None = None
+    """Whether a ready first review suggests the ``ci_gate`` label; None leaves it as it is."""
     skill: str | None = Field(default=None, max_length=300)
     """The review skill (``review.skill``); None leaves it as it is."""
     instructions: str | None = Field(default=None, max_length=8000)
@@ -2050,6 +2052,8 @@ def build_router() -> APIRouter:
             "writing_guide": profile.review.writing_guide,
             "quality_guide": profile.review.quality_guide,
             "quick_quality": profile.review.quick_quality,
+            "suggest_ci_gate": profile.review.suggest_ci_gate,
+            "ci_gate_label": profile.label_for("ci_gate"),
             "quick_lessons": await quick_lessons(service.store, repo),
             "quick_misses": [
                 m.model_dump() for m in await quick_misses(service.store, repo)
@@ -2109,6 +2113,11 @@ def build_router() -> APIRouter:
             review.pop("quick_quality", None)
         else:
             review["quick_quality"] = False
+        if body.suggest_ci_gate is not None:
+            if body.suggest_ci_gate:
+                review["suggest_ci_gate"] = True
+            else:
+                review.pop("suggest_ci_gate", None)
         if review:
             layer["review"] = review
         else:
