@@ -12,7 +12,7 @@ import { useT } from "./i18n";
 import { Icon } from "./icons";
 import { useToast } from "./ui";
 
-const KEYS = [["settings"], ["memory"], ["profile"], ["repos"], ["chat"], ["audit"]];
+const KEYS = [["settings"], ["memory"], ["profile"], ["repos"], ["chat"], ["audit"], ["learning"]];
 const SETTINGS_PATH = "config/service.yaml";
 
 export function ChangeById({ id }: { id: string }) {
@@ -43,10 +43,11 @@ export function SettingsChangeCard({ change, compact = false }: { change: Memory
   const toast = useToast();
   const settings = useSettings();
   const doc = change.service ? change.files[SETTINGS_PATH] : null;
+  const isSettingsDoc = doc != null;
   const check = useQuery({
     queryKey: ["settings", "check", change.id],
     queryFn: () => api.post<SettingsCheck>("/api/settings/check", { yaml: doc ?? "" }),
-    enabled: doc != null,
+    enabled: isSettingsDoc,
   });
   const approve = useAct(() => api.post<{ state: string }>(`/api/memory/changes/${change.id}/approve`), KEYS);
   const reject = useAct((reason: string) => api.post(`/api/memory/changes/${change.id}/reject`, { reason }), KEYS);
@@ -61,10 +62,10 @@ export function SettingsChangeCard({ change, compact = false }: { change: Memory
         <strong>{change.title}</strong>
         <Status value={state} />
         <span className="small muted right">
-          {change.service ? t("service settings") : change.repos.join(", ")} · {change.requested_by ?? change.author} · <When at={change.created_at} />
+          {isSettingsDoc ? t("service settings") : change.service ? t("service") : change.repos.join(", ")} · {change.requested_by ?? change.author} · <When at={change.created_at} />
         </span>
       </div>
-      {change.service ? (
+      {isSettingsDoc ? (
         check.isLoading ? null : check.data ? (
           <>
             {!check.data.ok && (

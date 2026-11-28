@@ -33,7 +33,9 @@ from auto_maintainer.agents.adapters.opencode import OpenCodeRuntime
 from auto_maintainer.agents.exec import RunFiles
 from auto_maintainer.agents.registry import build_runtime
 from auto_maintainer.agents.sandbox import scrub
+from auto_maintainer.domain.access import ACCESS_PATH
 from auto_maintainer.domain.agents import AgentTask, TaskKind
+from auto_maintainer.domain.memory import MemoryChange, Tier
 from auto_maintainer.domain.permissions import Permission
 from auto_maintainer.domain.profile import Route
 from auto_maintainer.domain.settings import (
@@ -46,6 +48,10 @@ from auto_maintainer.domain.settings import (
     check_settings,
     effective_routing,
     parse_settings,
+)
+from auto_maintainer.profiles.knowledge import (
+    GLOBAL_AGENT_LESSONS,
+    machine_lessons_path,
 )
 from auto_maintainer.testing.demo import DEMO_SETTINGS_CHANGE, build_demo
 from auto_maintainer.web.app import create_app
@@ -219,6 +225,49 @@ async def test_anyone_else_only_proposes_even_an_operator(demo, login: str) -> N
         assert approved.json()["state"] == "merged"
     assert h.service.settings.poll_seconds == 600
     assert h.service.scheduler.poll_seconds == 600
+
+
+async def test_settings_pending_lists_only_service_settings_changes(demo) -> None:
+    """``/api/settings`` pending changes include only ``config/service.yaml`` edits,
+    not service-level agent lessons (shown on Service) or ``config/access.yaml``."""
+    h, app = demo
+    lesson_change = MemoryChange(
+        tier=Tier.T1,
+        title="lessons from review on acme/widget#1",
+        description="Use lab --sync before running tests.",
+        files={
+            GLOBAL_AGENT_LESSONS: "# Agent lessons\n- Use lab --sync.\n",
+            machine_lessons_path("a800"): "# Agent lessons\n- Use conda.\n",
+        },
+        service=True,
+        from_own_signals=False,
+    )
+    access_change = MemoryChange(
+        tier=Tier.T2,
+        title="access: add admin",
+        description="Access update.",
+        files={ACCESS_PATH: "schema: 1\nadmins: [walt]\n"},
+        service=True,
+        from_own_signals=False,
+    )
+    settings_change = MemoryChange(
+        tier=Tier.T2,
+        title="settings: poll every 10m",
+        description="Service settings change by walt.",
+        files={SETTINGS_PATH: "schema: 1\nsystem: {poll_seconds: 600}\n"},
+        service=True,
+        author="walt",
+        requested_by="walt",
+        from_own_signals=False,
+    )
+    for change in (lesson_change, access_change, settings_change):
+        await h.store.save_memory_change(change)
+
+    async with _client(app, "maria") as maria:
+        pending = (await maria.get("/api/settings")).json()["pending"]
+        assert [c["id"] for c in pending] == [settings_change.id]
+        lessons = (await maria.get("/api/learning")).json()["lessons"]
+        assert [c["id"] for c in lessons] == [lesson_change.id]
 
 
 async def test_an_agent_is_switched_to_skip_permissions_through_the_gate(
