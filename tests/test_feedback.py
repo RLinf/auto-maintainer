@@ -285,3 +285,53 @@ async def test_rejecting_without_a_reason_succeeds_and_skips_learning(
     block = rejections_block(await rejections_on(h.store, REPO, 42))
     assert "maria turned down labels enhancement, documentation at" in block
     assert "Why:" not in block
+
+
+async def test_rejected_ci_gate_role_is_tracked_and_not_proposed_again(
+    h: Harness,
+) -> None:
+    from auto_maintainer.domain.memory import profile_path
+    from auto_maintainer.playbooks.feedback import (
+        declined_roles,
+        rejections_block,
+        rejections_on,
+    )
+    from auto_maintainer.profiles.layers import dump_yaml, parse_yaml
+
+    layer = parse_yaml(h.memory.files[profile_path(REPO)], "settings")
+    layer["labels"] = {
+        **(layer.get("labels") or {}),
+        "roles": {"ci_gate": "run-ci"},
+    }
+    layer["review"] = {**(layer.get("review") or {}), "suggest_ci_gate": True}
+    h.memory.files[profile_path(REPO)] = dump_yaml(layer)
+    await h.approve_directly(REPO, "maria")
+
+    await h.emit(_request())
+    gate_props = [
+        p
+        for p in await h.store.list_proposals(ProposalState.PENDING, REPO)
+        if (await h.store.get_action(p.action_id)).action.kind
+        == ActionKind.LABEL_CI_GATE
+    ]
+    assert len(gate_props) == 1
+    gate_prop = gate_props[0]
+    reason = "Do not suggest run-ci in reviews."
+    await h.service.pipeline.reject(gate_prop.id, "maria", reason)
+    await h.settle()
+
+    turned_down = await rejections_on(h.store, REPO, 42)
+    assert declined_roles(turned_down) == {"ci_gate"}
+    block = rejections_block(turned_down)
+    assert "label.ci_gate (ci_gate)" in block and reason in block
+    [learn_task] = _tasks(h, "learn")
+    assert "'run-ci' (label.ci_gate)" in learn_task.prompt
+
+    await h.emit(_request())
+    again = [
+        p
+        for p in await h.store.list_proposals(ProposalState.PENDING, REPO)
+        if (await h.store.get_action(p.action_id)).action.kind
+        == ActionKind.LABEL_CI_GATE
+    ]
+    assert again == []

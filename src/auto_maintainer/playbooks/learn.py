@@ -102,6 +102,13 @@ class LearnFromRejection(Playbook):
         payload = action.payload
         if action.kind == ActionKind.LABEL_APPLY:
             proposed = "the labels " + ", ".join(payload.get("labels") or [])
+        elif action.kind == ActionKind.LABEL_CI_GATE:
+            gate = profile.label_for("ci_gate")
+            proposed = (
+                f"the CI gate label {gate!r} (label.ci_gate)"
+                if gate
+                else "the CI gate label (label.ci_gate)"
+            )
         elif isinstance(payload.get("body"), str):
             proposed = f"a {action.kind} beginning:\n{payload['body'][:EXCERPT_CHARS]}"
         else:

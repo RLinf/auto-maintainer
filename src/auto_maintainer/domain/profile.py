@@ -223,6 +223,11 @@ class Review(_Section):
     """Whether reviews and follow-ups suggest labels from the repository's own (never
     the role labels the service manages); a suggestion is a ``label.apply`` action."""
     max_suggested_labels: int = Field(default=3, ge=1, le=10)
+    suggest_ci_gate: bool = False
+    """Whether a first review that recommends ready proposes adding the repository's
+    ``ci_gate`` label (``label.ci_gate``). Off by default so configuring
+    ``labels.roles.ci_gate`` for Run CI and merge scheduling does not make reviews
+    propose it on their own."""
     writing_guide: str | None = Field(default=None, max_length=8000)
     """How every review, follow-up, and revision of one is written, in plain words,
     over any review skill's own rules. ``None``: a repository's own review skill keeps

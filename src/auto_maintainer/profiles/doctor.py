@@ -167,6 +167,14 @@ async def run_doctor(
         items.append(
             DoctorItem(check="CODEOWNERS", ok=bool(rules), detail=f"{len(rules)} rules")
         )
+    if profile.review.suggest_ci_gate and profile.label_for("ci_gate") is None:
+        items.append(
+            DoctorItem(
+                check="review ci_gate",
+                ok=False,
+                detail="review.suggest_ci_gate is enabled but labels.roles.ci_gate is not set",
+            )
+        )
     if (
         profile.merge.enabled
         and profile.label_for("ci_gate") is None

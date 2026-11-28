@@ -549,6 +549,7 @@ function ReviewGuidesSection({ repo }: { repo: string }) {
   const [writing, setWriting] = useState("");
   const [quality, setQuality] = useState("");
   const [quick, setQuick] = useState(true);
+  const [suggestCiGate, setSuggestCiGate] = useState(false);
   useEffect(() => {
     if (!d) return;
     setSkill(d.skill);
@@ -556,6 +557,7 @@ function ReviewGuidesSection({ repo }: { repo: string }) {
     setWriting(d.writing_guide ?? d.default_writing_guide);
     setQuality(d.quality_guide ?? d.default_quality_guide);
     setQuick(d.quick_quality);
+    setSuggestCiGate(d.suggest_ci_gate);
   }, [d]);
   const save = useAct(
     () =>
@@ -565,6 +567,7 @@ function ReviewGuidesSection({ repo }: { repo: string }) {
         writing_guide: writing,
         quality_guide: quality,
         quick_quality: quick,
+        suggest_ci_gate: suggestCiGate,
       }),
     [["profile"], ["memory"]],
   );
@@ -574,7 +577,8 @@ function ReviewGuidesSection({ repo }: { repo: string }) {
       instructions.trim() !== (d.instructions ?? "").trim() ||
       writing.trim() !== (d.writing_guide ?? d.default_writing_guide).trim() ||
       quality.trim() !== (d.quality_guide ?? d.default_quality_guide).trim() ||
-      quick !== d.quick_quality);
+      quick !== d.quick_quality ||
+      suggestCiGate !== d.suggest_ci_gate);
   return (
     <Section title={t("How PRs are reviewed")} hint={t("every review, follow-up, and revision")}>
       {!d ? (
@@ -645,6 +649,17 @@ function ReviewGuidesSection({ repo }: { repo: string }) {
               </span>
             </span>
           </label>
+          {(d.ci_gate_label || suggestCiGate) && (
+            <label className="row" style={{ gap: 8, alignItems: "flex-start" }}>
+              <input type="checkbox" checked={suggestCiGate} onChange={(e) => setSuggestCiGate(e.target.checked)} style={{ marginTop: 3 }} />
+              <span className="stack" style={{ gap: 2 }}>
+                <strong>{t("Suggest CI gate label on ready reviews")}</strong>
+                <span className="small muted">
+                  {t("When a first review finds a PR ready, propose adding the repository's CI gate label. Off by default; Run CI and merge scheduling still use the label.")}
+                </span>
+              </span>
+            </label>
+          )}
           <QuickLessons view={d} />
           <div className="row">
             <span className="spacer" />

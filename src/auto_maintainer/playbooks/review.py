@@ -56,7 +56,13 @@ from .base import (
     in_scope,
     keeps_session,
 )
-from .feedback import Rejection, declined_labels, rejections_block, rejections_on
+from .feedback import (
+    Rejection,
+    declined_labels,
+    declined_roles,
+    rejections_block,
+    rejections_on,
+)
 from .person_notes import load_notes, notes_block
 from .prompts import (
     NOTHING_RUNS,
@@ -209,6 +215,7 @@ class ReviewPlaybook(Playbook):
         info = await ctx.forge.get_repo(pr.repo)
         turned_down = await rejections_on(ctx.store, pr.repo, pr.number)
         declined = declined_labels(turned_down)
+        declined_r = declined_roles(turned_down)
         choices = [
             c for c in label_choices(info.labels, profile, pr) if c not in declined
         ]
@@ -352,7 +359,13 @@ class ReviewPlaybook(Playbook):
                 )
             )
         elif meaning == "ready":
-            if profile.label_for("ci_gate"):
+            gate = profile.label_for("ci_gate")
+            if (
+                profile.review.suggest_ci_gate
+                and gate
+                and gate not in pr.labels
+                and "ci_gate" not in declined_r
+            ):
                 actions.append(
                     make_action(
                         ActionKind.LABEL_CI_GATE,

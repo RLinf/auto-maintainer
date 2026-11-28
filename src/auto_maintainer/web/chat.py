@@ -1170,9 +1170,11 @@ async def _page_block(
                 "repository's review skill when it has one, else the service's) | "
                 "service:<name> (the service's even so) | repo:<path of a SKILL.md "
                 "above>, instructions: <how its maintainers want PRs reviewed, in their "
-                "words>} in its settings layer. Instructions now: "
+                "words>, suggest_ci_gate: true | false (whether ready first reviews "
+                "propose the ci_gate label; false by default, without affecting Run CI "
+                "or merge scheduling)} in its settings layer. Instructions now: "
                 + (repr(setup["instructions"]) if setup["instructions"] else "none")
-                + "."
+                + f"; suggest_ci_gate: {active.review.suggest_ci_gate}."
             )
         offered = [
             (name, m)
